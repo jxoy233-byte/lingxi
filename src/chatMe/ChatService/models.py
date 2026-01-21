@@ -1,0 +1,41 @@
+import enum
+from datetime import datetime
+from typing import List, Optional
+
+from pydantic import BaseModel, Field
+
+
+class ChatRequest(BaseModel):
+    message: str
+    session_id: Optional[str] = ""
+
+
+class ChatResponse(BaseModel):
+    message :str
+    session_id :str
+    conversation_title :str
+
+class MessageRole(str, enum.Enum):
+    USER = "user"
+    AI = "ai"
+
+class Message(BaseModel):
+    role :MessageRole
+    content :str
+
+class Conversation(BaseModel):
+    """
+    与智能体对话存放model
+    """
+    session_id :str
+    title :str = "新对话"
+    messages :List[Message] = []
+    created_at :datetime = Field(default_factory=datetime.now)
+    updated_at :datetime = Field(default_factory=datetime.now)
+    is_clicked :bool = False
+
+class ConversationListResp(BaseModel):
+    total: int = Field(default=0, description="会话总数")
+    limit: int = Field(default=10, description="本次返回条数")
+    conversations: List[Conversation] = Field(default=[], description="会话列表")
+

@@ -148,6 +148,8 @@ class ChatService:
                     ))
 
         created_at = state.created_at if hasattr(state, "created_at") else datetime.now()
+
+        # todo: state状态里面又created但是没有updated导致每次get_conversation的时候使得updated自动更新，明明也是没有更新
         updated_at = state.updated_at if hasattr(state, "updated_at") else datetime.now()
         title = state.values["messages"][1].additional_kwargs.get("title","新对话")  # 读取你之前更新的真实标题
 

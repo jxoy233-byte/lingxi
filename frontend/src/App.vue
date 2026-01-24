@@ -187,56 +187,102 @@ export default {
         })
 
         if (!response.ok) {
-          throw new Error('请求失败')
+          throw new Error(`请求失败: ${response.status} ${response.statusText}`)
         }
 
         const reader = response.body.getReader()
         const decoder = new TextDecoder()
-        let aiMessage = {
+
+        // 初始化 AI 消息并添加到消息列表
+        const aiMessageIndex = this.messages.length
+        this.messages.push({
           role: 'ai',
           content: ''
-        }
-        this.messages.push(aiMessage)
+        })
+
+        let buffer = '' // 用于处理跨块的不完整 JSON
 
         while (true) {
           const { done, value } = await reader.read()
           if (done) break
 
-          const chunk = decoder.decode(value, { stream: true })
-          const lines = chunk.split('\n\n').filter(line => line.trim())
+          // 解码当前块并添加到缓冲区
+          buffer += decoder.decode(value, { stream: true })
 
-          for (const line of lines) {
-            if (!line.trim()) continue
+          // 按 \n\n 分割 SSE 消息
+          const parts = buffer.split('\n\n')
+
+          // 保留最后一个可能不完整的部分
+          buffer = parts.pop() || ''
+
+          for (const part of parts) {
+            const line = part.trim()
+            if (!line) continue
 
             try {
               const data = JSON.parse(line)
 
               if (data.type === 'content') {
-                aiMessage.content += data.content
+                // 使用 Vue 响应式更新：通过索引直接修改数组元素触发更新
+                this.messages[aiMessageIndex] = {
+                  role: 'ai',
+                  content: this.messages[aiMessageIndex].content + data.content
+                }
               } else if (data.type === 'done') {
-                aiMessage.content = data.full_response
+                // 使用完整响应替换内容
+                this.messages[aiMessageIndex] = {
+                  role: 'ai',
+                  content: data.full_response
+                }
 
+                // 处理新会话 ID
                 if (!this.currentSessionId && data.session_id) {
                   this.currentSessionId = data.session_id
 
-                  // 新对话自动生成标题（前5个字）
+                  // 新对话自动生成标题（前6个字）
                   if (isNewConversation) {
                     this.autoGenerateTitle(data.session_id, message)
                   }
                 }
 
+                // 刷新对话列表
                 this.loadConversations()
               } else if (data.type === 'error') {
                 console.error('AI响应错误:', data.error)
-                aiMessage.content = '抱歉，出现了一些问题：' + data.error
+                this.messages[aiMessageIndex] = {
+                  role: 'ai',
+                  content: `抱歉，出现了一些问题：${data.error}`
+                }
               }
             } catch (e) {
-              console.error('解析响应失败:', e, line)
+              console.error('解析 SSE 消息失败:', e, '原始内容:', line)
             }
+          }
+        }
+
+        // 处理缓冲区中剩余的数据
+        if (buffer.trim()) {
+          try {
+            const data = JSON.parse(buffer.trim())
+            if (data.type === 'content') {
+              this.messages[aiMessageIndex] = {
+                role: 'ai',
+                content: this.messages[aiMessageIndex].content + data.content
+              }
+            } else if (data.type === 'done') {
+              this.messages[aiMessageIndex] = {
+                role: 'ai',
+                content: data.full_response
+              }
+            }
+          } catch (e) {
+            console.error('解析缓冲区剩余数据失败:', e)
           }
         }
       } catch (error) {
         console.error('发送消息失败:', error)
+
+        // 创建新的错误消息
         this.messages.push({
           role: 'ai',
           content: '抱歉，发送消息时出现错误，请稍后重试。'
@@ -246,8 +292,8 @@ export default {
       }
     },
     async autoGenerateTitle(sessionId, message) {
-      // 取用户消息前5个字作为标题
-      const title = message.substring(0, 5) + (message.length > 5 ? '...' : '')
+      // 取用户消息前6个字作为标题
+      const title = message.substring(0, 6) + (message.length > 6 ? '...' : '')
 
       try {
         await fetch(`/chat/${sessionId}/title`, {

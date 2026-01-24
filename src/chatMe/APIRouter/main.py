@@ -4,7 +4,6 @@ from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, FastAPI, Path, Body, Query
 from fastapi.responses import StreamingResponse
-from starlette.responses import RedirectResponse
 
 from ..ChatService.models import ChatRequest, Conversation
 from ..ChatService import ChatService

@@ -116,7 +116,7 @@ export default {
       } catch (error) {
         console.error('加载对话失败:', error)
       }
-    },
+    },git
     async deleteConversation(sessionId) {
       this.deleteTargetId = sessionId
       this.showDeleteConfirm = true

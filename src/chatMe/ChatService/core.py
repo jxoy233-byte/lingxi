@@ -94,14 +94,14 @@ class ChatService:
         # 后续还要进行文件操作，不要关闭文件
         return images, texts
 
-    async def _process_files_img(self, files: List[UploadFile])-> Optional[str]:
+    async def _process_files_img(self, files: List[UploadFile])-> Optional[List[str]]:
         """
         处理传入图片类型文件信息，类型为png，jpg等常见图片类型
         :param files:
         :return:
         """
         # 将多个图片文件处理进入同一份二进制数据
-        images_bytes: bytes = b""
+        images_list: Optional[List[str]] = []
         if not files:
             logging.warning("未传入任何图片文件，返回空二进制数据")
             return None
@@ -113,15 +113,15 @@ class ChatService:
                 await img.close()
                 continue
 
-            images_bytes += image_byte
+            # 拼接URL时，bytes与str无法直接拼接
+            images_list.append(base64.b64encode(image_byte).decode("utf-8"))
             await img.close() # 读取完毕再关文件
             logging.info(f"成功读取图片{img.filename}，大小：{img.size/1024:.2f}KB")
 
-        images_content = base64.b64encode(images_bytes).decode("utf-8")
 
-        return images_content
+        return images_list
 
-    async def _process_files_text(self, files: List[UploadFile])-> Optional[str]:
+    async def _process_files_text(self, files: List[UploadFile])-> Optional[List[str]]:
         """
         使用langchain的document_loader组件处理传入文件信息，类型为txt，md等常见文本类型
         :param files:
@@ -134,13 +134,12 @@ class ChatService:
         """
         处理传入文件信息，返回处理好的二进制文件内容
         :param files:
-        :return:
+        :return: images_content（含图片信息列表）, text_content（含文本信息列表）
         """
         Images, Texts = await self._distinguish_files(files)
 
-        # 拼接URL时，bytes与str无法直接拼接
-        images_content :Optional[str] = await self._process_files_img(Images)
-        text_content :Optional[str] = await self._process_files_text(Texts)
+        images_content :Optional[List[str]] = await self._process_files_img(Images)
+        text_content :Optional[List[str]] = await self._process_files_text(Texts)
 
         return images_content, text_content
 
@@ -169,7 +168,8 @@ class ChatService:
         ]
         if text_content or images_content:
             if images_content:
-                message_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{images_content}"}, "detail": "auto"})
+                for img in images_content:
+                    message_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img}"}, "detail": "auto"})
             if text_content:
                 message_content.append({"type": "text", "text": f"用户传入文本:\n{text_content}"})
 

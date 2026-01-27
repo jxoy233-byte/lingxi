@@ -165,25 +165,53 @@ export default {
         console.error('修改标题失败:', error)
       }
     },
-    async sendMessage(message) { // todo: 处理请求头变成form-data形式符合后端message-stream要求
-      this.messages.push({
+    async sendMessage(data) {
+      // data 可以是字符串（向后兼容）或对象 { message, files }
+      const message = typeof data === 'string' ? data : data.message
+      const files = typeof data === 'object' ? data.files : []
+
+      // 为用户消息添加文件附件信息
+      const userMessage = {
         role: 'user',
         content: message
-      })
+      }
+
+      // 如果有文件，添加文件信息用于显示
+      if (files && files.length > 0) {
+        userMessage.files = files.map(file => ({
+          name: file.name,
+          size: file.size,
+          type: file.type,
+          preview: file.type.startsWith('image/') ? URL.createObjectURL(file) : null
+        }))
+      }
+
+      this.messages.push(userMessage)
 
       this.isLoading = true
       const isNewConversation = !this.currentSessionId
 
       try {
+        // 构建 FormData
+        const formData = new FormData()
+
+        // 添加 chatRequest 字段（JSON 字符串）
+        formData.append('chatRequest', JSON.stringify({
+          message: message,
+          session_id: this.currentSessionId || ''
+        }))
+
+        // 添加文件（如果有）
+        if (files && files.length > 0) {
+          files.forEach(file => {
+            formData.append('files', file)
+          })
+        }
+
         const response = await fetch('/chat/', {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            message: message,
-            session_id: this.currentSessionId || ''
-          })
+          // 不设置 Content-Type，让浏览器自动设置 multipart/form-data 和 boundary
+          body: formData
         })
 
         if (!response.ok) {

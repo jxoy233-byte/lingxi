@@ -1,6 +1,79 @@
 <template>
   <div class="input-area">
+    <!-- 文件列表显示区域 - 横向紧凑布局 -->
+    <div v-if="selectedFiles.length > 0" class="file-list-container">
+      <div class="file-list-scroll">
+        <div
+          v-for="(file, index) in selectedFiles"
+          :key="index"
+          class="file-item"
+          :class="{ 'file-error': file.error }"
+        >
+          <!-- 图片预览或文件图标 -->
+          <div class="file-preview-wrapper">
+            <img
+              v-if="isImageFile(file) && file.preview"
+              :src="file.preview"
+              class="file-preview-img"
+              :alt="file.name"
+            />
+            <div v-else class="file-icon-compact">
+              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
+                <polyline points="13 2 13 9 20 9"/>
+              </svg>
+            </div>
+
+            <!-- 删除按钮 -->
+            <button
+              type="button"
+              class="remove-button-overlay"
+              @click="removeFile(index)"
+              :title="'删除 ' + file.name"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="18" y1="6" x2="6" y2="18"/>
+                <line x1="6" y1="6" x2="18" y2="18"/>
+              </svg>
+            </button>
+          </div>
+
+          <!-- 文件名称（悬停显示完整信息） -->
+          <div class="file-name-compact" :title="`${file.name} (${formatFileSize(file.size)})`">
+            {{ truncateFileName(file.name, 12) }}
+          </div>
+
+          <!-- 错误提示 -->
+          <div v-if="file.error" class="file-error-badge" :title="file.error">!</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 输入区域 -->
     <div class="input-wrapper">
+      <!-- 文件上传按钮 -->
+      <button
+        type="button"
+        class="upload-button"
+        @click="triggerFileInput"
+        :disabled="isLoading"
+        title="上传文件"
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+        </svg>
+      </button>
+
+      <!-- 隐藏的文件输入 -->
+      <input
+        ref="fileInput"
+        type="file"
+        multiple
+        :accept="acceptedTypes"
+        @change="handleFileSelect"
+        style="display: none"
+      />
+
       <textarea
         v-model="inputText"
         @keydown.enter.exact.prevent="handleSend"
@@ -10,11 +83,29 @@
       ></textarea>
       <button
         @click="handleSend"
-        :disabled="!inputText.trim() || isLoading"
+        :disabled="(!inputText.trim() && selectedFiles.filter(f => !f.error).length === 0) || isLoading"
         class="send-btn"
       >
         发送
       </button>
+    </div>
+
+    <!-- 拖拽区域遮罩 -->
+    <div
+      v-if="isDragging"
+      class="drag-overlay"
+      @drop.prevent="handleDrop"
+      @dragover.prevent
+      @dragleave="isDragging = false"
+    >
+      <div class="drag-content">
+        <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="17 8 12 3 7 8"/>
+          <line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>
+        <p>释放文件以上传</p>
+      </div>
     </div>
   </div>
 </template>
@@ -31,15 +122,191 @@ export default {
   emits: ['send'],
   data() {
     return {
-      inputText: ''
+      inputText: '',
+      selectedFiles: [],
+      isDragging: false,
+      // 文件验证配置（与后端保持一致）
+      maxFileSize: 10 * 1024 * 1024, // 10MB
+      allowedImageTypes: ['.png', '.jpg', '.jpeg', '.gif'],
+      allowedTextTypes: ['.txt', '.md', '.json', '.csv', '.xml']
     }
+  },
+  computed: {
+    acceptedTypes() {
+      return [...this.allowedImageTypes, ...this.allowedTextTypes].join(',')
+    },
+    allowedExtensions() {
+      return [...this.allowedImageTypes, ...this.allowedTextTypes]
+    }
+  },
+  mounted() {
+    // 监听全局拖拽事件
+    window.addEventListener('dragenter', this.handleDragEnter)
+    window.addEventListener('dragover', this.handleDragOver)
+    window.addEventListener('drop', this.handleWindowDrop)
+  },
+  beforeUnmount() {
+    // 清理事件监听
+    window.removeEventListener('dragenter', this.handleDragEnter)
+    window.removeEventListener('dragover', this.handleDragOver)
+    window.removeEventListener('drop', this.handleWindowDrop)
+
+    // 清理预览 URL
+    this.selectedFiles.forEach(file => {
+      if (file.preview) {
+        URL.revokeObjectURL(file.preview)
+      }
+    })
   },
   methods: {
     handleSend() {
-      if (!this.inputText.trim() || this.isLoading) return
+      // 获取有效文件（没有错误的文件）
+      const validFiles = this.selectedFiles.filter(f => !f.error).map(f => f.file)
 
-      this.$emit('send', this.inputText.trim())
+      // 至少需要有文本或有效文件
+      if ((!this.inputText.trim() && validFiles.length === 0) || this.isLoading) {
+        return
+      }
+
+      // 发送消息和文件
+      this.$emit('send', {
+        message: this.inputText.trim(),
+        files: validFiles
+      })
+
+      // 清空输入
       this.inputText = ''
+      this.clearFiles()
+    },
+
+    triggerFileInput() {
+      this.$refs.fileInput.click()
+    },
+
+    handleFileSelect(event) {
+      const selectedFiles = Array.from(event.target.files)
+      this.addFiles(selectedFiles)
+      // 清空 input，允许重复选择同一文件
+      event.target.value = ''
+    },
+
+    handleDragEnter(e) {
+      e.preventDefault()
+      if (this.isLoading) return
+
+      // 检查是否包含文件
+      if (e.dataTransfer.types.includes('Files')) {
+        this.isDragging = true
+      }
+    },
+
+    handleDragOver(e) {
+      e.preventDefault()
+    },
+
+    handleWindowDrop(e) {
+      e.preventDefault()
+      this.isDragging = false
+    },
+
+    handleDrop(e) {
+      this.isDragging = false
+      if (this.isLoading) return
+
+      const droppedFiles = Array.from(e.dataTransfer.files)
+      this.addFiles(droppedFiles)
+    },
+
+    addFiles(newFiles) {
+      const validatedFiles = newFiles.map(file => {
+        const fileObj = {
+          name: file.name,
+          size: file.size,
+          type: file.type,
+          file: file,
+          error: null,
+          preview: null
+        }
+
+        // 验证文件
+        const validation = this.validateFile(file)
+        if (!validation.valid) {
+          fileObj.error = validation.error
+        } else if (this.isImageFile(fileObj)) {
+          // 为图片创建预览
+          fileObj.preview = URL.createObjectURL(file)
+        }
+
+        return fileObj
+      })
+
+      this.selectedFiles.push(...validatedFiles)
+    },
+
+    validateFile(file) {
+      // 检查文件大小
+      if (file.size > this.maxFileSize) {
+        return {
+          valid: false,
+          error: `文件大小超过 ${this.formatFileSize(this.maxFileSize)} 限制`
+        }
+      }
+
+      // 检查文件扩展名
+      const extension = this.getFileExtension(file.name)
+      if (!this.allowedExtensions.includes(extension)) {
+        return {
+          valid: false,
+          error: `不支持的文件类型 ${extension}`
+        }
+      }
+
+      return { valid: true }
+    },
+
+    removeFile(index) {
+      const file = this.selectedFiles[index]
+      // 清理预览 URL
+      if (file.preview) {
+        URL.revokeObjectURL(file.preview)
+      }
+      this.selectedFiles.splice(index, 1)
+    },
+
+    clearFiles() {
+      // 清理所有预览 URL
+      this.selectedFiles.forEach(file => {
+        if (file.preview) {
+          URL.revokeObjectURL(file.preview)
+        }
+      })
+      this.selectedFiles = []
+    },
+
+    getFileExtension(filename) {
+      if (!filename || !filename.includes('.')) return ''
+      return '.' + filename.split('.').pop().toLowerCase()
+    },
+
+    isImageFile(fileObj) {
+      const extension = this.getFileExtension(fileObj.name)
+      return this.allowedImageTypes.includes(extension)
+    },
+
+    formatFileSize(bytes) {
+      if (bytes === 0) return '0 B'
+      const k = 1024
+      const sizes = ['B', 'KB', 'MB', 'GB']
+      const i = Math.floor(Math.log(bytes) / Math.log(k))
+      return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i]
+    },
+
+    truncateFileName(filename, maxLength) {
+      if (filename.length <= maxLength) return filename
+      const extension = this.getFileExtension(filename)
+      const nameWithoutExt = filename.substring(0, filename.length - extension.length)
+      const truncatedName = nameWithoutExt.substring(0, maxLength - 3 - extension.length)
+      return truncatedName + '...' + extension
     }
   }
 }
@@ -47,17 +314,179 @@ export default {
 
 <style scoped>
 .input-area {
+  position: relative;
   padding: 20px;
   background-color: var(--bg-primary);
   border-top: 1px solid var(--border-color);
 }
 
+/* 文件列表容器 - 横向紧凑布局 */
+.file-list-container {
+  max-width: 800px;
+  margin: 0 auto 12px;
+  overflow: hidden;
+}
+
+.file-list-scroll {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 4px 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-color) transparent;
+}
+
+.file-list-scroll::-webkit-scrollbar {
+  height: 6px;
+}
+
+.file-list-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.file-list-scroll::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 3px;
+}
+
+.file-list-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+}
+
+.file-item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  width: 80px;
+}
+
+.file-item.file-error .file-preview-wrapper {
+  border-color: #ef4444;
+}
+
+.file-preview-wrapper {
+  position: relative;
+  width: 80px;
+  height: 80px;
+  border: 2px solid var(--border-color);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--message-bg);
+  transition: all 0.2s;
+}
+
+.file-preview-wrapper:hover {
+  border-color: var(--primary-color);
+}
+
+.file-preview-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.file-icon-compact {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  background: var(--hover-bg);
+}
+
+.file-name-compact {
+  font-size: 11px;
+  color: var(--text-primary);
+  text-align: center;
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 0 2px;
+}
+
+.file-error-badge {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: 20px;
+  height: 20px;
+  background: #ef4444;
+  color: white;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: bold;
+  cursor: help;
+}
+
+.remove-button-overlay {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: rgba(0, 0, 0, 0.6);
+  color: white;
+  cursor: pointer;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: all 0.2s;
+}
+
+.file-preview-wrapper:hover .remove-button-overlay {
+  opacity: 1;
+}
+
+.remove-button-overlay:hover {
+  background: #ef4444;
+  transform: scale(1.1);
+}
+
+/* 输入区域 */
 .input-wrapper {
   max-width: 800px;
   margin: 0 auto;
   display: flex;
   gap: 12px;
   align-items: flex-end;
+}
+
+.upload-button {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 52px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: 12px;
+  transition: all 0.2s;
+  border: 1px solid var(--border-color);
+}
+
+.upload-button:hover:not(:disabled) {
+  background: var(--hover-bg);
+  color: var(--primary-color);
+  border-color: var(--primary-color);
+}
+
+.upload-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .input-wrapper textarea {
@@ -81,6 +510,7 @@ export default {
 }
 
 .send-btn {
+  flex-shrink: 0;
   height: 52px;
   padding: 0 24px;
   border: none;
@@ -100,5 +530,44 @@ export default {
 .send-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* 拖拽遮罩 */
+.drag-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.8);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.drag-content {
+  text-align: center;
+  color: white;
+  pointer-events: none;
+}
+
+.drag-content svg {
+  margin-bottom: 16px;
+  animation: bounce 1s infinite;
+}
+
+.drag-content p {
+  font-size: 18px;
+  font-weight: 500;
+}
+
+@keyframes bounce {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
 }
 </style>

@@ -2,11 +2,11 @@ import logging
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, FastAPI, Path, Body, Query
+from fastapi import APIRouter, HTTPException, FastAPI, Path, Body, Query, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 
 from ..ChatService.models import ChatRequest, Conversation
-from ..ChatService import ChatService
+from ..ChatService import ChatService, FILE_MAX_LENGTH
 from ..ChatWorkflow import ChatWorkflow
 
 chatMe_app = APIRouter(prefix="/chat")
@@ -40,7 +40,11 @@ async def lifespan(app :FastAPI):
 
 
 @chatMe_app.post("/", summary="新建对话/继续对话-流式响应，无session_id则新建对话")
-async def chat_stream(chatRequest: ChatRequest):
+async def chat_stream(
+        chatRequest: str = Form(...),
+        # chatRequest: ChatRequest = Body(...),
+        files: list[UploadFile] | None = File(default=None, max_length=FILE_MAX_LENGTH)
+):
     """
     核心流式对话接口：
     - 不传session_id → 自动生成新会话ID，创建全新对话
@@ -48,17 +52,23 @@ async def chat_stream(chatRequest: ChatRequest):
     - 传入不存在的session_id → 抛出404异常
 
     参数:
-        session_id: 会话 ID，如果没有则为 None
-        message: 请求对象，包含用户消息
+        chatRequest ***前端要用字符串形式传入json字典对象***，包含：
+            session_id: 会话 ID，如果没有则为 None
+            message: 请求对象，包含用户消息(form-data)
+        files: 文件参数，要不然置空，要不然传入
 
     返回:
         StreamingResponse: 包含 AI 回应、session_id 和会话标题
     """
     try:
+        # 将form-data参数转为chatRequest对象
+        chatRequest = ChatRequest.model_validate_json(chatRequest)
+
         async def event_generator():
             async for data in chat_service.message_stream(
                 message=chatRequest.message,
-                session_id=chatRequest.session_id
+                session_id=chatRequest.session_id,
+                files = files,
             ):
                 yield f"{data}"
 

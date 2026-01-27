@@ -165,7 +165,7 @@ export default {
         console.error('修改标题失败:', error)
       }
     },
-    async sendMessage(message) {
+    async sendMessage(message) { // todo: 处理请求头变成form-data形式符合后端message-stream要求
       this.messages.push({
         role: 'user',
         content: message

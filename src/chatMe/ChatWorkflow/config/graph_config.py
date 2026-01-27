@@ -2,10 +2,6 @@
 from dotenv import load_dotenv
 import os
 
-# 加载环境变量
-load_dotenv()
-
-
 def get_graph_config():
     """
     获取大模型配置
@@ -13,11 +9,14 @@ def get_graph_config():
     llm_config :Dict,
     prompt :str
     """
+    # 加载环境变量
+    load_dotenv()
+
     model_name = os.getenv("OPENAI_MODEL_NAME")
     api_key = os.getenv("OPENAI_API_KEY")
     base_url = os.getenv("OPENAI_BASE_URL")
     temperature = os.getenv("OPENAI_TEMPERATURE", "0.7")
-    max_tokens = os.getenv("OPENAI_MAX_TOKENS", "2048")
+    max_tokens = os.getenv("OPENAI_MAX_TOKENS", "4096")
     top_p = os.getenv("OPENAI_TOP_P", "1.0")
     frequency_penalty = float(os.getenv("OPENAI_FREQUENCY_PENALTY", "0.0"))
     presence_penalty = float(os.getenv("OPENAI_PRESENCE_PENALTY", "0.0"))

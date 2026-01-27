@@ -1,14 +1,17 @@
+import base64
 import json
 import logging
 import uuid
 from datetime import datetime
-from typing import AsyncGenerator, Set, List
+from typing import AsyncGenerator, Set, List, Optional
 
+from fastapi import UploadFile
 from langchain_core.messages import HumanMessage, AIMessage
 from langgraph_sdk.auth.exceptions import HTTPException
 from redisvl.query import FilterQuery
 from langgraph.checkpoint.redis.util import from_storage_safe_id
 
+from . import FILE_ALLOWED_TYPES, FILE_MAX_LENGTH
 from .models import MessageRole, Message, Conversation
 from ..ChatWorkflow import ChatWorkflow
 
@@ -18,7 +21,6 @@ class ChatService:
     ChatMe服务对象：
     实现自定义langgraph服务
     """
-
 
     def __init__(self, workflow: ChatWorkflow):
         self.chat_workflow = workflow
@@ -52,11 +54,102 @@ class ChatService:
 
         return sorted(list(thread_ids))
 
+    async def _get_file_suffix(self, filename: Optional[str]) -> str:
+        """
+        提取文件后缀，处理边界情况：
+        1. 无后缀（如"readme"）返回空字符串
+        2. 多后缀（如"file.tar.gz"）返回最后一个后缀（.gz）
+        3. 后缀转小写（如".PNG"→".png"）
+        """
+        if not filename or "." not in filename:
+            return ""
+        return "." + filename.split(".")[-1].lower()
+
+    async def _distinguish_files(self, files: List[UploadFile]):
+        """
+        划分文件类型
+        :param files:
+        :return: images, texts (图片类型， 文本类型) | None,None
+        """
+        if not files:
+            logging.warning("未传入任何图片文件，返回空二进制数据")
+            return None,None
+
+        images_type = FILE_ALLOWED_TYPES["IMAGE"]["IMAGE_SUFFIX"]
+        texts_type = FILE_ALLOWED_TYPES["TEXT"]["TEXT_SUFFIX"]
+        images, texts = [], []
+        for file in files:
+            file_name = file.filename or "不支持文件或位置文件"
+            file_suffix = await self._get_file_suffix(file_name)
+            if file_suffix in images_type:
+                images.append(file)
+            elif file_suffix in texts_type:
+                texts.append(file)
+            else:
+                # 宽松处理，防止影响后续文件处理
+                logging.warning(f"忽略不支持的文件类型：{file_name}")
+                await file.close()  # 单独关闭非法文件，释放资源
+                continue  # 跳过当前文件，处理下一个
+
+        # 后续还要进行文件操作，不要关闭文件
+        return images, texts
+
+    async def _process_files_img(self, files: List[UploadFile])-> Optional[str]:
+        """
+        处理传入图片类型文件信息，类型为png，jpg等常见图片类型
+        :param files:
+        :return:
+        """
+        # 将多个图片文件处理进入同一份二进制数据
+        images_bytes: bytes = b""
+        if not files:
+            logging.warning("未传入任何图片文件，返回空二进制数据")
+            return None
+
+        for img in files:
+            image_byte = await img.read()
+            if not image_byte: # 过滤为空图片
+                logging.warning(f"图片文件{img.filename}为空，跳过")
+                await img.close()
+                continue
+
+            images_bytes += image_byte
+            await img.close() # 读取完毕再关文件
+            logging.info(f"成功读取图片{img.filename}，大小：{img.size/1024:.2f}KB")
+
+        images_content = base64.b64encode(images_bytes).decode("utf-8")
+
+        return images_content
+
+    async def _process_files_text(self, files: List[UploadFile])-> Optional[str]:
+        """
+        使用langchain的document_loader组件处理传入文件信息，类型为txt，md等常见文本类型
+        :param files:
+        :return:
+        """
+        # todo: 使用langchain的document_loader组件处理传入文件信息
+        pass
+
+    async def _process_files(self, files: List[UploadFile]):
+        """
+        处理传入文件信息，返回处理好的二进制文件内容
+        :param files:
+        :return:
+        """
+        Images, Texts = await self._distinguish_files(files)
+
+        # 拼接URL时，bytes与str无法直接拼接
+        images_content :Optional[str] = await self._process_files_img(Images)
+        text_content :Optional[str] = await self._process_files_text(Texts)
+
+        return images_content, text_content
+
 
     async def message_stream(
         self,
         message: str,
-        session_id: str = None
+        session_id: str = None,
+        files: list[UploadFile] | None = None,
     ) -> AsyncGenerator[str, None]:
         """
         流式响应用户信息
@@ -68,6 +161,17 @@ class ChatService:
         Yields:
             基于流式传输的 JSON 字符串
         """
+
+        images_content, text_content = await self._process_files(files)
+
+        message_content = [
+            {"type": "text", "text": message},
+        ]
+        if text_content or images_content:
+            if images_content:
+                message_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{images_content}"}, "detail": "auto"})
+            if text_content:
+                message_content.append({"type": "text", "text": f"用户传入文本:\n{text_content}"})
 
         session_ids = await self.aget_conversation_ids
 
@@ -90,7 +194,7 @@ class ChatService:
 
         full_response = ""
         try:
-            async for chunk in self.chat_workflow.astream(messages=[HumanMessage(content=message)], config=input_config):
+            async for chunk in self.chat_workflow.astream(messages=[HumanMessage(content=message_content)], config=input_config):
                 if chunk['event'] == 'on_chat_model_stream':
                     content = chunk['data']['chunk'].content
                     full_response += content
@@ -139,13 +243,31 @@ class ChatService:
             for msg in state.values["messages"]:
                     if isinstance(msg, HumanMessage):
                         role = MessageRole.USER
+                        if isinstance(msg.content, str):
+                            messages_list.append(Message(
+                                role=role,
+                                content=msg.content  # 获取用户输入的文本
+                            ))
+                        else:
+                            human_message = ""
+                            for content in msg.content:
+                                if content.get("type") == "text":
+                                    human_message += content.get("text", "")
+                                    human_message += '\n'
+                                    messages_list.append(Message(
+                                        role=role,
+                                        content=human_message
+                                    ))
+
+
                     elif isinstance(msg, AIMessage):
                         role = MessageRole.AI
+                        messages_list.append(Message(
+                            role=role,
+                            content=msg.content
+                        ))
 
-                    messages_list.append(Message(
-                        role=role,
-                        content=msg.content
-                    ))
+
 
         created_at = state.created_at if hasattr(state, "created_at") else datetime.now()
 

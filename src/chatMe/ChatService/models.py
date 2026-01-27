@@ -1,8 +1,9 @@
 import enum
+import json
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ChatRequest(BaseModel):
@@ -14,6 +15,7 @@ class ChatResponse(BaseModel):
     message :str
     session_id :str
     conversation_title :str
+
 
 class MessageRole(str, enum.Enum):
     USER = "user"

@@ -1,9 +1,8 @@
-import base64
 import json
 import logging
 import uuid
 from datetime import datetime
-from typing import AsyncGenerator, Set, List, Optional
+from typing import AsyncGenerator, Set, List
 
 from fastapi import UploadFile
 from langchain_core.messages import HumanMessage, AIMessage
@@ -11,8 +10,8 @@ from langgraph_sdk.auth.exceptions import HTTPException
 from redisvl.query import FilterQuery
 from langgraph.checkpoint.redis.util import from_storage_safe_id
 
-from . import FILE_ALLOWED_TYPES, FILE_MAX_LENGTH
-from .models import MessageRole, Message, Conversation
+from chatMe.ChatService.config.models import MessageRole, Message, Conversation
+from .FilesLoaders.core import FilesLoaders
 from ..ChatWorkflow import ChatWorkflow
 
 
@@ -33,113 +32,69 @@ class ChatService:
         获取Redis中所有不重复的thread_id列表(基于alist方法为启发)
         :return: 所有不重复的thread_id列表
         """
-        # 构造Redis Search查询：匹配所有checkpoint，只返回thread_id字段，极致精简
+        # 构造Redis Search查询
         query = FilterQuery(
-            filter_expression="*",  # 匹配所有检查点数据
-            return_fields=["thread_id"],  # 只查询thread_id字段，不查任何冗余数据
-            num_results=10000,  # 可调整，足够容纳你的所有会话数（比如1万）
-            sort_by=None,  # 关闭排序，避免触发排序缺陷
+            filter_expression="*",
+            return_fields=["thread_id"],
+            num_results=10000,
+            sort_by=None,
         )
-        # 异步执行查询，直接从Redis索引获取数据
-        search_results = await self.checkpointer.checkpoints_index.search(query)
 
-        # 去重+还原原始thread_id：从Redis存储的safe_id转回真实的thread_id
-        thread_ids: Set[str] = set()
-        for doc in search_results.docs:
-            # doc.thread_id 是Redis里存储的加密safe_id
-            safe_thread_id = doc.thread_id
-            # 还原为原始thread_id
-            raw_thread_id = from_storage_safe_id(safe_thread_id)
-            thread_ids.add(raw_thread_id)
+        try:
+            # 执行查询
+            search_results = await self.checkpointer.checkpoints_index.search(query)
 
-        return sorted(list(thread_ids))
+            # 风险点1：处理search_results为None的情况
+            if search_results is None:
+                logging.info("Redis搜索结果为空（search_results为None）")
+                return []
 
-    async def _get_file_suffix(self, filename: Optional[str]) -> str:
-        """
-        提取文件后缀，处理边界情况：
-        1. 无后缀（如"readme"）返回空字符串
-        2. 多后缀（如"file.tar.gz"）返回最后一个后缀（.gz）
-        3. 后缀转小写（如".PNG"→".png"）
-        """
-        if not filename or "." not in filename:
-            return ""
-        return "." + filename.split(".")[-1].lower()
+            # 风险点2：确保docs是可遍历的列表
+            docs = getattr(search_results, "docs", [])
+            if not isinstance(docs, list):
+                logging.warning(f"Redis搜索结果docs格式异常，非列表类型：{type(docs)}")
+                return []
 
-    async def _distinguish_files(self, files: List[UploadFile]):
-        """
-        划分文件类型
-        :param files:
-        :return: images, texts (图片类型， 文本类型) | None,None
-        """
-        if not files:
-            logging.warning("未传入任何图片文件，返回空二进制数据")
-            return None,None
+            thread_ids: Set[str] = set()
+            for doc in docs:
+                # 风险点3：安全获取thread_id，避免属性不存在
+                safe_thread_id = getattr(doc, "thread_id", None)
+                if not safe_thread_id:  # 跳过空的safe_id
+                    continue
 
-        images_type = FILE_ALLOWED_TYPES["IMAGE"]["IMAGE_SUFFIX"]
-        texts_type = FILE_ALLOWED_TYPES["TEXT"]["TEXT_SUFFIX"]
-        images, texts = [], []
-        for file in files:
-            file_name = file.filename or "不支持文件或位置文件"
-            file_suffix = await self._get_file_suffix(file_name)
-            if file_suffix in images_type:
-                images.append(file)
-            elif file_suffix in texts_type:
-                texts.append(file)
-            else:
-                # 宽松处理，防止影响后续文件处理
-                logging.warning(f"忽略不支持的文件类型：{file_name}")
-                await file.close()  # 单独关闭非法文件，释放资源
-                continue  # 跳过当前文件，处理下一个
+                try:
+                    # 风险点4：捕获ID转换函数的异常
+                    raw_thread_id = from_storage_safe_id(safe_thread_id)
+                    if raw_thread_id:  # 跳过转换后为空的ID
+                        thread_ids.add(raw_thread_id)
+                except Exception as e:
+                    logging.warning(f"转换safe_id失败：{safe_thread_id}，错误：{e}")
+                    continue
 
-        # 后续还要进行文件操作，不要关闭文件
-        return images, texts
+            # 排序并返回（空集合会返回空列表）
+            return sorted(list(thread_ids))
 
-    async def _process_files_img(self, files: List[UploadFile])-> Optional[List[str]]:
-        """
-        处理传入图片类型文件信息，类型为png，jpg等常见图片类型
-        :param files:
-        :return:
-        """
-        # 将多个图片文件处理进入同一份二进制数据
-        images_list: Optional[List[str]] = []
-        if not files:
-            logging.warning("未传入任何图片文件，返回空二进制数据")
-            return None
-
-        for img in files:
-            image_byte = await img.read()
-            if not image_byte: # 过滤为空图片
-                logging.warning(f"图片文件{img.filename}为空，跳过")
-                await img.close()
-                continue
-
-            # 拼接URL时，bytes与str无法直接拼接
-            images_list.append(base64.b64encode(image_byte).decode("utf-8"))
-            await img.close() # 读取完毕再关文件
-            logging.info(f"成功读取图片{img.filename}，大小：{img.size/1024:.2f}KB")
+        # 风险点5：捕获所有异常，而非仅HTTPException
+        except HTTPException as e:
+            logging.warning(f"Redis查询触发HTTP异常（无历史数据）：{e}")
+            return []
+        except Exception as e:
+            # 兜底捕获所有其他异常（如连接错误、序列化错误等）
+            logging.warning(f"获取conversation_ids失败：{type(e).__name__}: {e}")
+            return []
 
 
-        return images_list
 
-    async def _process_files_text(self, files: List[UploadFile])-> Optional[List[str]]:
-        """
-        使用langchain的document_loader组件处理传入文件信息，类型为txt，md等常见文本类型
-        :param files:
-        :return:
-        """
-        # todo: 使用langchain的document_loader组件处理传入文件信息
-        pass
 
     async def _process_files(self, files: List[UploadFile]):
         """
-        处理传入文件信息，返回处理好的二进制文件内容
+        创建FilesLoaders类实例,调用loading_files防擦，处理传入文件信息，返回处理好的分类文件内容
         :param files:
         :return: images_content（含图片信息列表）, text_content（含文本信息列表）
         """
-        Images, Texts = await self._distinguish_files(files)
 
-        images_content :Optional[List[str]] = await self._process_files_img(Images)
-        text_content :Optional[List[str]] = await self._process_files_text(Texts)
+        fl = FilesLoaders(files)
+        images_content, text_content = await fl.loading_files(files)
 
         return images_content, text_content
 
@@ -171,7 +126,10 @@ class ChatService:
                 for img in images_content:
                     message_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img}"}, "detail": "auto"})
             if text_content:
-                message_content.append({"type": "text", "text": f"用户传入文本:\n{text_content}"})
+                message += "\n\n" + "=[用户传入文件]=\n" # 分隔文本文件与用户提问
+                for text in text_content:
+                    message += text + "\n"
+                message_content[0]["text"] = message
 
         session_ids = await self.aget_conversation_ids
 
@@ -192,9 +150,14 @@ class ChatService:
             }
         }
 
+        additional_kwargs ={
+            "updated_at": datetime.now(),
+            "files": files,
+        }
+
         full_response = ""
         try:
-            async for chunk in self.chat_workflow.astream(messages=[HumanMessage(content=message_content)], config=input_config):
+            async for chunk in self.chat_workflow.astream(messages=[HumanMessage(content=message_content,additional_kwargs=additional_kwargs)], config=input_config):
                 if chunk['event'] == 'on_chat_model_stream':
                     content = chunk['data']['chunk'].content
                     full_response += content
@@ -233,6 +196,7 @@ class ChatService:
         config = {"configurable": {"thread_id": session_id}}
         try:
             state = await self.graph.aget_state(config=config)
+            print(state.values["messages"])
         except HTTPException as e:
             logging.error(f"获取会话状态异常(session_id:{session_id})：{str(e)}")
             return Conversation(session_id=session_id)
@@ -251,7 +215,7 @@ class ChatService:
                         else:
                             human_message = ""
                             for content in msg.content:
-                                if content.get("type") == "text":
+                                if content.get("type") == "text": # todo 改获取对话内容的逻辑
                                     human_message += content.get("text", "")
                                     human_message += '\n'
                                     messages_list.append(Message(
@@ -268,20 +232,17 @@ class ChatService:
                         ))
 
 
-
         created_at = state.created_at if hasattr(state, "created_at") else datetime.now()
+        updated_at = state.values["messages"][-2].additional_kwargs.get("updated_at")
 
-        # todo: state状态里面又created但是没有updated导致每次get_conversation的时候使得updated自动更新，明明也是没有更新
-        updated_at = state.updated_at if hasattr(state, "updated_at") else datetime.now()
         title = state.values["messages"][1].additional_kwargs.get("title","新对话")  # 读取你之前更新的真实标题
 
         return Conversation(
             session_id=session_id,
             messages=messages_list,
             title=title,
-            created_at=created_at ,
+            created_at=created_at,
             updated_at=updated_at,
-            is_clicked=True # 前端点击进入对话后置为true，然后点击进入别的对话就将当前对话改为false
         )
 
     async def get_conversation_list(self, limit: int = 10) -> List[Conversation]:

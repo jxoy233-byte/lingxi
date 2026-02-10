@@ -1,5 +1,4 @@
 import enum
-import json
 from datetime import datetime
 from typing import List, Optional
 
@@ -32,9 +31,8 @@ class Conversation(BaseModel):
     session_id :str
     title :str = "新对话"
     messages :List[Message] = []
-    created_at :datetime = Field(default_factory=datetime.now)
+    created_at :datetime = Field(default_factory=datetime.now) # 要求传入的是函数方法
     updated_at :datetime = Field(default_factory=datetime.now)
-    is_clicked :bool = False
 
 class ConversationListResp(BaseModel):
     total: int = Field(default=0, description="会话总数")

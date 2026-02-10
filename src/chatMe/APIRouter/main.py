@@ -5,7 +5,7 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException, FastAPI, Path, Body, Query, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 
-from ..ChatService.models import ChatRequest, Conversation
+from ..ChatService.config.models import ChatRequest, Conversation
 from ..ChatService import ChatService, FILE_MAX_LENGTH
 from ..ChatWorkflow import ChatWorkflow
 
@@ -99,7 +99,7 @@ async def get_conversations(
         logging.error(f"获取会话列表异常：{str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@chatMe_app.get("/{session_id}", summary="获取指定会话内容")
+@chatMe_app.get("/{session_id}/conversation", summary="获取指定会话内容")
 async def get_conversation_content(session_id :str = Path(..., description="会话ID")):
     """
     进入指定会话详情页核心接口：

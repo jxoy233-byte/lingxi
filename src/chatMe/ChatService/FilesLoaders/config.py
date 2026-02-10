@@ -8,8 +8,8 @@ FILE_ALLOWED_TYPES = {
     },
 
     "TEXT": { # 文后缀白名单 + 对应MIME类型
-        "TEXT_SUFFIX" : {".txt", ".md", ".json", ".csv", ".xml"},
-        "TEXT_MIME" : {"text/plain", "text/markdown", "application/json", "text/csv", "text/xml"},
+        "TEXT_SUFFIX" : {".txt", ".md", ".csv", ".xml", ".json"},
+        "TEXT_MIME" : {"text/plain", "text/markdown", "text/csv", "text/xml", "application/json"},
     },
 
 }

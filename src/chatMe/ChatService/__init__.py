@@ -1,4 +1,4 @@
-from .config import *
+from .FilesLoaders.config import *
 from .core import ChatService
 
 __all__ = [

@@ -107,7 +107,7 @@ export default {
     },
     async loadConversation(sessionId) {
       try {
-        const response = await fetch(`/chat/${sessionId}`)
+        const response = await fetch(`/chat/${sessionId}/conversation`)
         if (response.ok) {
           const conversation = await response.json()
           this.currentSessionId = sessionId
@@ -116,7 +116,7 @@ export default {
       } catch (error) {
         console.error('加载对话失败:', error)
       }
-    },git
+    },
     async deleteConversation(sessionId) {
       this.deleteTargetId = sessionId
       this.showDeleteConfirm = true

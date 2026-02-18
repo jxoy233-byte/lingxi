@@ -12,8 +12,13 @@ class ChatState(TypedDict):
 
 
 class SearchDecision(BaseModel):
-    should_search: bool
-    query: str
+    should_search: bool = False
+    query: str = ""
+    
+    def __init__(self, should_search: bool, query: str):
+        super().__init__()
+        self.should_search = should_search
+        self.query = query
 
 class ChatState3(TypedDict):
     """State for the chatMe graph3"""

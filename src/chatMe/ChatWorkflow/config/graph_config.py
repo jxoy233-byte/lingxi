@@ -61,7 +61,7 @@ def get_judge_search_node_config():
     model_name = os.getenv("DEEPSEEK_MODEL_NAME")
     api_key = os.getenv("DEEPSEEK_API_KEY")
     base_url = os.getenv("DEEPSEEK_BASE_URL")
-    temperature = os.getenv("OPENAI_TEMPERATURE", "0.2")
+    temperature = os.getenv("OPENAI_TEMPERATURE", "0.1")
     max_tokens = os.getenv("OPENAI_MAX_TOKENS", "8192")
     top_p = os.getenv("OPENAI_TOP_P", "1.0")
     frequency_penalty = float(os.getenv("OPENAI_FREQUENCY_PENALTY", "0.0"))
@@ -109,6 +109,9 @@ def get_judge_search_node_config():
     - 历史会话中已通过 AI 回复提供了足够信息的问题
     
     ### 输出规则：
+    请根据以下对话内容判断是否需要搜索，并返回结果(含有以下两个参数的JSON字典)：
+    "should_search": true/false,
+    "query": "搜索关键词"
     - 如果【不需要搜索】，输出一个空字符串和布尔类型：“” && False
     - 如果【需要搜索】，输出一条【适合搜索引擎使用的中文搜索语句】&& True
     - 搜索语句应简洁、准确，仅包含关键信息

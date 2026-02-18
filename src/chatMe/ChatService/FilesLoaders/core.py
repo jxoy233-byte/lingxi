@@ -3,7 +3,7 @@ import logging
 import os
 
 from tempfile import NamedTemporaryFile
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 from fastapi import UploadFile, HTTPException
 from langchain_core.document_loaders import BaseLoader
@@ -14,8 +14,15 @@ from langchain_community.document_loaders import UnstructuredMarkdownLoader, Uns
 
 
 class FilesLoaders:
-    def __init__(self, processing_files :List[UploadFile]):
+    def __init__(self, processing_files :list[UploadFile] | None):
         self.processing_files = processing_files
+
+    async def cleanup(self):
+        """异步清理资源"""
+        if self.processing_files:
+            for file in self.processing_files:
+                await file.close()
+            self.processing_files = None
 
     async def _get_file_suffix(self, filename: Optional[str]) -> str:
         """
@@ -34,6 +41,7 @@ class FilesLoaders:
         :param files:
         :return: images, texts (图片类型， 文本类型) | None,None
         """
+        files = self.processing_files
         if not files:
             logging.warning("未传入任何图片文件，返回空二进制数据")
             return None,None
@@ -57,14 +65,14 @@ class FilesLoaders:
         # 后续还要进行文件操作，不要关闭文件
         return images, texts
 
-    async def _process_files_img(self, files: List[UploadFile])-> Optional[List[str]]:
+    async def _process_files_img(self, files: List[UploadFile])-> Optional[List[Dict]]:
         """
         处理传入图片类型文件信息，类型为png，jpg等常见图片类型
         :param files:
         :return:
         """
         # 将多个图片文件处理进入同一份二进制数据
-        images_list: Optional[List[str]] = []
+        images_list: Optional[List[Dict]] = []
         if not files:
             logging.info("未传入任何图片文件，返回空二进制数据")
             return None
@@ -76,11 +84,15 @@ class FilesLoaders:
                 await img.close()
                 continue
 
+            image_dict ={
+                "file_content": base64.b64encode(image_byte).decode("utf-8"),
+                "file_name": img.filename,
+                "file_type": await self._get_file_suffix(img.filename),
+                "file_size": img.size,
+            }
             # 拼接URL时，bytes与str无法直接拼接
-            images_list.append(base64.b64encode(image_byte).decode("utf-8"))
-            await img.close() # 读取完毕再关文件
+            images_list.append(image_dict)
             logging.info(f"成功读取图片{img.filename}，大小：{img.size/1024:.2f}KB")
-
 
         return images_list
 
@@ -112,19 +124,19 @@ class FilesLoaders:
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"创建临时文件失败：{str(e)}")
 
-
-    async def _process_files_text(self, files: List[UploadFile])-> Optional[List[str]]:
+    async def _process_files_text(self, files: List[UploadFile])-> Optional[List[Dict]]:
         """
         使用langchain的document_loader组件处理传入文件信息，类型为txt，md等常见文本类型
         :param files:
         :return:
         """
+
         # todo: 再更新对doc文件的识别 前端更新：
         if not files:
             logging.info("未传入任何文本文件，返回空二进制数据")
             return None
 
-        text_list: Optional[List[str]] = []
+        text_list: Optional[List[Dict]] = []
         for file in files:
             temp_file_path = None
             try:
@@ -172,11 +184,18 @@ class FilesLoaders:
                 # loader都为BaseLoader的子类 ，都有aload方法可以调用
                 documents = await loader.aload()
                 file_text = documents[0].page_content if documents else ""
-                text_list.append(file_text)
+                file_name = file.filename
+                file_dict = {
+                    "file_content": file_text,
+                    "file_name": file_name,
+                    "file_suffix": text_suffix,
+                    "file_size": file.size,
+                }
+                text_list.append(file_dict)
 
             except Exception as e:
                 logging.error(f"处理文件 {file.filename} 失败：{str(e)}")
-                text_list.append("")  # 保证列表完整性
+                text_list.append({})  # 保证列表完整性
             finally:
                 if temp_file_path and os.path.exists(temp_file_path):
                     try:
@@ -185,20 +204,40 @@ class FilesLoaders:
                     except Exception as e:
                         logging.error(f"删除临时文件失败：{temp_file_path}，错误信息：{str(e)}")
 
-            await file.close()
-
         return text_list if text_list else None
 
-    async def loading_files(self, files: List[UploadFile]):
+    async def loading_files(self):
         """
         处理传入文件信息，返回处理好的二进制文件内容
         :param files:
         :return: images_content（含图片信息列表）, text_content（含文本信息列表）
         """
-        Images, Texts = await self._distinguish_files(files)
+        files = self.processing_files
 
-        images_content :Optional[List[str]] = await self._process_files_img(Images)
-        text_content :Optional[List[str]] = await self._process_files_text(Texts)
+        Images, Texts = await self._distinguish_files(files=files)
+
+        images_content :Optional[List[Dict]] = await self._process_files_img(Images)
+        text_content :Optional[List[Dict]] = await self._process_files_text(Texts)
+
+        await self.cleanup()
 
         return images_content, text_content
+
+    async def create_files_additional_kwargs(self)-> List[Dict]:
+        files = self.processing_files
+        file_list: List[Dict] = [] # 存储前端可响应的记录文件信息的字典列表
+        if files:
+            for file in files:
+                file_content = await file.read()
+                base64_content = base64.b64encode(file_content).decode("utf-8")
+                file_list.append({
+                    "filename": file.filename,
+                    "content_type": file.content_type,
+                    "base64_data": f"data:{file.content_type};base64,{base64_content}"
+                })
+        else:
+            file_list = []
+
+        return file_list
+
 

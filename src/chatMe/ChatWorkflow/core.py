@@ -1,3 +1,4 @@
+import json
 import logging
 from http.client import HTTPException
 from typing import Optional, Dict, Any, AsyncGenerator
@@ -22,6 +23,7 @@ class ChatWorkflow:
 
     def __init__(self):
         self.llm = None
+        self.judge_llm = None
         self.graph = None
         self.checkpointer = None
         self.tavily_search = TavilySearch(
@@ -42,13 +44,21 @@ class ChatWorkflow:
         await self.checkpointer.setup()
 
         llm_config, system_prompt = get_graph_config()
-
         # 大模型基础配置
         self.llm = ChatOpenAI(**llm_config)
         prompt = ChatPromptTemplate.from_messages([("system", system_prompt),("placeholder", "{messages}")])
         self.llm = prompt | self.llm
 
-        self.graph = self._create_graph()
+        judge_llm_config, judge_search_prompt = get_judge_search_node_config()
+
+        self.judge_llm = ChatOpenAI(**judge_llm_config)
+
+        judge_search_template_prompt = ChatPromptTemplate.from_messages(
+            [("system", judge_search_prompt), ("placeholder", "{messages}")])
+
+        self.judge_llm = judge_search_template_prompt | self.judge_llm
+
+        self.graph = self._create_graph3()
 
 
     def _create_graph(self):
@@ -95,36 +105,44 @@ class ChatWorkflow:
         # 编译图工作流
         return workflow.compile(checkpointer=self.checkpointer)
 
-    async def _create_graph3(self):
+    def _create_graph3(self):
         """
         自定义工作流对象，带有搜索引擎
         """
         workflow = StateGraph(ChatState3)
 
-        async def judge_search_node(state: ChatState3):
-            total_messages: str = ""
-            for msg in state["messages"]:
-                print(msg)
+        def judge_search_node(state: ChatState3):
+            total_messages = []
+            for msg in list(state["messages"]):
                 if isinstance(msg, HumanMessage):
                     for content in msg.content:
                         if content.get("type") == "text":
-                            total_messages += ("Human: " + content.get("text"))
+                            # 判断有没有文本信息
+                            if content.get("text_file",False):
+                                total_messages.append("File: " + content.get("text"))
+                            total_messages.append("Human: " + content.get("text"))
                 if isinstance(msg, AIMessage):
-                    total_messages += ("AI: " + msg.content)
+                    total_messages.append("AI: " + msg.content)
 
-            judge_llm_config, judge_search_prompt = get_judge_search_node_config()
 
-            judge_llm = ChatOpenAI(**judge_llm_config)
+            response = self.judge_llm.invoke({"messages": total_messages})
+            try:
+                response_dict = json.loads(response.content)
+                should_search = response_dict.get("should_search", False)
+                query = response_dict.get("query", "")
+            except json.JSONDecodeError:
+                # 如果解析失败，默认不搜索
+                logging.error("解析搜索结果失败，默认不搜索")
+                should_search = False
+                query = ""
 
-            judge_llm = judge_search_prompt | judge_llm.with_structured_output(SearchDecision)
-
-            judge_decision = await judge_llm.ainvoke({"messages": total_messages})
+            search_decision = SearchDecision(should_search=should_search, query=query)
 
             return {
-                "search_decision": judge_decision
+                "search_decision": search_decision
             }
 
-        async def search_node(state: ChatState3):
+        def search_node(state: ChatState3):
             should_search = state["search_decision"].should_search
             query = state["search_decision"].query
             messages = list(state["messages"])
@@ -132,11 +150,11 @@ class ChatWorkflow:
             search_message = ""
             try:
                 if should_search:
-                    search_results = await self.tavily_search.ainvoke(query)
-                    print(search_results)
+                    search_results = self.tavily_search.invoke(query)
                     results = search_results.get("results", [])
                     for result in results:
-                        search_message += (result + '\n')
+                        # url，title，content字典值
+                        search_message += (result["content"] + '\n')
             except HTTPException as e:
                 logging.error(f"搜索引擎搜索失败：{e}")
                 search_message = "搜索服务暂时不可用，请稍后再试。"
@@ -151,9 +169,9 @@ class ChatWorkflow:
                 "messages": messages
             }
 
-        async def final_node(state: ChatState3):
+        def final_node(state: ChatState3):
             input_msg = list(state["messages"])
-            response = await self.llm.ainvoke({"messages": input_msg})
+            response = self.llm.invoke({"messages": input_msg})
 
             return {
                 "messages": [response]

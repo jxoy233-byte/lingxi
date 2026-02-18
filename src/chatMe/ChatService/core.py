@@ -1,8 +1,9 @@
+import base64
 import json
 import logging
 import uuid
 from datetime import datetime
-from typing import AsyncGenerator, Set, List
+from typing import AsyncGenerator, Set, List, Dict
 
 from fastapi import UploadFile
 from langchain_core.messages import HumanMessage, AIMessage
@@ -84,19 +85,18 @@ class ChatService:
             return []
 
 
-
-
     async def _process_files(self, files: List[UploadFile]):
         """
         创建FilesLoaders类实例,调用loading_files防擦，处理传入文件信息，返回处理好的分类文件内容
         :param files:
-        :return: images_content（含图片信息列表）, text_content（含文本信息列表）
+        :return: images_content（含图片信息列表）, text_content（含文本信息列表）,额外参数files_list
         """
 
         fl = FilesLoaders(files)
-        images_content, text_content = await fl.loading_files(files)
+        images_content, text_content = await fl.loading_files()
+        files_list = await fl.create_files_additional_kwargs()
 
-        return images_content, text_content
+        return images_content, text_content, files_list
 
 
     async def message_stream(
@@ -116,7 +116,7 @@ class ChatService:
             基于流式传输的 JSON 字符串
         """
 
-        images_content, text_content = await self._process_files(files)
+        images_content, text_content, files_list = await self._process_files(files)
 
         message_content = [
             {"type": "text", "text": message},
@@ -124,17 +124,16 @@ class ChatService:
         if text_content or images_content:
             if images_content:
                 for img in images_content:
-                    message_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img}"}, "detail": "auto"})
+                    message_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img["file_content"]}"}, "detail": "auto"})
             if text_content:
-                message += "\n\n" + "=[用户传入文件]=\n" # 分隔文本文件与用户提问
+                message_content.append({"type": "text", "text": "以下为传入用户文件\n:", "text_file": True})
                 for text in text_content:
-                    message += text + "\n"
-                message_content[0]["text"] = message
+                    message_content.append({"type": "text", "text": text["file_content"], "text_file": True})
 
         session_ids = await self.aget_conversation_ids
 
         # 会话ID处理：无则新建，有则校验是否存在
-        if session_id == "":
+        if session_id == "" or session_id is None:
             session_id = str(uuid.uuid4().hex)
         elif session_id not in session_ids:
             # 会话ID不存在，返回错误信息
@@ -152,20 +151,24 @@ class ChatService:
 
         additional_kwargs ={
             "updated_at": datetime.now(),
-            "files": files,
+            "files": files_list, # 不可行, todo 需要产生可序列化对象
         }
 
         full_response = ""
         try:
             async for chunk in self.chat_workflow.astream(messages=[HumanMessage(content=message_content,additional_kwargs=additional_kwargs)], config=input_config):
                 if chunk['event'] == 'on_chat_model_stream':
-                    content = chunk['data']['chunk'].content
-                    full_response += content
-                    yield json.dumps(
-                        {"type": "content", "content": content},
-                        ensure_ascii=False,
-                        default=str
-                    ) + "\n\n"
+                    # 最终返回的chunk
+                    if chunk['metadata']['langgraph_node'] and chunk['metadata']['langgraph_node'] == 'final_node':
+                        content = chunk['data']['chunk'].content
+                        full_response += content
+                        yield json.dumps(
+                            {"type": "content", "content": content},
+                            ensure_ascii=False,
+                            default=str
+                        ) + "\n\n"
+                    else: # todo 后续增添搜索引擎获取的链接网址信息
+                        continue
 
         except HTTPException as e:
             import traceback
@@ -181,7 +184,8 @@ class ChatService:
         # 返回最终完整结果
         yield json.dumps({
             "type": "done",
-            "full_response": full_response
+            "full_response": full_response,
+            "session_id": session_id
         }) + "\n\n"
 
 
@@ -196,7 +200,7 @@ class ChatService:
         config = {"configurable": {"thread_id": session_id}}
         try:
             state = await self.graph.aget_state(config=config)
-            print(state.values["messages"])
+            print(state)
         except HTTPException as e:
             logging.error(f"获取会话状态异常(session_id:{session_id})：{str(e)}")
             return Conversation(session_id=session_id)
@@ -220,20 +224,28 @@ class ChatService:
                                     human_message += '\n'
                                     messages_list.append(Message(
                                         role=role,
-                                        content=human_message
+                                        content=human_message,
+                                        files=msg.additional_kwargs.get("files", [])
                                     ))
+                                    break # 只获取第一条用户提问的信息内容
 
 
                     elif isinstance(msg, AIMessage):
                         role = MessageRole.AI
                         messages_list.append(Message(
                             role=role,
-                            content=msg.content
+                            content=msg.content,
+                            files=None
                         ))
 
 
         created_at = state.created_at if hasattr(state, "created_at") else datetime.now()
-        updated_at = state.values["messages"][-2].additional_kwargs.get("updated_at")
+        updated_at = None
+        if "messages" in state.values and state.values["messages"]:
+            for msg in reversed(state.values["messages"]):
+                if isinstance(msg, HumanMessage):
+                    updated_at = msg.additional_kwargs.get("updated_at")
+                    break
 
         title = state.values["messages"][1].additional_kwargs.get("title","新对话")  # 读取你之前更新的真实标题
 

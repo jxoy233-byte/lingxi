@@ -11,5 +11,7 @@ FILE_ALLOWED_TYPES = {
         "TEXT_SUFFIX" : {".txt", ".md", ".csv", ".xml", ".json"},
         "TEXT_MIME" : {"text/plain", "text/markdown", "text/csv", "text/xml", "application/json"},
     },
-
 }
+
+
+

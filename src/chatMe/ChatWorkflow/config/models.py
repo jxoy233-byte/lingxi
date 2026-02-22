@@ -24,3 +24,4 @@ class ChatState3(TypedDict):
     """State for the chatMe graph3"""
     messages: Annotated[list[BaseMessage], add_messages]
     search_decision: Annotated[SearchDecision, "每一轮对话的搜索判断结果"]
+    search_message: Annotated[List, "每一轮对话的搜索结果"]

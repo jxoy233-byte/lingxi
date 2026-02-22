@@ -151,12 +151,13 @@ class ChatService:
 
         additional_kwargs ={
             "updated_at": datetime.now(),
-            "files": files_list, # 不可行, todo 需要产生可序列化对象
+            "files": files_list, # 列表字典
         }
 
         full_response = ""
         try:
             async for chunk in self.chat_workflow.astream(messages=[HumanMessage(content=message_content,additional_kwargs=additional_kwargs)], config=input_config):
+                print(chunk)
                 if chunk['event'] == 'on_chat_model_stream':
                     # 最终返回的chunk
                     if chunk['metadata']['langgraph_node'] and chunk['metadata']['langgraph_node'] == 'final_node':
@@ -167,9 +168,18 @@ class ChatService:
                             ensure_ascii=False,
                             default=str
                         ) + "\n\n"
-                    else: # todo 后续增添搜索引擎获取的链接网址信息
+                    else:
                         continue
-
+                elif chunk['event'] == 'on_tool_end':
+                    if 'output' in chunk['data']:
+                        if search_results := chunk['data']['output'].get('results',[]):
+                            yield json.dumps(
+                                {"type": "search_result", "content": search_results},
+                                ensure_ascii=False,
+                                default=str
+                            ) + "\n\n"
+                        else:
+                            continue
         except HTTPException as e:
             import traceback
             error_detail = f"{str(e)}\n{traceback.format_exc()}"
@@ -200,7 +210,6 @@ class ChatService:
         config = {"configurable": {"thread_id": session_id}}
         try:
             state = await self.graph.aget_state(config=config)
-            print(state)
         except HTTPException as e:
             logging.error(f"获取会话状态异常(session_id:{session_id})：{str(e)}")
             return Conversation(session_id=session_id)

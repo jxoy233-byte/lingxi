@@ -5,6 +5,7 @@
 - 更新了带有搜索引擎功能的graph 
 - 更新updated_at字段存放在config的additional_kwargs配置中,这样应该可以解决没有正常显示对话更新时间距离现在的问题（√）
 - 对于传入文件数据，对后端的Conversation进行拓展变量来保存，使得前端每次对话进入仍可以显示上传过的文件(todo) ***使用additional_kwargs传入每一段对话的文件显示，如果传入了的话，否则置为None***
+- Message传入搜索引擎关键字字段(如果存在的话)
 
 ### 前端更新任务
 - *增加Markdown语法渲染*

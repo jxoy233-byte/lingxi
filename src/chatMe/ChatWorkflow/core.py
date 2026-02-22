@@ -145,32 +145,34 @@ class ChatWorkflow:
         def search_node(state: ChatState3):
             should_search = state["search_decision"].should_search
             query = state["search_decision"].query
-            messages = list(state["messages"])
 
-            search_message = ""
+            search_message = []
             try:
                 if should_search:
                     search_results = self.tavily_search.invoke(query)
                     results = search_results.get("results", [])
                     for result in results:
                         # url，title，content字典值
-                        search_message += (result["content"] + '\n')
+                        search_message.append(result)
             except HTTPException as e:
                 logging.error(f"搜索引擎搜索失败：{e}")
                 search_message = "搜索服务暂时不可用，请稍后再试。"
 
-            messages.append(
-                SystemMessage(
-                    content=f"以下是搜索结果：\n{search_message}"
-                )
-            )
-
             return {
-                "messages": messages
+                "search_message": search_message
             }
 
         def final_node(state: ChatState3):
             input_msg = list(state["messages"])
+            if "search_message" in state and state["search_message"]:
+                search_results = ""
+                for result in state["search_message"]:
+                    search_results += result["content"] + '\n'
+                input_msg.append(
+                    SystemMessage(
+                        content=f"以下是搜索结果：\n{search_results}"
+                    )
+                )
             response = self.llm.invoke({"messages": input_msg})
 
             return {

@@ -4,15 +4,14 @@ from http.client import HTTPException
 from typing import Optional, Dict, Any, AsyncGenerator
 
 from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, SystemMessage
-from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_tavily import TavilySearch
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.redis import AsyncRedisSaver
-from pyexpat.errors import messages
 
-from chatMe.ChatWorkflow import get_graph_config, ChatState, get_judge_search_node_config, SearchDecision, ChatState3
+from chatMe.ChatWorkflow import get_graph_config, get_judge_search_node_config, SearchDecision, \
+    ChatStateCore, get_imp_ipt_config
 
 
 class ChatWorkflow:
@@ -22,7 +21,8 @@ class ChatWorkflow:
     """
 
     def __init__(self):
-        self.llm = None
+        self.llm_core = None
+        self.llm_imp_ipt = None
         self.judge_llm = None
         self.graph = None
         self.checkpointer = None
@@ -30,6 +30,28 @@ class ChatWorkflow:
             tavily_api_key="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",
             max_results = 5,
         )
+
+    async def init_llm(self):
+        # 核心gpt5.1大模型配置
+        llm_config, system_prompt = get_graph_config()
+
+        self.llm_core = ChatOpenAI(**llm_config)
+        prompt = ChatPromptTemplate.from_messages([("system", system_prompt),("placeholder", "{messages}")])
+        self.llm_core = prompt | self.llm_core
+
+        # 判断搜索节点大模型配置
+        judge_llm_config, judge_search_prompt = get_judge_search_node_config()
+
+        self.judge_llm = ChatOpenAI(**judge_llm_config)
+        judge_search_template_prompt = ChatPromptTemplate.from_messages([("system", judge_search_prompt), ("placeholder", "{messages}")])
+        self.judge_llm = judge_search_template_prompt | self.judge_llm
+
+        # 输入优化大模型配置
+        imp_ipt_llm_config, imp_ipt_llm_prompt = get_imp_ipt_config()
+
+        self.llm_imp_ipt = ChatOpenAI(**imp_ipt_llm_config)
+        prompt = ChatPromptTemplate.from_messages([("system", imp_ipt_llm_prompt), ("human", "{input}")])
+        self.llm_imp_ipt = prompt | self.llm_imp_ipt
 
     async def ainit(self):
         """
@@ -43,75 +65,18 @@ class ChatWorkflow:
         self.checkpointer = AsyncRedisSaver(redis_url=redis_url_checkpoint)
         await self.checkpointer.setup()
 
-        llm_config, system_prompt = get_graph_config()
-        # 大模型基础配置
-        self.llm = ChatOpenAI(**llm_config)
-        prompt = ChatPromptTemplate.from_messages([("system", system_prompt),("placeholder", "{messages}")])
-        self.llm = prompt | self.llm
+        # 初始化所有llm
+        await self.init_llm()
 
-        judge_llm_config, judge_search_prompt = get_judge_search_node_config()
+        self.graph = self._create_graph_core()
 
-        self.judge_llm = ChatOpenAI(**judge_llm_config)
-
-        judge_search_template_prompt = ChatPromptTemplate.from_messages(
-            [("system", judge_search_prompt), ("placeholder", "{messages}")])
-
-        self.judge_llm = judge_search_template_prompt | self.judge_llm
-
-        self.graph = self._create_graph3()
-
-
-    def _create_graph(self):
-        """
-        自定义工作流对象
-        """
-
-        # 创建流对象
-        workflow = StateGraph(ChatState)
-
-        # ========== 同步节点：适配 invoke 同步调用 ==========
-        def chat_node(state: ChatState, config:  RunnableConfig | None) -> ChatState:
-            """ LLM 同步处理 """
-            messages = state["messages"]
-            response = self.llm.invoke({"messages": messages})
-            return {"messages": [response], }
-
-        # ========== 异步节点：适配 ainvoke/astream 异步调用 ==========
-        async def achat_node(state: ChatState, config:  RunnableConfig | None) :
-            """ LLM 异步流式处理 """
-            messages = state["messages"]
-            response = await self.llm.ainvoke({"messages": messages})
-            return {
-                "messages": [response]
-            }
-
-
-        # 添加节点
-        workflow.add_node("achat_node", achat_node)
-        # workflow.add_node("chat_node", chat_node)
-
-        # 添加入口节点点, 手动调整异步入口还是同步入口
-        workflow.set_entry_point("achat_node")
-        # workflow.set_entry_point("chat_node")
-
-        # 添加节点边
-        workflow.add_edge("achat_node", END)
-        # workflow.add_edge("chat_node", END)
-
-        # # 长期存储 官方无异步适配-舍弃 如果需要则自己开发相应功能
-        # redis_url_store = "redis://localhost:6379/8"
-        # store = RedisStore(redis_url=redis_url_store)
-
-        # 编译图工作流
-        return workflow.compile(checkpointer=self.checkpointer)
-
-    def _create_graph3(self):
+    def _create_graph_core(self):
         """
         自定义工作流对象，带有搜索引擎
         """
-        workflow = StateGraph(ChatState3)
+        workflow = StateGraph(ChatStateCore)
 
-        def judge_search_node(state: ChatState3):
+        def judge_search_node(state: ChatStateCore):
             total_messages = []
             for msg in list(state["messages"]):
                 if isinstance(msg, HumanMessage):
@@ -142,7 +107,7 @@ class ChatWorkflow:
                 "search_decision": search_decision
             }
 
-        def search_node(state: ChatState3):
+        def search_node(state: ChatStateCore):
             should_search = state["search_decision"].should_search
             query = state["search_decision"].query
 
@@ -150,7 +115,9 @@ class ChatWorkflow:
             try:
                 if should_search:
                     search_results = self.tavily_search.invoke(query)
+
                     results = search_results.get("results", [])
+
                     for result in results:
                         # url，title，content字典值
                         search_message.append(result)
@@ -162,7 +129,7 @@ class ChatWorkflow:
                 "search_message": search_message
             }
 
-        def final_node(state: ChatState3):
+        def final_node(state: ChatStateCore):
             input_msg = list(state["messages"])
             if "search_message" in state and state["search_message"]:
                 search_results = ""
@@ -173,7 +140,10 @@ class ChatWorkflow:
                         content=f"以下是搜索结果：\n{search_results}"
                     )
                 )
-            response = self.llm.invoke({"messages": input_msg})
+            response = self.llm_core.invoke({"messages": input_msg})
+
+            print(state["search_message"])
+            response.additional_kwargs["search_results"] = state["search_message"]
 
             return {
                 "messages": [response]
@@ -183,7 +153,7 @@ class ChatWorkflow:
         workflow.add_node("search_node", search_node)
         workflow.add_node("final_node", final_node)
 
-        def route_decision(state: ChatState3) -> str:
+        def route_decision(state: ChatStateCore) -> str:
             """根据 search_judge 决定下一步路径"""
             search_or_not = state["search_decision"].should_search
             if search_or_not:

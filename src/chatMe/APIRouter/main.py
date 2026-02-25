@@ -176,5 +176,20 @@ async def get_latest_conversation():
         logging.error(f"获取最新会话异常：{str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@chatMe_app.post("/improve_input", summary="优化用户输入内容")
+async def improve_input(
+    input_text: str = Body(..., embed=True, min_length=1, max_length=500, description="用户输入内容")
+):
+    """
+    优化用户输入内容，优化成更好让后续进行AI对话中AI来理解用户需求
+    """
+    try:
+        resp = await chat_service.chat_workflow.llm_imp_ipt.ainvoke(input_text)
+        improved_text = resp.content
+        return {"improved_text": improved_text}
+    except Exception as e:
+        logging.error(f"输入内容优化异常：{str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 

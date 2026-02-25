@@ -23,6 +23,8 @@ class Message(BaseModel):
     role :MessageRole
     content :str
     files: Optional[List[Dict]] = Field(default=None, description="存储字典的列表，前端可解析的后端文件响应")
+    search_results: Optional[List] = Field(default=None, description="搜索引擎结果")
+
 class Conversation(BaseModel):
     """
     与智能体对话存放model

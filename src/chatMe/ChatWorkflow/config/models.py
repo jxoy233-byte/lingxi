@@ -5,12 +5,6 @@ from langchain_core.messages import BaseMessage
 from pydantic import BaseModel
 
 
-class ChatState(TypedDict):
-    """State for the chatMe graph"""
-    messages: Annotated[list[BaseMessage], add_messages]
-    search_results: List[Annotated[str,"每一轮对话如果需要搜索时的搜索结果"]]
-
-
 class SearchDecision(BaseModel):
     should_search: bool = False
     query: str = ""
@@ -20,7 +14,7 @@ class SearchDecision(BaseModel):
         self.should_search = should_search
         self.query = query
 
-class ChatState3(TypedDict):
+class ChatStateCore(TypedDict):
     """State for the chatMe graph3"""
     messages: Annotated[list[BaseMessage], add_messages]
     search_decision: Annotated[SearchDecision, "每一轮对话的搜索判断结果"]

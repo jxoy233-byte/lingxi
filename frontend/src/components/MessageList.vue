@@ -12,11 +12,11 @@
     />
 
   <div v-if="isLoading" class="message ai-message">
-    <div class="message-avatar">🤖</div>
-    <div class="message-content">
+    <div class="message-content loading-content">
       <div class="typing-indicator">
         <span></span><span></span><span></span>
       </div>
+      <div class="loading-text">AI酱 正在思考中...</div>
     </div>
   </div>
 
@@ -92,14 +92,15 @@ export default {
   watch: {
     messages: {
       handler(newMessages, oldMessages) {
-        // 只有在非用户滚动状态下才自动滚动
+        // 自动滚动到底部，除非用户手动向上滚动
         if (!this.isUserScrolling) {
           // 如果是新增消息或内容更新,使用平滑滚动
           const isNewMessage = newMessages.length > oldMessages?.length
           this.scrollToBottom(isNewMessage)
         }
       },
-      deep: true
+      deep: true,
+      immediate: false
     },
     isLoading(newVal) {
       // 加载状态变化时自动滚动
@@ -153,7 +154,6 @@ export default {
 
 .message {
   display: flex;
-  gap: 16px;
   margin-bottom: 24px;
   width: 100%;
 }
@@ -162,19 +162,8 @@ export default {
   justify-content: flex-start;
 }
 
-.message-avatar {
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 20px;
-  flex-shrink: 0;
-}
-
 .message-content {
-  max-width: 70%;
+  max-width: 75%;
   padding: 12px 16px;
   border-radius: 12px;
 }
@@ -184,18 +173,36 @@ export default {
   border: 1px solid var(--border-color);
 }
 
+.loading-content {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  animation: fadeIn 0.3s ease-in;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 .typing-indicator {
   display: flex;
   gap: 4px;
-  padding: 12px 0;
+  padding: 0;
 }
 
 .typing-indicator span {
   width: 8px;
   height: 8px;
-  background-color: var(--text-secondary);
+  background-color: var(--button-bg);
   border-radius: 50%;
-  animation: typing 1.4s infinite;
+  animation: typing 1.4s infinite ease-in-out;
 }
 
 .typing-indicator span:nth-child(2) {
@@ -209,8 +216,25 @@ export default {
 @keyframes typing {
   0%, 60%, 100% {
     opacity: 0.3;
+    transform: scale(0.8);
   }
   30% {
+    opacity: 1;
+    transform: scale(1.2);
+  }
+}
+
+.loading-text {
+  font-size: 13px;
+  color: var(--text-secondary);
+  animation: pulse-text 2s ease-in-out infinite;
+}
+
+@keyframes pulse-text {
+  0%, 100% {
+    opacity: 0.6;
+  }
+  50% {
     opacity: 1;
   }
 }

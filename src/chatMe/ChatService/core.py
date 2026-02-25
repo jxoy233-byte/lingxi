@@ -1,4 +1,3 @@
-import base64
 import json
 import logging
 import uuid
@@ -84,7 +83,6 @@ class ChatService:
             logging.warning(f"获取conversation_ids失败：{type(e).__name__}: {e}")
             return []
 
-
     async def _process_files(self, files: List[UploadFile]):
         """
         创建FilesLoaders类实例,调用loading_files防擦，处理传入文件信息，返回处理好的分类文件内容
@@ -96,8 +94,9 @@ class ChatService:
         images_content, text_content = await fl.loading_files()
         files_list = await fl.create_files_additional_kwargs()
 
-        return images_content, text_content, files_list
+        await fl.cleanup()
 
+        return images_content, text_content, files_list
 
     async def message_stream(
         self,
@@ -119,7 +118,7 @@ class ChatService:
         images_content, text_content, files_list = await self._process_files(files)
 
         message_content = [
-            {"type": "text", "text": message},
+            {"type": "text", "text": message, "text_file": False},
         ]
         if text_content or images_content:
             if images_content:
@@ -157,7 +156,6 @@ class ChatService:
         full_response = ""
         try:
             async for chunk in self.chat_workflow.astream(messages=[HumanMessage(content=message_content,additional_kwargs=additional_kwargs)], config=input_config):
-                print(chunk)
                 if chunk['event'] == 'on_chat_model_stream':
                     # 最终返回的chunk
                     if chunk['metadata']['langgraph_node'] and chunk['metadata']['langgraph_node'] == 'final_node':
@@ -210,6 +208,7 @@ class ChatService:
         config = {"configurable": {"thread_id": session_id}}
         try:
             state = await self.graph.aget_state(config=config)
+            print( state)
         except HTTPException as e:
             logging.error(f"获取会话状态异常(session_id:{session_id})：{str(e)}")
             return Conversation(session_id=session_id)
@@ -218,34 +217,35 @@ class ChatService:
         messages_list = []
         if "messages" in state.values and state.values["messages"]:
             for msg in state.values["messages"]:
-                    if isinstance(msg, HumanMessage):
-                        role = MessageRole.USER
-                        if isinstance(msg.content, str):
-                            messages_list.append(Message(
-                                role=role,
-                                content=msg.content  # 获取用户输入的文本
-                            ))
-                        else:
-                            human_message = ""
-                            for content in msg.content:
-                                if content.get("type") == "text": # todo 改获取对话内容的逻辑
-                                    human_message += content.get("text", "")
-                                    human_message += '\n'
-                                    messages_list.append(Message(
-                                        role=role,
-                                        content=human_message,
-                                        files=msg.additional_kwargs.get("files", [])
-                                    ))
-                                    break # 只获取第一条用户提问的信息内容
+                if isinstance(msg, HumanMessage):
+                    role = MessageRole.USER
+                    human_message = ""
+                    files = []
+                    files_input = False
+                    for content in msg.content:
+                        if content.get("type") == "text":
+                            human_message += content.get("text", "")
+                            human_message += '\n'
+                        if content.get("type") == "image_url" or content.get("text_file") == True:
+                            files_input = True
+                        if files_input:
+                            files = msg.additional_kwargs.get("files",[])
+                            break
+                    messages_list.append(Message(
+                        role=role,
+                        content=human_message,
+                        files=files,
+                        search_results=None
+                    ))
 
-
-                    elif isinstance(msg, AIMessage):
-                        role = MessageRole.AI
-                        messages_list.append(Message(
-                            role=role,
-                            content=msg.content,
-                            files=None
-                        ))
+                elif isinstance(msg, AIMessage):
+                    role = MessageRole.AI
+                    messages_list.append(Message(
+                        role=role,
+                        content=msg.content,
+                        files=None,
+                        search_results=msg.additional_kwargs.get("search_results",[])
+                    ))
 
 
         created_at = state.created_at if hasattr(state, "created_at") else datetime.now()
@@ -315,9 +315,10 @@ class ChatService:
             if state.values["messages"][1]:
                 for msg in state.values["messages"]:
                     if isinstance(msg, AIMessage):
+                        msg.additional_kwargs["title"] = new_title.strip()
                         new_msg = AIMessage(
                             content=msg.content,
-                            additional_kwargs={"title": new_title.strip()},
+                            additional_kwargs=msg.additional_kwargs,
                             response_metadata=msg.response_metadata,
                             id=msg.id,
                             usage_metadata = msg.usage_metadata
@@ -339,7 +340,6 @@ class ChatService:
         except HTTPException as e:
             logging.error(f"修改标题失败(session_id:{session_id}): {str(e)}")
             return False
-
 
     async def backtrack_state(self, session_id :str, checkpoint_id :str) -> bool:
         """

@@ -76,11 +76,32 @@
 
       <textarea
         v-model="inputText"
-        @keydown.enter.exact.prevent="handleSend"
-        placeholder="输入消息... (Enter发送，Shift+Enter换行)"
+        @keydown.enter="handleEnterKey"
+        @input="autoResize"
+        placeholder="输入消息... (Enter发送，Ctrl+Enter换行)"
         rows="1"
         ref="textarea"
       ></textarea>
+
+      <!-- 优化按钮 -->
+      <button
+        type="button"
+        class="optimize-button"
+        :class="{ 'optimizing': isOptimizing }"
+        @click="optimizeInput"
+        :disabled="!inputText.trim() || isLoading || isOptimizing"
+        :title="isOptimizing ? '优化中...' : '优化输入'"
+      >
+        <svg v-if="!isOptimizing" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M12 1v6m0 6v6m5.2-13.2l-4.2 4.2m0 6l4.2 4.2M23 12h-6m-6 0H1m18.2 5.2l-4.2-4.2m0-6l4.2-4.2"/>
+        </svg>
+        <svg v-else class="spinner" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"/>
+          <path d="M12 2 A10 10 0 0 1 22 12"/>
+        </svg>
+      </button>
+
       <button
         @click="handleSend"
         :disabled="(!inputText.trim() && selectedFiles.filter(f => !f.error).length === 0) || isLoading"
@@ -125,6 +146,7 @@ export default {
       inputText: '',
       selectedFiles: [],
       isDragging: false,
+      isOptimizing: false,
       // 文件验证配置（与后端保持一致）
       maxFileSize: 10 * 1024 * 1024, // 10MB
       allowedImageTypes: ['.png', '.jpg', '.jpeg', '.gif'],
@@ -159,6 +181,41 @@ export default {
     })
   },
   methods: {
+    handleEnterKey(e) {
+      // Ctrl+Enter 换行，Enter 发送
+      if (e.ctrlKey) {
+        // Ctrl+Enter: 插入换行符
+        const textarea = e.target
+        const start = textarea.selectionStart
+        const end = textarea.selectionEnd
+        const value = textarea.value
+
+        this.inputText = value.substring(0, start) + '\n' + value.substring(end)
+
+        // 恢复光标位置
+        this.$nextTick(() => {
+          textarea.selectionStart = textarea.selectionEnd = start + 1
+          this.autoResize()
+        })
+      } else {
+        // Enter: 发送消息
+        e.preventDefault()
+        this.handleSend()
+      }
+    },
+
+    autoResize() {
+      const textarea = this.$refs.textarea
+      if (!textarea) return
+
+      // 重置高度以获取正确的 scrollHeight
+      textarea.style.height = 'auto'
+
+      // 设置新高度，最小52px，最大200px
+      const newHeight = Math.min(Math.max(textarea.scrollHeight, 52), 200)
+      textarea.style.height = newHeight + 'px'
+    },
+
     handleSend() {
       // 获取有效文件（没有错误的文件）
       const validFiles = this.selectedFiles.filter(f => !f.error).map(f => f.file)
@@ -177,6 +234,51 @@ export default {
       // 清空输入
       this.inputText = ''
       this.clearFiles()
+
+      // 重置 textarea 高度
+      this.$nextTick(() => {
+        const textarea = this.$refs.textarea
+        if (textarea) {
+          textarea.style.height = '52px'
+        }
+      })
+    },
+
+    async optimizeInput() {
+      if (!this.inputText.trim() || this.isOptimizing) return
+
+      this.isOptimizing = true
+
+      try {
+        const response = await fetch('/chat/improve_input', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            input_text: this.inputText.trim()
+          })
+        })
+
+        if (!response.ok) {
+          throw new Error('优化请求失败')
+        }
+
+        const data = await response.json()
+
+        // 更新输入框内容
+        if (data.improved_text) {
+          this.inputText = data.improved_text
+          // 触发自动调整高度
+          this.$nextTick(() => {
+            this.autoResize()
+          })
+        }
+      } catch (error) {
+        console.error('优化输入失败:', error)
+      } finally {
+        this.isOptimizing = false
+      }
     },
 
     triggerFileInput() {
@@ -489,10 +591,96 @@ export default {
   cursor: not-allowed;
 }
 
+.optimize-button {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 52px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: 12px;
+  transition: all 0.3s ease;
+  border: 1px solid var(--border-color);
+  position: relative;
+  overflow: hidden;
+}
+
+.optimize-button::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 0;
+  height: 0;
+  border-radius: 50%;
+  background: var(--button-bg);
+  opacity: 0;
+  transform: translate(-50%, -50%);
+  transition: width 0.6s, height 0.6s, opacity 0.6s;
+}
+
+.optimize-button.optimizing::before {
+  width: 100%;
+  height: 100%;
+  opacity: 0.1;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+.optimize-button:hover:not(:disabled) {
+  background: var(--hover-bg);
+  color: var(--button-bg);
+  border-color: var(--button-bg);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(16, 163, 127, 0.2);
+}
+
+.optimize-button:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.optimize-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.optimize-button.optimizing {
+  border-color: var(--button-bg);
+  color: var(--button-bg);
+}
+
+.optimize-button .spinner {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 0.1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  50% {
+    opacity: 0.2;
+    transform: translate(-50%, -50%) scale(1.1);
+  }
+}
+
 .input-wrapper textarea {
   flex: 1;
   min-height: 52px;
   max-height: 200px;
+  height: 52px;
   padding: 14px 16px;
   border: 1px solid var(--border-color);
   border-radius: 12px;
@@ -503,6 +691,40 @@ export default {
   resize: none;
   outline: none;
   transition: border-color 0.2s;
+  overflow-y: auto;
+  line-height: 1.5;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.1) transparent;
+}
+
+.input-wrapper textarea::-webkit-scrollbar {
+  width: 6px;
+}
+
+.input-wrapper textarea::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.input-wrapper textarea::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.1);
+  border-radius: 3px;
+}
+
+.input-wrapper textarea::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.15);
+}
+
+/* 暗色主题下的滚动条 */
+.dark-theme .input-wrapper textarea {
+  scrollbar-color: rgba(255, 255, 255, 0.1) transparent;
+}
+
+.dark-theme .input-wrapper textarea::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.dark-theme .input-wrapper textarea::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.15);
 }
 
 .input-wrapper textarea:focus {

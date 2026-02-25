@@ -78,6 +78,22 @@ export default {
     }
 
     this.loadConversations()
+
+    // 从 URL 加载会话
+    const sessionId = this.$route.params.sessionId
+    if (sessionId) {
+      this.loadConversation(sessionId)
+    }
+  },
+  watch: {
+    '$route.params.sessionId'(newSessionId) {
+      // 监听 URL 变化
+      if (newSessionId) {
+        this.loadConversation(newSessionId)
+      } else {
+        this.createNewChat()
+      }
+    }
   },
   methods: {
     toggleTheme() {
@@ -104,6 +120,10 @@ export default {
     createNewChat() {
       this.currentSessionId = null
       this.messages = []
+      // 更新 URL 到根路径
+      if (this.$route.path !== '/') {
+        this.$router.push('/')
+      }
     },
     async loadConversation(sessionId) {
       try {
@@ -111,7 +131,57 @@ export default {
         if (response.ok) {
           const conversation = await response.json()
           this.currentSessionId = sessionId
-          this.messages = conversation.messages
+
+          // 更新 URL
+          if (this.$route.params.sessionId !== sessionId) {
+            this.$router.push(`/${sessionId}`)
+          }
+
+          // 处理消息中的文件信息和搜索结果
+          this.messages = conversation.messages.map(msg => {
+            const processedMsg = { ...msg }
+
+            // 处理文件信息
+            if (msg.files && msg.files.length > 0) {
+              processedMsg.files = msg.files.map(file => {
+                const fileInfo = {
+                  name: file.filename,
+                  type: file.content_type,
+                  preview: null,
+                  content: null
+                }
+
+                // 如果是图片，使用 base64_data 作为预览
+                if (file.content_type && file.content_type.startsWith('image/')) {
+                  fileInfo.preview = file.base64_data
+                }
+                // 如果是文本文件，解码 base64 内容
+                else if (file.content_type && (
+                  file.content_type.startsWith('text/') ||
+                  file.content_type === 'application/json' ||
+                  file.content_type === 'text/csv' ||
+                  file.content_type === 'text/xml'
+                )) {
+                  try {
+                    // 从 base64_data 中提取 base64 部分并解码
+                    const base64Content = file.base64_data.split(',')[1]
+                    fileInfo.content = atob(base64Content)
+                  } catch (e) {
+                    console.error('解码文本文件失败:', e)
+                  }
+                }
+
+                return fileInfo
+              })
+            }
+
+            // 处理搜索结果
+            if (msg.search_results) {
+              processedMsg.searchResults = msg.search_results
+            }
+
+            return processedMsg
+          })
         }
       } catch (error) {
         console.error('加载对话失败:', error)
@@ -254,18 +324,35 @@ export default {
                 // 使用 Vue 响应式更新：通过索引直接修改数组元素触发更新
                 this.messages[aiMessageIndex] = {
                   role: 'ai',
-                  content: this.messages[aiMessageIndex].content + data.content
+                  content: this.messages[aiMessageIndex].content + data.content,
+                  searchResults: this.messages[aiMessageIndex].searchResults
+                }
+              } else if (data.type === 'search_result') {
+                // 接收搜索结果
+                this.messages[aiMessageIndex] = {
+                  role: 'ai',
+                  content: this.messages[aiMessageIndex].content,
+                  searchResults: data.content
                 }
               } else if (data.type === 'done') {
+                // 保存搜索结果，避免刷新后丢失
+                const currentSearchResults = this.messages[aiMessageIndex].searchResults
+
                 // 使用完整响应替换内容
                 this.messages[aiMessageIndex] = {
                   role: 'ai',
-                  content: data.full_response
+                  content: data.full_response,
+                  searchResults: currentSearchResults
                 }
 
                 // 处理新会话 ID
                 if (!this.currentSessionId && data.session_id) {
                   this.currentSessionId = data.session_id
+
+                  // 更新 URL
+                  if (this.$route.params.sessionId !== data.session_id) {
+                    this.$router.push(`/${data.session_id}`)
+                  }
 
                   // 新对话自动生成标题（前6个字）
                   if (isNewConversation) {
@@ -273,8 +360,11 @@ export default {
                   }
                 }
 
-                // 刷新对话列表
-                this.loadConversations()
+                // 不刷新对话内容，保留搜索结果
+                // 只更新侧边栏时间
+                if (this.currentSessionId) {
+                  this.updateConversationTime()
+                }
               } else if (data.type === 'error') {
                 console.error('AI响应错误:', data.error)
                 this.messages[aiMessageIndex] = {
@@ -331,8 +421,97 @@ export default {
           },
           body: JSON.stringify({ title })
         })
+
+        // 添加新对话到列表
+        this.conversations.unshift({
+          session_id: sessionId,
+          title: title,
+          updated_at: new Date().toISOString()
+        })
       } catch (error) {
         console.error('自动生成标题失败:', error)
+      }
+    },
+    async refreshCurrentConversation() {
+      if (!this.currentSessionId) return
+
+      try {
+        const response = await fetch(`/chat/${this.currentSessionId}/conversation`)
+        if (response.ok) {
+          const conversation = await response.json()
+
+          // 处理消息中的文件信息和搜索结果
+          this.messages = conversation.messages.map(msg => {
+            const processedMsg = { ...msg }
+
+            // 处理文件信息
+            if (msg.files && msg.files.length > 0) {
+              processedMsg.files = msg.files.map(file => {
+                const fileInfo = {
+                  name: file.filename,
+                  type: file.content_type,
+                  preview: null,
+                  content: null
+                }
+
+                // 如果是图片，使用 base64_data 作为预览
+                if (file.content_type && file.content_type.startsWith('image/')) {
+                  fileInfo.preview = file.base64_data
+                }
+                // 如果是文本文件，解码 base64 内容
+                else if (file.content_type && (
+                  file.content_type.startsWith('text/') ||
+                  file.content_type === 'application/json' ||
+                  file.content_type === 'text/csv' ||
+                  file.content_type === 'text/xml'
+                )) {
+                  try {
+                    // 从 base64_data 中提取 base64 部分并解码
+                    const base64Content = file.base64_data.split(',')[1]
+                    fileInfo.content = atob(base64Content)
+                  } catch (e) {
+                    console.error('解码文本文件失败:', e)
+                  }
+                }
+
+                return fileInfo
+              })
+            }
+
+            // 处理搜索结果
+            if (msg.search_results) {
+              processedMsg.searchResults = msg.search_results
+            }
+
+            return processedMsg
+          })
+
+          // 更新侧边栏中的对话时间
+          const conv = this.conversations.find(c => c.session_id === this.currentSessionId)
+          if (conv && conversation.updated_at) {
+            conv.updated_at = conversation.updated_at
+          }
+        }
+      } catch (error) {
+        console.error('刷新当前对话失败:', error)
+      }
+    },
+    async updateConversationTime() {
+      if (!this.currentSessionId) return
+
+      try {
+        const response = await fetch(`/chat/${this.currentSessionId}/conversation`)
+        if (response.ok) {
+          const conversation = await response.json()
+
+          // 只更新侧边栏中的对话时间
+          const conv = this.conversations.find(c => c.session_id === this.currentSessionId)
+          if (conv && conversation.updated_at) {
+            conv.updated_at = conversation.updated_at
+          }
+        }
+      } catch (error) {
+        console.error('更新对话时间失败:', error)
       }
     }
   }

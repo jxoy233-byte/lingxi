@@ -219,14 +219,15 @@ class FilesLoaders:
         images_content :Optional[List[Dict]] = await self._process_files_img(Images)
         text_content :Optional[List[Dict]] = await self._process_files_text(Texts)
 
-        await self.cleanup()
-
         return images_content, text_content
 
     async def create_files_additional_kwargs(self)-> List[Dict]:
         files = self.processing_files
         file_list: List[Dict] = [] # 存储前端可响应的记录文件信息的字典列表
         if files:
+            for file in files:
+                await file.seek(0)
+
             for file in files:
                 file_content = await file.read()
                 base64_content = base64.b64encode(file_content).decode("utf-8")

@@ -87,16 +87,16 @@ class ChatService:
         """
         创建FilesLoaders类实例,调用loading_files防擦，处理传入文件信息，返回处理好的分类文件内容
         :param files:
-        :return: images_content（含图片信息列表）, text_content（含文本信息列表）,额外参数files_list
+        :return: images_content（含图片信息列表）, text_content（含文本信息列表）, doc_content(文档信息列表), 额外参数files_list
         """
 
         fl = FilesLoaders(files)
-        images_content, text_content = await fl.loading_files()
+        images_content, text_content, doc_content = await fl.loading_files()
         files_list = await fl.create_files_additional_kwargs()
 
         await fl.cleanup()
 
-        return images_content, text_content, files_list
+        return images_content, text_content, doc_content, files_list
 
     async def message_stream(
         self,

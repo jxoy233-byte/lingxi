@@ -10,7 +10,7 @@ from langchain_core.document_loaders import BaseLoader
 
 from chatMe.ChatService import FILE_ALLOWED_TYPES
 from langchain_community.document_loaders import UnstructuredMarkdownLoader, UnstructuredCSVLoader, \
-    TextLoader, UnstructuredXMLLoader, JSONLoader
+    TextLoader, UnstructuredXMLLoader, JSONLoader, UnstructuredWordDocumentLoader, UnstructuredPDFLoader
 
 
 class FilesLoaders:
@@ -39,16 +39,16 @@ class FilesLoaders:
         """
         划分文件类型
         :param files:
-        :return: images, texts (图片类型， 文本类型) | None,None
+        :return: images, texts, docs(图片类型， 文本类型, 文档类型)
         """
-        files = self.processing_files
         if not files:
             logging.warning("未传入任何图片文件，返回空二进制数据")
             return None,None
 
         images_type = FILE_ALLOWED_TYPES["IMAGE"]["IMAGE_SUFFIX"]
         texts_type = FILE_ALLOWED_TYPES["TEXT"]["TEXT_SUFFIX"]
-        images, texts = [], []
+        docs_type = FILE_ALLOWED_TYPES["DOCUMENT"]["DOCUMENT_SUFFIX"]
+        images, texts, docs = [], [], []
         for file in files:
             file_name = file.filename or "不支持文件或位置文件"
             file_suffix = await self._get_file_suffix(file_name)
@@ -56,6 +56,8 @@ class FilesLoaders:
                 images.append(file)
             elif file_suffix in texts_type:
                 texts.append(file)
+            elif file_suffix in docs_type:
+                docs.append(file)
             else:
                 # 宽松处理，防止影响后续文件处理
                 logging.warning(f"忽略不支持的文件类型：{file_name}")
@@ -63,7 +65,7 @@ class FilesLoaders:
                 continue  # 跳过当前文件，处理下一个
 
         # 后续还要进行文件操作，不要关闭文件
-        return images, texts
+        return images, texts, docs
 
     async def _process_files_img(self, files: List[UploadFile])-> Optional[List[Dict]]:
         """
@@ -131,7 +133,6 @@ class FilesLoaders:
         :return:
         """
 
-        # todo: 再更新对doc文件的识别 前端更新：
         if not files:
             logging.info("未传入任何文本文件，返回空二进制数据")
             return None
@@ -206,6 +207,82 @@ class FilesLoaders:
 
         return text_list if text_list else None
 
+    async def _process_files_doc(self, files: List[UploadFile])-> Optional[List[Dict]]:
+        """
+        使用langchain的document_loader组件处理传入文件信息，类型为xlsx, pdf等常见文本类型
+        :param files:
+        :return:
+        """
+
+        if not files:
+            logging.info("未传入任何文本文件，返回空二进制数据")
+            return None
+
+        doc_list: Optional[List[Dict]] = []
+        for file in files:
+            temp_file_path = None
+            try:
+                text_suffix = await self._get_file_suffix(file.filename)
+                temp_file_path = await self._create_temp_file_path(file, text_suffix)
+                loader :BaseLoader
+                """
+                将 UploadFile 的内容写入本地临时文件；
+                传入 UnstructuredFileLoader；
+                解析完成后删除临时文件（避免占用磁盘）。
+                """
+                ...
+                if text_suffix == ".doc":
+                    loader = UnstructuredWordDocumentLoader(
+                        temp_file_path,  # 替换为你的带图片Word文档路径
+                        mode="single",
+                        strategy="fast",
+                        unstructured_kwargs={
+                            "ocr_languages": "chi_sim+eng",
+                            "ocr_strategy": "auto",
+                            "extract_images": True,
+                        }
+                    )
+                elif text_suffix == ".pdf":
+                    loader = UnstructuredPDFLoader(
+                        temp_file_path,
+                        mode="single",
+                        strategy="fast",
+                        encoding="utf-8",
+                        unstructured_kwargs={
+                            "ocr_languages": "chi_sim+eng",
+                            "ocr_strategy": "auto",
+                            "extract_images": True,
+                        }
+                    )
+                else:
+                    logging.warning(f"不支持的文件类型：{file.filename}")
+
+                # loader都为BaseLoader的子类 ，都有aload方法可以调用
+                documents = await loader.aload()
+                print(documents)
+                # file_text = documents[0].page_content if documents else ""
+                # file_name = file.filename
+                # file_dict = {
+                #     "file_content": file_text,
+                #     "file_name": file_name,
+                #     "file_suffix": text_suffix,
+                #     "file_size": file.size,
+                # }
+                # doc_list.append(file_dict)
+
+            except Exception as e:
+                logging.error(f"处理文件 {file.filename} 失败：{str(e)}")
+                doc_list.append({})  # 保证列表完整性
+            finally:
+                if temp_file_path and os.path.exists(temp_file_path):
+                    try:
+                        os.remove(temp_file_path)
+                        logging.info(f"成功删除临时文件：{temp_file_path}")
+                    except Exception as e:
+                        logging.error(f"删除临时文件失败：{temp_file_path}，错误信息：{str(e)}")
+
+        return doc_list if doc_list else None
+
     async def loading_files(self):
         """
         处理传入文件信息，返回处理好的二进制文件内容
@@ -214,12 +291,13 @@ class FilesLoaders:
         """
         files = self.processing_files
 
-        Images, Texts = await self._distinguish_files(files=files)
+        Images, Texts, Docs = await self._distinguish_files(files=files)
 
         images_content :Optional[List[Dict]] = await self._process_files_img(Images)
         text_content :Optional[List[Dict]] = await self._process_files_text(Texts)
+        doc_content :Optional[List[Dict]] = await self._process_files_doc(Docs)
 
-        return images_content, text_content
+        return images_content, text_content, doc_content
 
     async def create_files_additional_kwargs(self)-> List[Dict]:
         files = self.processing_files

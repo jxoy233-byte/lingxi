@@ -147,13 +147,20 @@ export default {
       selectedFiles: [],
       isDragging: false,
       isOptimizing: false,
-      // 文件验证配置（与后端保持一致）
-      maxFileSize: 10 * 1024 * 1024, // 10MB
-      allowedImageTypes: ['.png', '.jpg', '.jpeg', '.gif'],
-      allowedTextTypes: ['.txt', '.md', '.json', '.csv', '.xml']
+      fileConfig: null,
+      loadingConfig: false
     }
   },
   computed: {
+    maxFileSize() {
+      return this.fileConfig?.maxFileSize || 10 * 1024 * 1024
+    },
+    allowedImageTypes() {
+      return this.fileConfig?.imageTypes?.suffixes || ['.png', '.jpg', '.jpeg', '.gif']
+    },
+    allowedTextTypes() {
+      return this.fileConfig?.textTypes?.suffixes || ['.txt', '.md', '.csv', '.xml', '.json']
+    },
     acceptedTypes() {
       return [...this.allowedImageTypes, ...this.allowedTextTypes].join(',')
     },
@@ -162,6 +169,7 @@ export default {
     }
   },
   mounted() {
+    this.fetchFileConfig()
     // 监听全局拖拽事件
     window.addEventListener('dragenter', this.handleDragEnter)
     window.addEventListener('dragover', this.handleDragOver)
@@ -181,6 +189,21 @@ export default {
     })
   },
   methods: {
+    async fetchFileConfig() {
+      if (this.loadingConfig) return
+      this.loadingConfig = true
+      try {
+        const response = await fetch('/chat/file-config')
+        if (response.ok) {
+          this.fileConfig = await response.json()
+        }
+      } catch (error) {
+        console.error('获取文件配置失败:', error)
+      } finally {
+        this.loadingConfig = false
+      }
+    },
+
     handleEnterKey(e) {
       // Ctrl+Enter 换行，Enter 发送
       if (e.ctrlKey) {

@@ -142,8 +142,8 @@ class ChatWorkflow:
                 )
             response = self.llm_core.invoke({"messages": input_msg})
 
-            print(state["search_message"])
-            response.additional_kwargs["search_results"] = state["search_message"]
+            if "search_message" in state and state["search_message"]:
+                response.additional_kwargs["search_results"] = state["search_message"]
 
             return {
                 "messages": [response]

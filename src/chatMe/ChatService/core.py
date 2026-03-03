@@ -91,12 +91,12 @@ class ChatService:
         """
 
         fl = FilesLoaders(files)
-        images_content, text_content, doc_content = await fl.loading_files()
+        images_content, text_content = await fl.loading_files()
         files_list = await fl.create_files_additional_kwargs()
 
         await fl.cleanup()
 
-        return images_content, text_content, doc_content, files_list
+        return images_content, text_content, files_list
 
     async def message_stream(
         self,
@@ -208,7 +208,6 @@ class ChatService:
         config = {"configurable": {"thread_id": session_id}}
         try:
             state = await self.graph.aget_state(config=config)
-            print( state)
         except HTTPException as e:
             logging.error(f"获取会话状态异常(session_id:{session_id})：{str(e)}")
             return Conversation(session_id=session_id)

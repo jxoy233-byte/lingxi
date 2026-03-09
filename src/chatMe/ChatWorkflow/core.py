@@ -4,6 +4,7 @@ from http.client import HTTPException
 from typing import Optional, Dict, Any, AsyncGenerator
 
 from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, SystemMessage
+from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_tavily import TavilySearch
@@ -28,7 +29,19 @@ class ChatWorkflow:
         self.checkpointer = None
         self.tavily_search = TavilySearch(
             tavily_api_key="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",
-            max_results = 5,
+            max_results = 10,
+        )
+        self.mcp_client = None
+
+    async def init_mcps(self):
+        agent_reach_mcp_config = {
+            'url': 'http://127.0.0.1:18080/streamable',
+            'transport': 'streamable_http'
+        }
+        self.mcp_client = MultiServerMCPClient(
+            {
+                'agent_reach_mcp': agent_reach_mcp_config
+            }
         )
 
     async def init_llm(self):
@@ -36,6 +49,7 @@ class ChatWorkflow:
         llm_config, system_prompt = get_graph_config()
 
         self.llm_core = ChatOpenAI(**llm_config)
+        # self.llm_core = self.llm_core.bind_tools(await self.mcp_client.get_tools())
         prompt = ChatPromptTemplate.from_messages([("system", system_prompt),("placeholder", "{messages}")])
         self.llm_core = prompt | self.llm_core
 
@@ -53,12 +67,13 @@ class ChatWorkflow:
         prompt = ChatPromptTemplate.from_messages([("system", imp_ipt_llm_prompt), ("human", "{input}")])
         self.llm_imp_ipt = prompt | self.llm_imp_ipt
 
+
     async def ainit(self):
         """
-        初始化llm和配置工作流：
-        1.ChatOpenAI+prompt+格式化输出（有必要的话)    langchain链式结构
-        2._create_graph()自定义工作流创建workflow对象     langgraph图工作流
+        初始化mcp，初始化redis-stack，初始化llm和配置工作流：
         """
+
+        await self.init_mcps()
 
         # 短期存储(redis)
         redis_url_checkpoint = "redis://:123456@localhost:6388/0"
@@ -119,8 +134,9 @@ class ChatWorkflow:
                     results = search_results.get("results", [])
 
                     for result in results:
-                        # url，title，content字典值
-                        search_message.append(result)
+                        if result.get("score") > 0.65:
+                            # url，title，content字典值
+                            search_message.append(result)
             except HTTPException as e:
                 logging.error(f"搜索引擎搜索失败：{e}")
                 search_message = "搜索服务暂时不可用，请稍后再试。"

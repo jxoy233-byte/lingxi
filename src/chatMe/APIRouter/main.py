@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, FastAPI, Path, Body, Query, Upload
 from fastapi.responses import StreamingResponse
 
 from ..ChatService.config.models import ChatRequest, Conversation
-from ..ChatService import ChatService, FILE_MAX_LENGTH
+from ..ChatService import ChatService, FILE_MAX_LENGTH, FILE_ALLOWED_TYPES
 from ..ChatWorkflow import ChatWorkflow
 
 chatMe_app = APIRouter(prefix="/chat")
@@ -189,6 +189,34 @@ async def improve_input(
         return {"improved_text": improved_text}
     except Exception as e:
         logging.error(f"输入内容优化异常：{str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@chatMe_app.get("/file-config", summary="获取文件上传配置")
+async def get_file_config():
+    """
+    获取文件上传配置信息，包括：
+    - 最大文件大小限制
+    - 支持的文件类型（图片、文本、文档）
+    """
+    try:
+        return {
+            "maxFileSize": FILE_MAX_LENGTH,
+            "imageTypes": {
+                "suffixes": list(FILE_ALLOWED_TYPES["IMAGE"]["IMAGE_SUFFIX"]),
+                "mimeTypes": list(FILE_ALLOWED_TYPES["IMAGE"]["IMAGE_MIME"])
+            },
+            "textTypes": {
+                "suffixes": list(FILE_ALLOWED_TYPES["TEXT"]["TEXT_SUFFIX"]),
+                "mimeTypes": list(FILE_ALLOWED_TYPES["TEXT"]["TEXT_MIME"])
+            },
+            "documentTypes": {
+                "suffixes": list(FILE_ALLOWED_TYPES["DOCUMENT"]["DOCUMENT_SUFFIX"]),
+                "mimeTypes": list(FILE_ALLOWED_TYPES["DOCUMENT"]["DOCUMENT_MIME"])
+            }
+        }
+    except Exception as e:
+        logging.error(f"获取文件配置异常：{str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

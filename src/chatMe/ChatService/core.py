@@ -2,7 +2,7 @@ import json
 import logging
 import uuid
 from datetime import datetime
-from typing import AsyncGenerator, Set, List, Dict
+from typing import AsyncGenerator, Set, List
 
 from fastapi import UploadFile
 from langchain_core.messages import HumanMessage, AIMessage
@@ -91,12 +91,12 @@ class ChatService:
         """
 
         fl = FilesLoaders(files)
-        images_content, text_content = await fl.loading_files()
+        (images_content, text_content, doc_content) = await fl.loading_files()
         files_list = await fl.create_files_additional_kwargs()
 
         await fl.cleanup()
 
-        return images_content, text_content, files_list
+        return images_content, text_content, doc_content, files_list
 
     async def message_stream(
         self,
@@ -115,20 +115,44 @@ class ChatService:
             基于流式传输的 JSON 字符串
         """
 
-        images_content, text_content, files_list = await self._process_files(files)
+        (images_content, text_content, doc_content, files_list) = await self._process_files(files)
+        print(doc_content, files_list)
 
-        message_content = [
-            {"type": "text", "text": message, "text_file": False},
-        ]
-        if text_content or images_content:
+        message_content = [{"type": "text", "text": message, "text_file": False},]
+        if text_content or images_content or doc_content:
             if images_content:
                 for img in images_content:
                     message_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img["file_content"]}"}, "detail": "auto"})
             if text_content:
-                message_content.append({"type": "text", "text": "以下为传入用户文件\n:", "text_file": True})
+                message_content.append({"type": "text", "text": "接收到的文本文件:\n", "text_file": True})
                 for text in text_content:
                     message_content.append({"type": "text", "text": text["file_content"], "text_file": True})
+            if doc_content:
+                for doc in doc_content:
+                    if doc["file_type"] == ".pptx":
+                        message_content.append({"type": "text", "text": "--用户传入的pptx--:\n", "text_file": True})
+                        for img in doc["file_content"]["images"]:
+                            message_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img}"}, "detail": "auto"})
+                    elif doc["file_type"] == ".docx":
+                        message_content.append({"type": "text", "text": "--用户传入的docx--:\n", "text_file": True})
+                        message_content.append({"type": "text", "text": "文本：\n" + doc["file_content"]["text"] + "\n", "text_file": True})
+                        message_content.append({"type": "text", "text": "图片：\n", "text_file": True})
+                        for img in doc["file_content"]["images"]:
+                            message_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img}"}, "detail": "auto"})
+                    elif doc["file_type"] == ".pdf":
+                        message_content.append({"type": "text", "text": "--用户传入的pdf--:\n", "text_file": True})
+                        for img in doc["file_content"]["images"]:
+                            message_content.append(
+                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img}"},
+                                 "detail": "auto"})
+                    elif doc["file_type"] == ".xlsx":
+                        message_content.append({"type": "text", "text": "--用户传入的xlsx--:\n", "text_file": True})
+                        message_content.append({"type": "text", "text": doc["file_content"]["text"], "text_file": True})
 
+
+        # message_content.append({"type": "text", "text": message, "text_file": False},)
+
+        print(message_content)
         session_ids = await self.aget_conversation_ids
 
         # 会话ID处理：无则新建，有则校验是否存在
@@ -136,6 +160,7 @@ class ChatService:
             session_id = str(uuid.uuid4().hex)
         elif session_id not in session_ids:
             # 会话ID不存在，返回错误信息
+
             yield json.dumps(
                 {"type": "error", "error": f"会话ID {session_id} 不存在，请检查后重试"},
                 ensure_ascii=False
@@ -222,7 +247,7 @@ class ChatService:
                     files = []
                     files_input = False
                     for content in msg.content:
-                        if content.get("type") == "text":
+                        if content.get("type") == "text" and content.get("text_file", False) == False:
                             human_message += content.get("text", "")
                             human_message += '\n'
                         if content.get("type") == "image_url" or content.get("text_file") == True:
@@ -346,6 +371,8 @@ class ChatService:
         :param round_id:
         :return: 是否回溯成功
         """
+
+        #每次对话完后保存一次当前checkpoint_id记录点
         pass
 
 

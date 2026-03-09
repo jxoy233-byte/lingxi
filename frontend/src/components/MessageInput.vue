@@ -153,19 +153,25 @@ export default {
   },
   computed: {
     maxFileSize() {
-      return this.fileConfig?.maxFileSize || 10 * 1024 * 1024
+      return this.fileConfig?.maxFileSize || 100 * 1024 * 1024
     },
     allowedImageTypes() {
-      return this.fileConfig?.imageTypes?.suffixes || ['.png', '.jpg', '.jpeg', '.gif']
+      const types = this.fileConfig?.imageTypes?.suffixes
+      return types && types.length > 0 ? types : ['.png', '.jpg', '.jpeg', '.gif']
     },
     allowedTextTypes() {
-      return this.fileConfig?.textTypes?.suffixes || ['.txt', '.md', '.csv', '.xml', '.json']
+      const types = this.fileConfig?.textTypes?.suffixes
+      return types && types.length > 0 ? types : ['.txt', '.md', '.csv', '.xml', '.json']
+    },
+    allowedDocumentTypes() {
+      const types = this.fileConfig?.documentTypes?.suffixes
+      return types && types.length > 0 ? types : ['.pdf', '.docx', '.pptx', '.xlsx']
     },
     acceptedTypes() {
-      return [...this.allowedImageTypes, ...this.allowedTextTypes].join(',')
+      return [...this.allowedImageTypes, ...this.allowedTextTypes, ...this.allowedDocumentTypes].join(',')
     },
     allowedExtensions() {
-      return [...this.allowedImageTypes, ...this.allowedTextTypes]
+      return [...this.allowedImageTypes, ...this.allowedTextTypes, ...this.allowedDocumentTypes]
     }
   },
   mounted() {
@@ -193,12 +199,17 @@ export default {
       if (this.loadingConfig) return
       this.loadingConfig = true
       try {
+        console.log('正在获取文件配置...')
         const response = await fetch('/chat/file-config')
         if (response.ok) {
           this.fileConfig = await response.json()
+          console.log('文件配置获取成功:', this.fileConfig)
+        } else {
+          console.warn('获取文件配置失败，使用默认配置')
         }
       } catch (error) {
         console.error('获取文件配置失败:', error)
+        console.warn('使用默认文件配置')
       } finally {
         this.loadingConfig = false
       }
@@ -369,23 +380,40 @@ export default {
     },
 
     validateFile(file) {
+      const extension = this.getFileExtension(file.name)
+      
+      console.log('=== 文件验证调试信息 ===')
+      console.log('文件名:', file.name)
+      console.log('文件扩展名:', extension)
+      console.log('允许的图片类型:', this.allowedImageTypes)
+      console.log('允许的文本类型:', this.allowedTextTypes)
+      console.log('允许的文档类型:', this.allowedDocumentTypes)
+      console.log('所有允许的扩展名:', this.allowedExtensions)
+      
       // 检查文件大小
       if (file.size > this.maxFileSize) {
+        console.log('文件大小超出限制:', file.size, '>', this.maxFileSize)
         return {
           valid: false,
           error: `文件大小超过 ${this.formatFileSize(this.maxFileSize)} 限制`
         }
       }
 
-      // 检查文件扩展名
-      const extension = this.getFileExtension(file.name)
-      if (!this.allowedExtensions.includes(extension)) {
+      // 检查文件扩展名 - 使用更宽松的匹配
+      const isAllowed = this.allowedExtensions.some(allowedExt => 
+        allowedExt.toLowerCase() === extension.toLowerCase()
+      )
+      
+      console.log('扩展名是否允许:', isAllowed)
+      
+      if (!isAllowed) {
         return {
           valid: false,
           error: `不支持的文件类型 ${extension}`
         }
       }
 
+      console.log('文件验证通过!')
       return { valid: true }
     },
 

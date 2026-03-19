@@ -92,12 +92,10 @@ class ChatService:
 
         fl = FilesLoaders(files)
         (images_content, text_content, doc_content) = await fl.loading_files()
-        files_list = await fl.create_files_additional_kwargs()
-
+        file_list = await fl.create_files_additional_kwargs()
         await fl.cleanup()
 
-        return images_content, text_content, doc_content, files_list
-
+        return images_content, text_content, doc_content, file_list
     async def message_stream(
         self,
         message: str,
@@ -115,8 +113,7 @@ class ChatService:
             基于流式传输的 JSON 字符串
         """
 
-        (images_content, text_content, doc_content, files_list) = await self._process_files(files)
-        print(doc_content, files_list)
+        (images_content, text_content, doc_content, file_list) = await self._process_files(files)
 
         message_content = [{"type": "text", "text": message, "text_file": False},]
         if text_content or images_content or doc_content:
@@ -150,9 +147,6 @@ class ChatService:
                         message_content.append({"type": "text", "text": doc["file_content"]["text"], "text_file": True})
 
 
-        # message_content.append({"type": "text", "text": message, "text_file": False},)
-
-        print(message_content)
         session_ids = await self.aget_conversation_ids
 
         # 会话ID处理：无则新建，有则校验是否存在
@@ -169,18 +163,19 @@ class ChatService:
 
         input_config = {
             "configurable" :{
-                "thread_id" : session_id
+                "thread_id" : session_id,
+                "file_list": file_list,
             }
         }
 
         additional_kwargs ={
             "updated_at": datetime.now(),
-            "files": files_list, # 列表字典
         }
 
         full_response = ""
         try:
             async for chunk in self.chat_workflow.astream(messages=[HumanMessage(content=message_content,additional_kwargs=additional_kwargs)], config=input_config):
+                print(chunk)
                 if chunk['event'] == 'on_chat_model_stream':
                     # 最终返回的chunk
                     if chunk['metadata']['langgraph_node'] and chunk['metadata']['langgraph_node'] == 'final_node':

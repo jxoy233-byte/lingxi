@@ -82,6 +82,11 @@
           <polyline points="20 6 9 17 4 12"/>
         </svg>
       </button>
+
+      <!-- 响应时间显示 -->
+      <div v-if="message.role === 'ai' && message.responseTime" class="response-time">
+        {{ formatResponseTime(message.responseTime) }}
+      </div>
     </div>
 
     <!-- 文件预览模态框 -->
@@ -95,13 +100,23 @@
 
 <script>
 import { marked } from 'marked'
+import hljs from 'highlight.js'
+import 'highlight.js/styles/atom-one-dark.css'
 import SearchResults from './SearchResults.vue'
 import FilePreviewModal from './FilePreviewModal.vue'
 
 // 配置 marked
+const renderer = new marked.Renderer()
+renderer.code = function(code, lang) {
+  const language = hljs.getLanguage(lang) ? lang : 'plaintext'
+  const highlighted = hljs.highlight(code, { language }).value
+  return `<pre><code class="hljs ${language}">${highlighted}</code></pre>`
+}
+
 marked.setOptions({
   breaks: true,
-  gfm: true
+  gfm: true,
+  renderer: renderer
 })
 
 export default {
@@ -136,7 +151,25 @@ export default {
       return this.escapeHtml(this.message.content)
     }
   },
+  watch: {
+    'message.content': {
+      handler() {
+        this.$nextTick(() => {
+          this.highlightCode()
+        })
+      },
+      immediate: true
+    }
+  },
   methods: {
+    highlightCode() {
+      const codeBlocks = this.$el.querySelectorAll('pre code')
+      codeBlocks.forEach(block => {
+        if (!block.classList.contains('hljs')) {
+          hljs.highlightElement(block)
+        }
+      })
+    },
     escapeHtml(text) {
       const div = document.createElement('div')
       div.textContent = text
@@ -195,6 +228,15 @@ export default {
       if (!text) return ''
       if (text.length <= maxLength) return text
       return text.substring(0, maxLength) + '...'
+    },
+    formatResponseTime(seconds) {
+      if (seconds < 60) {
+        return `${seconds.toFixed(1)}秒`
+      } else {
+        const minutes = Math.floor(seconds / 60)
+        const remainingSeconds = (seconds % 60).toFixed(1)
+        return `${minutes}分${remainingSeconds}秒`
+      }
     }
   }
 }
@@ -319,8 +361,9 @@ export default {
 }
 
 .message-text {
-  line-height: 1.6;
+  line-height: 1.7;
   word-wrap: break-word;
+  font-size: 15px;
 }
 
 /* Markdown 样式 */
@@ -330,82 +373,152 @@ export default {
 .message-text :deep(h4),
 .message-text :deep(h5),
 .message-text :deep(h6) {
-  margin: 16px 0 8px;
-  font-weight: 600;
-  line-height: 1.3;
+  margin: 20px 0 12px;
+  font-weight: 700;
+  line-height: 1.4;
+  color: var(--text-primary);
 }
 
-.message-text :deep(h1) { font-size: 1.8em; }
-.message-text :deep(h2) { font-size: 1.5em; }
-.message-text :deep(h3) { font-size: 1.3em; }
+.message-text :deep(h1) { font-size: 1.7em; border-bottom: 1px solid var(--border-color); padding-bottom: 8px; }
+.message-text :deep(h2) { font-size: 1.45em; border-bottom: 1px solid var(--border-color); padding-bottom: 6px; }
+.message-text :deep(h3) { font-size: 1.25em; }
+.message-text :deep(h4) { font-size: 1.1em; }
+.message-text :deep(h5) { font-size: 1em; }
+.message-text :deep(h6) { font-size: 0.9em; color: var(--text-secondary); }
 
 .message-text :deep(p) {
-  margin: 8px 0;
+  margin: 10px 0;
+}
+
+.message-text :deep(strong),
+.message-text :deep(b) {
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.message-text :deep(em),
+.message-text :deep(i) {
+  font-style: italic;
 }
 
 .message-text :deep(code) {
   background: var(--bg-secondary);
   padding: 2px 6px;
   border-radius: 4px;
-  font-family: 'Courier New', monospace;
-  font-size: 0.9em;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', 'Courier New', monospace;
+  font-size: 0.88em;
+  color: #e06c75;
 }
 
 .message-text :deep(pre) {
-  background: var(--bg-secondary);
-  padding: 12px;
+  background: #282c34;
+  padding: 16px;
   border-radius: 8px;
   overflow-x: auto;
-  margin: 12px 0;
+  margin: 16px 0;
+  border: 1px solid var(--border-color);
+  position: relative;
 }
 
 .message-text :deep(pre code) {
-  background: none;
+  background: transparent;
   padding: 0;
+  color: #abb2bf;
+  font-size: 0.9em;
+  line-height: 1.6;
+}
+
+.message-text :deep(pre code.hljs) {
+  background: transparent !important;
 }
 
 .message-text :deep(ul),
 .message-text :deep(ol) {
-  margin: 8px 0;
-  padding-left: 24px;
+  margin: 12px 0;
+  padding-left: 28px;
+}
+
+.message-text :deep(ul) {
+  list-style-type: disc;
+}
+
+.message-text :deep(ol) {
+  list-style-type: decimal;
 }
 
 .message-text :deep(li) {
-  margin: 4px 0;
+  margin: 6px 0;
+  padding-left: 4px;
+}
+
+.message-text :deep(ul ul),
+.message-text :deep(ol ol),
+.message-text :deep(ul ol),
+.message-text :deep(ol ul) {
+  margin: 6px 0;
+  padding-left: 24px;
 }
 
 .message-text :deep(blockquote) {
-  border-left: 3px solid var(--border-color);
-  padding-left: 12px;
-  margin: 12px 0;
+  border-left: 4px solid var(--button-bg);
+  padding: 12px 16px;
+  margin: 16px 0;
   color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border-radius: 0 6px 6px 0;
+}
+
+.message-text :deep(blockquote p) {
+  margin: 0;
 }
 
 .message-text :deep(a) {
   color: var(--button-bg);
   text-decoration: none;
+  transition: color 0.2s;
 }
 
 .message-text :deep(a:hover) {
   text-decoration: underline;
+  color: var(--button-hover);
 }
 
 .message-text :deep(table) {
   border-collapse: collapse;
   width: 100%;
-  margin: 12px 0;
+  margin: 16px 0;
+  overflow-x: auto;
+  display: block;
 }
 
 .message-text :deep(th),
 .message-text :deep(td) {
   border: 1px solid var(--border-color);
-  padding: 8px;
+  padding: 10px 14px;
   text-align: left;
 }
 
 .message-text :deep(th) {
   background: var(--bg-secondary);
-  font-weight: 600;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.message-text :deep(tr:nth-child(even)) {
+  background: var(--bg-secondary);
+}
+
+.message-text :deep(hr) {
+  border: none;
+  border-top: 1px solid var(--border-color);
+  margin: 24px 0;
+}
+
+.message-text :deep(img) {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+  margin: 12px 0;
 }
 
 /* 复制按钮 */
@@ -438,5 +551,16 @@ export default {
 
 .copy-button:active {
   transform: scale(0.95);
+}
+
+/* 响应时间样式 */
+.response-time {
+  position: absolute;
+  bottom: 8px;
+  right: 12px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  opacity: 0.6;
+  pointer-events: none;
 }
 </style>

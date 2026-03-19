@@ -68,7 +68,11 @@ export default {
       messages: [],
       isLoading: false,
       showDeleteConfirm: false,
-      deleteTargetId: null
+      deleteTargetId: null,
+      responseStartTime: null,
+      responseTimerInterval: null,
+      currentResponseTime: 0,
+      currentAiMessageIndex: null
     }
   },
   mounted() {
@@ -261,6 +265,10 @@ export default {
       this.isLoading = true
       const isNewConversation = !this.currentSessionId
 
+      // 开始响应计时
+      this.responseStartTime = Date.now()
+      this.currentResponseTime = 0
+
       try {
         // 构建 FormData
         const formData = new FormData()
@@ -293,10 +301,15 @@ export default {
 
         // 初始化 AI 消息并添加到消息列表
         const aiMessageIndex = this.messages.length
+        this.currentAiMessageIndex = aiMessageIndex
         this.messages.push({
           role: 'ai',
-          content: ''
+          content: '',
+          responseTime: 0
         })
+
+        // 开始响应计时，需要在消息添加后启动
+        this.startResponseTimer()
 
         let buffer = '' // 用于处理跨块的不完整 JSON
 
@@ -325,24 +338,31 @@ export default {
                 this.messages[aiMessageIndex] = {
                   role: 'ai',
                   content: this.messages[aiMessageIndex].content + data.content,
-                  searchResults: this.messages[aiMessageIndex].searchResults
+                  searchResults: this.messages[aiMessageIndex].searchResults,
+                  responseTime: this.currentResponseTime
                 }
               } else if (data.type === 'search_result') {
                 // 接收搜索结果
                 this.messages[aiMessageIndex] = {
                   role: 'ai',
                   content: this.messages[aiMessageIndex].content,
-                  searchResults: data.content
+                  searchResults: data.content,
+                  responseTime: this.currentResponseTime
                 }
               } else if (data.type === 'done') {
                 // 保存搜索结果，避免刷新后丢失
                 const currentSearchResults = this.messages[aiMessageIndex].searchResults
+                
+                // 停止响应计时
+                this.stopResponseTimer()
+                const responseTime = this.currentResponseTime
 
                 // 使用完整响应替换内容
                 this.messages[aiMessageIndex] = {
                   role: 'ai',
                   content: data.full_response,
-                  searchResults: currentSearchResults
+                  searchResults: currentSearchResults,
+                  responseTime: responseTime
                 }
 
                 // 处理新会话 ID
@@ -407,6 +427,7 @@ export default {
         })
       } finally {
         this.isLoading = false
+        this.stopResponseTimer()
       }
     },
     async autoGenerateTitle(sessionId, message) {
@@ -512,6 +533,35 @@ export default {
         }
       } catch (error) {
         console.error('更新对话时间失败:', error)
+      }
+    },
+    startResponseTimer() {
+      this.stopResponseTimer()
+      this.responseTimerInterval = setInterval(() => {
+        if (this.responseStartTime) {
+          this.currentResponseTime = Math.floor((Date.now() - this.responseStartTime) / 100) / 10
+          // 实时更新当前 AI 消息的响应时间
+          if (this.currentAiMessageIndex !== null && this.messages[this.currentAiMessageIndex]) {
+            this.messages[this.currentAiMessageIndex] = {
+              ...this.messages[this.currentAiMessageIndex],
+              responseTime: this.currentResponseTime
+            }
+          }
+        }
+      }, 100)
+    },
+    stopResponseTimer() {
+      if (this.responseTimerInterval) {
+        clearInterval(this.responseTimerInterval)
+        this.responseTimerInterval = null
+      }
+    }
+  },
+  watch: {
+    isLoading(newVal) {
+      // 当加载状态结束时，清理当前 AI 消息索引
+      if (!newVal) {
+        this.currentAiMessageIndex = null
       }
     }
   }

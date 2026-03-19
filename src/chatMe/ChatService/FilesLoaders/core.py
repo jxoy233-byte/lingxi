@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 
 from tempfile import NamedTemporaryFile
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Annotated
 
 import fitz
 import pandas as pd
@@ -19,6 +19,11 @@ from langchain_community.document_loaders import UnstructuredMarkdownLoader, Uns
 
 
 class FilesLoaders:
+    output_kwargs: Annotated[
+        Optional[List[Dict]],
+        "有文件传输时带字段file_name,file_type,file_size,file_content,传输失败则增加error字段"
+    ]
+
     def __init__(self, processing_files :list[UploadFile] | None):
         self.processing_files = processing_files
 
@@ -89,18 +94,20 @@ class FilesLoaders:
             return None
 
         for img in files:
+            image_dict = {
+                "file_name": img.filename,
+                "file_type": await FilesLoaders._get_file_suffix(img.filename),
+                "file_size": img.size,
+                "file_content": {"text": None, "images": ""}
+            }
             image_byte = await img.read()
             if not image_byte: # 过滤为空图片
                 logging.warning(f"图片文件{img.filename}为空，跳过")
                 await img.close()
                 continue
 
-            image_dict ={
-                "file_content": base64.b64encode(image_byte).decode("utf-8"),
-                "file_name": img.filename,
-                "file_type": await FilesLoaders._get_file_suffix(img.filename),
-                "file_size": img.size,
-            }
+            image_dict["file_content"]["images"] = base64.b64encode(image_byte).decode("utf-8")
+
             # 拼接URL时，bytes与str无法直接拼接
             images_list.append(image_dict)
             logging.info(f"成功读取图片{img.filename}，大小：{img.size/1024:.2f}KB")
@@ -148,9 +155,18 @@ class FilesLoaders:
         text_list: Optional[List[Dict]] = []
         for file in files:
             temp_file_path = None
+            file_dict = {
+                "file_name": "",
+                "file_type": "",
+                "file_content": {"text": "", "images": None}
+            }
             try:
                 text_suffix = await FilesLoaders._get_file_suffix(file.filename)
                 temp_file_path = await FilesLoaders._create_temp_file_path(file, text_suffix)
+
+                file_dict["file_name"] = file.filename
+                file_dict["file_type"] = text_suffix
+
                 loader: Optional[BaseLoader] = None
                 """
                 将 UploadFile 的内容写入本地临时文件；
@@ -192,16 +208,12 @@ class FilesLoaders:
                 # loader都为BaseLoader的子类 ，都有aload方法可以调用
                 documents = await loader.aload()
                 file_text = documents[0].page_content if documents else ""
-                file_dict = {
-                    "file_name": file.filename,
-                    "file_content": file_text,
-                    "file_suffix": text_suffix,
-                }
+                file_dict["file_content"]["text"] = file_text
                 text_list.append(file_dict)
 
             except Exception as e:
                 logging.error(f"处理文件 {file.filename} 失败：{str(e)}")
-                text_list.append({})  # 保证列表完整性
+                text_list.append(file_dict)  # 保证列表完整性
             finally:
                 if temp_file_path and os.path.exists(temp_file_path):
                     try:
@@ -213,7 +225,7 @@ class FilesLoaders:
         return text_list if text_list else None
 
     @classmethod
-    async def process_pptx(cls, pptx_path, dpi=180):
+    async def process_pptx(cls, pptx_path, dpi=72):
         """
         PPTX → LibreOffice 转 PDF → PyMuPDF 转图片（每一个幻灯片为一个图片）
         :return result字典：具有status,type,page_images.page_info[],page_count参数
@@ -225,7 +237,7 @@ class FilesLoaders:
 
         result = {
             "status": "success",
-            "type": "pptx",
+            "type": ".pptx",
             "images": [],
             "page_count": 0,
         }
@@ -286,7 +298,7 @@ class FilesLoaders:
         """DOCX仅提取图片"""
         result = {
             "status": "success",
-            "type": "docx",
+            "type": ".docx",
             "images": [],
             "image_info": [],
             "image_count": 0,
@@ -319,7 +331,7 @@ class FilesLoaders:
         return result
 
     @classmethod
-    async def process_pdf(cls, pdf_path, dpi=180):
+    async def process_pdf(cls, pdf_path, dpi=72):
         """
         PDF → PyMuPDF 转图片（每一个页为图片）
         :return result字典：具有status,type,page_images.page_info[],page_count参数
@@ -327,7 +339,7 @@ class FilesLoaders:
 
         result = {
             "status": "success",
-            "type": "pdf",
+            "type": ".pdf",
             "images": [],
             "page_count": 0,
         }
@@ -367,7 +379,7 @@ class FilesLoaders:
         """
         result = {
             "status": "success",
-            "type": "excel",
+            "type": ".xlsx",
         }
 
         try:
@@ -402,6 +414,11 @@ class FilesLoaders:
         doc_list: Optional[List[Dict]] = []
         for file in files:
             temp_file_path = None
+            file_dict = {
+                "file_name": "",
+                "file_type": "",
+                "file_content": {},
+            }
             try:
                 doc_suffix = await FilesLoaders._get_file_suffix(file.filename)
                 temp_file_path = await FilesLoaders._create_temp_file_path(file, doc_suffix)
@@ -409,11 +426,9 @@ class FilesLoaders:
                 将 UploadFile 的内容写入本地临时文件；
                 不同文档类型，进行不同文档解析
                 """
-                file_dict = {
-                    "file_name": file.filename,
-                    "file_content": {},
-                    "file_type": doc_suffix,
-                }
+                file_dict["file_name"] = file.filename
+                file_dict["file_type"] = doc_suffix
+
                 if doc_suffix == ".pptx":
                     result = await FilesLoaders.process_pptx(temp_file_path)
                     if result["status"] == "failed":
@@ -482,7 +497,7 @@ class FilesLoaders:
         images_content :Optional[List[Dict]] = await FilesLoaders._process_files_img(Images)
         text_content :Optional[List[Dict]] = await FilesLoaders._process_files_text(Texts)
         doc_content :Optional[List[Dict]] = await FilesLoaders._process_files_doc(Docs)
-
+        # todo 直接添加file_dict字段，使用上面三个content
         return images_content, text_content, doc_content
 
     async def create_files_additional_kwargs(self)-> List[Dict]:

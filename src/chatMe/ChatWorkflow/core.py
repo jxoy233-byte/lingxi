@@ -10,6 +10,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_tavily import TavilySearch
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.redis import AsyncRedisSaver
+from langgraph.prebuilt import ToolNode
 
 from chatMe.ChatWorkflow import get_graph_config, get_judge_search_node_config, SearchDecision, \
     ChatStateCore, get_imp_ipt_config
@@ -49,7 +50,7 @@ class ChatWorkflow:
         llm_config, system_prompt = get_graph_config()
 
         self.llm_core = ChatOpenAI(**llm_config)
-        # self.llm_core = self.llm_core.bind_tools(await self.mcp_client.get_tools())
+        self.llm_core = self.llm_core.bind_tools(await self.mcp_client.get_tools())
         prompt = ChatPromptTemplate.from_messages([("system", system_prompt),("placeholder", "{messages}")])
         self.llm_core = prompt | self.llm_core
 
@@ -83,12 +84,52 @@ class ChatWorkflow:
         # 初始化所有llm
         await self.init_llm()
 
-        self.graph = self._create_graph_core()
+        self.graph = await self._create_graph_core()
 
-    def _create_graph_core(self):
+    async def _create_graph_core(self):
         """
         自定义工作流对象，带有搜索引擎
         """
+        tools = await self.mcp_client.get_tools()
+
+        workflow = StateGraph(ChatStateCore)
+
+        tool_execution_node = ToolNode(tools=tools)  # 使用langgraph官方工具节点
+
+        def final_node(state: ChatStateCore):
+            input_msg = list(state["messages"])
+            if "search_message" in state and state["search_message"]:
+                search_results = ""
+                for result in state["search_message"]:
+                    search_results += result["content"] + '\n'
+                input_msg.append(
+                    SystemMessage(
+                        content=f"以下是搜索结果：\n{search_results}"
+                    )
+                )
+            response = self.llm_core.invoke({"messages": input_msg})
+
+            if "search_message" in state and state["search_message"]:
+                response.additional_kwargs["search_results"] = state["search_message"]
+
+            return {
+                "messages": [response]
+            }
+
+        workflow.add_node("tool_execution_node", tool_execution_node)
+        workflow.add_node("final_node", final_node)
+
+        workflow.set_entry_point("tool_execution_node")
+        workflow.add_edge("final_node", END)
+
+        return workflow.compile(checkpointer=self.checkpointer)
+
+    async def _create_graph_core_deprecated(self):
+        """
+        自定义工作流对象，带有搜索引擎
+        """
+        tools = await self.mcp_client.get_tools()
+
         workflow = StateGraph(ChatStateCore)
 
         def judge_search_node(state: ChatStateCore):
@@ -122,6 +163,7 @@ class ChatWorkflow:
                 "search_decision": search_decision
             }
 
+        # 弃用，使用agent_skills替代
         def search_node(state: ChatStateCore):
             should_search = state["search_decision"].should_search
             query = state["search_decision"].query
@@ -143,7 +185,9 @@ class ChatWorkflow:
 
             return {
                 "search_message": search_message
-            }
+            } #
+
+        tool_execution_node = ToolNode(tools=tools) # 使用langgraph官方工具节点
 
         def final_node(state: ChatStateCore):
             input_msg = list(state["messages"])
@@ -167,6 +211,7 @@ class ChatWorkflow:
 
         workflow.add_node("judge_search_node", judge_search_node)
         workflow.add_node("search_node", search_node)
+        workflow.add_node("tool_execution_node", tool_execution_node)
         workflow.add_node("final_node", final_node)
 
         def route_decision(state: ChatStateCore) -> str:
@@ -175,17 +220,39 @@ class ChatWorkflow:
             if search_or_not:
                 return "search_node"
             else:
-                return "final_node"
+                return "tool_execution_node"
 
         workflow.add_conditional_edges(
             "judge_search_node",
             route_decision,
             {
                 "search_node": "search_node",
-                "final_node": "final_node"
+                "tool_execution_node": "tool_execution_node"
             }
         )
-        workflow.add_edge("search_node", "final_node")
+
+        def route_after_tool(state: ChatStateCore) -> str:
+            """根据工具执行结果决定下一步路径"""
+            last_message = list(state["messages"])[-1]
+            if isinstance(last_message, AIMessage):
+                if hasattr(last_message, 'tool_responses') and last_message.tool_responses:
+                    return "final_node"
+                elif hasattr(last_message, 'tool_calls') and last_message.tool_calls:
+                    return "tool_execution_node" # 如果还有tool_calls之类其他字段则再次进入工具执行节点
+                else:
+                    return "final_node"
+
+
+        workflow.add_conditional_edges(
+            "tool_execution_node",
+            route_after_tool,
+            {
+                "final_node": "final_node",
+                "tool_execution_node": "tool_execution_node"
+            }
+        )
+
+        workflow.add_edge("search_node", "tool_execution_node") # 搜索节点到工具执行节点
         workflow.set_entry_point("judge_search_node")
         workflow.add_edge("final_node",END)
 

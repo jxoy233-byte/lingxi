@@ -50,7 +50,6 @@ class ChatWorkflow:
         llm_config, system_prompt = get_graph_config()
 
         self.llm_core = ChatOpenAI(**llm_config)
-        self.llm_core = self.llm_core.bind_tools(await self.mcp_client.get_tools())
         prompt = ChatPromptTemplate.from_messages([("system", system_prompt),("placeholder", "{messages}")])
         self.llm_core = prompt | self.llm_core
 
@@ -77,7 +76,7 @@ class ChatWorkflow:
         await self.init_mcps()
 
         # 短期存储(redis)
-        redis_url_checkpoint = "redis://:123456@localhost:6388/0"
+        redis_url_checkpoint = "redis://:123456@localhost:6379/0"
         self.checkpointer = AsyncRedisSaver(redis_url=redis_url_checkpoint)
         await self.checkpointer.setup()
 
@@ -88,26 +87,30 @@ class ChatWorkflow:
 
     async def _create_graph_core(self):
         """
-        自定义工作流对象，带有搜索引擎
+        自定义工作流对象，可以调用工具实现agent-skills获取
         """
+
         tools = await self.mcp_client.get_tools()
+
+        llm_with_tools = self.llm_core.bind(tools=tools)
 
         workflow = StateGraph(ChatStateCore)
 
+        async def agent_node(state: ChatStateCore):
+            """AI 代理节点，处理用户消息并决定是否调用工具"""
+            input_msg = list(state["messages"])
+            response = await llm_with_tools.ainvoke({"messages": input_msg})
+
+            return {
+                "messages": [response]
+            }
+
+
         tool_execution_node = ToolNode(tools=tools)  # 使用langgraph官方工具节点
 
-        def final_node(state: ChatStateCore):
+        async def final_node(state: ChatStateCore):
             input_msg = list(state["messages"])
-            if "search_message" in state and state["search_message"]:
-                search_results = ""
-                for result in state["search_message"]:
-                    search_results += result["content"] + '\n'
-                input_msg.append(
-                    SystemMessage(
-                        content=f"以下是搜索结果：\n{search_results}"
-                    )
-                )
-            response = self.llm_core.invoke({"messages": input_msg})
+            response = await self.llm_core.ainvoke({"messages": input_msg})
 
             if "search_message" in state and state["search_message"]:
                 response.additional_kwargs["search_results"] = state["search_message"]
@@ -116,14 +119,32 @@ class ChatWorkflow:
                 "messages": [response]
             }
 
+        workflow.add_node("agent_node", agent_node)
         workflow.add_node("tool_execution_node", tool_execution_node)
         workflow.add_node("final_node", final_node)
 
-        workflow.set_entry_point("tool_execution_node")
+        def route_agent_output(state: ChatStateCore) -> str:
+            """根据代理输出决定下一步"""
+            last_message = state["messages"][-1]
+            if isinstance(last_message, AIMessage) and hasattr(last_message, "tool_calls") and last_message.tool_calls:
+                return "tool_execution_node"
+            return "final_node"
+
+        workflow.set_entry_point("agent_node")
+
+        workflow.add_conditional_edges("agent_node",
+            route_agent_output,
+            {
+                "tool_execution_node": "tool_execution_node",
+                "final_node": "final_node"
+            }
+        )
+        workflow.add_edge("tool_execution_node", "agent_node")
         workflow.add_edge("final_node", END)
 
         return workflow.compile(checkpointer=self.checkpointer)
 
+    # todo: deprecated workflow
     async def _create_graph_core_deprecated(self):
         """
         自定义工作流对象，带有搜索引擎

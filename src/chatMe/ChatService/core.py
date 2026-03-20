@@ -11,9 +11,8 @@ from redisvl.query import FilterQuery
 from langgraph.checkpoint.redis.util import from_storage_safe_id
 
 from chatMe.ChatService.config.models import MessageRole, Message, Conversation
-from .FilesLoaders.core import FilesLoaders
-from ..ChatWorkflow import ChatWorkflow
-
+from chatMe.ChatService.FilesLoaders.core import FilesLoaders
+from chatMe.ChatWorkflow import ChatWorkflow
 
 class ChatService:
     """

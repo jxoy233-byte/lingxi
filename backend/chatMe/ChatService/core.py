@@ -2,17 +2,18 @@ import json
 import logging
 import uuid
 from datetime import datetime
-from typing import AsyncGenerator, Set, List
+from typing import AsyncGenerator, Set, List, Any
 
 from fastapi import UploadFile
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from langgraph_sdk.auth.exceptions import HTTPException
 from redisvl.query import FilterQuery
 from langgraph.checkpoint.redis.util import from_storage_safe_id
 
 from chatMe.ChatService.config.models import MessageRole, Message, Conversation
 from chatMe.ChatService.FilesLoaders.core import FilesLoaders
-from chatMe.ChatWorkflow import ChatWorkflow
+from chatMe.ChatWorkflow import ChatWorkflow, AIMessageType
+
 
 class ChatService:
     """
@@ -173,8 +174,8 @@ class ChatService:
 
         full_response = ""
         try:
+            # todo: 前段要适配返回的响应，让用户可以实时看见ai动态响应
             async for chunk in self.chat_workflow.astream(messages=[HumanMessage(content=message_content,additional_kwargs=additional_kwargs)], config=input_config):
-                print(chunk)
                 if chunk['event'] == 'on_chat_model_stream':
                     # 最终返回的chunk
                     if chunk['metadata']['langgraph_node'] and chunk['metadata']['langgraph_node'] == 'final_node':
@@ -185,19 +186,35 @@ class ChatService:
                             ensure_ascii=False,
                             default=str
                         ) + "\n\n"
+                    elif chunk['metadata']['langgraph_node'] and chunk['metadata']['langgraph_node'] == 'agent_node':
+                        content = chunk['data']['chunk'].content
+                        yield json.dumps(
+                            {"type": "reasoning", "content": content},
+                            ensure_ascii=False,
+                            default=str
+                        ) + "\n\n"
                     else:
                         continue
+                elif chunk['event'] == 'on_tool_start':
+                    tool_call_args = chunk['data'].get('input',{})
+                    tool_call_name = chunk['name']
+                    yield json.dumps(
+                        {"type": "tool_call_name", "content": {'args': tool_call_args, 'name': tool_call_name}},
+                        ensure_ascii=False,
+                        default=str
+                    ) + "\n\n"
                 elif chunk['event'] == 'on_tool_end':
-                    if 'output' in chunk['data']:
-                        if search_results := chunk['data']['output'].get('results',[]):
-                            yield json.dumps(
-                                {"type": "search_result", "content": search_results},
-                                ensure_ascii=False,
-                                default=str
-                            ) + "\n\n"
-                        else:
-                            continue
-        except HTTPException as e:
+                    if output := chunk['data']['output'].content:
+                        for op in output:
+                            if op['type'] == "text":
+                                tool_call_result = op['text']
+                                yield json.dumps(
+                                    {"type": "tool_call_result", "content": tool_call_result},
+                                    ensure_ascii=False,
+                                    default=str
+                                ) + "\n\n"
+
+        except Exception as e:
             import traceback
             error_detail = f"{str(e)}\n{traceback.format_exc()}"
             logging.error(f"流式响应异常(session_id:{session_id}): {error_detail}")
@@ -227,6 +244,7 @@ class ChatService:
         config = {"configurable": {"thread_id": session_id}}
         try:
             state = await self.graph.aget_state(config=config)
+            print(state)
         except HTTPException as e:
             logging.error(f"获取会话状态异常(session_id:{session_id})：{str(e)}")
             return Conversation(session_id=session_id)
@@ -253,7 +271,7 @@ class ChatService:
                         role=role,
                         content=human_message,
                         files=files,
-                        search_results=None
+                        additional_kwargs=None
                     ))
 
                 elif isinstance(msg, AIMessage):
@@ -262,9 +280,21 @@ class ChatService:
                         role=role,
                         content=msg.content,
                         files=None,
-                        search_results=msg.additional_kwargs.get("search_results",[])
+                        additional_kwargs=msg.additional_kwargs # 包含了AIMessage信息分类
                     ))
 
+                elif isinstance(msg, ToolMessage):
+                    role = MessageRole.AI
+                    tool_resp = Any
+                    for content in msg.content:
+                        if content.get("type") == "text":
+                            tool_resp = content.get("text",{})
+                    messages_list.append(Message(
+                        role=role,
+                        content=f"name: {msg.name}\ncontent:{tool_resp}",
+                        files=None,
+                        additional_kwargs={"type": AIMessageType.REASONING.value,"isTool": True} # 与调用工具的AIMessage进行区分
+                    ))
 
         created_at = state.created_at if hasattr(state, "created_at") else datetime.now()
         updated_at = None

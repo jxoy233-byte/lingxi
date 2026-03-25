@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from chatMe.APIRouter.main import chatMe_app, lifespan
 
-version = "0.0.1"
+version = "1.0.2"
 app = FastAPI(
     title = "ChatMe",
     description= "use ChatMe to chat with AI with better MEMORY and TOOLS !",
@@ -39,6 +39,7 @@ async def root():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="127.0.0.1", port=8211, reload=True)
+    # uvicorn.run("main:app", host="127.0.0.1", port=8211)
 
 
 

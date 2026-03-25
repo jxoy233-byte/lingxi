@@ -45,7 +45,7 @@ npm run build
 
 1. **启动后端服务**：确保后端服务已在 `http://127.0.0.1:8211` 运行
    ```bash
-   cd ../src
+   cd ../backend
    python main.py
    ```
 

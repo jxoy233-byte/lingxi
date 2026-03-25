@@ -136,56 +136,11 @@ export default {
           const conversation = await response.json()
           this.currentSessionId = sessionId
 
-          // 更新 URL
           if (this.$route.params.sessionId !== sessionId) {
             this.$router.push(`/${sessionId}`)
           }
 
-          // 处理消息中的文件信息和搜索结果
-          this.messages = conversation.messages.map(msg => {
-            const processedMsg = { ...msg }
-
-            // 处理文件信息
-            if (msg.files && msg.files.length > 0) {
-              processedMsg.files = msg.files.map(file => {
-                const fileInfo = {
-                  name: file.filename,
-                  type: file.content_type,
-                  preview: null,
-                  content: null
-                }
-
-                // 如果是图片，使用 base64_data 作为预览
-                if (file.content_type && file.content_type.startsWith('image/')) {
-                  fileInfo.preview = file.base64_data
-                }
-                // 如果是文本文件，解码 base64 内容
-                else if (file.content_type && (
-                  file.content_type.startsWith('text/') ||
-                  file.content_type === 'application/json' ||
-                  file.content_type === 'text/csv' ||
-                  file.content_type === 'text/xml'
-                )) {
-                  try {
-                    // 从 base64_data 中提取 base64 部分并解码
-                    const base64Content = file.base64_data.split(',')[1]
-                    fileInfo.content = atob(base64Content)
-                  } catch (e) {
-                    console.error('解码文本文件失败:', e)
-                  }
-                }
-
-                return fileInfo
-              })
-            }
-
-            // 处理搜索结果
-            if (msg.search_results) {
-              processedMsg.searchResults = msg.search_results
-            }
-
-            return processedMsg
-          })
+          this.messages = this.processConversationMessages(conversation.messages)
         }
       } catch (error) {
         console.error('加载对话失败:', error)
@@ -265,6 +220,9 @@ export default {
       this.isLoading = true
       const isNewConversation = !this.currentSessionId
 
+      // 发送消息时重置打断状态，强制滚到底部
+      this.$refs.messageList?.scrollToBottom(true)
+
       // 开始响应计时
       this.responseStartTime = Date.now()
       this.currentResponseTime = 0
@@ -305,6 +263,10 @@ export default {
         this.messages.push({
           role: 'ai',
           content: '',
+          reasoning: '',
+          toolCalls: [],
+          thinkingDone: false,
+          streaming: true,
           responseTime: 0
         })
 
@@ -334,34 +296,47 @@ export default {
               const data = JSON.parse(line)
 
               if (data.type === 'content') {
-                // 使用 Vue 响应式更新：通过索引直接修改数组元素触发更新
                 this.messages[aiMessageIndex] = {
-                  role: 'ai',
+                  ...this.messages[aiMessageIndex],
                   content: this.messages[aiMessageIndex].content + data.content,
-                  searchResults: this.messages[aiMessageIndex].searchResults,
+                  thinkingDone: true,
                   responseTime: this.currentResponseTime
                 }
-              } else if (data.type === 'search_result') {
-                // 接收搜索结果
+              } else if (data.type === 'reasoning') {
                 this.messages[aiMessageIndex] = {
-                  role: 'ai',
-                  content: this.messages[aiMessageIndex].content,
-                  searchResults: data.content,
+                  ...this.messages[aiMessageIndex],
+                  reasoning: this.messages[aiMessageIndex].reasoning + data.content,
+                  responseTime: this.currentResponseTime
+                }
+              } else if (data.type === 'tool_call_name') {
+                const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
+                toolCalls.push({ name: data.content.name, args: data.content.args, result: null })
+                this.messages[aiMessageIndex] = {
+                  ...this.messages[aiMessageIndex],
+                  toolCalls,
+                  responseTime: this.currentResponseTime
+                }
+              } else if (data.type === 'tool_call_result') {
+                const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
+                if (toolCalls.length > 0) {
+                  toolCalls[toolCalls.length - 1] = { ...toolCalls[toolCalls.length - 1], result: data.content }
+                }
+                this.messages[aiMessageIndex] = {
+                  ...this.messages[aiMessageIndex],
+                  toolCalls,
                   responseTime: this.currentResponseTime
                 }
               } else if (data.type === 'done') {
-                // 保存搜索结果，避免刷新后丢失
-                const currentSearchResults = this.messages[aiMessageIndex].searchResults
-                
-                // 停止响应计时
                 this.stopResponseTimer()
                 const responseTime = this.currentResponseTime
 
-                // 使用完整响应替换内容
                 this.messages[aiMessageIndex] = {
                   role: 'ai',
                   content: data.full_response,
-                  searchResults: currentSearchResults,
+                  reasoning: this.messages[aiMessageIndex].reasoning,
+                  toolCalls: this.messages[aiMessageIndex].toolCalls,
+                  thinkingDone: true,
+                  streaming: false,
                   responseTime: responseTime
                 }
 
@@ -369,27 +344,24 @@ export default {
                 if (!this.currentSessionId && data.session_id) {
                   this.currentSessionId = data.session_id
 
-                  // 更新 URL
                   if (this.$route.params.sessionId !== data.session_id) {
                     this.$router.push(`/${data.session_id}`)
                   }
 
-                  // 新对话自动生成标题（前6个字）
                   if (isNewConversation) {
                     this.autoGenerateTitle(data.session_id, message)
                   }
                 }
 
-                // 不刷新对话内容，保留搜索结果
-                // 只更新侧边栏时间
                 if (this.currentSessionId) {
                   this.updateConversationTime()
                 }
               } else if (data.type === 'error') {
                 console.error('AI响应错误:', data.error)
                 this.messages[aiMessageIndex] = {
-                  role: 'ai',
-                  content: `抱歉，出现了一些问题：${data.error}`
+                  ...this.messages[aiMessageIndex],
+                  content: `抱歉，出现了一些问题：${data.error}`,
+                  streaming: false
                 }
               }
             } catch (e) {
@@ -404,13 +376,16 @@ export default {
             const data = JSON.parse(buffer.trim())
             if (data.type === 'content') {
               this.messages[aiMessageIndex] = {
-                role: 'ai',
-                content: this.messages[aiMessageIndex].content + data.content
+                ...this.messages[aiMessageIndex],
+                content: this.messages[aiMessageIndex].content + data.content,
+                thinkingDone: true
               }
             } else if (data.type === 'done') {
               this.messages[aiMessageIndex] = {
-                role: 'ai',
-                content: data.full_response
+                ...this.messages[aiMessageIndex],
+                content: data.full_response,
+                thinkingDone: true,
+                streaming: false
               }
             }
           } catch (e) {
@@ -461,51 +436,7 @@ export default {
         if (response.ok) {
           const conversation = await response.json()
 
-          // 处理消息中的文件信息和搜索结果
-          this.messages = conversation.messages.map(msg => {
-            const processedMsg = { ...msg }
-
-            // 处理文件信息
-            if (msg.files && msg.files.length > 0) {
-              processedMsg.files = msg.files.map(file => {
-                const fileInfo = {
-                  name: file.filename,
-                  type: file.content_type,
-                  preview: null,
-                  content: null
-                }
-
-                // 如果是图片，使用 base64_data 作为预览
-                if (file.content_type && file.content_type.startsWith('image/')) {
-                  fileInfo.preview = file.base64_data
-                }
-                // 如果是文本文件，解码 base64 内容
-                else if (file.content_type && (
-                  file.content_type.startsWith('text/') ||
-                  file.content_type === 'application/json' ||
-                  file.content_type === 'text/csv' ||
-                  file.content_type === 'text/xml'
-                )) {
-                  try {
-                    // 从 base64_data 中提取 base64 部分并解码
-                    const base64Content = file.base64_data.split(',')[1]
-                    fileInfo.content = atob(base64Content)
-                  } catch (e) {
-                    console.error('解码文本文件失败:', e)
-                  }
-                }
-
-                return fileInfo
-              })
-            }
-
-            // 处理搜索结果
-            if (msg.search_results) {
-              processedMsg.searchResults = msg.search_results
-            }
-
-            return processedMsg
-          })
+          this.messages = this.processConversationMessages(conversation.messages)
 
           // 更新侧边栏中的对话时间
           const conv = this.conversations.find(c => c.session_id === this.currentSessionId)
@@ -555,6 +486,134 @@ export default {
         clearInterval(this.responseTimerInterval)
         this.responseTimerInterval = null
       }
+    },
+
+    // 将后端返回的扁平消息列表处理成前端所需的结构
+    // 后端消息类型（通过 additional_kwargs.type 区分）：
+    //   role:"user"                        → 用户消息
+    //   role:"ai" + type:"REASONING"       → agent 推理文本（AIMessage）或 工具调用结果（ToolMessage）
+    //   role:"ai" + type:"SUMMARY"         → AI 最终回答
+    //
+    // 重建 toolCalls 的策略：
+    //   AIMessage(REASONING) 的 additional_kwargs.tool_calls 包含工具名和参数
+    //   紧随其后的 ToolMessage(REASONING) 包含对应的工具结果
+    //   通过顺序配对来还原完整的 toolCalls 结构
+    processConversationMessages(rawMessages) {
+      const result = []
+      let i = 0
+
+      while (i < rawMessages.length) {
+        const msg = rawMessages[i]
+
+        if (msg.role === 'user') {
+          const processedMsg = { ...msg }
+          if (msg.files && msg.files.length > 0) {
+            processedMsg.files = msg.files.map(file => {
+              const fileInfo = {
+                name: file.filename,
+                type: file.content_type,
+                preview: null,
+                content: null
+              }
+              if (file.content_type && file.content_type.startsWith('image/')) {
+                fileInfo.preview = file.base64_data
+              } else if (file.content_type && (
+                file.content_type.startsWith('text/') ||
+                file.content_type === 'application/json' ||
+                file.content_type === 'text/csv' ||
+                file.content_type === 'text/xml'
+              )) {
+                try {
+                  const base64Content = file.base64_data.split(',')[1]
+                  fileInfo.content = atob(base64Content)
+                } catch (e) {
+                  console.error('解码文本文件失败:', e)
+                }
+              }
+              return fileInfo
+            })
+          }
+          result.push(processedMsg)
+          i++
+        } else if (msg.role === 'ai') {
+          // 将连续的 AI 消息合并为一个带思考过程的消息对象
+          const aiTurn = {
+            role: 'ai',
+            content: '',
+            reasoning: '',
+            toolCalls: [],
+            thinkingDone: true,
+            streaming: false
+          }
+
+          // 配对队列：AIMessage 推入工具名/参数，ToolMessage 填入结果
+          const pendingToolCallIndices = []
+
+          while (i < rawMessages.length && rawMessages[i].role === 'ai') {
+            const aiMsg = rawMessages[i]
+            const msgType = aiMsg.additional_kwargs?.type
+            const isTool = aiMsg.additional_kwargs?.isTool === true
+
+            if (msgType === 'SUMMARY') {
+              if (typeof aiMsg.content === 'string') {
+                aiTurn.content = aiMsg.content
+              } else if (Array.isArray(aiMsg.content)) {
+                aiTurn.content = aiMsg.content
+                  .filter(c => c.type === 'text')
+                  .map(c => c.text || '')
+                  .join('\n')
+              }
+            } else if (msgType === 'REASONING') {
+              if (isTool) {
+                // ToolMessage：content = "name: {tool_name}\ncontent:{tool_result}"
+                // 解析出工具名和结果，配对填入对应 toolCall
+                const raw = typeof aiMsg.content === 'string' ? aiMsg.content : ''
+                const nameMatch = raw.match(/^name:\s*(.+)/m)
+                const contentMatch = raw.match(/^content:([\s\S]*)$/m)
+                const toolName = nameMatch ? nameMatch[1].trim() : '工具调用'
+                const resultText = contentMatch ? contentMatch[1].trim() : raw
+
+                if (pendingToolCallIndices.length > 0) {
+                  // 有对应的 AIMessage toolCall 等待结果，填入名字和结果
+                  const targetIdx = pendingToolCallIndices.shift()
+                  aiTurn.toolCalls[targetIdx].name = toolName
+                  aiTurn.toolCalls[targetIdx].result = resultText
+                } else {
+                  // 没有对应的 AIMessage，独立构造一个完整 toolCall
+                  aiTurn.toolCalls.push({ name: toolName, args: null, result: resultText })
+                }
+              } else {
+                // AIMessage(REASONING)：推理文本 + 工具调用信息
+                // 1. 推理文本放入 reasoning（对应流式的 reasoning 事件）
+                const reasoningText = typeof aiMsg.content === 'string' ? aiMsg.content?.trim() : ''
+                if (reasoningText) {
+                  aiTurn.reasoning += (aiTurn.reasoning ? '\n\n' : '') + reasoningText
+                }
+                // 2. tool_calls 放入 toolCalls 队列等待 ToolMessage 填入结果（对应流式的 tool_call_name 事件）
+                const backendToolCalls = aiMsg.additional_kwargs?.tool_calls
+                if (backendToolCalls && backendToolCalls.length > 0) {
+                  for (const tc of backendToolCalls) {
+                    const idx = aiTurn.toolCalls.length
+                    aiTurn.toolCalls.push({
+                      name: tc.name || '工具调用',
+                      args: tc.args || null,
+                      result: null
+                    })
+                    pendingToolCallIndices.push(idx)
+                  }
+                }
+              }
+            }
+            i++
+          }
+
+          result.push(aiTurn)
+        } else {
+          i++
+        }
+      }
+
+      return result
     }
   },
   watch: {

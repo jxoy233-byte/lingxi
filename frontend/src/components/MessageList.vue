@@ -43,91 +43,115 @@ export default {
   },
   data() {
     return {
-      isUserScrolling: false,
-      scrollTimeout: null,
-      scrollDebounceTimer: null
+      userInterrupted: false,   // 用户主动介入，打断自动滚动
+      isAutoScrolling: false,   // 当前是否在自动滚动中
+      rafId: null               // requestAnimationFrame id
     }
   },
   methods: {
-    scrollToBottom(smooth = false) {
-      // 清除之前的防抖定时器
-      if (this.scrollDebounceTimer) {
-        clearTimeout(this.scrollDebounceTimer)
+    // 平滑滚动到底部，duration 根据距离动态计算
+    scrollToBottom(force = false) {
+      const container = this.$refs.messagesContainer
+      if (!container) return
+      if (force) this.userInterrupted = false
+      if (this.userInterrupted) return
+
+      this.$nextTick(() => {
+        const distance = container.scrollHeight - container.scrollTop - container.clientHeight
+        if (distance <= 0) return
+
+        // 距离越长速度越快：基础 300ms，每 500px 多加 80ms，上限 800ms
+        const duration = Math.min(300 + Math.floor(distance / 500) * 80, 800)
+
+        this.smoothScroll(container, container.scrollTop + distance, duration)
+      })
+    },
+
+    smoothScroll(container, targetTop, duration) {
+      if (this.rafId) cancelAnimationFrame(this.rafId)
+
+      const startTop = container.scrollTop
+      const diff = targetTop - startTop
+      const startTime = performance.now()
+
+      this.isAutoScrolling = true
+
+      const step = (now) => {
+        if (this.userInterrupted) {
+          this.isAutoScrolling = false
+          return
+        }
+        const elapsed = now - startTime
+        const progress = Math.min(elapsed / duration, 1)
+        // easeOutCubic
+        const ease = 1 - Math.pow(1 - progress, 3)
+        container.scrollTop = startTop + diff * ease
+
+        if (progress < 1) {
+          this.rafId = requestAnimationFrame(step)
+        } else {
+          this.isAutoScrolling = false
+        }
       }
 
-      // 使用防抖，避免频繁滚动
-      this.scrollDebounceTimer = setTimeout(() => {
-        this.$nextTick(() => {
-          const container = this.$refs.messagesContainer
-          if (container) {
-            container.scrollTo({
-              top: container.scrollHeight,
-              behavior: smooth ? 'smooth' : 'auto'
-            })
-          }
-        })
-      }, 10) // 10ms 防抖，既保证流畅又不会过于频繁
+      this.rafId = requestAnimationFrame(step)
     },
+
+    // 用户主动滚动（wheel / touchstart）时打断自动滚动
+    handleUserScroll() {
+      if (this.isAutoScrolling) {
+        this.userInterrupted = true
+        if (this.rafId) {
+          cancelAnimationFrame(this.rafId)
+          this.rafId = null
+        }
+        this.isAutoScrolling = false
+      }
+    },
+
+    // 用户滚回底部时恢复自动跟随
     handleScroll() {
-      // 检测用户是否手动滚动
       const container = this.$refs.messagesContainer
-      if (container) {
-        const isAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 50
-        this.isUserScrolling = !isAtBottom
-
-        // 清除之前的定时器
-        if (this.scrollTimeout) {
-          clearTimeout(this.scrollTimeout)
-        }
-
-        // 如果用户滚动到底部,重置标志
-        if (isAtBottom) {
-          this.scrollTimeout = setTimeout(() => {
-            this.isUserScrolling = false
-          }, 100)
-        }
+      if (!container) return
+      const isAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 50
+      if (isAtBottom) {
+        this.userInterrupted = false
       }
     }
   },
   watch: {
     messages: {
-      handler(newMessages, oldMessages) {
-        // 自动滚动到底部，除非用户手动向上滚动
-        if (!this.isUserScrolling) {
-          // 如果是新增消息或内容更新,使用平滑滚动
-          const isNewMessage = newMessages.length > oldMessages?.length
-          this.scrollToBottom(isNewMessage)
+      handler() {
+        if (!this.userInterrupted) {
+          this.scrollToBottom()
         }
       },
       deep: true,
       immediate: false
     },
     isLoading(newVal) {
-      // 加载状态变化时自动滚动
-      if (newVal && !this.isUserScrolling) {
+      if (newVal) {
+        // 发送消息时重置打断状态，强制滚到底部
         this.scrollToBottom(true)
       }
     }
   },
   mounted() {
-    // 添加滚动事件监听
     const container = this.$refs.messagesContainer
     if (container) {
-      container.addEventListener('scroll', this.handleScroll)
+      container.addEventListener('scroll', this.handleScroll, { passive: true })
+      container.addEventListener('wheel', this.handleUserScroll, { passive: true })
+      container.addEventListener('touchstart', this.handleUserScroll, { passive: true })
     }
   },
   beforeUnmount() {
-    // 清理事件监听和定时器
     const container = this.$refs.messagesContainer
     if (container) {
       container.removeEventListener('scroll', this.handleScroll)
+      container.removeEventListener('wheel', this.handleUserScroll)
+      container.removeEventListener('touchstart', this.handleUserScroll)
     }
-    if (this.scrollTimeout) {
-      clearTimeout(this.scrollTimeout)
-    }
-    if (this.scrollDebounceTimer) {
-      clearTimeout(this.scrollDebounceTimer)
-    }
+    if (this.rafId) cancelAnimationFrame(this.rafId)
   }
 }
 </script>
@@ -137,7 +161,6 @@ export default {
   flex: 1;
   overflow-y: auto;
   padding: 20px;
-  scroll-behavior: smooth;
 }
 
 .welcome-message {

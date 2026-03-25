@@ -62,7 +62,44 @@
       </div>
 
       <!-- 搜索结果显示 -->
-      <SearchResults v-if="message.searchResults" :results="message.searchResults" />
+
+      <!-- 思考过程区块 -->
+      <div v-if="message.role === 'ai' && hasThinking" class="thinking-section" :class="{ 'thinking-active': !message.thinkingDone, 'thinking-collapsed': thinkingCollapsed }">
+        <div class="thinking-header" @click="toggleThinking">
+          <div class="thinking-header-left">
+            <span class="thinking-status-dot" :class="{ 'dot-active': !message.thinkingDone }"></span>
+            <span class="thinking-label">{{ message.thinkingDone ? '思考过程' : '正在思考...' }}</span>
+            <span v-if="message.toolCalls && message.toolCalls.length" class="tool-badge">
+              {{ message.toolCalls.length }} 个工具调用
+            </span>
+          </div>
+          <svg class="thinking-chevron" :class="{ rotated: !thinkingCollapsed }" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="9 18 15 12 9 6"/>
+          </svg>
+        </div>
+        <div class="thinking-body" v-show="!thinkingCollapsed">
+          <!-- 工具调用列表 -->
+          <div v-if="message.toolCalls && message.toolCalls.length" class="tool-calls">
+            <div v-for="(tool, i) in message.toolCalls" :key="i" class="tool-call-item" :class="{ 'tool-done': tool.result !== null }">
+              <div class="tool-call-header" @click="toggleTool(i)" :style="tool.result !== null ? 'cursor:pointer' : ''">
+                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+                </svg>
+                <span class="tool-name">{{ tool.name }}</span>
+                <span v-if="tool.result !== null" class="tool-check">✓</span>
+                <span v-else class="tool-running-dot"></span>
+                <svg v-if="tool.result !== null" class="tool-expand-chevron" :class="{ rotated: expandedTools[i] }" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="9 18 15 12 9 6"/>
+                </svg>
+              </div>
+              <div v-if="tool.args && hasArgs(tool.args)" class="tool-args">{{ formatArgs(tool.args) }}</div>
+              <div v-if="tool.result !== null && expandedTools[i]" class="tool-result">{{ tool.result }}</div>
+            </div>
+          </div>
+          <!-- 推理文本 -->
+          <div v-if="message.reasoning" class="reasoning-text">{{ message.reasoning }}</div>
+        </div>
+      </div>
 
       <!-- 消息文本 -->
       <div v-if="message.content" class="message-text" v-html="renderedContent"></div>
@@ -84,7 +121,11 @@
       </button>
 
       <!-- 响应时间显示 -->
-      <div v-if="message.role === 'ai' && message.responseTime" class="response-time">
+      <div v-if="message.role === 'ai' && message.responseTime" class="response-time" :class="{ 'time-live': message.streaming !== false }">
+        <span v-if="message.streaming !== false" class="time-live-dot"></span>
+        <svg v-else xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+        </svg>
         {{ formatResponseTime(message.responseTime) }}
       </div>
     </div>
@@ -102,7 +143,6 @@
 import { marked } from 'marked'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/atom-one-dark.css'
-import SearchResults from './SearchResults.vue'
 import FilePreviewModal from './FilePreviewModal.vue'
 
 // 配置 marked
@@ -122,7 +162,6 @@ marked.setOptions({
 export default {
   name: 'MessageItem',
   components: {
-    SearchResults,
     FilePreviewModal
   },
   props: {
@@ -135,20 +174,23 @@ export default {
     return {
       copied: false,
       showPreview: false,
-      previewFile: {}
+      previewFile: {},
+      // 如果消息已完成（thinkingDone: true），默认折叠思考区块
+      thinkingCollapsed: this.message.thinkingDone === true,
+      expandedTools: {}
     }
   },
   computed: {
     renderedContent() {
       if (!this.message.content) return ''
-
-      // AI 消息使用 Markdown 渲染
       if (this.message.role === 'ai') {
         return marked(this.message.content)
       }
-
-      // 用户消息保持纯文本（转义 HTML）
       return this.escapeHtml(this.message.content)
+    },
+    hasThinking() {
+      return (this.message.reasoning && this.message.reasoning.length > 0) ||
+             (this.message.toolCalls && this.message.toolCalls.length > 0)
     }
   },
   watch: {
@@ -159,6 +201,18 @@ export default {
         })
       },
       immediate: true
+    },
+    // 主内容开始输出时折叠思考区块
+    'message.thinkingDone'(newVal) {
+      if (newVal) {
+        this.thinkingCollapsed = true
+      }
+    },
+    // 新消息开始流式输出时展开思考区块
+    'message.streaming'(newVal) {
+      if (newVal === true) {
+        this.thinkingCollapsed = false
+      }
     }
   },
   methods: {
@@ -231,11 +285,31 @@ export default {
     },
     formatResponseTime(seconds) {
       if (seconds < 60) {
-        return `${seconds.toFixed(1)}秒`
+        return `${seconds.toFixed(1)}s`
       } else {
         const minutes = Math.floor(seconds / 60)
         const remainingSeconds = (seconds % 60).toFixed(1)
-        return `${minutes}分${remainingSeconds}秒`
+        return `${minutes}m ${remainingSeconds}s`
+      }
+    },
+    toggleThinking() {
+      this.thinkingCollapsed = !this.thinkingCollapsed
+    },
+    toggleTool(index) {
+      this.expandedTools = {
+        ...this.expandedTools,
+        [index]: !this.expandedTools[index]
+      }
+    },
+    hasArgs(args) {
+      if (!args) return false
+      return Object.keys(args).length > 0
+    },
+    formatArgs(args) {
+      try {
+        return JSON.stringify(args, null, 2)
+      } catch {
+        return String(args)
       }
     }
   }
@@ -560,7 +634,210 @@ export default {
   right: 12px;
   font-size: 11px;
   color: var(--text-secondary);
-  opacity: 0.6;
+  opacity: 0.55;
   pointer-events: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+.response-time.time-live {
+  opacity: 0.8;
+  color: var(--button-bg);
+}
+
+.time-live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--button-bg);
+  animation: live-pulse 1.2s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.7); }
+}
+
+/* 思考过程区块 */
+.thinking-section {
+  margin-bottom: 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  overflow: hidden;
+  font-size: 13px;
+  transition: border-color 0.3s;
+}
+
+.thinking-section.thinking-active {
+  border-color: color-mix(in srgb, var(--button-bg) 40%, var(--border-color));
+}
+
+.thinking-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 10px;
+  cursor: pointer;
+  background: var(--bg-secondary);
+  user-select: none;
+  transition: background 0.15s;
+}
+
+.thinking-header:hover {
+  background: var(--bg-hover);
+}
+
+.thinking-header-left {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.thinking-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+  opacity: 0.5;
+  flex-shrink: 0;
+}
+
+.thinking-status-dot.dot-active {
+  background: var(--button-bg);
+  opacity: 1;
+  animation: live-pulse 1.2s ease-in-out infinite;
+}
+
+.thinking-label {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.tool-badge {
+  font-size: 11px;
+  color: var(--button-bg);
+  background: color-mix(in srgb, var(--button-bg) 12%, transparent);
+  padding: 1px 6px;
+  border-radius: 10px;
+}
+
+.thinking-chevron {
+  color: var(--text-secondary);
+  transition: transform 0.2s;
+  flex-shrink: 0;
+}
+
+.thinking-chevron.rotated {
+  transform: rotate(90deg);
+}
+
+.thinking-body {
+  padding: 8px 10px;
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-primary);
+}
+
+/* 工具调用 */
+.tool-calls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.tool-call-item {
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  overflow: hidden;
+  opacity: 0.75;
+  transition: opacity 0.2s;
+}
+
+.tool-call-item.tool-done {
+  opacity: 1;
+}
+
+.tool-call-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+}
+
+.tool-name {
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 12px;
+  color: var(--text-primary);
+  flex: 1;
+}
+
+.tool-check {
+  font-size: 11px;
+  color: var(--button-bg);
+  font-weight: 600;
+}
+
+.tool-running-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+  animation: live-pulse 1s ease-in-out infinite;
+}
+
+.tool-args {
+  padding: 5px 8px;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 80px;
+  overflow-y: auto;
+  background: var(--bg-primary);
+}
+
+.tool-result {
+  padding: 6px 8px;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 200px;
+  overflow-y: auto;
+  background: var(--bg-primary);
+  border-top: 1px solid var(--border-color);
+}
+
+.tool-expand-chevron {
+  margin-left: auto;
+  color: var(--text-secondary);
+  transition: transform 0.2s;
+  flex-shrink: 0;
+}
+
+.tool-expand-chevron.rotated {
+  transform: rotate(90deg);
+}
+
+/* 推理文本 */
+.reasoning-text {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 200px;
+  overflow-y: auto;
+  opacity: 0.8;
+  padding: 2px 0;
 }
 </style>

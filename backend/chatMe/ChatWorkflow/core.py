@@ -1,4 +1,5 @@
 import json
+import re
 import logging
 from http.client import HTTPException
 from typing import Optional, Dict, Any, AsyncGenerator
@@ -7,13 +8,12 @@ from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, System
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_tavily import TavilySearch
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.redis import AsyncRedisSaver
 from langgraph.prebuilt import ToolNode
 
-from chatMe.ChatWorkflow import get_graph_config, get_judge_search_node_config, SearchDecision, \
-    ChatStateCore, get_imp_ipt_config
+from chatMe.ChatWorkflow import get_graph_final_node_config, SearchDecision, \
+    ChatStateCore, get_imp_ipt_config, get_agent_node_config, get_graph_final_node_config, AIMessageType
 
 
 class ChatWorkflow:
@@ -24,14 +24,11 @@ class ChatWorkflow:
 
     def __init__(self):
         self.llm_core = None
+        self.agent_llm = None
         self.llm_imp_ipt = None
         self.judge_llm = None
         self.graph = None
         self.checkpointer = None
-        self.tavily_search = TavilySearch(
-            tavily_api_key="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",
-            max_results = 10,
-        )
         self.mcp_client = None
 
     async def init_mcps(self):
@@ -46,25 +43,25 @@ class ChatWorkflow:
         )
 
     async def init_llm(self):
-        # 核心gpt5.1大模型配置
-        llm_config, system_prompt = get_graph_config()
+        # 核心大模型配置
+        llm_config, system_prompt = get_graph_final_node_config()
 
         self.llm_core = ChatOpenAI(**llm_config)
         prompt = ChatPromptTemplate.from_messages([("system", system_prompt),("placeholder", "{messages}")])
         self.llm_core = prompt | self.llm_core
 
-        # 判断搜索节点大模型配置
-        judge_llm_config, judge_search_prompt = get_judge_search_node_config()
+        # 工具执行前节点agent_node配置
+        agent_node_config ,agent_prompt = get_agent_node_config()
 
-        self.judge_llm = ChatOpenAI(**judge_llm_config)
-        judge_search_template_prompt = ChatPromptTemplate.from_messages([("system", judge_search_prompt), ("placeholder", "{messages}")])
-        self.judge_llm = judge_search_template_prompt | self.judge_llm
+        self.agent_llm = ChatOpenAI(**agent_node_config)
+        prompt = ChatPromptTemplate.from_messages([("system", agent_prompt), ("human", "{messages}")])
+        self.agent_llm = prompt | self.agent_llm
 
         # 输入优化大模型配置
         imp_ipt_llm_config, imp_ipt_llm_prompt = get_imp_ipt_config()
 
         self.llm_imp_ipt = ChatOpenAI(**imp_ipt_llm_config)
-        prompt = ChatPromptTemplate.from_messages([("system", imp_ipt_llm_prompt), ("human", "{input}")])
+        prompt = ChatPromptTemplate.from_messages([("system", imp_ipt_llm_prompt), ("human", "{messages}")])
         self.llm_imp_ipt = prompt | self.llm_imp_ipt
 
 
@@ -85,6 +82,46 @@ class ChatWorkflow:
 
         self.graph = await self._create_graph_core()
 
+    def _parse_content_to_tool_calls(self, ai_message: AIMessage):
+        """
+        从 AIMessage 的 content 中提取 tool_calls 并填充到 tool_calls 字段
+        某些模型（如 Grok）将 tool_calls 以 JSON 字符串形式放在 content 中，
+        需要手动解析并转换为标准格式
+        """
+        if not ai_message.content:
+            return ai_message
+
+        content = str(ai_message.content)
+
+        tool_call_pattern = r'<tool_calls>\s*(\{.*?\})\s*</tool_calls>'
+        matches = re.findall(tool_call_pattern,content,re.DOTALL)
+        if not matches:
+            return ai_message
+        tool_calls = []
+        for i, match in enumerate(matches):
+            try:
+                tool_call_data = json.loads(match)
+                tool_call = {
+                    "name": tool_call_data.get("name"),
+                    "args": tool_call_data.get("args",{}),
+                    "id": tool_call_data.get("id", "") or f"call_{i+1}",
+                    "type": "tool_call"
+                }
+                if tool_call["name"]:
+                    tool_calls.append(tool_call)
+            except json.JSONDecodeError as e:
+                logging.error(f"JSON 解析错误: {e}")
+                continue
+
+        if tool_calls:
+            ai_message.tool_calls = tool_calls
+            # 清理 content 中的工具调用标记
+            clean_content = re.sub(r'\n*<tool_calls>.*?</tool_calls>\n*', '', content, flags=re.DOTALL).strip()
+            ai_message.content = clean_content if clean_content else None
+
+        ai_message.additional_kwargs = {"type": AIMessageType.REASONING.value}
+        return ai_message
+
     async def _create_graph_core(self):
         """
         自定义工作流对象，可以调用工具实现agent-skills获取
@@ -92,17 +129,20 @@ class ChatWorkflow:
 
         tools = await self.mcp_client.get_tools()
 
-        llm_with_tools = self.llm_core.bind(tools=tools)
+        agent_node_llm = self.agent_llm.bind(tools=tools)
 
         workflow = StateGraph(ChatStateCore)
 
         async def agent_node(state: ChatStateCore):
             """AI 代理节点，处理用户消息并决定是否调用工具"""
             input_msg = list(state["messages"])
-            response = await llm_with_tools.ainvoke({"messages": input_msg})
+            response = await agent_node_llm.ainvoke({"messages": input_msg})
+
+            # 符合ToolNode节点的AIMessage(REASONING)
+            format_response = self._parse_content_to_tool_calls(response)
 
             return {
-                "messages": [response]
+                "messages": [format_response]
             }
 
 
@@ -112,11 +152,14 @@ class ChatWorkflow:
             input_msg = list(state["messages"])
             response = await self.llm_core.ainvoke({"messages": input_msg})
 
-            if "search_message" in state and state["search_message"]:
-                response.additional_kwargs["search_results"] = state["search_message"]
+            # AIMessage字段支持解包复制
+            response_dict = dict(response)
+            response_dict["additional_kwargs"] = {**response.additional_kwargs, "type": AIMessageType.SUMMARY.value}
+
+            response_better = AIMessage(**response_dict)
 
             return {
-                "messages": [response]
+                "messages": [response_better]
             }
 
         workflow.add_node("agent_node", agent_node)

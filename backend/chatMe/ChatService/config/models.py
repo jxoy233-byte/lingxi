@@ -1,8 +1,8 @@
-import enum
+from enum import Enum
 from datetime import datetime
-from typing import List, Optional, Dict, Annotated
+from typing import List, Optional, Dict
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
 
 class ChatRequest(BaseModel):
@@ -15,15 +15,15 @@ class ChatResponse(BaseModel):
     session_id :str
     conversation_title :str
 
-class MessageRole(str, enum.Enum):
+class MessageRole(str, Enum):
     USER = "user"
     AI = "ai"
 
 class Message(BaseModel):
-    role :MessageRole
-    content :str
+    role: MessageRole
+    content: Optional[str]
     files: Optional[List[Dict]] = Field(default=None, description="存储字典的列表，前端可解析的后端文件响应")
-    search_results: Optional[List] = Field(default=None, description="搜索引擎结果")
+    additional_kwargs: Optional[Dict]
 
 class Conversation(BaseModel):
     """

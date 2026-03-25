@@ -5,9 +5,9 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException, FastAPI, Path, Body, Query, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 
-from ..ChatService.config.models import ChatRequest, Conversation
-from ..ChatService import ChatService, FILE_MAX_LENGTH, FILE_ALLOWED_TYPES
-from ..ChatWorkflow import ChatWorkflow
+from chatMe.ChatService.config.models import ChatRequest, Conversation
+from chatMe.ChatService import ChatService, FILE_MAX_LENGTH, FILE_ALLOWED_TYPES
+from chatMe.ChatWorkflow import ChatWorkflow
 
 chatMe_app = APIRouter(prefix="/chat")
 

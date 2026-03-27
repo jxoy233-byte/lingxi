@@ -17,7 +17,7 @@ class ExaSearch:
         if not self.api_key:
             raise ValueError("EXA_API_KEY 环境变量未设置")
 
-    def search(self, query: str, num_results: int = 10, type: Literal["instant","fast","auto","deep"] = "auto", maxCharacters:int =4000) -> List[Dict[str, Any]]:
+    def search(self, query: str, num_results: int = 5, type: Literal["instant","fast","auto","deep"] = "auto", maxCharacters:int =2000) -> List[Dict[str, Any]]:
         """
         语义搜索
 
@@ -71,7 +71,7 @@ class ExaSearch:
         except requests.RequestException as e:
             raise Exception(f"Exa 搜索失败：{str(e)}")
 
-    def find_similar(self, ids: List[str], maxCharacters:int =4000, maxAgeHours:int = 168, livercrawlTimeout: int =5000) -> List[Dict[str, Any]]:
+    def find_similar(self, ids: List[str], maxCharacters:int =2000, maxAgeHours:int = 168, livercrawlTimeout: int =5000) -> List[Dict[str, Any]]:
         """
         查找与给定 URL 相似的内容
 
@@ -126,7 +126,7 @@ class ExaSearch:
             raise Exception(f"Exa 相似内容查找失败：{str(e)}")
 
 
-def exa_search(query: str, num_results: int = 10, type: Literal["instant","fast","auto","deep"] = "auto", maxCharacters:int =4000) -> List[dict]:
+def exa_search(query: str, num_results: int = 5, type: Literal["instant","fast","auto","deep"] = "auto", maxCharacters:int =2000) -> List[dict]:
     """
     使用 Exa进行语义搜索
 
@@ -139,7 +139,7 @@ def exa_search(query: str, num_results: int = 10, type: Literal["instant","fast"
 
     return results
 
-def exa_find_similar(ids: List[str], maxCharacters:int =4000, maxAgeHours:int = 168, livercrawlTimeout: int =5000) -> List[dict]:
+def exa_find_similar(ids: List[str], maxCharacters:int =2000, maxAgeHours:int = 168, livercrawlTimeout: int =5000) -> List[dict]:
     """
     查找与指定 URL 相似的内容
 

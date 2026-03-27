@@ -2,11 +2,17 @@
   <transition name="modal">
     <div v-if="visible" class="modal-overlay" @click="handleCancel">
       <div class="modal-container" @click.stop>
-        <div class="modal-header">
-          <h3>{{ title }}</h3>
+        <div class="modal-icon-wrap">
+          <div class="modal-icon">
+            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M10 11v4M14 11v4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+            </svg>
+          </div>
         </div>
-        <div class="modal-body">
-          <p>{{ message }}</p>
+        <div class="modal-content">
+          <h3 class="modal-title">{{ title }}</h3>
+          <p class="modal-message">{{ message }}</p>
         </div>
         <div class="modal-footer">
           <button class="btn-cancel" @click="handleCancel">
@@ -65,7 +71,8 @@ export default {
   left: 0;
   width: 100%;
   height: 100%;
-  background-color: rgba(0, 0, 0, 0.5);
+  background-color: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(4px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -74,58 +81,87 @@ export default {
 
 .modal-container {
   background-color: var(--bg-primary);
-  border-radius: 12px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
-  max-width: 400px;
+  border-radius: 16px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25), 0 0 0 1px var(--border-color);
+  max-width: 360px;
   width: 90%;
   overflow: hidden;
+  padding: 28px 24px 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 12px;
 }
 
-.modal-header {
-  padding: 20px 24px;
-  border-bottom: 1px solid var(--border-color);
+.modal-icon-wrap {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: rgba(239, 68, 68, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
 }
 
-.modal-header h3 {
-  font-size: 18px;
+.modal-icon {
+  width: 28px;
+  height: 28px;
+  color: #ef4444;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.modal-content {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.modal-title {
+  font-size: 16px;
   font-weight: 600;
   color: var(--text-primary);
   margin: 0;
 }
 
-.modal-body {
-  padding: 24px;
-}
-
-.modal-body p {
-  font-size: 15px;
-  color: var(--text-primary);
+.modal-message {
+  font-size: 14px;
+  color: var(--text-secondary);
   line-height: 1.6;
   margin: 0;
 }
 
 .modal-footer {
-  padding: 16px 24px;
   display: flex;
-  justify-content: flex-end;
-  gap: 12px;
-  border-top: 1px solid var(--border-color);
+  gap: 10px;
+  width: 100%;
+  margin-top: 4px;
 }
 
 .btn-cancel,
 .btn-confirm {
-  padding: 10px 24px;
+  flex: 1;
+  padding: 9px 16px;
   border: none;
   border-radius: 8px;
   font-size: 14px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all 0.15s ease;
 }
 
 .btn-cancel {
   background-color: var(--bg-secondary);
   color: var(--text-primary);
+  border: 1px solid var(--border-color);
 }
 
 .btn-cancel:hover {
@@ -133,15 +169,21 @@ export default {
 }
 
 .btn-confirm {
-  background-color: #3b82f6;
+  background-color: #ef4444;
   color: white;
 }
 
 .btn-confirm:hover {
-  background-color: #2563eb;
+  background-color: #dc2626;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.35);
 }
 
-/* 动画效果 */
+.btn-confirm:active {
+  transform: translateY(0);
+  box-shadow: none;
+}
+
 .modal-enter-active,
 .modal-leave-active {
   transition: opacity 0.2s ease;
@@ -149,7 +191,7 @@ export default {
 
 .modal-enter-active .modal-container,
 .modal-leave-active .modal-container {
-  transition: transform 0.2s ease;
+  transition: transform 0.2s ease, opacity 0.2s ease;
 }
 
 .modal-enter-from,
@@ -159,6 +201,7 @@ export default {
 
 .modal-enter-from .modal-container,
 .modal-leave-to .modal-container {
-  transform: scale(0.95);
+  transform: scale(0.92) translateY(8px);
+  opacity: 0;
 }
 </style>

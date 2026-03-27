@@ -1,5 +1,4 @@
 import base64
-import logging
 import os
 import subprocess
 from pathlib import Path
@@ -17,6 +16,8 @@ from chatMe.ChatService import FILE_ALLOWED_TYPES
 from langchain_community.document_loaders import UnstructuredMarkdownLoader, UnstructuredCSVLoader, \
     TextLoader, UnstructuredXMLLoader, JSONLoader, UnstructuredWordDocumentLoader, PyMuPDFLoader
 
+from chatMe.logging_config import get_logger
+
 
 class FilesLoaders:
     output_kwargs: Annotated[
@@ -26,6 +27,7 @@ class FilesLoaders:
 
     def __init__(self, processing_files :list[UploadFile] | None):
         self.processing_files = processing_files
+        self.logger = get_logger(__class__.__name__)
 
     async def cleanup(self):
         """异步清理资源"""
@@ -55,7 +57,7 @@ class FilesLoaders:
         files = self.processing_files
 
         if not files:
-            logging.warning("未传入任何图片文件，返回空二进制数据")
+            self.logger.warning("未传入任何图片文件，返回空二进制数据")
             return None,None,None
 
         images_type = FILE_ALLOWED_TYPES["IMAGE"]["IMAGE_SUFFIX"]
@@ -73,7 +75,7 @@ class FilesLoaders:
                 docs.append(file)
             else:
                 # 宽松处理，防止影响后续文件处理
-                logging.warning(f"忽略不支持的文件类型：{file_name}")
+                self.logger.warning(f"忽略不支持的文件类型：{file_name}")
                 await file.close()  # 单独关闭非法文件，释放资源
                 continue  # 跳过当前文件，处理下一个
 
@@ -90,7 +92,7 @@ class FilesLoaders:
         # 将多个图片文件处理进入同一份二进制数据
         images_list: Optional[List[Dict]] = []
         if not files:
-            logging.info("未传入任何图片文件，返回空二进制数据")
+            cls.logger.info("未传入任何图片文件，返回空二进制数据")
             return None
 
         for img in files:
@@ -102,7 +104,7 @@ class FilesLoaders:
             }
             image_byte = await img.read()
             if not image_byte: # 过滤为空图片
-                logging.warning(f"图片文件{img.filename}为空，跳过")
+                cls.logger.warning(f"图片文件{img.filename}为空，跳过")
                 await img.close()
                 continue
 
@@ -110,7 +112,7 @@ class FilesLoaders:
 
             # 拼接URL时，bytes与str无法直接拼接
             images_list.append(image_dict)
-            logging.info(f"成功读取图片{img.filename}，大小：{img.size/1024:.2f}KB")
+            cls.logger.info(f"成功读取图片{img.filename}，大小：{img.size/1024:.2f}KB")
 
         return images_list
 
@@ -149,7 +151,7 @@ class FilesLoaders:
         """
 
         if not files:
-            logging.info("未传入任何文本文件，返回空二进制数据")
+            cls.logger.info("未传入任何文本文件，返回空二进制数据")
             return None
 
         text_list: Optional[List[Dict]] = []
@@ -203,7 +205,7 @@ class FilesLoaders:
                         text_content=True  # False：保留原始JSON结构，True：仅提取文本
                     )
                 else:
-                    logging.warning(f"不支持的文件类型：{file.filename}")
+                    cls.logger.warning(f"不支持的文件类型：{file.filename}")
 
                 # loader都为BaseLoader的子类 ，都有aload方法可以调用
                 documents = await loader.aload()
@@ -212,15 +214,15 @@ class FilesLoaders:
                 text_list.append(file_dict)
 
             except Exception as e:
-                logging.error(f"处理文件 {file.filename} 失败：{str(e)}")
+                cls.logger.error(f"处理文件 {file.filename} 失败：{str(e)}")
                 text_list.append(file_dict)  # 保证列表完整性
             finally:
                 if temp_file_path and os.path.exists(temp_file_path):
                     try:
                         os.remove(temp_file_path)
-                        logging.info(f"成功删除临时文件：{temp_file_path}")
+                        cls.logger.info(f"成功删除临时文件：{temp_file_path}")
                     except Exception as e:
-                        logging.error(f"删除临时文件失败：{temp_file_path}，错误信息：{str(e)}")
+                        cls.logger.error(f"删除临时文件失败：{temp_file_path}，错误信息：{str(e)}")
 
         return text_list if text_list else None
 
@@ -266,7 +268,7 @@ class FilesLoaders:
             pdf_path = os.path.join(tmpdir, pdf_name)
 
             if not os.path.exists(pdf_path):
-                raise Exception("LibreOffice 未生成 PDF")
+                cls.logger.error("LibreOffice 未生成 PDF")
 
             # ========== PDF 转图片 ==========
             doc = fitz.open(pdf_path)
@@ -282,14 +284,14 @@ class FilesLoaders:
                 img_base64 = base64.b64encode(img_blob).decode()
                 result["images"].append(img_base64)
 
-                logging.info(f"{pdf_name} 的 第{i + 1}页已存储")
+                cls.logger.info(f"{pdf_name} 的 第{i + 1}页已存储")
 
             doc.close()
 
         except Exception as e:
             result["status"] = "failed"
             result["error"] = str(e)
-            logging.error(f"❌ 转换失败: {str(e)}")
+            cls.logger.error(f"❌ 转换失败: {str(e)}")
 
         return result
 
@@ -324,7 +326,7 @@ class FilesLoaders:
             result["image_count"] = len(images)
 
         except Exception as e:
-            logging.error(f"❌ 提取图片失败: {str(e)}")
+            cls.logger.error(f"❌ 提取图片失败: {str(e)}")
             result["status"] = "failed"
             result["error"] = str(e)
 
@@ -360,14 +362,14 @@ class FilesLoaders:
                 img_base64 = base64.b64encode(img_blob).decode()
                 result["images"].append(img_base64)
 
-                logging.info(f"{pdf_name} 的 第{i + 1}页已存储")
+                cls.logger.info(f"{pdf_name} 的 第{i + 1}页已存储")
 
             doc.close()
 
         except Exception as e:
             result["status"] = "failed"
             result["error"] = str(e)
-            logging.error(f"❌ 转换失败: {str(e)}")
+            cls.logger.error(f"❌ 转换失败: {str(e)}")
 
         return result
 
@@ -396,7 +398,7 @@ class FilesLoaders:
         except Exception as e:
             result["status"] = "failed"
             result["error"] = str(e)
-            logging.error(f"❌ 读取excel文件失败: {str(e)}")
+            cls.logger.error(f"❌ 读取excel文件失败: {str(e)}")
 
         return result
 
@@ -408,7 +410,7 @@ class FilesLoaders:
         :return:
         """
         if not files:
-            logging.info("未传入任何文本文件，返回空二进制数据")
+            cls.logger.info("未传入任何文本文件，返回空二进制数据")
             return None
 
         doc_list: Optional[List[Dict]] = []
@@ -432,7 +434,7 @@ class FilesLoaders:
                 if doc_suffix == ".pptx":
                     result = await FilesLoaders.process_pptx(temp_file_path)
                     if result["status"] == "failed":
-                        logging.error(f"pptx文件{file}处理失败, 错误:{result['error']}")
+                        cls.logger.error(f"pptx文件{file}处理失败, 错误:{result['error']}")
                         raise
                     file_dict["file_content"]["images"] = result["images"]
                     file_dict["file_content"]["text"] = ""
@@ -444,7 +446,7 @@ class FilesLoaders:
                     )
                     result = await FilesLoaders.extract_docx_images(temp_file_path)
                     if result["status"] == "failed":
-                        logging.error(f"docx文件{file}处理失败, 错误:{result['error']}")
+                        cls.logger.error(f"docx文件{file}处理失败, 错误:{result['error']}")
                         raise Exception(result['error'])
                     file_dict["file_content"]["images"] = result["images"]
                     doc = await loader.aload()
@@ -453,7 +455,7 @@ class FilesLoaders:
                 elif doc_suffix == ".pdf":
                     result = await FilesLoaders.process_pdf(temp_file_path)
                     if result["status"] == "failed":
-                        logging.error(f"pdf文件{file}处理失败, 错误:{result['error']}")
+                        cls.logger.error(f"pdf文件{file}处理失败, 错误:{result['error']}")
                         raise Exception(result['error'])
                     file_dict["file_content"]["images"] = result["images"]
                     file_dict["file_content"]["text"] = ""
@@ -461,29 +463,29 @@ class FilesLoaders:
                 elif doc_suffix == ".xlsx":
                     result = await FilesLoaders.process_excel(temp_file_path)
                     if result["status"] == "failed":
-                        logging.error(f"excel文件{file}处理失败, 错误:{result['error']}")
+                        cls.logger.error(f"excel文件{file}处理失败, 错误:{result['error']}")
                         raise Exception(result['error'])
                     file_dict["file_content"]["images"] = []
                     file_dict["file_content"]["text"] = result["content"]
 
                 else:
-                    logging.warning(f"不支持的文件类型：{file.filename}")
+                    cls.logger.warning(f"不支持的文件类型：{file.filename}")
                     raise Exception(f"不支持的文件类型：{doc_suffix}")
 
 
                 doc_list.append(file_dict)
 
             except Exception as e:
-                logging.error(f"处理文件 {file.filename} 失败 {str(e)}")
+                cls.logger.error(f"处理文件 {file.filename} 失败 {str(e)}")
                 doc_list.append({})  # 保证列表完整性
 
             finally:
                 if temp_file_path and os.path.exists(temp_file_path):
                     try:
                         os.remove(temp_file_path)
-                        logging.info(f"成功删除临时文件：{temp_file_path}")
+                        cls.logger.info(f"成功删除临时文件：{temp_file_path}")
                     except Exception as e:
-                        logging.error(f"删除临时文件失败：{temp_file_path}，错误信息：{str(e)}")
+                        cls.logger.error(f"删除临时文件失败：{temp_file_path}，错误信息：{str(e)}")
 
         return doc_list if doc_list else None
 

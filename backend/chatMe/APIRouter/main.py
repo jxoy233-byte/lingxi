@@ -1,4 +1,3 @@
-import logging
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
@@ -6,13 +5,17 @@ from fastapi import APIRouter, HTTPException, FastAPI, Path, Body, Query, Upload
 from fastapi.responses import StreamingResponse
 
 from chatMe.ChatService.config.models import ChatRequest, Conversation
-from chatMe.ChatService import ChatService, FILE_MAX_LENGTH, FILE_ALLOWED_TYPES
+from chatMe.ChatService import ChatService, FILE_MAX_LENGTH
 from chatMe.ChatWorkflow import ChatWorkflow
+from chatMe.logging_config import get_logger
 
 chatMe_app = APIRouter(prefix="/chat")
 
 chat_service: Optional[ChatService] = None
 
+logger = get_logger("ChatService Router")
+
+logger.info("ChatService Router 加载成功")
 
 async def create_chat_service() -> ChatService:
     """
@@ -32,11 +35,11 @@ async def create_chat_service() -> ChatService:
 async def lifespan(app :FastAPI):
     # 启动时执行：初始化全局 chat_service
     chat_service = await create_chat_service()
-    logging.info("ChatService启动成功")
+    logger.info("ChatService启动成功")
     # 分割启动与关闭逻辑
     yield
     chat_service = None
-    logging.info("ChatService关闭成功")
+    logger.info("ChatService关闭成功")
 
 
 @chatMe_app.post("/", summary="新建对话/继续对话-流式响应，无session_id则新建对话")
@@ -60,44 +63,36 @@ async def chat_stream(
     返回:
         StreamingResponse: 包含 AI 回应、session_id 和会话标题
     """
-    try:
-        # 将form-data参数转为chatRequest对象
-        chatRequest = ChatRequest.model_validate_json(chatRequest)
+    # 将form-data参数转为chatRequest对象
+    chatRequest = ChatRequest.model_validate_json(chatRequest)
 
-        async def event_generator():
-            async for data in chat_service.message_stream(
-                message=chatRequest.message,
-                session_id=chatRequest.session_id,
-                files = files,
-            ):
-                yield f"{data}"
+    async def event_generator():
+        async for data in chat_service.message_stream(
+            message=chatRequest.message,
+            session_id=chatRequest.session_id,
+            files = files,
+        ):
+            yield f"{data}"
 
-        headers = {
-            "Cache-Control": "no-cache",  # 禁用缓存
-            "X-Accel-Buffering": "no",  # 禁用nginx/uvicorn缓冲区!
-            "Connection": "keep-alive"  # 长连接保持
-        }
+    headers = {
+        "Cache-Control": "no-cache",  # 禁用缓存
+        "X-Accel-Buffering": "no",  # 禁用nginx/uvicorn缓冲区!
+        "Connection": "keep-alive"  # 长连接保持
+    }
 
-        return StreamingResponse(
-            event_generator(),
-            media_type="text/event-stream",
-            headers=headers,
-        )
-    except Exception as e:
-        logging.error(f"接口执行异常(session_id:{chatRequest.session_id})：{str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers=headers,
+    )
 
 @chatMe_app.get("/conversations", summary="获取历史会话列表【默认返回最新20条】", response_model=List[Conversation])
 async def get_conversations(
     limit: int = Query(default=20, ge=1, le=50, description="返回会话数量，默认20条，最多50条")
 ):
     """获取所有历史会话，按【更新时间倒序】排列，最新的会话在最前面，自动过滤空会话"""
-    try:
-        conversations = await chat_service.get_conversation_list(limit=limit)
-        return conversations
-    except Exception as e:
-        logging.error(f"获取会话列表异常：{str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+    conversations = await chat_service.get_conversation_list(limit=limit)
+    return conversations
 
 @chatMe_app.get("/{session_id}/conversation", summary="获取指定会话内容")
 async def get_conversation_content(session_id :str = Path(..., description="会话ID")):
@@ -107,17 +102,13 @@ async def get_conversation_content(session_id :str = Path(..., description="会�
     2. 返回会话标题/创建时间/更新时间等完整信息
     3. 前端拿到后渲染聊天界面，之后可调用/chat接口传入该session_id继续对话
     """
-    try:
-        conversation = await chat_service.get_conversation(session_id)
+    conversation = await chat_service.get_conversation(session_id)
 
-        if not conversation or len(conversation.messages) == 0:
-            logging.warning(f"会话ID: {session_id} 暂无对话内容")
-            raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在或暂无聊天记录")
+    if not conversation or len(conversation.messages) == 0:
+        logger.warning(f"会话ID: {session_id} 暂无对话内容")
+        raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在或暂无聊天记录")
 
-        return conversation
-    except Exception as e:
-        logging.error(f"获取会话内容异常(session_id:{session_id})：{str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+    return conversation
 
 
 @chatMe_app.delete("/{session_id}/clear", summary="删除指定历史会话（含聊天记录）")
@@ -125,15 +116,11 @@ async def delete_conversation(
     session_id: str = Path(..., description="会话唯一ID")
 ):
     """删除会话：彻底删除Redis中的会话上下文+检查点数据，前端删除后刷新列表即可"""
-    try:
-        success = await chat_service.delete_conversation(session_id)
-        if not success:
-            raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在，删除失败")
-        return {"code": 200, "msg": "会话删除成功", "session_id": session_id}
+    success = await chat_service.delete_conversation(session_id)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在，删除失败")
+    return {"code": 200, "msg": "会话删除成功", "session_id": session_id}
 
-    except Exception as e:
-        logging.error(f"删除会话异常(session_id:{session_id})：{str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 @chatMe_app.put("/{session_id}/title", summary="修改会话标题")
 async def update_conversation_title(
@@ -141,40 +128,28 @@ async def update_conversation_title(
     title: str = Body(..., embed=True, min_length=1, max_length=50, description="会话标题")
 ):
     """修改会话标题：解决默认标题新对话的问题，前端点击修改标题调用"""
-    try:
-        success = await chat_service.update_conversation_title(session_id, title)
-        if not success:
-            raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在，修改失败")
-        return {"code": 200, "msg": "标题修改成功", "session_id": session_id, "new_title": title}
-    except Exception as e:
-        logging.error(f"修改标题异常(session_id:{session_id})：{str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+    success = await chat_service.update_conversation_title(session_id, title)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在，修改失败")
+    return {"code": 200, "msg": "标题修改成功", "session_id": session_id, "new_title": title}
 
 @chatMe_app.get("/{session_id}/title", summary="获取单个会话的标题")
 async def get_conversation_title(
     session_id: str = Path(..., description="会话唯一ID")
 ):
     """单独获取会话标题，用于前端会话列表渲染"""
-    try:
-        conversation = await chat_service.get_conversation(session_id)
-        if not conversation:
-            raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
-        return {"session_id": session_id, "title": conversation.title}
-    except Exception as e:
-        logging.error(f"获取标题异常(session_id:{session_id})：{str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+    conversation = await chat_service.get_conversation(session_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
+    return {"session_id": session_id, "title": conversation.title}
 
 @chatMe_app.get("/common/latest", summary="获取最新的一条会话ID")
 async def get_latest_conversation():
     """前端默认进入最新会话，无需手动点击，提升体验"""
-    try:
-        conv_list = await chat_service.get_conversation_list(limit=1)
-        if not conv_list:
-            return {"session_id": None}
-        return {"session_id": conv_list[0].session_id, "title": conv_list[0].title}
-    except Exception as e:
-        logging.error(f"获取最新会话异常：{str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+    conv_list = await chat_service.get_conversation_list(limit=1)
+    if not conv_list:
+        return {"session_id": None}
+    return {"session_id": conv_list[0].session_id, "title": conv_list[0].title}
 
 @chatMe_app.post("/improve_input", summary="优化用户输入内容")
 async def improve_input(
@@ -183,13 +158,8 @@ async def improve_input(
     """
     优化用户输入内容，优化成更好让后续进行AI对话中AI来理解用户需求
     """
-    try:
-        resp = await chat_service.chat_workflow.llm_imp_ipt.ainvoke(input_text)
-        improved_text = resp.content
-        return {"improved_text": improved_text}
-    except Exception as e:
-        logging.error(f"输入内容优化异常：{str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+    improved_text= await chat_service.get_imp_usr_ipt(input_text)
+    return {"improved_text": improved_text}
 
 
 @chatMe_app.get("/file-config", summary="获取文件上传配置")
@@ -199,25 +169,22 @@ async def get_file_config():
     - 最大文件大小限制
     - 支持的文件类型（图片、文本、文档）
     """
-    try:
-        return {
-            "maxFileSize": FILE_MAX_LENGTH,
-            "imageTypes": {
-                "suffixes": list(FILE_ALLOWED_TYPES["IMAGE"]["IMAGE_SUFFIX"]),
-                "mimeTypes": list(FILE_ALLOWED_TYPES["IMAGE"]["IMAGE_MIME"])
-            },
-            "textTypes": {
-                "suffixes": list(FILE_ALLOWED_TYPES["TEXT"]["TEXT_SUFFIX"]),
-                "mimeTypes": list(FILE_ALLOWED_TYPES["TEXT"]["TEXT_MIME"])
-            },
-            "documentTypes": {
-                "suffixes": list(FILE_ALLOWED_TYPES["DOCUMENT"]["DOCUMENT_SUFFIX"]),
-                "mimeTypes": list(FILE_ALLOWED_TYPES["DOCUMENT"]["DOCUMENT_MIME"])
-            }
-        }
-    except Exception as e:
-        logging.error(f"获取文件配置异常：{str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+    return chat_service.get_file_config()
 
 
+@chatMe_app.post("/{session_id}/backtrack", summary="会话回溯")
+async def backtrack_checkpoint(
+    session_id: str = Path(..., description="会话唯一ID"),
+    backtrack_id: str = Body(..., embed=True, description="回溯ID")
+):
+    """
+    会话回溯：
+    - 获取指定会话的指定回溯ID的会话内容
+    - 获取指定会话的指定回溯ID的会话内容，并返回该回溯ID的会话内容
+    """
+    status = await chat_service.backtrack_state(session_id=session_id, checkpoint_id=backtrack_id)
 
+    if status == False:
+        return {"code": 500, "msg": "回溯失败", "session_id": session_id, "backtrack_id": backtrack_id}
+
+    return {"code": 200, "msg": "回溯成功", "session_id": session_id, "backtrack_id": backtrack_id}

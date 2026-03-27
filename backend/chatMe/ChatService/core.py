@@ -1,5 +1,4 @@
 import json
-import logging
 import uuid
 from datetime import datetime
 from typing import AsyncGenerator, Set, List, Any
@@ -10,9 +9,11 @@ from langgraph_sdk.auth.exceptions import HTTPException
 from redisvl.query import FilterQuery
 from langgraph.checkpoint.redis.util import from_storage_safe_id
 
+from chatMe.ChatService import FILE_MAX_LENGTH, FILE_ALLOWED_TYPES
 from chatMe.ChatService.config.models import MessageRole, Message, Conversation
 from chatMe.ChatService.FilesLoaders.core import FilesLoaders
 from chatMe.ChatWorkflow import ChatWorkflow, AIMessageType
+from chatMe.logging_config import get_logger
 
 
 class ChatService:
@@ -22,6 +23,7 @@ class ChatService:
     """
 
     def __init__(self, workflow: ChatWorkflow):
+        self.logger = get_logger(__class__.__name__)
         self.chat_workflow = workflow
         self.checkpointer = self.chat_workflow.checkpointer
         self.graph = self.chat_workflow.graph
@@ -46,13 +48,13 @@ class ChatService:
 
             # 风险点1：处理search_results为None的情况
             if search_results is None:
-                logging.info("Redis搜索结果为空（search_results为None）")
+                self.logger.info("Redis搜索结果为空（search_results为None）")
                 return []
 
             # 风险点2：确保docs是可遍历的列表
             docs = getattr(search_results, "docs", [])
             if not isinstance(docs, list):
-                logging.warning(f"Redis搜索结果docs格式异常，非列表类型：{type(docs)}")
+                self.logger.warning(f"Redis搜索结果docs格式异常，非列表类型：{type(docs)}")
                 return []
 
             thread_ids: Set[str] = set()
@@ -68,7 +70,7 @@ class ChatService:
                     if raw_thread_id:  # 跳过转换后为空的ID
                         thread_ids.add(raw_thread_id)
                 except Exception as e:
-                    logging.warning(f"转换safe_id失败：{safe_thread_id}，错误：{e}")
+                    self.logger.warning(f"转换safe_id失败：{safe_thread_id}，错误：{e}")
                     continue
 
             # 排序并返回（空集合会返回空列表）
@@ -76,11 +78,11 @@ class ChatService:
 
         # 风险点5：捕获所有异常，而非仅HTTPException
         except HTTPException as e:
-            logging.warning(f"Redis查询触发HTTP异常（无历史数据）：{e}")
+            self.logger.warning(f"Redis查询触发HTTP异常（无历史数据）：{e}")
             return []
         except Exception as e:
             # 兜底捕获所有其他异常（如连接错误、序列化错误等）
-            logging.warning(f"获取conversation_ids失败：{type(e).__name__}: {e}")
+            self.logger.warning(f"获取conversation_ids失败：{type(e).__name__}: {e}")
             return []
 
     async def _process_files(self, files: List[UploadFile]):
@@ -96,6 +98,38 @@ class ChatService:
         await fl.cleanup()
 
         return images_content, text_content, doc_content, file_list
+
+    async def _save_round_checkpoint(self, session_id: str):
+        """
+        获取指定会话的所有 checkpoint_id 列表
+        :param session_id: 会话 ID (thread_id)
+
+        更新状态使得带有对应的checkpoint_id在最后一条SUMMARY的AI消息
+
+        :return 修改成功的状态:True/False
+        """
+        try:
+            config = {"configurable": {"thread_id": session_id}}
+
+            state = await self.graph.aget_state(config=config)
+
+            checkpoint_id = state.config["configurable"]["checkpoint_id"]
+
+            if isinstance(state.values["messages"][-1], AIMessage):
+                last_ai_message = list(state.values["messages"])[-1]
+                last_ai_message.additional_kwargs["checkpoint_id"] = checkpoint_id
+
+                state.values["messages"][-1] = last_ai_message
+                await self.graph.aupdate_state(
+                    config=config,
+                    values=state.values,  # 把修改后的完整state值更新回去
+                )
+                return True
+
+        except Exception as e:
+            self.logger.error(f"保存检查点失败(session_id:{session_id}): {str(e)}")
+            return False
+
     async def message_stream(
         self,
         message: str,
@@ -164,12 +198,12 @@ class ChatService:
         input_config = {
             "configurable" :{
                 "thread_id" : session_id,
-                "file_list": file_list,
             }
         }
 
         additional_kwargs ={
             "updated_at": datetime.now(),
+            "file_list": file_list,
         }
 
         full_response = ""
@@ -217,13 +251,19 @@ class ChatService:
         except Exception as e:
             import traceback
             error_detail = f"{str(e)}\n{traceback.format_exc()}"
-            logging.error(f"流式响应异常(session_id:{session_id}): {error_detail}")
+            self.logger.error(f"流式响应异常(session_id:{session_id}): {error_detail}")
             # 异常返回错误信息 + 双换行符 + 不执行return，避免生成器强制关闭
             yield json.dumps(
                 {"type": "error", "error": str(e)},
                 ensure_ascii=False,
                 default=str
             ) + "\n\n"
+        finally:
+            status = await self._save_round_checkpoint(session_id)
+            if status:
+                self.logger.info("保存检查点成功")
+            else:
+                self.logger.error("保存检查点失败")
 
         # 返回最终完整结果
         yield json.dumps({
@@ -242,13 +282,13 @@ class ChatService:
             会话内容
         """
         config = {"configurable": {"thread_id": session_id}}
+
         try:
             state = await self.graph.aget_state(config=config)
             print(state)
         except HTTPException as e:
-            logging.error(f"获取会话状态异常(session_id:{session_id})：{str(e)}")
+            self.logger.error(f"获取会话状态异常(session_id:{session_id})：{str(e)}")
             return Conversation(session_id=session_id)
-
 
         messages_list = []
         if "messages" in state.values and state.values["messages"]:
@@ -280,8 +320,8 @@ class ChatService:
                         role=role,
                         content=msg.content,
                         files=None,
-                        additional_kwargs=msg.additional_kwargs # 包含了AIMessage信息分类
-                    ))
+                        additional_kwargs={**msg.additional_kwargs} # 包含了AIMessage信息分类
+                    ))# todo 新增checkpoint检查点，存放在前端
 
                 elif isinstance(msg, ToolMessage):
                     role = MessageRole.AI
@@ -320,17 +360,21 @@ class ChatService:
         :param limit: 返回条数，默认10
         :return: 按更新时间倒序的会话列表，自动过滤空会话
         """
-        session_ids = await self.aget_conversation_ids
-        conversation_list = []
-        for sid in session_ids:
-            conv = await self.get_conversation(sid)
-            # 过滤空会话：无消息的会话不展示
-            if conv and len(conv.messages) > 0:
-                conversation_list.append(conv)
-        # 按更新时间倒序，最新对话在最前面
-        conversation_list.sort(key=lambda x: x.updated_at, reverse=True)
-        # 只返回前N条
-        return conversation_list[:limit]
+        try:
+            session_ids = await self.aget_conversation_ids
+            conversation_list = []
+            for sid in session_ids:
+                conv = await self.get_conversation(sid)
+                # 过滤空会话：无消息的会话不展示
+                if conv and len(conv.messages) > 0:
+                    conversation_list.append(conv)
+            # 按更新时间倒序，最新对话在最前面
+            conversation_list.sort(key=lambda x: x.updated_at, reverse=True)
+            # 只返回前N条
+            return conversation_list[:limit]
+        except HTTPException as e:
+            self.logger.error(f"获取会话列表异常：{str(e)}")
+            return []
 
     async def delete_conversation(self, session_id: str) -> bool:
         """
@@ -343,13 +387,13 @@ class ChatService:
             await self.checkpointer.adelete_thread(
                 thread_id=session_id,
             )
-            logging.info(f"会话删除成功(session_id:{session_id})")
+            self.logger.info(f"会话删除成功(session_id:{session_id})")
             return True
 
         # 捕获异常
         except HTTPException as e:
             error_detail = f"删除会话失败(session_id:{session_id})：{str(e)}"
-            logging.error(error_detail)
+            self.logger.error(error_detail)
             return False
 
     async def update_conversation_title(self, session_id: str, new_title: str) -> bool:
@@ -358,7 +402,7 @@ class ChatService:
             config = {"configurable": {"thread_id": session_id}}
             state = await self.graph.aget_state(config=config)
 
-            # 由于langgraph对更新state的限制和BaseMessage修改的要求做出的***史山代码***
+            # 面对langgraph对更新state的限制所制作的*神秘代码*
             new_msg = None
             if state.values["messages"][1]:
                 for msg in state.values["messages"]:
@@ -380,25 +424,67 @@ class ChatService:
                     values=state.values,  # 把修改后的完整state值更新回去
                 )
 
-                logging.info(f"会话标题修改成功(session_id:{session_id})：{new_title}")
+                self.logger.info(f"会话标题修改成功(session_id:{session_id})：{new_title}")
                 return True
             else:
-                logging.error(f"会话不存在(session_id:{session_id})")
+                self.logger.error(f"会话不存在(session_id:{session_id})")
                 return False
         except HTTPException as e:
-            logging.error(f"修改标题失败(session_id:{session_id}): {str(e)}")
+            self.logger.error(f"修改标题失败(session_id:{session_id}): {str(e)}")
             return False
 
     async def backtrack_state(self, session_id :str, checkpoint_id :str) -> bool:
         """
         返回到当前对话的特定的检查点状态
-        :param round_id:
-        :return: 是否回溯成功
+        :param
+            session_id: 会话id
+            checkpoint_id: 检查点id
+        :return
+            已回溯到某个检查点状态的对话信息
         """
+        backtrack_config = {"configurable": {"thread_id": session_id, "checkpoint_id":checkpoint_id}}
 
-        #每次对话完后保存一次当前checkpoint_id记录点
-        pass
+        try:
+            backtrack_state = await self.graph.aget_state(config=backtrack_config)
+            await self.graph.aupdate_state(config=backtrack_config, values=backtrack_state.values)
+
+            return True
+
+        except Exception as e:
+            self.logger.error(f"会话回溯失败(session_id:{session_id}, checkpoint_id:{checkpoint_id}): {str(e)}")
+            return False
 
 
+    async def get_imp_usr_ipt(self, input_text:str):
+        """
+        优化用户需求函数，使后续ai更好理解用户需求
+        返回两个参数: 优化后的输入,状态码
+        """
+        improved_text =input_text
+        try:
+            resp = await self.chat_workflow.llm_imp_ipt.ainvoke(input_text)
+            improved_text = resp.content
+
+        except Exception as e:
+            self.logger.error(f"优化用户输入失败: {str(e)},采用回原输出")
+        finally:
+            return improved_text
+
+    async def get_file_config(self):
+        return {
+            "maxFileSize": FILE_MAX_LENGTH,
+            "imageTypes": {
+                "suffixes": list(FILE_ALLOWED_TYPES["IMAGE"]["IMAGE_SUFFIX"]),
+                "mimeTypes": list(FILE_ALLOWED_TYPES["IMAGE"]["IMAGE_MIME"])
+            },
+            "textTypes": {
+                "suffixes": list(FILE_ALLOWED_TYPES["TEXT"]["TEXT_SUFFIX"]),
+                "mimeTypes": list(FILE_ALLOWED_TYPES["TEXT"]["TEXT_MIME"])
+            },
+            "documentTypes": {
+                "suffixes": list(FILE_ALLOWED_TYPES["DOCUMENT"]["DOCUMENT_SUFFIX"]),
+                "mimeTypes": list(FILE_ALLOWED_TYPES["DOCUMENT"]["DOCUMENT_MIME"])
+            }
+        }
 
 

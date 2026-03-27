@@ -78,7 +78,7 @@
         v-model="inputText"
         @keydown.enter="handleEnterKey"
         @input="autoResize"
-        placeholder="输入消息... (Enter发送，Ctrl+Enter换行)"
+        placeholder="输入消息..."
         rows="1"
         ref="textarea"
       ></textarea>

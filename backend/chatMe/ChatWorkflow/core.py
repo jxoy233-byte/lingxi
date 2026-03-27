@@ -1,6 +1,5 @@
 import json
 import re
-import logging
 from http.client import HTTPException
 from typing import Optional, Dict, Any, AsyncGenerator
 
@@ -14,6 +13,7 @@ from langgraph.prebuilt import ToolNode
 
 from chatMe.ChatWorkflow import get_graph_final_node_config, SearchDecision, \
     ChatStateCore, get_imp_ipt_config, get_agent_node_config, get_graph_final_node_config, AIMessageType
+from chatMe.logging_config import get_logger
 
 
 class ChatWorkflow:
@@ -23,6 +23,7 @@ class ChatWorkflow:
     """
 
     def __init__(self):
+        self.logger = get_logger(__class__.__name__)
         self.llm_core = None
         self.agent_llm = None
         self.llm_imp_ipt = None
@@ -110,7 +111,7 @@ class ChatWorkflow:
                 if tool_call["name"]:
                     tool_calls.append(tool_call)
             except json.JSONDecodeError as e:
-                logging.error(f"JSON 解析错误: {e}")
+                self.logger.error(f"JSON 解析错误: {e}")
                 continue
 
         if tool_calls:
@@ -217,7 +218,7 @@ class ChatWorkflow:
                 query = response_dict.get("query", "")
             except json.JSONDecodeError:
                 # 如果解析失败，默认不搜索
-                logging.error("解析搜索结果失败，默认不搜索")
+                self.logger.error("解析搜索结果失败，默认不搜索")
                 should_search = False
                 query = ""
 
@@ -244,7 +245,7 @@ class ChatWorkflow:
                             # url，title，content字典值
                             search_message.append(result)
             except HTTPException as e:
-                logging.error(f"搜索引擎搜索失败：{e}")
+                self.logger.error(f"搜索引擎搜索失败：{e}")
                 search_message = "搜索服务暂时不可用，请稍后再试。"
 
             return {

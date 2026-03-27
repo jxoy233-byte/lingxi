@@ -1,7 +1,10 @@
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from chatMe.APIRouter.main import chatMe_app, lifespan
+from chatMe.logging_config import set_logger
 
 version = "1.0.2"
 app = FastAPI(
@@ -11,6 +14,10 @@ app = FastAPI(
     lifespan = lifespan
 )
 
+logger = set_logger()
+
+logger.info("ChatMe应用启动ing")
+logger.info(f"版本:{version}")
 
 app.add_middleware(
     CORSMiddleware,
@@ -40,6 +47,7 @@ if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="127.0.0.1", port=8211, reload=True)
     # uvicorn.run("main:app", host="127.0.0.1", port=8211)
+    logger.info("ChatMe应用启动完毕")
 
 
 

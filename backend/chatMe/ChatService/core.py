@@ -1,4 +1,5 @@
 import json
+import traceback
 import uuid
 from datetime import datetime
 from typing import AsyncGenerator, Set, List, Any
@@ -10,6 +11,7 @@ from redisvl.query import FilterQuery
 from langgraph.checkpoint.redis.util import from_storage_safe_id
 
 from chatMe.ChatService import FILE_MAX_LENGTH, FILE_ALLOWED_TYPES
+from chatMe.ChatService.RedisStateSaver.core import RedisStateSaver
 from chatMe.ChatService.config.models import MessageRole, Message, Conversation
 from chatMe.ChatService.FilesLoaders.core import FilesLoaders
 from chatMe.ChatWorkflow import ChatWorkflow, AIMessageType
@@ -27,6 +29,7 @@ class ChatService:
         self.chat_workflow = workflow
         self.checkpointer = self.chat_workflow.checkpointer
         self.graph = self.chat_workflow.graph
+        self.state_saver = RedisStateSaver()
 
     @property
     async def aget_conversation_ids(self) -> List[str]:
@@ -115,20 +118,26 @@ class ChatService:
 
             checkpoint_id = state.config["configurable"]["checkpoint_id"]
 
-            if isinstance(state.values["messages"][-1], AIMessage):
-                last_ai_message = list(state.values["messages"])[-1]
-                last_ai_message.additional_kwargs["checkpoint_id"] = checkpoint_id
+            status = await self.state_saver.write_checkpoint(session_id, checkpoint_id)
 
-                state.values["messages"][-1] = last_ai_message
-                await self.graph.aupdate_state(
-                    config=config,
-                    values=state.values,  # 把修改后的完整state值更新回去
-                )
-                return True
+            if status:
+                self.logger.info(f"保存每轮检查点成功(session_id:{session_id})")
+                if isinstance(state.values["messages"][-1], AIMessage):
+                    last_ai_message = list(state.values["messages"])[-1]
+                    last_ai_message.additional_kwargs["checkpoint_id"] = checkpoint_id
+
+                    state.values["messages"][-1] = last_ai_message
+                    await self.graph.aupdate_state(
+                        config=config,
+                        values=state.values,  # 把修改后的完整state值更新回去
+                    )
+                    return True
 
         except Exception as e:
-            self.logger.error(f"保存检查点失败(session_id:{session_id}): {str(e)}")
+            self.logger.error(f"保存每轮检查点失败(session_id:{session_id}): {str(e)}")
             return False
+
+
 
     async def message_stream(
         self,
@@ -208,7 +217,6 @@ class ChatService:
 
         full_response = ""
         try:
-            # todo: 前段要适配返回的响应，让用户可以实时看见ai动态响应
             async for chunk in self.chat_workflow.astream(messages=[HumanMessage(content=message_content,additional_kwargs=additional_kwargs)], config=input_config):
                 if chunk['event'] == 'on_chat_model_stream':
                     # 最终返回的chunk
@@ -238,18 +246,25 @@ class ChatService:
                         default=str
                     ) + "\n\n"
                 elif chunk['event'] == 'on_tool_end':
-                    if output := chunk['data']['output'].content:
-                        for op in output:
-                            if op['type'] == "text":
-                                tool_call_result = op['text']
-                                yield json.dumps(
-                                    {"type": "tool_call_result", "content": tool_call_result},
-                                    ensure_ascii=False,
-                                    default=str
-                                ) + "\n\n"
+                    output_content = chunk['data']['output'].content
+                    if output_content:
+                        if isinstance(output_content, list):
+                            for op in output_content:
+                                if op['type'] == "text":
+                                    tool_call_result = op['text']
+                                    yield json.dumps(
+                                        {"type": "tool_call_result", "content": tool_call_result},
+                                        ensure_ascii=False,
+                                        default=str
+                                    ) + "\n\n"
+                        if isinstance(output_content, str):
+                            yield json.dumps(
+                                {"type": "tool_call_result", "content": output_content},
+                                ensure_ascii=False,
+                                default=str
+                            ) + "\n\n"
 
         except Exception as e:
-            import traceback
             error_detail = f"{str(e)}\n{traceback.format_exc()}"
             self.logger.error(f"流式响应异常(session_id:{session_id}): {error_detail}")
             # 异常返回错误信息 + 双换行符 + 不执行return，避免生成器强制关闭
@@ -258,12 +273,8 @@ class ChatService:
                 ensure_ascii=False,
                 default=str
             ) + "\n\n"
-        finally:
-            status = await self._save_round_checkpoint(session_id)
-            if status:
-                self.logger.info("保存检查点成功")
-            else:
-                self.logger.error("保存检查点失败")
+
+        await self._save_round_checkpoint(session_id)
 
         # 返回最终完整结果
         yield json.dumps({
@@ -283,9 +294,11 @@ class ChatService:
         """
         config = {"configurable": {"thread_id": session_id}}
 
+        checkpoints = await self.state_saver.get_checkpoints(session_id)
+        checkpoint_index = 0
+
         try:
             state = await self.graph.aget_state(config=config)
-            print(state)
         except HTTPException as e:
             self.logger.error(f"获取会话状态异常(session_id:{session_id})：{str(e)}")
             return Conversation(session_id=session_id)
@@ -316,12 +329,22 @@ class ChatService:
 
                 elif isinstance(msg, AIMessage):
                     role = MessageRole.AI
-                    messages_list.append(Message(
-                        role=role,
-                        content=msg.content,
-                        files=None,
-                        additional_kwargs={**msg.additional_kwargs} # 包含了AIMessage信息分类
-                    ))# todo 新增checkpoint检查点，存放在前端
+                    if msg.additional_kwargs.get("type") == AIMessageType.SUMMARY.value:
+                        msg.additional_kwargs["checkpoint_id"] = checkpoints[checkpoint_index]["checkpoint_id"]
+                        messages_list.append(Message(
+                            role=role,
+                            content=msg.content,
+                            files=None,
+                            additional_kwargs=msg.additional_kwargs
+                        ))
+                        checkpoint_index += 1
+                    else:
+                        messages_list.append(Message(
+                            role=role,
+                            content=msg.content,
+                            files=None,
+                            additional_kwargs=msg.additional_kwargs
+                        ))
 
                 elif isinstance(msg, ToolMessage):
                     role = MessageRole.AI
@@ -335,6 +358,7 @@ class ChatService:
                         files=None,
                         additional_kwargs={"type": AIMessageType.REASONING.value,"isTool": True} # 与调用工具的AIMessage进行区分
                     ))
+        print(messages_list)
 
         created_at = state.created_at if hasattr(state, "created_at") else datetime.now()
         updated_at = None
@@ -346,13 +370,15 @@ class ChatService:
 
         title = state.values["messages"][1].additional_kwargs.get("title","新对话")  # 读取你之前更新的真实标题
 
-        return Conversation(
+        conversations = Conversation(
             session_id=session_id,
             messages=messages_list,
             title=title,
             created_at=created_at,
             updated_at=updated_at,
         )
+
+        return conversations
 
     async def get_conversation_list(self, limit: int = 10) -> List[Conversation]:
         """
@@ -382,7 +408,7 @@ class ChatService:
         彻底删除Redis中的会话数据：包含检查点+历史状态+索引
         """
         try:
-
+            await self.state_saver.delete_thread(session_id)
             # langgraph新版本 删除会话 adelete_thread
             await self.checkpointer.adelete_thread(
                 thread_id=session_id,
@@ -445,8 +471,34 @@ class ChatService:
         backtrack_config = {"configurable": {"thread_id": session_id, "checkpoint_id":checkpoint_id}}
 
         try:
+            checkpoints = await self.state_saver.get_checkpoints(session_id)
+
+            if not checkpoints:
+                self.logger.error(f"会话不存在(session_id:{session_id})")
+                return False
+
+            target_index = -1
+            checkpoints.reverse()
+            # 一般都是回溯到上一个会话，就不用优化算法了
+            for i, cp in enumerate(checkpoints):
+                if cp["checkpoint_id"] == checkpoint_id:
+                    target_index = i
+                    break
+
+            if target_index != 0:
+                checkpoints_to_del = checkpoints[:target_index]
+
+                for cp in checkpoints_to_del:
+                    await self.state_saver.delete_checkpoint(session_id, cp["checkpoint_id"])
+                    cp_id_to_del = cp["checkpoint_id"]
+                    if cp_id_to_del:
+                        await self.state_saver.delete_checkpoint(thread_id=session_id, checkpoint_id=cp_id_to_del)
+
             backtrack_state = await self.graph.aget_state(config=backtrack_config)
+
             await self.graph.aupdate_state(config=backtrack_config, values=backtrack_state.values)
+
+            self.logger.info(f"会话回溯成功(session_id:{session_id}, checkpoint_id:{checkpoint_id})")
 
             return True
 

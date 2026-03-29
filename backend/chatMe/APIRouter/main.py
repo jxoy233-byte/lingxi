@@ -169,7 +169,7 @@ async def get_file_config():
     - 最大文件大小限制
     - 支持的文件类型（图片、文本、文档）
     """
-    return chat_service.get_file_config()
+    return await chat_service.get_file_config()
 
 
 @chatMe_app.post("/{session_id}/backtrack", summary="会话回溯")

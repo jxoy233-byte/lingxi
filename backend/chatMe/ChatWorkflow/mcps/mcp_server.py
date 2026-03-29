@@ -1,16 +1,23 @@
+from shutil import which
+from typing import Any, Annotated,Literal
+
 from fastmcp import FastMCP
 import subprocess
 import tempfile
 import os
-import json
 import platform
 import re
 import sys
 
+import chardet
+
+from chatMe.logging_config import get_logger
+
 server = FastMCP(name="ChatMe Agent Skills", )
 
+logger = get_logger("mcp_server")
 
-def is_dangerous_command(command: str) -> tuple[bool, str]:
+def is_dangerous_command(command: Annotated[ str, "系统执行命令"]) -> tuple[bool, str]:
     """
     检测命令是否危险
     返回：(是否危险，危险原因)
@@ -115,9 +122,8 @@ def is_dangerous_command(command: str) -> tuple[bool, str]:
 
     return False, ""
 
-
 @server.tool
-def execute_code(code: str, language: str = "python") -> str:
+def execute_code(code: str, language: Literal["python", "nodejs", "javascript", "js"] = "python") -> str:
     """在沙盒中执行代码"""
     try:
         venv_path = os.path.dirname(sys.executable)
@@ -127,31 +133,57 @@ def execute_code(code: str, language: str = "python") -> str:
         # 确保虚拟环境路径在最前面
         if not current_path.startswith(venv_path):
             env['PATH'] = f"{venv_path}:{current_path}"
+        skills_dir = os.path.join(os.path.dirname(__file__), 'skills')
 
         if language == "python":
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False,dir=skills_dir) as f:
                 f.write(code)
                 temp_file = f.name
 
-            result = subprocess.run(
-                ["python", temp_file],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                env=env,
-            )
-            
-            os.unlink(temp_file)
-            
-            return f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n\nReturn code: {result.returncode}"
-        else:
-            return f"Unsupported language: {language}"
+            try:
+                result = subprocess.run(
+                    ["python", temp_file],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    env=env,
+                )
+
+                logger.info(f"执行{language}代码成功")
+                return f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n\nReturn code: {result.returncode}"
+            finally:
+                os.unlink(temp_file)
+
+        elif language in ["nodejs", "javascript", "js"]:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.js', delete=False, dir=skills_dir) as f:
+                f.write(code)
+                temp_file = f.name
+
+            try:
+                node_cmd = which("node")
+                if not node_cmd:
+                    logger.error("Error: Node.js 未找到")
+                    return "Error: Node.js 未找到"
+
+                result = subprocess.run(
+                    [node_cmd, temp_file],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    env=env,
+                )
+
+                logger.info(f"执行{language}代码成功")
+                return f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n\nReturn code: {result.returncode}"
+            finally:
+                os.unlink(temp_file)
     except Exception as e:
-        return f"Error: {str(e)}"
+        logger.error(f"错误执行代码: {str(e)}")
+        return f"Error: {str(e)} "
 
 
 @server.tool
-def execute_command(command: str, timeout: int = 30) -> str:
+def execute_command(command: Annotated[ str, "系统执行命令"], timeout: int = 30) -> str:
     """在安全的沙盒环境中执行终端命令"""
     is_dangerous, reason = is_dangerous_command(command=command)
     if is_dangerous:
@@ -182,62 +214,42 @@ def execute_command(command: str, timeout: int = 30) -> str:
     except Exception as e:
         return f"Error: {str(e)}"
 
-@server.tool
-def list_skills() -> str:
-    """列出所有可用的技能"""
-    skills_dir = os.path.join(os.path.dirname(__file__), 'skills')
-    print(skills_dir)
-    skills = []
-    
-    if os.path.exists(skills_dir):
-        for file in os.listdir(skills_dir):
-            if file.endswith('.py') and file != '__init__.py':
-                skills.append(file[:-3])
-    
-    return json.dumps({"skills": skills})
-
 @server.tool    
-def read_skill_file(skill_name: str) -> str:
+def read_skill_file(skill: Annotated[str, "技能文件名称"]) -> str:
     """读取技能文件内容"""
     skills_dir = os.path.join(os.path.dirname(__file__), 'skills')
-    skill_file = os.path.join(skills_dir, f"{skill_name}.py")
+    skill_file = os.path.join(skills_dir, skill)
     
     if os.path.exists(skill_file):
         with open(skill_file, 'r', encoding='utf-8') as f:
+            logger.info(f"读取技能文件成功: {skill}")
             return f.read()
     else:
-        return f"Skill file not found: {skill_name}"
+        logger.error(f"未找到技能文件: {skill}")
+        return f"未找到技能文件: {skill}"
+
 
 @server.tool
-def create_skill(skill_name: str, content: str) -> str:
-    """创建新的技能文件"""
+def get_skills_overview() -> str:
+    """获取ai可以技能的使用指南概括"""
+    skills_md = ["skills", "Skills", "SKILLS"]
     skills_dir = os.path.join(os.path.dirname(__file__), 'skills')
-    if not os.path.exists(skills_dir):
-        os.makedirs(skills_dir)
-    
-    skill_file = os.path.join(skills_dir, f"{skill_name}.py")
-    
-    try:
-        with open(skill_file, 'w', encoding='utf-8') as f:
-            f.write(content)
-        return f"Skill created successfully: {skill_name}"
-    except Exception as e:
-        return f"Error creating skill: {str(e)}"
+    skill_file = Any
+    for name in skills_md:
+        skill_file = os.path.join(skills_dir, f"{name}.md")
+        break
 
-@server.tool        
-def delete_skill(skill_name: str) -> str:
-    """删除技能文件"""
-    skills_dir = os.path.join(os.path.dirname(__file__), 'skills')
-    skill_file = os.path.join(skills_dir, f"{skill_name}.py")
-    
     if os.path.exists(skill_file):
-        try:
-            os.unlink(skill_file)
-            return f"Skill deleted successfully: {skill_name}"
-        except Exception as e:
-            return f"Error deleting skill: {str(e)}"
+        with open(skill_file, 'rb') as f:
+            raw_data = f.read(10000)
+            result = chardet.detect(raw_data)
+            detected_encoding = result['encoding'] or 'utf-8'
+
+        with open(skill_file, 'r', encoding=detected_encoding) as f:
+            return f.read()
     else:
-        return f"Skill file not found: {skill_name}"
+        return f"技能概括文件没有找到"
+
 
 if __name__ == "__main__":
     server.run(host="127.0.0.1", port=18080, transport="streamable-http", path="/streamable")

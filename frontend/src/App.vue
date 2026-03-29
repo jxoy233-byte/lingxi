@@ -15,13 +15,17 @@
       <main class="chat-area">
         <ChatHeader
           :is-dark-theme="isDarkTheme"
+          :has-session="!!currentSessionId"
           @toggle-theme="toggleTheme"
+          @toggle-checkpoints="toggleCheckpoints"
         />
 
         <MessageList
           ref="messageList"
           :messages="messages"
           :is-loading="isLoading"
+          @restore="restoreCheckpoint"
+          @open-link="openWebPreview"
         />
 
         <MessageInput
@@ -29,6 +33,34 @@
           @send="sendMessage"
         />
       </main>
+
+      <CheckpointPanel
+        :visible="showCheckpoints"
+        :messages="messages"
+        @close="showCheckpoints = false"
+        @restore="restoreCheckpoint"
+      />
+
+      <WebPreviewPanel
+        :visible="showWebPreview"
+        :url="webPreviewUrl"
+        @close="showWebPreview = false"
+        @resizing="isResizingWebPreview = $event"
+      />
+
+      <!-- 点击空白区域关闭网页预览面板 -->
+      <div
+        v-if="showWebPreview && !isResizingWebPreview"
+        class="web-preview-overlay"
+        @click="showWebPreview = false"
+      />
+
+      <!-- 点击空白区域关闭历史记录面板 -->
+      <div
+        v-if="showCheckpoints"
+        class="checkpoint-overlay"
+        @click="showCheckpoints = false"
+      />
     </div>
 
     <ConfirmDialog
@@ -40,6 +72,16 @@
       @confirm="confirmDelete"
       @cancel="cancelDelete"
     />
+
+    <ConfirmDialog
+      :visible="showRestoreConfirm"
+      title="恢复历史版本"
+      message="恢复到此版本后，之后的消息将被删除，确定要继续吗？"
+      confirm-text="确定恢复"
+      cancel-text="取消"
+      @confirm="confirmRestore"
+      @cancel="cancelRestore"
+    />
   </div>
 </template>
 
@@ -49,6 +91,8 @@ import ChatHeader from './components/ChatHeader.vue'
 import MessageList from './components/MessageList.vue'
 import MessageInput from './components/MessageInput.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
+import CheckpointPanel from './components/CheckpointPanel.vue'
+import WebPreviewPanel from './components/WebPreviewPanel.vue'
 
 export default {
   name: 'App',
@@ -57,7 +101,9 @@ export default {
     ChatHeader,
     MessageList,
     MessageInput,
-    ConfirmDialog
+    ConfirmDialog,
+    CheckpointPanel,
+    WebPreviewPanel
   },
   data() {
     return {
@@ -69,6 +115,12 @@ export default {
       isLoading: false,
       showDeleteConfirm: false,
       deleteTargetId: null,
+      showCheckpoints: false,
+      showRestoreConfirm: false,
+      restoreTargetId: null,
+      showWebPreview: false,
+      webPreviewUrl: '',
+      isResizingWebPreview: false,
       responseStartTime: null,
       responseTimerInterval: null,
       currentResponseTime: 0,
@@ -107,6 +159,63 @@ export default {
     toggleSidebar() {
       this.sidebarCollapsed = !this.sidebarCollapsed
     },
+    toggleCheckpoints() {
+      this.showCheckpoints = !this.showCheckpoints
+    },
+    openWebPreview(url) {
+      this.webPreviewUrl = url
+      this.showWebPreview = true
+    },
+    async restoreCheckpoint(checkpointId) {
+      this.restoreTargetId = checkpointId
+      this.showRestoreConfirm = true
+    },
+    async confirmRestore() {
+      if (!this.restoreTargetId || !this.currentSessionId) return
+
+      try {
+        const response = await fetch(`/chat/${this.currentSessionId}/backtrack`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            backtrack_id: this.restoreTargetId
+          })
+        })
+
+        if (response.ok) {
+          // 重新加载对话界面
+          await this.loadConversation(this.currentSessionId)
+          this.showCheckpoints = false
+
+          // 回溯后重新生成标题（取当前对话第一条用户消息前6个字）
+          const firstUserMsg = this.messages.find(m => m.role === 'user')
+          if (firstUserMsg && firstUserMsg.content) {
+            const title = firstUserMsg.content.substring(0, 6) + (firstUserMsg.content.length > 6 ? '...' : '')
+            await fetch(`/chat/${this.currentSessionId}/title`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ title })
+            })
+            // 同步侧边栏标题
+            const conv = this.conversations.find(c => c.session_id === this.currentSessionId)
+            if (conv) conv.title = title
+          }
+        } else {
+          console.error('恢复检查点失败')
+        }
+      } catch (error) {
+        console.error('恢复检查点失败:', error)
+      } finally {
+        this.showRestoreConfirm = false
+        this.restoreTargetId = null
+      }
+    },
+    cancelRestore() {
+      this.showRestoreConfirm = false
+      this.restoreTargetId = null
+    },
     async loadConversations() {
       try {
         const response = await fetch('/chat/conversations?limit=50')
@@ -144,6 +253,21 @@ export default {
         }
       } catch (error) {
         console.error('加载对话失败:', error)
+      }
+    },
+
+    // 静默刷新消息内容，不触发自动滚动（用于对话结束后同步 checkpointId）
+    async refreshMessagesOnly() {
+      if (!this.currentSessionId) return
+      try {
+        const response = await fetch(`/chat/${this.currentSessionId}/conversation`)
+        if (response.ok) {
+          const conversation = await response.json()
+          this.$refs.messageList?.suppressNextScroll()
+          this.messages = this.processConversationMessages(conversation.messages)
+        }
+      } catch (error) {
+        console.error('刷新消息失败:', error)
       }
     },
     async deleteConversation(sessionId) {
@@ -337,7 +461,8 @@ export default {
                   toolCalls: this.messages[aiMessageIndex].toolCalls,
                   thinkingDone: true,
                   streaming: false,
-                  responseTime: responseTime
+                  responseTime: responseTime,
+                  checkpointId: data.checkpoint_id || null
                 }
 
                 // 处理新会话 ID
@@ -355,6 +480,8 @@ export default {
 
                 if (this.currentSessionId) {
                   this.updateConversationTime()
+                  // 对话结束后静默刷新，同步后端最新 checkpointId，不触发滚动
+                  this.refreshMessagesOnly()
                 }
               } else if (data.type === 'error') {
                 console.error('AI响应错误:', data.error)
@@ -543,7 +670,8 @@ export default {
             reasoning: '',
             toolCalls: [],
             thinkingDone: true,
-            streaming: false
+            streaming: false,
+            checkpointId: null  // 添加 checkpoint_id 字段
           }
 
           // 配对队列：AIMessage 推入工具名/参数，ToolMessage 填入结果
@@ -562,6 +690,10 @@ export default {
                   .filter(c => c.type === 'text')
                   .map(c => c.text || '')
                   .join('\n')
+              }
+              // 提取 checkpoint_id
+              if (aiMsg.additional_kwargs?.checkpoint_id) {
+                aiTurn.checkpointId = aiMsg.additional_kwargs.checkpoint_id
               }
             } else if (msgType === 'REASONING') {
               if (isTool) {
@@ -629,18 +761,18 @@ export default {
 
 <style>
 :root {
-  --bg-primary: #ffffff;
-  --bg-secondary: #f7f7f8;
-  --bg-hover: #ececf1;
+  --bg-primary: #f5f5f5;
+  --bg-secondary: #e8e8e8;
+  --bg-hover: #dcdcdc;
   --text-primary: #1a1a1a;
   --text-secondary: #6e6e80;
-  --border-color: #e5e5e5;
-  --user-msg-bg: #f7f7f8;
-  --ai-msg-bg: #ffffff;
+  --border-color: #d0d0d0;
+  --user-msg-bg: #e8e8e8;
+  --ai-msg-bg: #f5f5f5;
   --button-bg: #10a37f;
   --button-hover: #0d8c6d;
-  --sidebar-bg: #ffffff;
-  --header-bg: #ffffff;
+  --sidebar-bg: #f5f5f5;
+  --header-bg: #f5f5f5;
 }
 
 .dark-theme {
@@ -689,6 +821,18 @@ body {
   display: flex;
   flex-direction: column;
   background-color: var(--bg-primary);
+}
+
+.checkpoint-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 99;
+}
+
+.web-preview-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 99;
 }
 
 ::-webkit-scrollbar {

@@ -9,6 +9,8 @@
       v-for="(msg, index) in messages"
       :key="index"
       :message="msg"
+      @restore="$emit('restore', $event)"
+      @open-link="$emit('open-link', $event)"
     />
 
   <div v-if="isLoading" class="message ai-message">
@@ -41,6 +43,7 @@ export default {
       default: false
     }
   },
+  emits: ['restore', 'open-link'],
   data() {
     return {
       userInterrupted: false,   // 用户主动介入，打断自动滚动
@@ -65,6 +68,11 @@ export default {
 
         this.smoothScroll(container, container.scrollTop + distance, duration)
       })
+    },
+
+    // 静默刷新消息，不触发自动滚动
+    suppressNextScroll() {
+      this._suppressScroll = true
     },
 
     smoothScroll(container, targetTop, duration) {
@@ -122,6 +130,10 @@ export default {
   watch: {
     messages: {
       handler() {
+        if (this._suppressScroll) {
+          this._suppressScroll = false
+          return
+        }
         if (!this.userInterrupted) {
           this.scrollToBottom()
         }

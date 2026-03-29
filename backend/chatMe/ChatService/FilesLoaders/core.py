@@ -25,9 +25,10 @@ class FilesLoaders:
         "有文件传输时带字段file_name,file_type,file_size,file_content,传输失败则增加error字段"
     ]
 
+    logger = get_logger("FilesLoader")
+
     def __init__(self, processing_files :list[UploadFile] | None):
         self.processing_files = processing_files
-        self.logger = get_logger(__class__.__name__)
 
     async def cleanup(self):
         """异步清理资源"""

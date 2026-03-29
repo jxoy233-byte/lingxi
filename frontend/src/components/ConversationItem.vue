@@ -7,8 +7,9 @@
       class="conv-title"
       @dblclick.stop="startEdit"
       v-if="!isEditing"
+      :title="conversation.title"
     >
-      {{ conversation.title }}
+      {{ truncatedTitle }}
     </div>
     <input
       v-else
@@ -47,6 +48,10 @@ export default {
     }
   },
   computed: {
+    truncatedTitle() {
+      const title = this.conversation.title || ''
+      return title.length > 10 ? title.substring(0, 10) + '...' : title
+    },
     formattedTime() {
       if (!this.conversation.updated_at) return ''
 

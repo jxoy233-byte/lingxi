@@ -45,7 +45,7 @@ AI 必须：
 
 Exa 是一个语义搜索引擎
 
-**文件路径**: `exa.py`  
+**文件路径**: `Exa.py`  
 **类型**: 搜索 / 信息检索  
 **能力**: 语义搜索 + 相似内容发现
 **描述**: 含有exa_search()和exa_find_similar()的两个功能模块
@@ -56,7 +56,7 @@ Exa 是一个语义搜索引擎
 
 获取当前时间和日期的工具
 
-**文件路径**: `datetime_tool.py`  
+**文件路径**: `DateTime.py`  
 **类型**: 系统工具 / 时间服务  
 **能力**: 获取实时时间、日期、星期等信息
 **描述**: 提供 get_current_datetime()、get_formatted_date()、get_formatted_time() 三个函数

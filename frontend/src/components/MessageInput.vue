@@ -216,6 +216,11 @@ export default {
     },
 
     handleEnterKey(e) {
+      // 如果正在输入法输入中（如拼音、日文等），不处理 Enter
+      if (e.isComposing || e.keyCode === 229) {
+        return
+      }
+
       // Ctrl+Enter 换行，Enter 发送
       if (e.ctrlKey) {
         // Ctrl+Enter: 插入换行符

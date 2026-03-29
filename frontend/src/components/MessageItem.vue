@@ -1,6 +1,7 @@
 <template>
   <div :class="['message', message.role === 'user' ? 'user-message' : 'ai-message']">
-    <div class="message-content">
+    <div :class="['message-wrapper', message.role === 'user' ? 'user-wrapper' : 'ai-wrapper']">
+      <div class="message-content">
       <!-- 文件附件显示 -->
       <div v-if="message.files && message.files.length > 0" class="message-files">
         <div
@@ -102,23 +103,7 @@
       </div>
 
       <!-- 消息文本 -->
-      <div v-if="message.content" class="message-text" v-html="renderedContent"></div>
-
-      <!-- 复制按钮 -->
-      <button
-        v-if="message.role === 'ai' && message.content"
-        class="copy-button"
-        @click="copyMessage"
-        :title="copied ? '已复制' : '复制'"
-      >
-        <svg v-if="!copied" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
-          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-        </svg>
-        <svg v-else xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <polyline points="20 6 9 17 4 12"/>
-        </svg>
-      </button>
+      <div v-if="message.content" class="message-text" v-html="renderedContent" @click.capture="handleLinkClick"></div>
 
       <!-- 响应时间显示 -->
       <div v-if="message.role === 'ai' && message.responseTime" class="response-time" :class="{ 'time-live': message.streaming !== false }">
@@ -128,6 +113,35 @@
         </svg>
         {{ formatResponseTime(message.responseTime) }}
       </div>
+    </div>
+
+    <!-- 操作按钮组：气泡外，仅 AI 消息 -->
+    <div v-if="message.role === 'ai' && message.content && !message.streaming" class="action-buttons">
+      <button
+        v-if="message.checkpointId"
+        class="action-button"
+        @click="handleRestore"
+        title="回溯到此对话"
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="1 4 1 10 7 10"/>
+          <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
+        </svg>
+      </button>
+      <button
+        class="action-button"
+        @click="copyMessage"
+        :title="copied ? '已复制' : '复制'"
+      >
+        <svg v-if="!copied" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+        </svg>
+        <svg v-else xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="20 6 9 17 4 12"/>
+        </svg>
+      </button>
+    </div>
     </div>
 
     <!-- 文件预览模态框 -->
@@ -170,6 +184,7 @@ export default {
       required: true
     }
   },
+  emits: ['restore', 'open-link'],
   data() {
     return {
       copied: false,
@@ -239,6 +254,21 @@ export default {
         }, 2000)
       } catch (err) {
         console.error('复制失败:', err)
+      }
+    },
+
+    handleLinkClick(e) {
+      const anchor = e.target.closest('a')
+      if (!anchor) return
+      const href = anchor.getAttribute('href')
+      if (!href || !href.startsWith('http')) return
+      e.preventDefault()
+      this.$emit('open-link', href)
+    },
+
+    handleRestore() {
+      if (this.message.checkpointId) {
+        this.$emit('restore', this.message.checkpointId)
       }
     },
 
@@ -319,20 +349,35 @@ export default {
 <style scoped>
 .message {
   display: flex;
-  margin-bottom: 24px;
+  flex-direction: column;
+  margin-bottom: 8px;
   width: 100%;
 }
 
 .user-message {
-  justify-content: flex-end;
+  align-items: flex-end;
 }
 
 .ai-message {
-  justify-content: flex-start;
+  align-items: flex-start;
+}
+
+/* wrapper 包裹气泡 + 按钮组，hover 时触发按钮显示 */
+.message-wrapper {
+  display: flex;
+  flex-direction: column;
+  max-width: 75%;
+}
+
+.user-wrapper {
+  align-items: flex-end;
+}
+
+.ai-wrapper {
+  align-items: flex-start;
 }
 
 .message-content {
-  max-width: 75%;
   padding: 12px 16px;
   border-radius: 14px;
   position: relative;
@@ -595,43 +640,42 @@ export default {
   margin: 12px 0;
 }
 
-/* 复制按钮 */
-.copy-button {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  width: 32px;
-  height: 32px;
+/* 操作按钮组：气泡下方，hover 时显示 */
+.action-buttons {
+  display: flex;
+  gap: 2px;
+  padding: 2px 4px;
+  margin-top: 2px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.ai-wrapper:hover .action-buttons,
+.action-buttons:hover {
+  opacity: 1;
+}
+
+.action-button {
+  width: 26px;
+  height: 26px;
   border: none;
-  background: var(--bg-secondary);
+  background: transparent;
   color: var(--text-secondary);
-  border-radius: 6px;
+  border-radius: 5px;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  opacity: 0;
-  transition: all 0.2s;
+  transition: background 0.15s, color 0.15s;
 }
 
-.message-content:hover .copy-button {
-  opacity: 1;
-}
-
-.copy-button:hover {
+.action-button:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
 }
 
-.copy-button:active {
-  transform: scale(0.95);
-}
-
 /* 响应时间样式 */
 .response-time {
-  position: absolute;
-  bottom: 8px;
-  right: 12px;
   font-size: 11px;
   color: var(--text-secondary);
   opacity: 0.55;
@@ -641,6 +685,8 @@ export default {
   gap: 4px;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.02em;
+  padding: 2px 4px;
+  margin-top: 2px;
 }
 
 .response-time.time-live {

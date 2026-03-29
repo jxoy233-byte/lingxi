@@ -78,6 +78,7 @@
         v-model="inputText"
         @keydown.enter="handleEnterKey"
         @input="autoResize"
+        @paste="handlePaste"
         placeholder="输入消息..."
         rows="1"
         ref="textarea"
@@ -215,6 +216,24 @@ export default {
       }
     },
 
+    handlePaste(e) {
+      const items = e.clipboardData?.items
+      if (!items) return
+
+      const files = []
+      for (const item of items) {
+        if (item.kind === 'file') {
+          const file = item.getAsFile()
+          if (file) files.push(file)
+        }
+      }
+
+      if (files.length > 0) {
+        e.preventDefault()
+        this.addFiles(files)
+      }
+    },
+
     handleEnterKey(e) {
       // 如果正在输入法输入中（如拼音、日文等），不处理 Enter
       if (e.isComposing || e.keyCode === 229) {
@@ -247,12 +266,13 @@ export default {
       const textarea = this.$refs.textarea
       if (!textarea) return
 
-      // 重置高度以获取正确的 scrollHeight
+      // 先隐藏滚动条再测量，避免滚动条宽度变化引起的抖动
+      textarea.style.overflowY = 'hidden'
       textarea.style.height = 'auto'
-
-      // 设置新高度，最小52px，最大200px
       const newHeight = Math.min(Math.max(textarea.scrollHeight, 52), 200)
       textarea.style.height = newHeight + 'px'
+      // 达到最大高度才显示滚动条
+      textarea.style.overflowY = newHeight >= 200 ? 'auto' : 'hidden'
     },
 
     handleSend() {
@@ -473,14 +493,14 @@ export default {
 <style scoped>
 .input-area {
   position: relative;
-  padding: 20px;
+  padding: 16px;
   background-color: var(--bg-primary);
   border-top: 1px solid var(--border-color);
 }
 
 /* 文件列表容器 - 横向紧凑布局 */
 .file-list-container {
-  max-width: 800px;
+  max-width: 900px;
   margin: 0 auto 12px;
   overflow: hidden;
 }
@@ -613,7 +633,7 @@ export default {
 
 /* 输入区域 */
 .input-wrapper {
-  max-width: 800px;
+  max-width: 900px;
   margin: 0 auto;
   display: flex;
   gap: 12px;
@@ -747,7 +767,7 @@ export default {
   resize: none;
   outline: none;
   transition: border-color 0.2s;
-  overflow-y: auto;
+  overflow-y: hidden;
   line-height: 1.5;
   scrollbar-width: thin;
   scrollbar-color: rgba(0, 0, 0, 0.1) transparent;

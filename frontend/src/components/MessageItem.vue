@@ -115,7 +115,7 @@
       </div>
     </div>
 
-    <!-- 操作按钮组：气泡外，仅 AI 消息 -->
+    <!-- 操作按钮组：AI 消息文本下方，hover 显示 -->
     <div v-if="message.role === 'ai' && message.content && !message.streaming" class="action-buttons">
       <button
         v-if="message.checkpointId"
@@ -123,7 +123,7 @@
         @click="handleRestore"
         title="回溯到此对话"
       >
-        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="1 4 1 10 7 10"/>
           <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
         </svg>
@@ -133,11 +133,11 @@
         @click="copyMessage"
         :title="copied ? '已复制' : '复制'"
       >
-        <svg v-if="!copied" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <svg v-if="!copied" xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
           <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
         </svg>
-        <svg v-else xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <svg v-else xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="20 6 9 17 4 12"/>
         </svg>
       </button>
@@ -242,7 +242,7 @@ export default {
     escapeHtml(text) {
       const div = document.createElement('div')
       div.textContent = text
-      return div.innerHTML.replace(/\n/g, '<br>')
+      return div.innerHTML
     },
 
     async copyMessage() {
@@ -350,7 +350,7 @@ export default {
 .message {
   display: flex;
   flex-direction: column;
-  margin-bottom: 8px;
+  margin-bottom: 28px;
   width: 100%;
 }
 
@@ -362,35 +362,41 @@ export default {
   align-items: flex-start;
 }
 
-/* wrapper 包裹气泡 + 按钮组，hover 时触发按钮显示 */
-.message-wrapper {
+/* AI wrapper：全宽，无气泡 */
+.ai-wrapper {
   display: flex;
   flex-direction: column;
-  max-width: 75%;
-}
-
-.user-wrapper {
-  align-items: flex-end;
-}
-
-.ai-wrapper {
+  width: 100%;
   align-items: flex-start;
 }
 
+/* User wrapper：右对齐，收缩气泡 */
+.user-wrapper {
+  display: flex;
+  flex-direction: column;
+  max-width: 68%;
+  align-items: flex-end;
+}
+
 .message-content {
-  padding: 12px 16px;
-  border-radius: 14px;
+  border-radius: 16px;
   position: relative;
 }
 
+/* AI：无气泡 */
 .ai-message .message-content {
-  background-color: var(--ai-msg-bg);
-  border: 1px solid var(--border-color);
+  background: transparent;
+  border: none;
+  padding: 0;
 }
 
+/* User：圆角气泡 */
 .user-message .message-content {
   background-color: var(--user-msg-bg);
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--user-msg-border);
+  padding: 10px 14px;
+  width: fit-content;
+  max-width: 100%;
 }
 
 /* 文件附件样式 */
@@ -483,6 +489,10 @@ export default {
   line-height: 1.7;
   word-wrap: break-word;
   font-size: 15px;
+}
+
+.user-message .message-text {
+  white-space: pre-wrap;
 }
 
 /* Markdown 样式 */
@@ -640,12 +650,11 @@ export default {
   margin: 12px 0;
 }
 
-/* 操作按钮组：气泡下方，hover 时显示 */
+/* 操作按钮组：AI 文本下方，hover 显示 */
 .action-buttons {
   display: flex;
-  gap: 2px;
-  padding: 2px 4px;
-  margin-top: 2px;
+  gap: 1px;
+  margin-top: 4px;
   opacity: 0;
   transition: opacity 0.15s ease;
 }
@@ -685,8 +694,7 @@ export default {
   gap: 4px;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.02em;
-  padding: 2px 4px;
-  margin-top: 2px;
+  margin-top: 6px;
 }
 
 .response-time.time-live {

@@ -761,33 +761,35 @@ export default {
 
 <style>
 :root {
-  --bg-primary: #f5f5f5;
-  --bg-secondary: #e8e8e8;
-  --bg-hover: #dcdcdc;
+  --bg-primary: #ffffff;
+  --bg-secondary: #f0f0f0;
+  --bg-hover: #e8e8e8;
   --text-primary: #1a1a1a;
-  --text-secondary: #6e6e80;
-  --border-color: #d0d0d0;
-  --user-msg-bg: #e8e8e8;
-  --ai-msg-bg: #f5f5f5;
+  --text-secondary: #6b7280;
+  --border-color: #e5e5e5;
+  --user-msg-bg: #ececec;
+  --user-msg-border: #e0e0e0;
+  --ai-msg-bg: transparent;
   --button-bg: #10a37f;
   --button-hover: #0d8c6d;
-  --sidebar-bg: #f5f5f5;
-  --header-bg: #f5f5f5;
+  --sidebar-bg: #f7f7f8;
+  --header-bg: #ffffff;
 }
 
 .dark-theme {
-  --bg-primary: #1a1a1a;
-  --bg-secondary: #2d2d2d;
-  --bg-hover: #3d3d3d;
+  --bg-primary: #212121;
+  --bg-secondary: #2a2a2a;
+  --bg-hover: #383838;
   --text-primary: #ececec;
-  --text-secondary: #b4b4b4;
-  --border-color: #3d3d3d;
+  --text-secondary: #9ca3af;
+  --border-color: #363636;
   --user-msg-bg: #2d2d2d;
-  --ai-msg-bg: #1a1a1a;
+  --user-msg-border: #404040;
+  --ai-msg-bg: transparent;
   --button-bg: #10a37f;
   --button-hover: #0d8c6d;
-  --sidebar-bg: #0a0a0a;
-  --header-bg: #2d2d2d;
+  --sidebar-bg: #171717;
+  --header-bg: #212121;
 }
 
 * {

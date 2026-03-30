@@ -435,7 +435,7 @@ class ChatService:
 
             # 面对langgraph对更新state的限制所制作的*神秘代码*
             new_msg = None
-            if state.values["messages"][-1]:
+            if state.values["messages"][1]:
                 for msg in state.values["messages"]:
                     if isinstance(msg, AIMessage):
                         msg.additional_kwargs["title"] = new_title.strip()

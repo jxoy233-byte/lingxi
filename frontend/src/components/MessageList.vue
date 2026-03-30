@@ -171,12 +171,14 @@ export default {
 .messages-container {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .messages-column {
   max-width: 900px;
   margin: 0 auto;
   padding: 32px 16px 16px;
+  min-width: 0;
 }
 
 .welcome-message {

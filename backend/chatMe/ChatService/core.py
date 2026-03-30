@@ -2,7 +2,7 @@ import json
 import traceback
 import uuid
 from datetime import datetime
-from typing import AsyncGenerator, Set, List, Any
+from typing import AsyncGenerator, Set, List, Any, Optional
 
 from fastapi import UploadFile
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
@@ -102,14 +102,14 @@ class ChatService:
 
         return images_content, text_content, doc_content, file_list
 
-    async def _save_round_checkpoint(self, session_id: str):
+    async def _save_round_checkpoint(self, session_id: str)-> Optional[str]:
         """
         获取指定会话的所有 checkpoint_id 列表
         :param session_id: 会话 ID (thread_id)
 
         更新状态使得带有对应的checkpoint_id在最后一条SUMMARY的AI消息
 
-        :return 修改成功的状态:True/False
+        :return 保存成功返回对应session_id
         """
         try:
             config = {"configurable": {"thread_id": session_id}}
@@ -131,11 +131,11 @@ class ChatService:
                         config=config,
                         values=state.values,  # 把修改后的完整state值更新回去
                     )
-                    return True
+                    return session_id
 
         except Exception as e:
             self.logger.error(f"保存每轮检查点失败(session_id:{session_id}): {str(e)}")
-            return False
+            return None
 
 
 
@@ -222,6 +222,8 @@ class ChatService:
                     # 最终返回的chunk
                     if chunk['metadata']['langgraph_node'] and chunk['metadata']['langgraph_node'] == 'final_node':
                         content = chunk['data']['chunk'].content
+                        if not isinstance(content, str):
+                            content = str(content)
                         full_response += content
                         yield json.dumps(
                             {"type": "content", "content": content},
@@ -230,6 +232,8 @@ class ChatService:
                         ) + "\n\n"
                     elif chunk['metadata']['langgraph_node'] and chunk['metadata']['langgraph_node'] == 'agent_node':
                         content = chunk['data']['chunk'].content
+                        if not isinstance(content, str):
+                            content = str(content)
                         yield json.dumps(
                             {"type": "reasoning", "content": content},
                             ensure_ascii=False,
@@ -274,13 +278,14 @@ class ChatService:
                 default=str
             ) + "\n\n"
 
-        await self._save_round_checkpoint(session_id)
+        session_id = await self._save_round_checkpoint(session_id)
 
         # 返回最终完整结果
         yield json.dumps({
             "type": "done",
             "full_response": full_response,
-            "session_id": session_id
+            "session_id": session_id,
+            "checkpoint_id": session_id,
         }) + "\n\n"
 
 
@@ -299,6 +304,7 @@ class ChatService:
 
         try:
             state = await self.graph.aget_state(config=config)
+            print(state)
         except HTTPException as e:
             self.logger.error(f"获取会话状态异常(session_id:{session_id})：{str(e)}")
             return Conversation(session_id=session_id)
@@ -358,7 +364,6 @@ class ChatService:
                         files=None,
                         additional_kwargs={"type": AIMessageType.REASONING.value,"isTool": True} # 与调用工具的AIMessage进行区分
                     ))
-        print(messages_list)
 
         created_at = state.created_at if hasattr(state, "created_at") else datetime.now()
         updated_at = None
@@ -424,13 +429,13 @@ class ChatService:
 
     async def update_conversation_title(self, session_id: str, new_title: str) -> bool:
         """ 修改会话标题，存入会话元数据"""
-        try:
+        try: # todo 一轮对话更新一次title
             config = {"configurable": {"thread_id": session_id}}
             state = await self.graph.aget_state(config=config)
 
             # 面对langgraph对更新state的限制所制作的*神秘代码*
             new_msg = None
-            if state.values["messages"][1]:
+            if state.values["messages"][-1]:
                 for msg in state.values["messages"]:
                     if isinstance(msg, AIMessage):
                         msg.additional_kwargs["title"] = new_title.strip()

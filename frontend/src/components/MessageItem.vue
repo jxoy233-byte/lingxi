@@ -162,9 +162,49 @@ import FilePreviewModal from './FilePreviewModal.vue'
 // 配置 marked
 const renderer = new marked.Renderer()
 renderer.code = function(code, lang) {
-  const language = hljs.getLanguage(lang) ? lang : 'plaintext'
-  const highlighted = hljs.highlight(code, { language }).value
-  return `<pre><code class="hljs ${language}">${highlighted}</code></pre>`
+  // 确保 code 是字符串类型，如果是对象则尝试提取内容
+  if (typeof code !== 'string') {
+    // 如果是对象，尝试 JSON 序列化或提取 text 字段
+    if (code && typeof code === 'object') {
+      if (code.text) {
+        code = String(code.text)
+      } else if (code.content) {
+        code = String(code.content)
+      } else {
+        code = JSON.stringify(code)
+      }
+    } else {
+      code = String(code)
+    }
+  }
+
+  // 处理 lang 参数，确保是字符串
+  if (typeof lang !== 'string') {
+    lang = ''
+  }
+
+  // 去除 infostring 中可能包含的元数据（如 {meta}）
+  const langParts = lang.split(/\s+/)
+  const cleanLang = langParts[0]
+
+  // 检测并获取有效的高亮语言
+  const language = cleanLang && hljs.getLanguage(cleanLang) ? cleanLang : 'plaintext'
+
+  try {
+    // 使用 highlight 方法，传入语言和配置
+    const highlighted = hljs.highlight(code, { language }).value
+    return `<pre><code class="hljs ${language}">${highlighted}</code></pre>`
+  } catch (error) {
+    // 高亮失败时返回纯文本
+    console.warn('代码高亮失败:', error, '语言:', language)
+    const escapedCode = code
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;')
+    return `<pre><code class="hljs">${escapedCode}</code></pre>`
+  }
 }
 
 marked.setOptions({
@@ -199,7 +239,29 @@ export default {
     renderedContent() {
       if (!this.message.content) return ''
       if (this.message.role === 'ai') {
-        return marked(this.message.content)
+        try {
+          // 确保 content 是字符串
+          let content = this.message.content
+          if (typeof content !== 'string') {
+            // 如果是对象，尝试提取内容
+            if (content && typeof content === 'object') {
+              if (content.text) {
+                content = String(content.text)
+              } else if (content.content) {
+                content = String(content.content)
+              } else {
+                content = JSON.stringify(content)
+              }
+            } else {
+              content = String(content)
+            }
+          }
+          return marked(content)
+        } catch (error) {
+          console.error('Markdown 渲染失败:', error, '原始内容:', this.message.content)
+          // 降级处理，直接返回纯文本
+          return this.escapeHtml(String(this.message.content))
+        }
       }
       return this.escapeHtml(this.message.content)
     },
@@ -367,6 +429,7 @@ export default {
   display: flex;
   flex-direction: column;
   width: 100%;
+  min-width: 0;
   align-items: flex-start;
 }
 
@@ -383,11 +446,12 @@ export default {
   position: relative;
 }
 
-/* AI：无气泡 */
+/* AI：无气泡，必须显式填满宽度，否则 pre 的 max-width: 100% 无法正确参照 */
 .ai-message .message-content {
   background: transparent;
   border: none;
   padding: 0;
+  width: 100%;
 }
 
 /* User：圆角气泡 */
@@ -488,7 +552,9 @@ export default {
 .message-text {
   line-height: 1.7;
   word-wrap: break-word;
+  word-break: break-word;
   font-size: 15px;
+  min-width: 0;
 }
 
 .user-message .message-text {
@@ -544,6 +610,8 @@ export default {
   padding: 16px;
   border-radius: 8px;
   overflow-x: auto;
+  max-width: 100%;
+  box-sizing: border-box;
   margin: 16px 0;
   border: 1px solid var(--border-color);
   position: relative;

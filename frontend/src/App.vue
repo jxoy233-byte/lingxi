@@ -474,14 +474,15 @@ export default {
                   }
 
                   if (isNewConversation) {
-                    this.autoGenerateTitle(data.session_id, message)
+                    await this.autoGenerateTitle(data.session_id, message)
                   }
                 }
 
                 if (this.currentSessionId) {
-                  this.updateConversationTime()
                   // 对话结束后静默刷新，同步后端最新 checkpointId，不触发滚动
-                  this.refreshMessagesOnly()
+                  await this.refreshMessagesOnly()
+                  // 刷新对话列表以更新时间和标题
+                  await this.loadConversations()
                 }
               } else if (data.type === 'error') {
                 console.error('AI响应错误:', data.error)
@@ -576,22 +577,8 @@ export default {
       }
     },
     async updateConversationTime() {
-      if (!this.currentSessionId) return
-
-      try {
-        const response = await fetch(`/chat/${this.currentSessionId}/conversation`)
-        if (response.ok) {
-          const conversation = await response.json()
-
-          // 只更新侧边栏中的对话时间
-          const conv = this.conversations.find(c => c.session_id === this.currentSessionId)
-          if (conv && conversation.updated_at) {
-            conv.updated_at = conversation.updated_at
-          }
-        }
-      } catch (error) {
-        console.error('更新对话时间失败:', error)
-      }
+      // 已由 loadConversations() 统一替代，保留以防其他地方调用
+      await this.loadConversations()
     },
     startResponseTimer() {
       this.stopResponseTimer()
@@ -820,6 +807,7 @@ body {
 
 .chat-area {
   flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   background-color: var(--bg-primary);

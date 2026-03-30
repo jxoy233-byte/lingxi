@@ -2,7 +2,7 @@ import json
 import re
 from typing import Optional, Dict, Any, AsyncGenerator
 
-from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import BaseMessage, AIMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
@@ -150,7 +150,6 @@ class ChatWorkflow:
         async def final_node(state: ChatStateCore):
             input_msg = list(state["messages"])
             response = await self.llm_core.ainvoke({"messages": input_msg})
-            print(response.content)
             # AIMessage字段支持解包复制
             response_dict = dict(response)
             response_dict["additional_kwargs"] = {**response.additional_kwargs, "type": AIMessageType.SUMMARY.value}

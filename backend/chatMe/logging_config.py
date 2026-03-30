@@ -3,7 +3,6 @@ from pathlib import Path
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 
-
 def set_logger(
         name: str="ChatMe",
         log_level:int =logging.INFO,

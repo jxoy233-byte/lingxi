@@ -373,7 +373,7 @@ class ChatService:
                     updated_at = msg.additional_kwargs.get("updated_at")
                     break
 
-        title = state.values["messages"][1].additional_kwargs.get("title","新对话")  # 读取你之前更新的真实标题
+        title = state.values["messages"][-1].additional_kwargs.get("title","新对话")  # 读取你之前更新的真实标题
 
         conversations = Conversation(
             session_id=session_id,
@@ -429,24 +429,20 @@ class ChatService:
 
     async def update_conversation_title(self, session_id: str, new_title: str) -> bool:
         """ 修改会话标题，存入会话元数据"""
-        try: # todo 一轮对话更新一次title
+        try:
             config = {"configurable": {"thread_id": session_id}}
             state = await self.graph.aget_state(config=config)
 
             # 面对langgraph对更新state的限制所制作的*神秘代码*
-            new_msg = None
-            if state.values["messages"][1]:
-                for msg in state.values["messages"]:
-                    if isinstance(msg, AIMessage):
-                        msg.additional_kwargs["title"] = new_title.strip()
-                        new_msg = AIMessage(
-                            content=msg.content,
-                            additional_kwargs=msg.additional_kwargs,
-                            response_metadata=msg.response_metadata,
-                            id=msg.id,
-                            usage_metadata = msg.usage_metadata
-                        )
-                        break
+            if msg := state.values["messages"][-1]:
+                msg.additional_kwargs["title"] = new_title.strip()
+                new_msg = AIMessage(
+                    content=msg.content,
+                    additional_kwargs=msg.additional_kwargs,
+                    response_metadata=msg.response_metadata,
+                    id=msg.id,
+                    usage_metadata = msg.usage_metadata
+                )
 
                 state.values["messages"][1] = new_msg
                 # 调用aupdate_state：只传config和values

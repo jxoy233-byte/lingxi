@@ -6,7 +6,7 @@ import uvicorn
 from chatMe.APIRouter.main import chatMe_app, lifespan
 from chatMe.logging_config import set_logger
 
-version = "1.0.3"
+version = "1.0.0"
 app = FastAPI(
     title = "ChatMe",
     description= "use ChatMe to chat with AI with better MEMORY and TOOLS !",

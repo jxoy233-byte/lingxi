@@ -188,20 +188,6 @@ export default {
           // 重新加载对话界面
           await this.loadConversation(this.currentSessionId)
           this.showCheckpoints = false
-
-          // 回溯后重新生成标题（取当前对话第一条用户消息前6个字）
-          const firstUserMsg = this.messages.find(m => m.role === 'user')
-          if (firstUserMsg && firstUserMsg.content) {
-            const title = firstUserMsg.content.substring(0, 6) + (firstUserMsg.content.length > 6 ? '...' : '')
-            await fetch(`/chat/${this.currentSessionId}/title`, {
-              method: 'PUT',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ title })
-            })
-            // 同步侧边栏标题
-            const conv = this.conversations.find(c => c.session_id === this.currentSessionId)
-            if (conv) conv.title = title
-          }
         } else {
           console.error('恢复检查点失败')
         }
@@ -342,7 +328,6 @@ export default {
       this.messages.push(userMessage)
 
       this.isLoading = true
-      const isNewConversation = !this.currentSessionId
 
       // 发送消息时重置打断状态，强制滚到底部
       this.$refs.messageList?.scrollToBottom(true)
@@ -472,17 +457,10 @@ export default {
                   if (this.$route.params.sessionId !== data.session_id) {
                     this.$router.push(`/${data.session_id}`)
                   }
-
-                  if (isNewConversation) {
-                    await this.autoGenerateTitle(data.session_id, message)
-                  }
                 }
 
                 if (this.currentSessionId) {
-                  // 对话结束后静默刷新，同步后端最新 checkpointId，不触发滚动
-                  await this.refreshMessagesOnly()
-                  // 刷新对话列表以更新时间和标题
-                  await this.loadConversations()
+                  await this.updateTitleAndRefresh(this.currentSessionId, message)
                 }
               } else if (data.type === 'error') {
                 console.error('AI响应错误:', data.error)
@@ -533,27 +511,43 @@ export default {
         this.stopResponseTimer()
       }
     },
-    async autoGenerateTitle(sessionId, message) {
-      // 取用户消息前6个字作为标题
-      const title = message.substring(0, 6) + (message.length > 6 ? '...' : '')
-
+    async updateTitleAndRefresh(sessionId, userMessage) {
+      // 1. 用用户消息更新标题
+      const title = userMessage.substring(0, 12) + (userMessage.length > 12 ? '...' : '')
       try {
         await fetch(`/chat/${sessionId}/title`, {
           method: 'PUT',
-          headers: {
-            'Content-Type': 'application/json'
-          },
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ title })
         })
-
-        // 添加新对话到列表
-        this.conversations.unshift({
-          session_id: sessionId,
-          title: title,
-          updated_at: new Date().toISOString()
-        })
       } catch (error) {
-        console.error('自动生成标题失败:', error)
+        console.error('更新标题失败:', error)
+      }
+
+      // 2. 获取最新对话内容（含更新后的标题 + 历史记录）
+      try {
+        const response = await fetch(`/chat/${sessionId}/conversation`)
+        if (response.ok) {
+          const conversation = await response.json()
+          // 静默刷新消息，不触发自动滚动
+          this.$refs.messageList?.suppressNextScroll()
+          this.messages = this.processConversationMessages(conversation.messages)
+          // 同步侧边栏标题和更新时间
+          const conv = this.conversations.find(c => c.session_id === sessionId)
+          if (conv) {
+            conv.title = conversation.title
+            conv.updated_at = conversation.updated_at
+          } else {
+            // 新对话首次出现，插入侧边栏顶部
+            this.conversations.unshift({
+              session_id: sessionId,
+              title: conversation.title,
+              updated_at: conversation.updated_at
+            })
+          }
+        }
+      } catch (error) {
+        console.error('刷新对话失败:', error)
       }
     },
     async refreshCurrentConversation() {

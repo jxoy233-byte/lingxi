@@ -755,6 +755,16 @@ export default {
   --button-hover: #0d8c6d;
   --sidebar-bg: #f7f7f8;
   --header-bg: #ffffff;
+  /* 代码块 */
+  --code-block-bg: #f7f7f8;
+  --code-block-border: rgba(234, 235, 236, 0.9);
+  --code-block-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --code-block-text: #1f2937;
+  --code-inline-bg: rgba(234, 235, 236, 0.6);
+  --code-inline-color: #d6336c;
+  --code-lang-bg: rgba(255, 255, 255, 0.8);
+  --code-lang-border: rgba(220, 222, 224, 0.9);
+  --code-lang-color: #6b7280;
 }
 
 .dark-theme {
@@ -771,6 +781,16 @@ export default {
   --button-hover: #0d8c6d;
   --sidebar-bg: #171717;
   --header-bg: #212121;
+  /* 代码块 - 暗色主题 */
+  --code-block-bg: #141414;
+  --code-block-border: rgba(255, 255, 255, 0.1);
+  --code-block-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
+  --code-block-text: #e5e7eb;
+  --code-inline-bg: rgba(255, 255, 255, 0.06);
+  --code-inline-color: #f472b6;
+  --code-lang-bg: rgba(0, 0, 0, 0.3);
+  --code-lang-border: rgba(255, 255, 255, 0.08);
+  --code-lang-color: #9ca3af;
 }
 
 * {

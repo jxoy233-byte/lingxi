@@ -597,36 +597,57 @@ export default {
 }
 
 .message-text :deep(code) {
-  background: var(--bg-secondary);
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-family: 'SF Mono', 'Fira Code', 'Consolas', 'Courier New', monospace;
-  font-size: 0.88em;
-  color: #e06c75;
+  background: var(--code-inline-bg);
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-family: 'SF Mono', 'Monaco', 'Consolas', 'Courier New', monospace;
+  font-size: 0.85em;
+  color: var(--code-inline-color);
+  font-weight: 400;
 }
 
 .message-text :deep(pre) {
-  background: #282c34;
-  padding: 16px;
-  border-radius: 8px;
+  background: var(--code-block-bg);
+  padding: 16px 20px;
+  border-radius: 12px;
   overflow-x: auto;
-  max-width: 100%;
-  box-sizing: border-box;
   margin: 16px 0;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--code-block-border);
   position: relative;
+  line-height: 1.6;
+  box-shadow: var(--code-block-shadow);
 }
 
 .message-text :deep(pre code) {
   background: transparent;
   padding: 0;
-  color: #abb2bf;
-  font-size: 0.9em;
-  line-height: 1.6;
+  color: var(--code-block-text);
+  font-size: 13.5px;
+  line-height: 1.65;
+  font-weight: 400;
+  font-family: 'SF Mono', 'Monaco', 'Consolas', 'Courier New', monospace;
 }
 
 .message-text :deep(pre code.hljs) {
   background: transparent !important;
+  color: var(--code-block-text);
+}
+
+.message-text :deep(pre[data-language])::before {
+  content: attr(data-language);
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--code-lang-color);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  pointer-events: none;
+  background: var(--code-lang-bg);
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--code-lang-border);
 }
 
 .message-text :deep(ul),

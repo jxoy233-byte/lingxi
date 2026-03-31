@@ -93,6 +93,7 @@
         :disabled="!inputText.trim() || isLoading || isOptimizing"
         :title="isOptimizing ? '优化中...' : '优化输入'"
       >
+
         <svg v-if="!isOptimizing" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="3"/>
           <path d="M12 1v6m0 6v6m5.2-13.2l-4.2 4.2m0 6l4.2 4.2M23 12h-6m-6 0H1m18.2 5.2l-4.2-4.2m0-6l4.2-4.2"/>
@@ -485,7 +486,7 @@ export default {
       const nameWithoutExt = filename.substring(0, filename.length - extension.length)
       const truncatedName = nameWithoutExt.substring(0, maxLength - 3 - extension.length)
       return truncatedName + '...' + extension
-    }
+    },
   }
 }
 </script>
@@ -653,13 +654,11 @@ export default {
   cursor: pointer;
   border-radius: 12px;
   transition: all 0.2s;
-  border: 1px solid var(--border-color);
 }
 
 .upload-button:hover:not(:disabled) {
   background: var(--hover-bg);
-  color: var(--primary-color);
-  border-color: var(--primary-color);
+  color: var(--text-primary);
 }
 
 .upload-button:disabled {

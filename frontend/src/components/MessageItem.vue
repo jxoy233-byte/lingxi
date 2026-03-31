@@ -105,13 +105,22 @@
       <!-- 消息文本 -->
       <div v-if="message.content" class="message-text" v-html="renderedContent" @click.capture="handleLinkClick"></div>
 
-      <!-- 响应时间显示 -->
-      <div v-if="message.role === 'ai' && message.responseTime" class="response-time" :class="{ 'time-live': message.streaming !== false }">
-        <span v-if="message.streaming !== false" class="time-live-dot"></span>
-        <svg v-else xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-        </svg>
-        {{ formatResponseTime(message.responseTime) }}
+      <!-- 用户消息的复制按钮 -->
+      <div v-if="message.role === 'user' && message.content" class="user-message-copy">
+        <button
+          class="user-copy-button"
+          :class="{ 'copy-success': userCopied }"
+          @click="copyUserMessage"
+          :title="userCopied ? '已复制' : '复制'"
+        >
+          <svg v-if="!userCopied" xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+          </svg>
+          <svg v-else xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="20 6 9 17 4 12"/>
+          </svg>
+        </button>
       </div>
     </div>
 
@@ -130,6 +139,7 @@
       </button>
       <button
         class="action-button"
+        :class="{ 'copy-success': copied }"
         @click="copyMessage"
         :title="copied ? '已复制' : '复制'"
       >
@@ -228,6 +238,7 @@ export default {
   data() {
     return {
       copied: false,
+      userCopied: false,
       showPreview: false,
       previewFile: {},
       // 如果消息已完成（thinkingDone: true），默认折叠思考区块
@@ -300,6 +311,33 @@ export default {
           hljs.highlightElement(block)
         }
       })
+
+      // 为每个代码块的 pre 元素添加复制点击事件
+      const preElements = this.$el.querySelectorAll('pre')
+      preElements.forEach(pre => {
+        pre.addEventListener('click', (e) => {
+          const rect = pre.getBoundingClientRect()
+          const x = e.clientX - rect.left
+          const y = e.clientY - rect.top
+
+          // 复制按钮区域：右上角
+          if (x >= rect.width - 40 && y <= 30) {
+            e.stopPropagation()
+            const code = pre.querySelector('code')
+            if (code) {
+              navigator.clipboard.writeText(code.textContent).then(() => {
+                // 添加 copied 类来改变图标
+                pre.classList.add('copied')
+                setTimeout(() => {
+                  pre.classList.remove('copied')
+                }, 2000)
+              }).catch(err => {
+                console.error('复制失败:', err)
+              })
+            }
+          }
+        })
+      })
     },
     escapeHtml(text) {
       const div = document.createElement('div')
@@ -313,6 +351,18 @@ export default {
         this.copied = true
         setTimeout(() => {
           this.copied = false
+        }, 2000)
+      } catch (err) {
+        console.error('复制失败:', err)
+      }
+    },
+
+    async copyUserMessage() {
+      try {
+        await navigator.clipboard.writeText(this.message.content)
+        this.userCopied = true
+        setTimeout(() => {
+          this.userCopied = false
         }, 2000)
       } catch (err) {
         console.error('复制失败:', err)
@@ -461,7 +511,13 @@ export default {
   padding: 10px 14px;
   width: fit-content;
   max-width: 100%;
+  position: relative;
 }
+
+.user-message .message-content:hover .user-message-copy {
+  opacity: 1;
+}
+
 
 /* 文件附件样式 */
 .message-files {
@@ -637,17 +693,50 @@ export default {
   content: attr(data-language);
   position: absolute;
   top: 8px;
-  right: 12px;
+  right: 50px;
   font-size: 11px;
   font-weight: 500;
   color: var(--code-lang-color);
-  text-transform: uppercase;
   letter-spacing: 0.03em;
   pointer-events: none;
   background: var(--code-lang-bg);
   padding: 2px 8px;
   border-radius: 6px;
   border: 1px solid var(--code-lang-border);
+}
+
+.message-text :deep(pre)::after {
+  content: '';
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 28px;
+  height: 28px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='9' y='9' width='13' height='13' rx='2' ry='2'/%3E%3Cpath d='M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
+  background-color: var(--code-lang-bg);
+  border: 1px solid var(--code-lang-border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+  opacity: 0;
+}
+
+.message-text :deep(pre:hover)::after {
+  opacity: 1;
+}
+
+.message-text :deep(pre)::after:hover {
+  background-color: var(--button-bg);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='9' y='9' width='13' height='13' rx='2' ry='2'/%3E%3Cpath d='M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1'/%3E%3C/svg%3E");
+  border-color: var(--button-bg);
+}
+
+.message-text :deep(pre.copied)::after {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='20 6 9 17 4 12'/%3E%3C/svg%3E");
+  background-color: var(--button-bg);
+  border-color: var(--button-bg);
 }
 
 .message-text :deep(ul),
@@ -770,6 +859,57 @@ export default {
 .action-button:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
+}
+
+.action-button.copy-success,
+.action-button.copy-success:hover {
+  background: var(--button-bg);
+  color: white;
+}
+
+.action-button.copy-success svg,
+.action-button.copy-success:hover svg {
+  stroke: white;
+}
+
+/* 用户消息复制按钮 */
+.user-message-copy {
+  position: absolute;
+  bottom: 6px;
+  right: 8px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  display: flex;
+}
+
+.user-message-copy:hover {
+  opacity: 1;
+}
+
+.user-copy-button {
+  width: 26px;
+  height: 26px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  border-radius: 5px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+  padding: 0;
+}
+
+.user-copy-button:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.user-copy-button.copy-success,
+.user-copy-button.copy-success:hover {
+  background: var(--button-bg);
+  color: white;
 }
 
 /* 响应时间样式 */

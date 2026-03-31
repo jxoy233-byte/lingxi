@@ -487,25 +487,37 @@ export default {
                 thinkingDone: true
               }
             } else if (data.type === 'done') {
+              this.stopResponseTimer()
+              const responseTime = this.currentResponseTime
+
               this.messages[aiMessageIndex] = {
-                ...this.messages[aiMessageIndex],
+                role: 'ai',
                 content: data.full_response,
+                reasoning: this.messages[aiMessageIndex].reasoning,
+                toolCalls: this.messages[aiMessageIndex].toolCalls,
                 thinkingDone: true,
-                streaming: false
+                streaming: false,
+                responseTime: responseTime,
+                checkpointId: data.checkpoint_id || null
+              }
+
+              // 处理新会话 ID（缓冲区中的 done 事件也要处理）
+              if (!this.currentSessionId && data.session_id) {
+                this.currentSessionId = data.session_id
+
+                if (this.$route.params.sessionId !== data.session_id) {
+                  this.$router.push(`/${data.session_id}`)
+                }
+              }
+
+              if (this.currentSessionId) {
+                await this.updateTitleAndRefresh(this.currentSessionId, message)
               }
             }
           } catch (e) {
             console.error('解析缓冲区剩余数据失败:', e)
           }
         }
-      } catch (error) {
-        console.error('发送消息失败:', error)
-
-        // 创建新的错误消息
-        this.messages.push({
-          role: 'ai',
-          content: '抱歉，发送消息时出现错误，请稍后重试。'
-        })
       } finally {
         this.isLoading = false
         this.stopResponseTimer()

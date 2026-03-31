@@ -4,11 +4,13 @@ import uuid
 from datetime import datetime
 from typing import AsyncGenerator, Set, List, Any, Optional
 
+from anyio.lowlevel import checkpoint
 from fastapi import UploadFile
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from langgraph_sdk.auth.exceptions import HTTPException
 from redisvl.query import FilterQuery
 from langgraph.checkpoint.redis.util import from_storage_safe_id
+from sqlalchemy import null
 
 from chatMe.ChatService import FILE_MAX_LENGTH, FILE_ALLOWED_TYPES
 from chatMe.ChatService.RedisStateSaver.core import RedisStateSaver
@@ -131,7 +133,7 @@ class ChatService:
                         config=config,
                         values=state.values,  # 把修改后的完整state值更新回去
                     )
-                    return session_id
+                    return checkpoint_id
 
         except Exception as e:
             self.logger.error(f"保存每轮检查点失败(session_id:{session_id}): {str(e)}")
@@ -278,14 +280,14 @@ class ChatService:
                 default=str
             ) + "\n\n"
 
-        session_id = await self._save_round_checkpoint(session_id)
+        checkpoint_id = await self._save_round_checkpoint(session_id)
 
         # 返回最终完整结果
         yield json.dumps({
             "type": "done",
             "full_response": full_response,
             "session_id": session_id,
-            "checkpoint_id": session_id,
+            "checkpoint_id": checkpoint_id,
         }) + "\n\n"
 
 

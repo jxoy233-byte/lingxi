@@ -3,6 +3,8 @@
 本文件定义了 AI 在本环境中可使用的技能（Skills）。
 这些技能以 Python 模块形式存在，AI 可以通过生成并执行 Python 代码来调用。
 
+提示: 
+    - python临时文件的生成执行位置与技能们的python文件和skills.md等同级目录下
 ---
 
 # 🧭 使用总则（非常重要）
@@ -45,7 +47,7 @@ AI 必须：
 
 Exa 是一个语义搜索引擎
 
-**文件路径**: `Exa.py`  
+**文件名称**: `Exa.py`  
 **类型**: 搜索 / 信息检索  
 **能力**: 语义搜索 + 相似内容发现
 **描述**: 含有exa_search()和exa_find_similar()的两个功能模块
@@ -56,7 +58,7 @@ Exa 是一个语义搜索引擎
 
 获取当前时间和日期的工具
 
-**文件路径**: `DateTime.py`  
+**文件名称**: `DateTime.py`  
 **类型**: 系统工具 / 时间服务  
 **能力**: 获取实时时间、日期、星期等信息
 **描述**: 提供 get_current_datetime()、get_formatted_date()、get_formatted_time() 三个函数

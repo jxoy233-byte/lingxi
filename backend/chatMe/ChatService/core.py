@@ -4,19 +4,20 @@ import uuid
 from datetime import datetime
 from typing import AsyncGenerator, Set, List, Any, Optional
 
-from anyio.lowlevel import checkpoint
-from fastapi import UploadFile
+import redis.asyncio as redis
+
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from langgraph_sdk.auth.exceptions import HTTPException
 from redisvl.query import FilterQuery
 from langgraph.checkpoint.redis.util import from_storage_safe_id
-from sqlalchemy import null
 
 from chatMe.ChatService import FILE_MAX_LENGTH, FILE_ALLOWED_TYPES
+from chatMe.ChatService.FilesLoaders import UploadFileWithId
 from chatMe.ChatService.RedisStateSaver.core import RedisStateSaver
 from chatMe.ChatService.config.models import MessageRole, Message, Conversation
-from chatMe.ChatService.FilesLoaders.core import FilesLoaders
-from chatMe.ChatWorkflow import ChatWorkflow, AIMessageType
+from chatMe.ChatService.FilesLoaders.core import FilesLoaders, OutputFormat
+from chatMe.ChatWorkflow import ChatWorkflow
+from chatMe.ChatWorkflow.config.models import AIMessageType
 from chatMe.logging_config import get_logger
 
 
@@ -90,19 +91,131 @@ class ChatService:
             self.logger.warning(f"获取conversation_ids失败：{type(e).__name__}: {e}")
             return []
 
-    async def _process_files(self, files: List[UploadFile]):
+    @staticmethod
+    async def process_files(files: List[UploadFileWithId]) -> List[OutputFormat]:
         """
-        创建FilesLoaders类实例,调用loading_files防擦，处理传入文件信息，返回处理好的分类文件内容
-        :param files:
-        :return: images_content（含图片信息列表）, text_content（含文本信息列表）, doc_content(文档信息列表), 额外参数files_list
+        处理上传的文件，返回处理后的文件内容和额外参数
+
+        Args:
+            files: 上传的文件列表
+
+        Returns:
+            处理后的文件
         """
+        if not files:
+            return []
 
         fl = FilesLoaders(files)
-        (images_content, text_content, doc_content) = await fl.loading_files()
-        file_list = await fl.create_files_additional_kwargs()
-        await fl.cleanup()
+        try:
+            outputs = await fl.loading_files()
 
-        return images_content, text_content, doc_content, file_list
+            return outputs
+        finally:
+            await fl.cleanup()
+
+    @staticmethod
+    def _get_mime_type(suffix: str) -> str:
+        """
+        获取文件类型对应的MIME类型
+
+        Args:
+            suffix: 文件后缀
+
+        Returns:
+            str: 文件的MIME类型
+        """
+        mime_type_map = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".gif": "image/gif",
+            '.pptx': 'PPTX 演示文稿',
+            '.docx': 'DOCX 文档',
+            '.pdf': 'PDF 文档',
+            '.xlsx': 'Excel 表格',
+        }
+        return mime_type_map.get(suffix, "image/jpeg")
+
+    async def build_files_content(
+            self,
+            processed_files: List[OutputFormat],
+    ) -> Optional[HumanMessage]:
+        """
+        构建多模态消息内容
+
+        Args:
+            processed_files: 处理后的文件列表
+
+        Returns:
+            HumanMessage: 符合 OpenAI 多模态格式的HumanMessage消息内容
+        """
+        # todo 未来待优化：按用户传入文件顺序来解析文件
+        try:
+            content = []
+
+            if not processed_files:
+                return None
+
+            # 分离不同类型的文件
+            images = [f for f in processed_files if f.file_info["file_type"] == "IMAGE"]
+            texts = [f for f in processed_files if f.file_info["file_type"] == "TEXT"]
+            documents = [f for f in processed_files if f.file_info["file_type"] == "DOCUMENT"]
+
+            # 处理图片
+            if images:
+                for img in images:
+                    if img.image_content:
+                        mime_type = self._get_mime_type(img.file_info["suffix"])
+                        content.append({
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime_type};base64,{img.image_content}"},
+                            "detail": "auto",
+                        })
+
+            # 处理文本文件
+            if texts:
+                for text_file in texts:
+                    mime_type = self._get_mime_type(text_file.file_info["suffix"])
+                    if text_file.text_content:
+                        content.append({
+                            "type": "text",
+                            "text": f"-- {mime_type}文本内容 --\n{text_file.text_content}\n",
+                        })
+
+            # 处理文档文件
+            if documents:
+                for doc in documents:
+                    if doc.text_content:
+                        doc_label = self._get_mime_type(doc.file_info["suffix"])
+                        content.append({
+                            "type": "text",
+                            "text": f"-- {doc_label} --\n{doc.text_content}\n",
+                        })
+                        for img in doc.image_content:
+                            name = img.get("name")
+                            base64 = img.get("base64")
+                            content.append(
+                                {"type": "text", "text": f"-- 文档中({name})的图片 --\n"},
+                            )
+                            content.append(
+                                {"type": "image_url", "image_url": {"url": f"data:{self._get_mime_type(name)};base64,{base64}"}}
+                            )
+
+            files_info_list = []
+            for i in processed_files:
+                files_info_list.append(i.file_info)
+
+            additional_kwargs = {
+                "file_info_list": files_info_list,
+                "is_file": True,
+            }
+
+            files_content = HumanMessage(content=content, additional_kwargs=additional_kwargs)
+        except Exception as e:
+            self.logger.warning(f"构建多模态消息内容失败: {e}")
+            return None
+
+        return files_content
 
     async def _save_round_checkpoint(self, session_id: str)-> Optional[str]:
         """
@@ -140,12 +253,11 @@ class ChatService:
             return None
 
 
-
     async def message_stream(
         self,
         message: str,
         session_id: str = None,
-        files: list[UploadFile] | None = None,
+        processed_outputs: List[OutputFormat] = None,
     ) -> AsyncGenerator[str, None]:
         """
         流式响应用户信息
@@ -153,45 +265,11 @@ class ChatService:
         Args:
             message: 用户信息
             session_id: 会话id
+            processed_outputs: 已处理好的文件内容结果
 
         Yields:
             基于流式传输的 JSON 字符串
         """
-
-        (images_content, text_content, doc_content, file_list) = await self._process_files(files)
-
-        message_content = [{"type": "text", "text": message, "text_file": False},]
-        if text_content or images_content or doc_content:
-            if images_content:
-                for img in images_content:
-                    message_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img["file_content"]}"}, "detail": "auto"})
-            if text_content:
-                message_content.append({"type": "text", "text": "接收到的文本文件:\n", "text_file": True})
-                for text in text_content:
-                    message_content.append({"type": "text", "text": text["file_content"], "text_file": True})
-            if doc_content:
-                for doc in doc_content:
-                    if doc["file_type"] == ".pptx":
-                        message_content.append({"type": "text", "text": "--用户传入的pptx--:\n", "text_file": True})
-                        for img in doc["file_content"]["images"]:
-                            message_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img}"}, "detail": "auto"})
-                    elif doc["file_type"] == ".docx":
-                        message_content.append({"type": "text", "text": "--用户传入的docx--:\n", "text_file": True})
-                        message_content.append({"type": "text", "text": "文本：\n" + doc["file_content"]["text"] + "\n", "text_file": True})
-                        message_content.append({"type": "text", "text": "图片：\n", "text_file": True})
-                        for img in doc["file_content"]["images"]:
-                            message_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img}"}, "detail": "auto"})
-                    elif doc["file_type"] == ".pdf":
-                        message_content.append({"type": "text", "text": "--用户传入的pdf--:\n", "text_file": True})
-                        for img in doc["file_content"]["images"]:
-                            message_content.append(
-                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img}"},
-                                 "detail": "auto"})
-                    elif doc["file_type"] == ".xlsx":
-                        message_content.append({"type": "text", "text": "--用户传入的xlsx--:\n", "text_file": True})
-                        message_content.append({"type": "text", "text": doc["file_content"]["text"], "text_file": True})
-
-
         session_ids = await self.aget_conversation_ids
 
         # 会话ID处理：无则新建，有则校验是否存在
@@ -199,7 +277,6 @@ class ChatService:
             session_id = str(uuid.uuid4().hex)
         elif session_id not in session_ids:
             # 会话ID不存在，返回错误信息
-
             yield json.dumps(
                 {"type": "error", "error": f"会话ID {session_id} 不存在，请检查后重试"},
                 ensure_ascii=False
@@ -214,12 +291,21 @@ class ChatService:
 
         additional_kwargs ={
             "updated_at": datetime.now(),
-            "file_list": file_list,
+            "is_file": False,
         }
+
+        messages = []
+        if processed_outputs:
+            files_content = await self.build_files_content(processed_outputs)
+            messages.append(files_content)
+
+        message_content = HumanMessage(content=[{"type": "text", "text": message} ], additional_kwargs=additional_kwargs)
+
+        messages.append(message_content)
 
         full_response = ""
         try:
-            async for chunk in self.chat_workflow.astream(messages=[HumanMessage(content=message_content,additional_kwargs=additional_kwargs)], config=input_config):
+            async for chunk in self.chat_workflow.astream(messages=messages, config=input_config):
                 if chunk['event'] == 'on_chat_model_stream':
                     # 最终返回的chunk
                     if chunk['metadata']['langgraph_node'] and chunk['metadata']['langgraph_node'] == 'final_node':
@@ -316,24 +402,29 @@ class ChatService:
             for msg in state.values["messages"]:
                 if isinstance(msg, HumanMessage):
                     role = MessageRole.USER
-                    human_message = ""
                     files = []
-                    files_input = False
-                    for content in msg.content:
-                        if content.get("type") == "text" and content.get("text_file", False) == False:
-                            human_message += content.get("text", "")
-                            human_message += '\n'
-                        if content.get("type") == "image_url" or content.get("text_file") == True:
-                            files_input = True
-                        if files_input:
-                            files = msg.additional_kwargs.get("files",[])
-                            break
-                    messages_list.append(Message(
-                        role=role,
-                        content=human_message,
-                        files=files,
-                        additional_kwargs=None
-                    ))
+                    is_file = msg.additional_kwargs.get("is_file", False)
+                    if is_file:
+                        files = msg.additional_kwargs.get("file_info_list", [])
+                        messages_list.append(Message(
+                            role=role,
+                            content="",
+                            files=files,
+                            additional_kwargs=None
+                        ))
+                    else:
+                        human_message = ""
+                        for content in msg.content:
+                            if content.get("type") == "text":
+                                human_message += content.get("text", "")
+                                human_message += '\n'
+                        if human_message.strip():
+                            messages_list.append(Message(
+                                role=role,
+                                content=human_message,
+                                files=files,
+                                additional_kwargs=None
+                            ))
 
                 elif isinstance(msg, AIMessage):
                     role = MessageRole.AI
@@ -452,7 +543,7 @@ class ChatService:
                     config=config,
                     values=state.values,  # 把修改后的完整state值更新回去
                 )
-
+                # todo 回溯后无法自动更新对话标题
                 self.logger.info(f"会话标题修改成功(session_id:{session_id})：{new_title}")
                 return True
             else:
@@ -460,6 +551,95 @@ class ChatService:
                 return False
         except HTTPException as e:
             self.logger.error(f"修改标题失败(session_id:{session_id}): {str(e)}")
+            return False
+
+    async def _delete_specific_checkpoint(self, session_id: str, checkpoint_id: str,
+                                         checkpoint_ns: str = "__empty__") -> bool:
+        """
+        删除指定 thread_id 中的特定 checkpoint
+
+        根据 Redis Desktop Manager 实际数据结构:
+        1. checkpoint:{thread_id}:{checkpoint_ns}:{checkpoint_id} -> JSON (主checkpoint数据)
+        2. checkpoint_latest:{thread_id} -> String (值为完整的checkpoint key路径)
+        3. checkpoint_write:{thread_id}:{checkpoint_ns}:{checkpoint_id}:{task_id} -> JSON (pending writes)
+        4. write_keys_zset:{thread_id}:{checkpoint_ns} -> ZSET (members为checkpoint_write完整key)
+
+        Args:
+            session_id: 会话线程ID
+            checkpoint_id: 要删除的检查点ID
+            checkpoint_ns: 检查点命名空间，默认为"__empty__"
+
+        Returns:
+            bool: 删除成功返回 True，失败返回 False
+        """
+        if not session_id or not checkpoint_id:
+            self.logger.warning("thread_id 或 checkpoint_id 为空，无法删除")
+            return False
+
+        try:
+            redis_url_checkpoint = "redis://:123456@localhost:6379/0"
+            redis_client = redis.from_url(url=redis_url_checkpoint)
+            deleted_count = 0
+
+            # 1. 删除主 checkpoint 数据 (JSON类型)
+            # Key格式: checkpoint:{session_id}:{checkpoint_ns}:{checkpoint_id}
+            checkpoint_key = f"checkpoint:{session_id}:{checkpoint_ns}:{checkpoint_id}"
+            if await redis_client.exists(checkpoint_key):
+                await redis_client.delete(checkpoint_key)
+                deleted_count += 1
+
+            # 2. 检查并更新 checkpoint_latest (String类型)
+            # Key格式: checkpoint_latest:{session_id}
+            # 值格式: checkpoint:{session_id}:{checkpoint_ns}:{checkpoint_id}
+            checkpoint_latest_key = f"checkpoint_latest:{session_id}"
+            if await redis_client.exists(checkpoint_latest_key):
+                current_latest = await redis_client.get(checkpoint_latest_key)
+                if current_latest:
+                    latest_str = current_latest.decode('utf-8') if isinstance(current_latest, bytes) else current_latest
+                    # 如果当前最新的checkpoint正是要删除的那个，需要清理
+                    if checkpoint_id in latest_str:
+                        await redis_client.delete(checkpoint_latest_key)
+                        deleted_count += 1
+
+            # 3. 删除所有相关的 checkpoint_write 数据 (JSON类型)
+            # Key格式: checkpoint_write:{session_id}:{checkpoint_ns}:{checkpoint_id}:{task_id}
+            write_pattern = f"checkpoint_write:{session_id}:{checkpoint_ns}:{checkpoint_id}:*"
+            write_keys = []
+            async for key in redis_client.scan_iter(match=write_pattern):
+                write_keys.append(key)
+
+            if write_keys:
+                deleted = await redis_client.delete(*write_keys)
+                deleted_count += deleted
+
+            # 4. 从 write_keys_zset 索引中清理相关的 write keys (ZSet类型)
+            # Key格式: write_keys_zset:{session_id}:{checkpoint_ns}
+            # Members: checkpoint_write:{session_id}:{checkpoint_ns}:{checkpoint_id}:{task_id}
+            write_keys_zset_key = f"write_keys_zset:{session_id}:{checkpoint_ns}"
+            if await redis_client.exists(write_keys_zset_key):
+                # 获取所有 members
+                all_members = await redis_client.zrange(write_keys_zset_key, 0, -1)
+                members_to_remove = []
+
+                for member in all_members:
+                    member_str = member.decode('utf-8') if isinstance(member, bytes) else member
+                    # 检查 member 是否包含要删除的 checkpoint_id
+                    # member 格式: checkpoint_write:{session_id}:{checkpoint_ns}:{checkpoint_id}:{task_id}
+                    if f":{checkpoint_id}:" in member_str:
+                        members_to_remove.append(member)
+
+                if members_to_remove:
+                    removed = await redis_client.zrem(write_keys_zset_key, *members_to_remove)
+                    deleted_count += removed
+
+            return True
+
+        except Exception as e:
+            self.logger.error(
+                f"删除特定 checkpoint 失败 (session_id='{session_id}', checkpoint_id='{checkpoint_id}'): {str(e)}"
+            )
+            import traceback
+            self.logger.error(f"详细错误: {traceback.format_exc()}")
             return False
 
     async def backtrack_state(self, session_id :str, checkpoint_id :str) -> bool:
@@ -492,7 +672,6 @@ class ChatService:
                 checkpoints_to_del = checkpoints[:target_index]
 
                 for cp in checkpoints_to_del:
-                    await self.state_saver.delete_checkpoint(session_id, cp["checkpoint_id"])
                     cp_id_to_del = cp["checkpoint_id"]
                     if cp_id_to_del:
                         await self.state_saver.delete_checkpoint(thread_id=session_id, checkpoint_id=cp_id_to_del)
@@ -500,6 +679,8 @@ class ChatService:
             backtrack_state = await self.graph.aget_state(config=backtrack_config)
 
             await self.graph.aupdate_state(config=backtrack_config, values=backtrack_state.values)
+
+            await self._delete_specific_checkpoint(session_id, checkpoint_id)
 
             self.logger.info(f"会话回溯成功(session_id:{session_id}, checkpoint_id:{checkpoint_id})")
 
@@ -525,7 +706,8 @@ class ChatService:
         finally:
             return improved_text
 
-    async def get_file_config(self):
+    @staticmethod
+    async def get_file_config():
         return {
             "maxFileSize": FILE_MAX_LENGTH,
             "imageTypes": {

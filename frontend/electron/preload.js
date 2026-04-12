@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron/renderer'
+import { contextBridge, ipcRenderer, shell } from 'electron/renderer'
 
 // 暴露安全的 IPC 通道给渲染进程
 contextBridge.exposeInMainWorld('electronAPI', {
@@ -17,4 +17,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   isTest: () => process.env.NODE_ENV === 'test'
 })
 
-console.log('✅ Electron Preload 已加载')
+// 暴露 Electron 相关功能
+contextBridge.exposeInMainWorld('electron', {
+  // 在外部浏览器打开链接
+  openExternal: (url) => shell.openExternal(url),
+
+  // 在 Electron 独立窗口打开网页
+  openWebPreview: (url) => ipcRenderer.invoke('open-web-preview', url),
+
+  // 监听新对话事件
+  onNewChat: (callback) => ipcRenderer.on('new-chat', callback)
+})

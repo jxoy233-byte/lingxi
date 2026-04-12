@@ -1,5 +1,5 @@
 from shutil import which
-from typing import Any, Annotated,Literal
+from typing import Any, Annotated, Literal, Optional
 
 from fastmcp import FastMCP
 import subprocess
@@ -8,8 +8,6 @@ import os
 import platform
 import re
 import sys
-
-import chardet
 
 from chatMe.logging_config import get_logger
 
@@ -123,7 +121,7 @@ def is_dangerous_command(command: Annotated[ str, "系统执行命令"]) -> tupl
     return False, ""
 
 @server.tool
-def execute_code(code: str, language: Literal["python", "nodejs", "javascript", "js"] = "python") -> str:
+def execute_code(code: str, language: Literal["python", "nodejs", "javascript", "js"] = "python") -> Optional[str]:
     """在沙盒中执行代码"""
     try:
         venv_path = os.path.dirname(sys.executable)
@@ -214,9 +212,16 @@ def execute_command(command: Annotated[ str, "系统执行命令"], timeout: int
     except Exception as e:
         return f"Error: {str(e)}"
 
-@server.tool    
-def read_skill_file(skill: Annotated[str, "技能文件名称"]) -> str:
-    """读取技能文件内容"""
+@server.tool
+def read_skill_file(skill: Annotated[str, "技能文件名称,必须包含文件后缀"]) -> str:
+    """
+    读取技能文件内容
+    ** 如果不确定文件名，请先调用 get_skills_overview 查看完整的文件名列表 **
+
+    Args:
+        skill: 技能文件名称，必须包含文件后缀（如: 'Exa.py', 'DateTime.py'）
+
+    """
     skills_dir = os.path.join(os.path.dirname(__file__), 'skills')
     skill_file = os.path.join(skills_dir, skill)
     
@@ -241,9 +246,10 @@ def get_skills_overview() -> str:
 
     if os.path.exists(skill_file):
         with open(skill_file, 'rb') as f:
+            import chardet
             raw_data = f.read(10000)
             result = chardet.detect(raw_data)
-            detected_encoding = result['encoding'] or 'utf-8'
+            detected_encoding = result.get("encoding", "utf-8")
 
         with open(skill_file, 'r', encoding=detected_encoding) as f:
             return f.read()

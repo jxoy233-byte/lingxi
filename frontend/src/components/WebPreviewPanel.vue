@@ -50,7 +50,24 @@
             <line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>
           </svg>
           <p>该网站不支持内嵌预览</p>
-          <button class="open-btn" @click="openExternal">在浏览器中打开</button>
+          <div class="action-buttons">
+            <button class="open-btn" @click="openInElectronWindow">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+                <polyline points="15 3 21 3 21 9"/>
+                <line x1="10" y1="14" x2="21" y2="3"/>
+              </svg>
+              在应用窗口打开
+            </button>
+            <button class="open-btn secondary" @click="openExternal">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+                <polyline points="15 3 21 3 21 9"/>
+                <line x1="10" y1="14" x2="21" y2="3"/>
+              </svg>
+              在浏览器打开
+            </button>
+          </div>
         </div>
 
         <iframe
@@ -85,7 +102,8 @@ export default {
       isResizing: false,
       startX: 0,
       startWidth: 0,
-      rafId: null
+      rafId: null,
+      loadTimeout: null
     }
   },
   emits: ['close', 'resizing'],
@@ -105,36 +123,98 @@ export default {
         this.loading = true
         this.blocked = false
         this.iframeKey++
+
+        if (this.loadTimeout) {
+          clearTimeout(this.loadTimeout)
+        }
+        this.loadTimeout = setTimeout(() => {
+          if (this.loading) {
+            this.handleLoadTimeout()
+          }
+        }, 8000)
       }
+    }
+  },
+  beforeUnmount() {
+    if (this.loadTimeout) {
+      clearTimeout(this.loadTimeout)
+    }
+    if (this.isResizing) {
+      this.stopResize({ preventDefault: () => {} })
+    }
+    if (this.rafId) {
+      cancelAnimationFrame(this.rafId)
     }
   },
   methods: {
     onLoad() {
-      // 尝试访问 iframe contentDocument，若被跨域拦截则认为正常加载完成
-      // 真正被 X-Frame-Options 拒绝时 iframe 会触发 error 或内容为空
+      if (this.loadTimeout) {
+        clearTimeout(this.loadTimeout)
+        this.loadTimeout = null
+      }
+
       this.loading = false
-      // 检测是否加载失败（部分浏览器 load 也会触发但内容为空）
+
       try {
         const doc = this.$refs.iframe?.contentDocument
         if (doc && doc.body && doc.body.innerHTML === '') {
+          console.log('检测到 iframe 内容为空')
           this.blocked = true
+        } else {
+          console.log('iframe 加载成功')
         }
-      } catch {
-        // 跨域访问报错属正常，说明页面实际加载了
+      } catch (e) {
+        console.log('iframe 跨域访问受限，但说明页面已加载:', e.message)
         this.loading = false
       }
     },
+
     onError() {
+      if (this.loadTimeout) {
+        clearTimeout(this.loadTimeout)
+        this.loadTimeout = null
+      }
+
+      console.log('iframe 加载失败')
       this.loading = false
       this.blocked = true
     },
+
+    handleLoadTimeout() {
+      console.log('iframe 加载超时')
+      this.loading = false
+      this.blocked = true
+    },
+
     reload() {
       this.loading = true
       this.blocked = false
       this.iframeKey++
+
+      if (this.loadTimeout) {
+        clearTimeout(this.loadTimeout)
+      }
+      this.loadTimeout = setTimeout(() => {
+        if (this.loading) {
+          this.handleLoadTimeout()
+        }
+      }, 8000)
     },
+
     openExternal() {
-      window.open(this.url, '_blank', 'noopener,noreferrer')
+      if (window.electron) {
+        window.electron.openExternal(this.url)
+      } else {
+        window.open(this.url, '_blank', 'noopener,noreferrer')
+      }
+    },
+
+    openInElectronWindow() {
+      if (window.electron) {
+        window.electron.openWebPreview(this.url)
+      } else {
+        window.open(this.url, '_blank', 'noopener,noreferrer')
+      }
     },
     startResize(e) {
       e.preventDefault()
@@ -187,14 +267,6 @@ export default {
       this.$emit('resizing', false)
     }
   },
-  beforeUnmount() {
-    if (this.isResizing) {
-      this.stopResize({ preventDefault: () => {} })
-    }
-    if (this.rafId) {
-      cancelAnimationFrame(this.rafId)
-    }
-  }
 }
 </script>
 

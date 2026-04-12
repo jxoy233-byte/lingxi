@@ -12,6 +12,7 @@
         :message="msg"
         @restore="$emit('restore', $event)"
         @open-link="$emit('open-link', $event)"
+        @preview-file="$emit('preview-file', $event)"
       />
 
       <div v-if="isLoading" class="loading-message">
@@ -42,7 +43,7 @@ export default {
       default: false
     }
   },
-  emits: ['restore', 'open-link'],
+  emits: ['restore', 'open-link', 'preview-file'],
   data() {
     return {
       userInterrupted: false,   // 用户主动介入，打断自动滚动

@@ -12,8 +12,8 @@
         >
           <!-- 图片预览 -->
           <img
-            v-if="file.preview && isImageFile(file)"
-            :src="file.preview"
+            v-if="(file.preview || file.iframe_url || file.preview_url) && isImageFile(file)"
+            :src="file.preview || file.iframe_url || file.preview_url"
             :alt="file.name"
             class="file-attachment-img"
           />
@@ -139,7 +139,6 @@
       </button>
       <button
         class="action-button"
-        :class="{ 'copy-success': copied }"
         @click="copyMessage"
         :title="copied ? '已复制' : '复制'"
       >
@@ -153,13 +152,6 @@
       </button>
     </div>
     </div>
-
-    <!-- 文件预览模态框 -->
-    <FilePreviewModal
-      :visible="showPreview"
-      :file="previewFile"
-      @close="closePreview"
-    />
   </div>
 </template>
 
@@ -167,10 +159,10 @@
 import { marked } from 'marked'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/atom-one-dark.css'
-import FilePreviewModal from './FilePreviewModal.vue'
 
 // 配置 marked
 const renderer = new marked.Renderer()
+// todo 带完善对url的高亮识别
 renderer.code = function(code, lang) {
   // 确保 code 是字符串类型，如果是对象则尝试提取内容
   if (typeof code !== 'string') {
@@ -225,22 +217,17 @@ marked.setOptions({
 
 export default {
   name: 'MessageItem',
-  components: {
-    FilePreviewModal
-  },
   props: {
     message: {
       type: Object,
       required: true
     }
   },
-  emits: ['restore', 'open-link'],
+  emits: ['restore', 'open-link', 'preview-file'],
   data() {
     return {
       copied: false,
       userCopied: false,
-      showPreview: false,
-      previewFile: {},
       // 如果消息已完成（thinkingDone: true），默认折叠思考区块
       thinkingCollapsed: this.message.thinkingDone === true,
       expandedTools: {}
@@ -267,6 +254,7 @@ export default {
               content = String(content)
             }
           }
+          // 渲染 Markdown
           return marked(content)
         } catch (error) {
           console.error('Markdown 渲染失败:', error, '原始内容:', this.message.content)
@@ -278,7 +266,8 @@ export default {
     },
     hasThinking() {
       return (this.message.reasoning && this.message.reasoning.length > 0) ||
-             (this.message.toolCalls && this.message.toolCalls.length > 0)
+             (this.message.toolCalls && this.message.toolCalls.length > 0) ||
+             (this.message.additional_kwargs?.type === 'REASONING')
     }
   },
   watch: {
@@ -385,27 +374,25 @@ export default {
     },
 
     handleFileClick(file) {
-      // 打开预览模态框
-      this.previewFile = file
-      this.showPreview = true
-    },
-
-    closePreview() {
-      this.showPreview = false
-      this.previewFile = {}
+      // 发送预览文件事件，让 App.vue 在 WebPreviewPanel 中打开
+      this.$emit('preview-file', file)
     },
 
     isImageFile(file) {
-      if (!file.type) return false
-      return file.type.startsWith('image/')
+      if (!file.type && !file.file_type) return false
+      // 检查大写的 file_type（如 "IMAGE"）和 type（如 "image/png"）
+      if (file.file_type === 'IMAGE' || file.type === 'IMAGE') return true
+      return file.type && file.type.startsWith('image/')
     },
 
     isTextFile(file) {
-      if (!file.type) return false
-      return file.type.startsWith('text/') ||
+      if (!file.type && !file.file_type) return false
+      // 检查大写的 file_type（如 "TEXT"）和 type（如 "text/plain"）
+      if (file.file_type === 'TEXT' || file.type === 'TEXT') return true
+      return file.type && (file.type.startsWith('text/') ||
              file.type === 'application/json' ||
              file.type === 'text/csv' ||
-             file.type === 'text/xml'
+             file.type === 'text/xml')
     },
 
     isDocumentFile(file) {
@@ -424,15 +411,6 @@ export default {
       if (!text) return ''
       if (text.length <= maxLength) return text
       return text.substring(0, maxLength) + '...'
-    },
-    formatResponseTime(seconds) {
-      if (seconds < 60) {
-        return `${seconds.toFixed(1)}s`
-      } else {
-        const minutes = Math.floor(seconds / 60)
-        const remainingSeconds = (seconds % 60).toFixed(1)
-        return `${minutes}m ${remainingSeconds}s`
-      }
     },
     toggleThinking() {
       this.thinkingCollapsed = !this.thinkingCollapsed
@@ -867,21 +845,23 @@ export default {
   color: white;
 }
 
-.action-button.copy-success svg,
-.action-button.copy-success:hover svg {
-  stroke: white;
-}
-
 /* 用户消息复制按钮 */
 .user-message-copy {
   position: absolute;
-  bottom: 6px;
+  bottom: 8px;
   right: 8px;
+  display: flex;
+  justify-content: flex-end;
   opacity: 0;
   transition: opacity 0.15s ease;
-  display: flex;
+  pointer-events: none;
 }
 
+.user-message-copy > * {
+  pointer-events: auto;
+}
+
+.user-message:hover .user-message-copy,
 .user-message-copy:hover {
   opacity: 1;
 }
@@ -898,7 +878,6 @@ export default {
   align-items: center;
   justify-content: center;
   transition: all 0.15s;
-  padding: 0;
 }
 
 .user-copy-button:hover {
@@ -910,34 +889,6 @@ export default {
 .user-copy-button.copy-success:hover {
   background: var(--button-bg);
   color: white;
-}
-
-/* 响应时间样式 */
-.response-time {
-  font-size: 11px;
-  color: var(--text-secondary);
-  opacity: 0.55;
-  pointer-events: none;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.02em;
-  margin-top: 6px;
-}
-
-.response-time.time-live {
-  opacity: 0.8;
-  color: var(--button-bg);
-}
-
-.time-live-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--button-bg);
-  animation: live-pulse 1.2s ease-in-out infinite;
-  flex-shrink: 0;
 }
 
 @keyframes live-pulse {

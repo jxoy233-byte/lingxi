@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, shell } from 'electron'
+import { app, BrowserWindow, Menu, shell, ipcMain } from 'electron'
 import path from 'path'
 import { fileURLToPath } from 'url'
 
@@ -7,19 +7,16 @@ const __dirname = path.dirname(__filename)
 
 const configModule = await import('./electron.config.js')
 const config = configModule.default
+
 let mainWindow
+let previewWindow = null
 
 // 判断是否为开发环境
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
-//const isDev = 'development'
 
 // 判断是否为测试环境
 const isTest = process.env.NODE_ENV === 'test'
-//const isTest = 'test'
 
-/**
- * 获取当前环境的配置
- */
 /**
  * 获取当前环境的配置
  */
@@ -362,3 +359,33 @@ app.on('certificate-error', (event, webContents, url, error, certificate, callba
 if (isDev) {
   app.commandLine.appendSwitch('ignore-certificate-errors')
 }
+
+// ==================== IPC 事件处理 ====================
+ipcMain.handle('open-web-preview', async (event, url) => {
+  if (previewWindow && !previewWindow.isDestroyed()) {
+    previewWindow.focus()
+    previewWindow.loadURL(url)
+  } else {
+    previewWindow = new BrowserWindow({
+      width: config.security.previewWindow.width,
+      height: config.security.previewWindow.height,
+      minWidth: 600,
+      minHeight: 500,
+      title: `网页预览 - ${url}`,
+      icon: config.paths.icon,
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+        devTools: isDev,
+        preload: path.join(__dirname, 'preload.js')
+      }
+    })
+
+    previewWindow.loadURL(url)
+
+    previewWindow.on('closed', () => {
+      previewWindow = null
+    })
+  }
+  return true
+})

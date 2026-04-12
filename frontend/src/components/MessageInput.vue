@@ -7,7 +7,7 @@
           v-for="(file, index) in selectedFiles"
           :key="index"
           class="file-item"
-          :class="{ 'file-error': file.error }"
+          :class="{ 'file-error': file.error, 'file-uploading': file.uploading }"
         >
           <!-- 图片预览或文件图标 -->
           <div class="file-preview-wrapper">
@@ -21,6 +21,13 @@
               <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
                 <polyline points="13 2 13 9 20 9"/>
+              </svg>
+            </div>
+
+            <div v-if="file.uploading" class="uploading-overlay">
+              <svg class="spinner-small" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"/>
+                <path d="M12 2 A10 10 0 0 1 22 12"/>
               </svg>
             </div>
 
@@ -106,8 +113,9 @@
 
       <button
         @click="handleSend"
-        :disabled="(!inputText.trim() && selectedFiles.filter(f => !f.error).length === 0) || isLoading"
+        :disabled="(!inputText.trim() && selectedFiles.filter(f => !f.error && !f.uploading).length === 0) || isLoading || hasUploadingFiles"
         class="send-btn"
+        :title="hasUploadingFiles ? '文件上传中，请等待' : ''"
       >
         发送
       </button>
@@ -150,7 +158,8 @@ export default {
       isDragging: false,
       isOptimizing: false,
       fileConfig: null,
-      loadingConfig: false
+      loadingConfig: false,
+      processedOutputs: []
     }
   },
   computed: {
@@ -174,6 +183,10 @@ export default {
     },
     allowedExtensions() {
       return [...this.allowedImageTypes, ...this.allowedTextTypes, ...this.allowedDocumentTypes]
+    },
+    // 检查是否有文件正在上传
+    hasUploadingFiles() {
+      return this.selectedFiles.some(f => f.uploading)
     }
   },
   mounted() {
@@ -201,17 +214,12 @@ export default {
       if (this.loadingConfig) return
       this.loadingConfig = true
       try {
-        console.log('正在获取文件配置...')
         const response = await fetch('/chat/file-config')
         if (response.ok) {
           this.fileConfig = await response.json()
-          console.log('文件配置获取成功:', this.fileConfig)
-        } else {
-          console.warn('获取文件配置失败，使用默认配置')
         }
       } catch (error) {
         console.error('获取文件配置失败:', error)
-        console.warn('使用默认文件配置')
       } finally {
         this.loadingConfig = false
       }
@@ -277,25 +285,23 @@ export default {
     },
 
     handleSend() {
-      // 获取有效文件（没有错误的文件）
-      const validFiles = this.selectedFiles.filter(f => !f.error).map(f => f.file)
+      const validFiles = this.selectedFiles.filter(f => !f.error && !f.uploading)
 
-      // 至少需要有文本或有效文件
       if ((!this.inputText.trim() && validFiles.length === 0) || this.isLoading) {
         return
       }
 
-      // 发送消息和文件
       this.$emit('send', {
         message: this.inputText.trim(),
-        files: validFiles
+        files: validFiles,
+        processedOutputs: [...this.processedOutputs]
       })
 
-      // 清空输入
+      console.log('发送消息，processedOutputs 数量:', this.processedOutputs.length)
+
       this.inputText = ''
       this.clearFiles()
 
-      // 重置 textarea 高度
       this.$nextTick(() => {
         const textarea = this.$refs.textarea
         if (textarea) {
@@ -379,7 +385,9 @@ export default {
       this.addFiles(droppedFiles)
     },
 
-    addFiles(newFiles) {
+    async addFiles(newFiles) {
+      if (!newFiles || newFiles.length === 0) return
+
       const validatedFiles = newFiles.map(file => {
         const fileObj = {
           name: file.name,
@@ -387,51 +395,118 @@ export default {
           type: file.type,
           file: file,
           error: null,
-          preview: null
+          preview: null,
+          fileId: null,
+          uploading: false
         }
 
-        // 验证文件
         const validation = this.validateFile(file)
         if (!validation.valid) {
           fileObj.error = validation.error
         } else if (this.isImageFile(fileObj)) {
-          // 为图片创建预览
           fileObj.preview = URL.createObjectURL(file)
         }
 
         return fileObj
       })
 
-      this.selectedFiles.push(...validatedFiles)
+      const validFiles = validatedFiles.filter(f => !f.error)
+      const invalidFiles = validatedFiles.filter(f => f.error)
+
+      this.selectedFiles.push(...invalidFiles)
+
+      if (validFiles.length > 0) {
+        validFiles.forEach(fileObj => {
+          fileObj.uploading = true
+        })
+        this.selectedFiles.push(...validFiles)
+        this.$forceUpdate()
+
+        const uploadPromises = validFiles.map(fileObj => this.uploadSingleFile(fileObj))
+
+        await Promise.all(uploadPromises)
+
+        this.$forceUpdate()
+      }
+    },
+
+     async uploadSingleFile(fileObj) {
+      const formData = new FormData()
+      formData.append('files', fileObj.file)
+      formData.append('processed_outputs', JSON.stringify(this.processedOutputs))
+
+      console.log('上传文件请求:', {
+        fileName: fileObj.name,
+        processedOutputs: this.processedOutputs,
+        processedOutputsLength: this.processedOutputs.length
+      })
+
+      try {
+        const response = await fetch('/chat/upload_file', {
+          method: 'POST',
+          body: formData
+        })
+
+        if (!response.ok) {
+          // 获取详细错误信息
+          const errorText = await response.text()
+          console.error('文件上传失败 - 状态码:', response.status)
+          console.error('文件上传失败 - 响应:', errorText)
+          throw new Error(`文件上传失败: ${response.status} - ${errorText}`)
+        }
+
+        const data = await response.json()
+
+        if (data.code === 200) {
+          console.log('上传成功，返回的 processed_outputs 数量:', data.processed_outputs?.length)
+          this.processedOutputs = data.processed_outputs || []
+          console.log('当前 processedOutputs 数量:', this.processedOutputs.length)
+
+          const output = this.processedOutputs.find(
+            op => op.file_info && op.file_info.file_name === fileObj.name
+          )
+
+          if (output && output.file_info) {
+            fileObj.fileId = output.file_info.file_id
+
+            // 使用后端返回的 preview_url（base64 data URL）
+            if (output.file_info.preview_url) {
+              fileObj.preview = output.file_info.preview_url
+            }
+
+            // 如果后端返回了 iframe_url，也一并保存
+            if (output.file_info.iframe_url) {
+              fileObj.iframe_url = output.file_info.iframe_url
+            }
+          }
+        } else {
+          throw new Error(data.msg || '文件上传失败')
+        }
+      } catch (error) {
+        console.error('文件上传失败:', error)
+        fileObj.error = '上传失败'
+      } finally {
+        fileObj.uploading = false
+        this.$forceUpdate()
+      }
     },
 
     validateFile(file) {
       const extension = this.getFileExtension(file.name)
-      
-      console.log('=== 文件验证调试信息 ===')
-      console.log('文件名:', file.name)
-      console.log('文件扩展名:', extension)
-      console.log('允许的图片类型:', this.allowedImageTypes)
-      console.log('允许的文本类型:', this.allowedTextTypes)
-      console.log('允许的文档类型:', this.allowedDocumentTypes)
-      console.log('所有允许的扩展名:', this.allowedExtensions)
-      
+
       // 检查文件大小
       if (file.size > this.maxFileSize) {
-        console.log('文件大小超出限制:', file.size, '>', this.maxFileSize)
         return {
           valid: false,
           error: `文件大小超过 ${this.formatFileSize(this.maxFileSize)} 限制`
         }
       }
 
-      // 检查文件扩展名 - 使用更宽松的匹配
-      const isAllowed = this.allowedExtensions.some(allowedExt => 
-        allowedExt.toLowerCase() === extension.toLowerCase()
+      // 检查文件扩展名
+      const isAllowed = this.allowedExtensions.some(
+        allowedExt => allowedExt.toLowerCase() === extension.toLowerCase()
       )
-      
-      console.log('扩展名是否允许:', isAllowed)
-      
+
       if (!isAllowed) {
         return {
           valid: false,
@@ -439,13 +514,34 @@ export default {
         }
       }
 
-      console.log('文件验证通过!')
       return { valid: true }
     },
 
-    removeFile(index) {
+    async removeFile(index) {
       const file = this.selectedFiles[index]
-      // 清理预览 URL
+
+      if (file.fileId && this.processedOutputs.length > 0) {
+        try {
+          const response = await fetch('/chat/cancel_upload_file', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              file_id: file.fileId,
+              processed_outputs: this.processedOutputs
+            })
+          })
+
+          if (response.ok) {
+            const data = await response.json()
+            this.processedOutputs = data.processed_outputs || []
+          }
+        } catch (error) {
+          console.error('取消文件上传失败:', error)
+        }
+      }
+
       if (file.preview) {
         URL.revokeObjectURL(file.preview)
       }
@@ -453,13 +549,13 @@ export default {
     },
 
     clearFiles() {
-      // 清理所有预览 URL
       this.selectedFiles.forEach(file => {
         if (file.preview) {
           URL.revokeObjectURL(file.preview)
         }
       })
       this.selectedFiles = []
+      this.processedOutputs = []
     },
 
     getFileExtension(filename) {
@@ -546,6 +642,11 @@ export default {
   border-color: #ef4444;
 }
 
+.file-item.file-uploading .file-preview-wrapper {
+  border-color: var(--button-bg);
+  opacity: 0.7;
+}
+
 .file-preview-wrapper {
   position: relative;
   width: 80px;
@@ -630,6 +731,31 @@ export default {
 .remove-button-overlay:hover {
   background: #ef4444;
   transform: scale(1.1);
+}
+
+.uploading-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.spinner-small {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* 输入区域 */

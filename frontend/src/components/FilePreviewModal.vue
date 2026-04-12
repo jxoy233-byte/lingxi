@@ -11,32 +11,73 @@
       <div class="modal-header">
         <h3>{{ file.name }}</h3>
         <div class="file-info">
-          <span class="file-type">{{ getFileTypeLabel(file.type) }}</span>
+          <span class="file-type">{{ getFileTypeLabel(file) }}</span>
+          <span v-if="file.size_human" class="file-size">{{ file.size_human }}</span>
         </div>
       </div>
 
       <div class="modal-body">
+        <!-- iframe 预览方式（PDF 和其他支持 iframe 预览的文件） -->
+        <iframe
+          v-if="file.preview_method === 'iframe' && (file.preview_url || file.iframe_url) && !isImageFile(file)"
+          :src="file.iframe_url || file.preview_url"
+          class="preview-iframe"
+          frameborder="0"
+        />
+
         <!-- 图片预览 -->
         <img
-          v-if="isImageFile(file)"
-          :src="file.preview"
+          v-else-if="isImageFile(file) && file.preview_url"
+          :src="file.preview_url"
           :alt="file.name"
           class="preview-image"
         />
 
-        <!-- 文本文件预览 -->
-        <div v-else-if="isTextFile(file)" class="preview-text">
+        <!-- Office 文档预览方式 -->
+        <div v-else-if="file.preview_method === 'iframe_office'" class="office-preview">
+          <div class="office-preview-content">
+            <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+              <polyline points="14 2 14 8 20 8"/>
+              <line x1="16" y1="13" x2="8" y2="13"/>
+              <line x1="16" y1="17" x2="8" y2="17"/>
+              <polyline points="10 9 9 9 8 9"/>
+            </svg>
+            <p>{{ file.preview_hint || 'Office 文档预览' }}</p>
+            <p class="preview-hint">建议使用 Office Online 或下载后查看</p>
+          </div>
+        </div>
+
+        <!-- 文本文件预览：使用解码后的 content 字段 -->
+        <div v-else-if="isTextFile(file) && file.content" class="preview-text">
           <pre>{{ file.content }}</pre>
         </div>
 
-        <!-- 其他文件类型 -->
+        <!-- 不支持预览的文件 -->
         <div v-else class="preview-placeholder">
           <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
             <polyline points="13 2 13 9 20 9"/>
           </svg>
-          <p>无法预览此文件类型</p>
+          <p>{{ file.preview_hint || '无法预览此文件类型' }}</p>
+          <p class="preview-hint">请下载后查看</p>
         </div>
+      </div>
+
+      <div v-if="file.preview_method === 'download' || file.preview_method === 'iframe_office'" class="modal-footer">
+        <a
+          v-if="file.preview_url"
+          :href="file.preview_url"
+          :download="file.name"
+          class="download-button"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          下载文件
+        </a>
       </div>
     </div>
   </div>
@@ -61,24 +102,42 @@ export default {
       this.$emit('close')
     },
     isImageFile(file) {
-      if (!file.type) return false
-      return file.type.startsWith('image/')
+      if (!file) return false
+      // 检查大写的 file_type（如 "IMAGE"）和 type（如 "image/png"）
+      if (file.file_type === 'IMAGE' || file.type === 'IMAGE') return true
+      return file.type && file.type.startsWith('image/')
     },
+
     isTextFile(file) {
-      if (!file.type) return false
-      return file.type.startsWith('text/') ||
+      if (!file) return false
+      // 检查大写的 file_type（如 "TEXT"）和 type（如 "text/plain"）
+      if (file.file_type === 'TEXT' || file.type === 'TEXT') return true
+      return file.type && (file.type.startsWith('text/') ||
              file.type === 'application/json' ||
              file.type === 'text/csv' ||
-             file.type === 'text/xml'
+             file.type === 'text/xml')
     },
-    getFileTypeLabel(type) {
-      if (!type) return '未知类型'
-      if (type.startsWith('image/')) return '图片文件'
-      if (type.startsWith('text/')) return '文本文件'
-      if (type === 'application/json') return 'JSON 文件'
-      if (type === 'text/csv') return 'CSV 文件'
-      if (type === 'text/xml') return 'XML 文件'
-      return type
+
+    getFileTypeLabel(file) {
+      if (!file) return '未知类型'
+
+      const fileType = file.file_type || file.type || ''
+      const mimeType = file.type || ''
+      const suffix = file.suffix || (file.name ? '.' + file.name.split('.').pop().toLowerCase() : '')
+
+      // 统一转大写比较，兼容后端返回的大写 file_type
+      const upperFileType = fileType.toUpperCase()
+      const upperMimeType = mimeType.toLowerCase()
+
+      if (upperFileType === 'IMAGE' || upperMimeType.startsWith('image/')) return '图片文件'
+      if (upperFileType === 'TEXT' || upperMimeType.startsWith('text/')) return '文本文件'
+      if (suffix === '.pdf' || upperMimeType === 'application/pdf') return 'PDF 文档'
+      if (suffix === '.docx' || upperMimeType.includes('document')) return 'Word 文档'
+      if (suffix === '.pptx' || upperMimeType.includes('presentation')) return 'PPT 演示文稿'
+      if (suffix === '.xlsx' || upperMimeType.includes('spreadsheet')) return 'Excel 表格'
+      if (upperMimeType === 'application/json') return 'JSON 文件'
+
+      return fileType || '文件'
     }
   }
 }
@@ -196,6 +255,70 @@ export default {
   max-height: 70vh;
   object-fit: contain;
   border-radius: 8px;
+}
+
+.preview-iframe {
+  width: 100%;
+  height: 70vh;
+  border: none;
+  border-radius: 8px;
+}
+
+.office-preview {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.office-preview-content {
+  text-align: center;
+  color: var(--text-secondary);
+  padding: 24px;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+}
+
+.office-preview-content svg {
+  margin-bottom: 12px;
+  opacity: 0.6;
+}
+
+.office-preview-content p {
+  margin: 8px 0;
+  font-size: 14px;
+}
+
+.preview-hint {
+  font-size: 13px !important;
+  color: var(--text-secondary);
+  opacity: 0.8;
+}
+
+.modal-footer {
+  padding: 16px 24px;
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  justify-content: flex-end;
+}
+
+.download-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  background: var(--button-bg);
+  color: white;
+  text-decoration: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  transition: all 0.2s;
+}
+
+.download-button:hover {
+  background: var(--button-hover);
+  transform: translateY(-1px);
 }
 
 .preview-text {

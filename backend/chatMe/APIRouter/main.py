@@ -1,9 +1,11 @@
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, FastAPI, Path, Body, Query, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, FastAPI, Path, Body, Query, File, Form, UploadFile
 from fastapi.responses import StreamingResponse
 
+from chatMe.ChatService.FilesLoaders import UploadFileWithId
+from chatMe.ChatService.FilesLoaders.core import OutputFormat
 from chatMe.ChatService.config.models import ChatRequest, Conversation
 from chatMe.ChatService import ChatService, FILE_MAX_LENGTH
 from chatMe.ChatWorkflow import ChatWorkflow
@@ -15,8 +17,6 @@ chat_service: Optional[ChatService] = None
 
 logger = get_logger("ChatService Router")
 
-logger.info("ChatService Router 加载成功")
-
 async def create_chat_service() -> ChatService:
     """
     初始化chatService的对象
@@ -24,10 +24,26 @@ async def create_chat_service() -> ChatService:
     Return: ChatService()
     """
     global chat_service
-    workflow = ChatWorkflow()
-    await workflow.ainit()
+    try:
+        workflow = ChatWorkflow()
 
-    chat_service = ChatService(workflow)
+        import asyncio
+        try:
+            await asyncio.wait_for(workflow.ainit(), timeout=30.0)
+            logger.info("ChatWorkflow 初始化成功")
+        except asyncio.TimeoutError:
+            logger.error("ChatWorkflow 初始化超时（30秒），请检查：")
+            logger.error("1. MCP 服务器是否启动 (http://127.0.0.1:18080)")
+            logger.error("2. Redis 是否启动 (localhost:6379)")
+            raise
+
+        chat_service = ChatService(workflow)
+        logger.info("ChatService 创建成功")
+
+        chat_service = ChatService(workflow)
+    except Exception as e:
+        logger.error(f"ChatService 创建失败：{e}")
+        raise
 
     return chat_service
 
@@ -44,9 +60,9 @@ async def lifespan(app :FastAPI):
 
 @chatMe_app.post("/", summary="新建对话/继续对话-流式响应，无session_id则新建对话")
 async def chat_stream(
-        chatRequest: str = Form(...),
-        # chatRequest: ChatRequest = Body(...),
-        files: list[UploadFile] | None = File(default=None, max_length=FILE_MAX_LENGTH)
+        # chatRequest: str = Form(...),
+        chat_request: ChatRequest = Body(...),
+        # files: Optional[list[UploadFile]] = File(default=None, max_length=FILE_MAX_LENGTH)
 ):
     """
     核心流式对话接口：
@@ -58,19 +74,19 @@ async def chat_stream(
         chatRequest ***前端要用字符串形式传入json字典对象***，包含：
             session_id: 会话 ID，如果没有则为 None
             message: 请求对象，包含用户消息(form-data)
-        files: 文件参数，要不然置空，要不然传入
+            files_content: 处理好的文件内容返回结果
 
     返回:
         StreamingResponse: 包含 AI 回应、session_id 和会话标题
     """
     # 将form-data参数转为chatRequest对象
-    chatRequest = ChatRequest.model_validate_json(chatRequest)
+    # chatRequest = ChatRequest.model_validate_json(chatRequest)
 
     async def event_generator():
         async for data in chat_service.message_stream(
-            message=chatRequest.message,
-            session_id=chatRequest.session_id,
-            files = files,
+            message=chat_request.message,
+            session_id=chat_request.session_id,
+            processed_outputs=chat_request.processed_outputs
         ):
             yield f"{data}"
 
@@ -184,7 +200,89 @@ async def backtrack_checkpoint(
     """
     status = await chat_service.backtrack_state(session_id=session_id, checkpoint_id=backtrack_id)
 
-    if status == False:
+    if not status:
         return {"code": 500, "msg": "回溯失败", "session_id": session_id, "backtrack_id": backtrack_id}
 
     return {"code": 200, "msg": "回溯成功", "session_id": session_id, "backtrack_id": backtrack_id}
+
+@chatMe_app.post("/upload_file", summary="上传文件")
+async def upload_file(
+    files: Optional[list[UploadFile]] = File(default=None, max_length=FILE_MAX_LENGTH),
+    processed_outputs: str = Form(default="[]", description="已处理好的文件信息(JSON字符串)")):
+    """
+        对文件进行预处理，提前处理要发给ai的文件信息
+
+        Args:
+            files: Upload文件
+            processed_outputs: 已处理好的文件输出
+        Returns:
+            包装好的 files_content 结果
+    """
+    import json
+
+    logger.info(f"文件上传请求 - 文件数量: {len(files) if files else 0}, FILE_MAX_LENGTH: {FILE_MAX_LENGTH}")
+
+    # 将 JSON 字符串解析为列表
+    try:
+        processed_outputs_list = json.loads(processed_outputs) if processed_outputs else []
+    except json.JSONDecodeError as e:
+        logger.error(f"解析 processed_outputs 失败: {e}, 原始值: {processed_outputs}")
+        processed_outputs_list = []
+
+    if not files:
+        logger.warning("文件上传请求 - 无文件")
+        return {"code": 404, "msg": "无文件上传", "processed_outputs": processed_outputs}
+
+    # 检查每个文件的大小
+    for f in files:
+        logger.info(f"文件信息 - filename: {f.filename}, size: {f.size}, content_type: {f.content_type}")
+        if f.size and f.size > FILE_MAX_LENGTH:
+            logger.warning(f"文件大小超过限制 - {f.filename}: {f.size} bytes > {FILE_MAX_LENGTH} bytes")
+
+    upload_files_with_id = [
+        UploadFileWithId(
+            file=f.file,
+            filename=f.filename,
+            size=f.size,
+            headers=f.headers
+        ) for f in files
+    ]
+
+    outputs = await chat_service.process_files(upload_files_with_id)
+    processed_outputs_list.extend(outputs)
+
+    return {
+        "code": 200,
+        "msg": "文件处理成功",
+        "processed_outputs": processed_outputs_list,
+    }
+
+@chatMe_app.post("/cancel_upload_file", summary="取消已上传的文件")
+async def cancel_upload_file(
+    file_id: str = Body(..., embed=True, description="每个文件自带的独特id"),
+    processed_outputs: List[OutputFormat] = Body(default=[], description="已处理好的文件信息",embed=True)
+):
+    """
+    取消已上传的文件
+    """
+    if not processed_outputs:
+        return {"code": 400, "msg": "无文件上传", "processed_outputs": processed_outputs}
+
+    index = -1
+    for i,op in enumerate(processed_outputs):
+        if file_id == op.file_info["file_id"]:
+            index = i
+            break
+
+    if index == -1:
+        return {"code": 404, "msg": f"无此{file_id}文件上传", "processed_outputs": processed_outputs}
+
+    processed_outputs.pop(index)
+
+    return{
+        "code": 200,
+        "msg": f"取消{file_id}文件上传成功",
+        "processed_outputs": processed_outputs,
+    }
+
+

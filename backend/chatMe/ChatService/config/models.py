@@ -2,12 +2,16 @@ from enum import Enum
 from datetime import datetime
 from typing import List, Optional, Dict
 
+from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
+
+from chatMe.ChatService.FilesLoaders.core import OutputFormat
 
 
 class ChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = ""
+    processed_outputs: Optional[List[OutputFormat]] = None
 
 
 class ChatResponse(BaseModel):

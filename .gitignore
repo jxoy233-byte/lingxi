@@ -58,3 +58,18 @@ NUL*
 
 #claude
 CLAUDE.md
+
+# Todo files
+todo.md
+*.todo
+TODO.md
+
+# Cached files
+cached/
+*.cached
+cache/
+*.cache
+
+# Logs
+logs/
+*.log.*

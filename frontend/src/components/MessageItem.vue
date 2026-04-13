@@ -162,28 +162,34 @@ import 'highlight.js/styles/atom-one-dark.css'
 
 // 配置 marked
 const renderer = new marked.Renderer()
-// todo 带完善对url的高亮识别
-renderer.code = function(code, lang) {
-  // 确保 code 是字符串类型，如果是对象则尝试提取内容
-  if (typeof code !== 'string') {
-    // 如果是对象，尝试 JSON 序列化或提取 text 字段
-    if (code && typeof code === 'object') {
-      if (code.text) {
-        code = String(code.text)
-      } else if (code.content) {
-        code = String(code.content)
-      } else {
-        code = JSON.stringify(code)
-      }
-    } else {
-      code = String(code)
-    }
-  }
 
-  // 处理 lang 参数，确保是字符串
-  if (typeof lang !== 'string') {
-    lang = ''
-  }
+// 自定义链接渲染器，修复 URL 识别问题
+// marked v5+ 接收 token 对象
+renderer.link = function(token) {
+  const href = token.href || ''
+  const title = token.title || ''
+  const text = token.text || ''
+
+  // 清理 URL 末尾的非法字符（中文标点、括号等）
+  let cleanHref = href.replace(/[，。、；：？！""''（）【】《》…——]+$/, '')
+  // 移除末尾不匹配的右括号
+  cleanHref = cleanHref.replace(/\)+$/, (match) => {
+    const openCount = (cleanHref.match(/\(/g) || []).length
+    const closeCount = match.length
+    if (closeCount > openCount) {
+      return ')'.repeat(openCount)
+    }
+    return match
+  })
+
+  const titleAttr = title ? ` title="${title}"` : ''
+  return `<a href="${cleanHref}"${titleAttr} target="_blank" rel="noopener noreferrer">${text}</a>`
+}
+
+renderer.code = function(token) {
+  // marked v5+ 接收 token 对象
+  const code = token.text || ''
+  const lang = token.lang || ''
 
   // 去除 infostring 中可能包含的元数据（如 {meta}）
   const langParts = lang.split(/\s+/)
@@ -254,8 +260,8 @@ export default {
               content = String(content)
             }
           }
-          // 渲染 Markdown
-          return marked(content)
+          // 渲染 Markdown（先预处理清理 URL，防止 marked 错误匹配）
+          return marked(this.preprocessContent(content))
         } catch (error) {
           console.error('Markdown 渲染失败:', error, '原始内容:', this.message.content)
           // 降级处理，直接返回纯文本
@@ -293,6 +299,22 @@ export default {
     }
   },
   methods: {
+    // 预处理原始文本 - 手动创建链接，避免 marked 错误解析
+    preprocessContent(content) {
+      if (typeof content !== 'string') return content
+
+      // 使用与成功案例相同的 URL 正则，直接创建 <a> 标签
+      // 这个正则的字符集自然排除中文
+      const urlRegex = /\b(https?|ftp|file):\/\/[-A-Za-z0-9+&@#\/%?=~_|!:,;.]+[-A-Za-z0-9+&@#\/%=~_|]/gi
+
+      // 直接替换 URL 为 <a> 标签，保留原始 URL 作为显示文本
+      let result = content.replace(urlRegex, (url) => {
+        return `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`
+      })
+
+      return result
+    },
+
     highlightCode() {
       const codeBlocks = this.$el.querySelectorAll('pre code')
       codeBlocks.forEach(block => {

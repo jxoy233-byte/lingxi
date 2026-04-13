@@ -121,7 +121,7 @@ class ChatWorkflow:
                     if tool_call["name"]:
                         tool_calls.append(tool_call)
                 except json.JSONDecodeError as e:
-                    self.logger.error(f"JSON 解析错误: {e}")
+                    self.logger.warning(f"解析工具调用JSON失败: {e}")
                     continue
 
             if tool_calls:

@@ -2,9 +2,14 @@ from typing import Any, Dict, List
 from datetime import datetime
 
 import json
+import traceback
+from datetime import datetime
+from typing import List, Dict, Any
+
 import redis.asyncio as redis
 
 from chatMe.ChatService.RedisStateSaver.config import REDIS_URL
+from chatMe.logging_config import get_logger
 
 
 class RedisStateSaver:
@@ -13,6 +18,7 @@ class RedisStateSaver:
     """
 
     def __init__(self):
+        self.logger = get_logger(__class__.__name__)
         self.redis_client = redis.from_url(REDIS_URL)
         self.redis_prefix = "threads"
 
@@ -24,7 +30,7 @@ class RedisStateSaver:
         """关闭连接"""
         await self.redis_client.close()
 
-    def _build_key(self, thread_id: str) ->str:
+    def _build_key(self, thread_id: str) -> str:
         """
         构建redis key
         :param thread_id: 会话id
@@ -32,25 +38,28 @@ class RedisStateSaver:
         """
         return f"{self.redis_prefix}:{thread_id}:checkpoints"
 
-    async def write_checkpoint(self, thread_id: str, checkpoint_id: str):
+    async def write_checkpoint(self, thread_id: str, checkpoint_id: str) -> bool:
         """
         写入 checkpoint 检查点到指定 thread_id 下
         :param thread_id: 会话id
         :param checkpoint_id: 检查点id
-        :param metadata: 检查点元数据
         :return: 写入状态
         """
         key = self._build_key(thread_id)
-
         ts = datetime.now().isoformat()
         value_data = {
             "ts": ts,
             "checkpoint_id": checkpoint_id,
         }
+        value = json.dumps(value_data, ensure_ascii=False, default=str)
 
-        value = json.dumps(value_data, ensure_ascii=False, default= str)
-
-        await self.redis_client.hset(key, checkpoint_id, value)
+        try:
+            await self.redis_client.hset(key, checkpoint_id, value)
+            self.logger.debug(f"写入checkpoint成功(thread_id={thread_id}, checkpoint_id={checkpoint_id})")
+            return True
+        except Exception as e:
+            self.logger.error(f"写入checkpoint失败(thread_id={thread_id}): {e}\n{traceback.format_exc()}")
+            return False
 
     async def get_checkpoints(self, thread_id: str) -> List[Dict[str, Any]]:
         """
@@ -60,25 +69,27 @@ class RedisStateSaver:
         """
         key = self._build_key(thread_id)
 
-        hash_data = await self.redis_client.hgetall(key)
-        if not hash_data:
+        try:
+            hash_data = await self.redis_client.hgetall(key)
+            if not hash_data:
+                self.logger.debug(f"无checkpoints(thread_id={thread_id})")
+                return []
+
+            checkpoints = []
+            for checkpoint_id, value_str in hash_data.items():
+                try:
+                    value_data = json.loads(value_str)
+                    checkpoints.append(value_data)
+                except json.JSONDecodeError:
+                    checkpoints.append({"checkpoint_id": checkpoint_id, "ts": None})
+
+            checkpoints.sort(key=lambda x: x.get("ts", "") or "")
+            self.logger.debug(f"获取checkpoints成功(thread_id={thread_id}, count={len(checkpoints)})")
+            return checkpoints
+
+        except Exception as e:
+            self.logger.error(f"获取checkpoints失败(thread_id={thread_id}): {e}\n{traceback.format_exc()}")
             return []
-
-        checkpoints = []
-
-        for checkpoint_id ,value_str in hash_data.items():
-            try:
-                value_data = json.loads(value_str)
-                checkpoints.append(value_data)
-            except json.JSONDecodeError as e:
-                checkpoints.append({
-                    "checkpoint_id": checkpoint_id,
-                    "ts": None,
-                })
-
-        checkpoints.sort(key=lambda x: x.get("ts","") or "")
-
-        return checkpoints
 
     async def delete_checkpoint(self, thread_id: str, checkpoint_id: str) -> bool:
         """
@@ -89,10 +100,13 @@ class RedisStateSaver:
         """
         key = self._build_key(thread_id)
 
-        await self.redis_client.hdel(key, checkpoint_id)
-
-        return True
-
+        try:
+            await self.redis_client.hdel(key, checkpoint_id)
+            self.logger.debug(f"删除checkpoint成功(thread_id={thread_id}, checkpoint_id={checkpoint_id})")
+            return True
+        except Exception as e:
+            self.logger.error(f"删除checkpoint失败(thread_id={thread_id}, checkpoint_id={checkpoint_id}): {e}")
+            return False
 
     async def delete_thread(self, thread_id: str) -> bool:
         """
@@ -102,6 +116,10 @@ class RedisStateSaver:
         """
         key = self._build_key(thread_id)
 
-        await self.redis_client.delete(key)
-
-        return True
+        try:
+            await self.redis_client.delete(key)
+            self.logger.info(f"删除会话所有checkpoints(thread_id={thread_id})")
+            return True
+        except Exception as e:
+            self.logger.error(f"删除会话失败(thread_id={thread_id}): {e}")
+            return False

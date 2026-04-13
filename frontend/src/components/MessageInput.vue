@@ -159,12 +159,15 @@ export default {
       isOptimizing: false,
       fileConfig: null,
       loadingConfig: false,
-      processedOutputs: []
+      processedOutputs: [],
+      // 上传队列控制
+      uploadQueue: [],      // 待处理的文件队列
+      isUploadQueueProcessing: false  // 队列是否正在处理中
     }
   },
   computed: {
     maxFileSize() {
-      return this.fileConfig?.maxFileSize || 100 * 1024 * 1024
+      return this.fileConfig?.maxFileSize || 25 * 1024 * 1024
     },
     allowedImageTypes() {
       const types = this.fileConfig?.imageTypes?.suffixes
@@ -186,7 +189,7 @@ export default {
     },
     // 检查是否有文件正在上传
     hasUploadingFiles() {
-      return this.selectedFiles.some(f => f.uploading)
+      return this.selectedFiles.some(f => f.uploading) || this.uploadQueue.length > 0 || this.isUploadQueueProcessing
     }
   },
   mounted() {
@@ -416,28 +419,56 @@ export default {
       this.selectedFiles.push(...invalidFiles)
 
       if (validFiles.length > 0) {
-        validFiles.forEach(fileObj => {
-          fileObj.uploading = true
-        })
-        this.selectedFiles.push(...validFiles)
-        this.$forceUpdate()
+        // 将有效文件添加到队列
+        this.uploadQueue.push(...validFiles)
 
-        const uploadPromises = validFiles.map(fileObj => this.uploadSingleFile(fileObj))
-
-        await Promise.all(uploadPromises)
-
-        this.$forceUpdate()
+        // 如果队列未在处理，则开始处理
+        if (!this.isUploadQueueProcessing) {
+          this.processUploadQueue()
+        }
       }
     },
 
-     async uploadSingleFile(fileObj) {
+    async processUploadQueue() {
+      if (this.uploadQueue.length === 0) {
+        this.isUploadQueueProcessing = false
+        return
+      }
+
+      this.isUploadQueueProcessing = true
+
+      // 取出队列中的所有文件
+      const filesToUpload = [...this.uploadQueue]
+      this.uploadQueue = []
+
+      // 标记为上传中
+      filesToUpload.forEach(fileObj => {
+        fileObj.uploading = true
+      })
+      this.selectedFiles.push(...filesToUpload)
+      this.$forceUpdate()
+
+      // 整批文件一次性上传
+      await this.uploadFilesBatch(filesToUpload)
+
+      // 这一批完成后，继续处理下一批
+      this.processUploadQueue()
+    },
+
+    async uploadFilesBatch(fileObjs) {
       const formData = new FormData()
-      formData.append('files', fileObj.file)
+
+      // 添加所有文件
+      fileObjs.forEach(fileObj => {
+        formData.append('files', fileObj.file)
+      })
+
+      // 携带当前已处理的文件列表
       formData.append('processed_outputs', JSON.stringify(this.processedOutputs))
 
-      console.log('上传文件请求:', {
-        fileName: fileObj.name,
-        processedOutputs: this.processedOutputs,
+      console.log('上传文件批次:', {
+        fileCount: fileObjs.length,
+        fileNames: fileObjs.map(f => f.name),
         processedOutputsLength: this.processedOutputs.length
       })
 
@@ -448,45 +479,47 @@ export default {
         })
 
         if (!response.ok) {
-          // 获取详细错误信息
           const errorText = await response.text()
-          console.error('文件上传失败 - 状态码:', response.status)
-          console.error('文件上传失败 - 响应:', errorText)
-          throw new Error(`文件上传失败: ${response.status} - ${errorText}`)
+          console.error('文件上传失败:', response.status, errorText)
+          throw new Error(`文件上传失败: ${response.status}`)
         }
 
         const data = await response.json()
 
         if (data.code === 200) {
-          console.log('上传成功，返回的 processed_outputs 数量:', data.processed_outputs?.length)
+          // 更新全局 processedOutputs
           this.processedOutputs = data.processed_outputs || []
-          console.log('当前 processedOutputs 数量:', this.processedOutputs.length)
+          console.log('批次上传成功，processedOutputs 数量:', this.processedOutputs.length)
 
-          const output = this.processedOutputs.find(
-            op => op.file_info && op.file_info.file_name === fileObj.name
-          )
+          // 更新每个文件的信息
+          fileObjs.forEach(fileObj => {
+            const output = this.processedOutputs.find(
+              op => op.file_info && op.file_info.file_name === fileObj.name
+            )
 
-          if (output && output.file_info) {
-            fileObj.fileId = output.file_info.file_id
-
-            // 使用后端返回的 preview_url（base64 data URL）
-            if (output.file_info.preview_url) {
-              fileObj.preview = output.file_info.preview_url
+            if (output && output.file_info) {
+              fileObj.fileId = output.file_info.file_id
+              if (output.file_info.preview_url) {
+                fileObj.preview = output.file_info.preview_url
+              }
+              if (output.file_info.iframe_url) {
+                fileObj.iframe_url = output.file_info.iframe_url
+              }
             }
-
-            // 如果后端返回了 iframe_url，也一并保存
-            if (output.file_info.iframe_url) {
-              fileObj.iframe_url = output.file_info.iframe_url
-            }
-          }
+          })
         } else {
           throw new Error(data.msg || '文件上传失败')
         }
       } catch (error) {
-        console.error('文件上传失败:', error)
-        fileObj.error = '上传失败'
+        console.error('批次上传失败:', error)
+        // 标记所有文件为失败
+        fileObjs.forEach(fileObj => {
+          fileObj.error = '上传失败'
+        })
       } finally {
-        fileObj.uploading = false
+        fileObjs.forEach(fileObj => {
+          fileObj.uploading = false
+        })
         this.$forceUpdate()
       }
     },
@@ -520,6 +553,15 @@ export default {
     async removeFile(index) {
       const file = this.selectedFiles[index]
 
+      // 如果文件还在队列中未上传，先从队列移除
+      if (file.uploading === false && file.fileId === null) {
+        const queueIndex = this.uploadQueue.findIndex(f => f === file)
+        if (queueIndex !== -1) {
+          this.uploadQueue.splice(queueIndex, 1)
+        }
+      }
+
+      // 如果文件已上传，调用后端取消
       if (file.fileId && this.processedOutputs.length > 0) {
         try {
           const response = await fetch('/chat/cancel_upload_file', {
@@ -556,6 +598,7 @@ export default {
       })
       this.selectedFiles = []
       this.processedOutputs = []
+      this.uploadQueue = []
     },
 
     getFileExtension(filename) {

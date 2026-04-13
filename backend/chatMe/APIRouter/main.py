@@ -39,8 +39,6 @@ async def create_chat_service() -> ChatService:
 
         chat_service = ChatService(workflow)
         logger.info("ChatService 创建成功")
-
-        chat_service = ChatService(workflow)
     except Exception as e:
         logger.error(f"ChatService 创建失败：{e}")
         raise
@@ -220,24 +218,18 @@ async def upload_file(
     """
     import json
 
-    logger.info(f"文件上传请求 - 文件数量: {len(files) if files else 0}, FILE_MAX_LENGTH: {FILE_MAX_LENGTH}")
-
     # 将 JSON 字符串解析为列表
     try:
         processed_outputs_list = json.loads(processed_outputs) if processed_outputs else []
     except json.JSONDecodeError as e:
-        logger.error(f"解析 processed_outputs 失败: {e}, 原始值: {processed_outputs}")
+        logger.error(f"解析 processed_outputs 失败: {e}")
         processed_outputs_list = []
 
     if not files:
-        logger.warning("文件上传请求 - 无文件")
+        logger.warning("文件上传请求无文件")
         return {"code": 404, "msg": "无文件上传", "processed_outputs": processed_outputs}
 
-    # 检查每个文件的大小
-    for f in files:
-        logger.info(f"文件信息 - filename: {f.filename}, size: {f.size}, content_type: {f.content_type}")
-        if f.size and f.size > FILE_MAX_LENGTH:
-            logger.warning(f"文件大小超过限制 - {f.filename}: {f.size} bytes > {FILE_MAX_LENGTH} bytes")
+    logger.info(f"文件上传: {len(files)}个文件")
 
     upload_files_with_id = [
         UploadFileWithId(
@@ -276,6 +268,8 @@ async def cancel_upload_file(
 
     if index == -1:
         return {"code": 404, "msg": f"无此{file_id}文件上传", "processed_outputs": processed_outputs}
+
+    await chat_service.remove_processed_files(processed_outputs[index])
 
     processed_outputs.pop(index)
 

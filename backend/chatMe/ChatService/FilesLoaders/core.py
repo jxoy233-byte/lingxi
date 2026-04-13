@@ -72,7 +72,7 @@ class OutputFormat:
 
 class FilesLoaders:
 
-    def __init__(self, processing_files :Optional[list[UploadFileWithId]]):
+    def __init__(self, processing_files: Optional[list[UploadFileWithId]]):
         self.logger = get_logger("FilesLoader")
         self.processing_files = processing_files
         self.processing_dir = str(Path.cwd()) + "/cached"
@@ -87,6 +87,7 @@ class FilesLoaders:
             for file in self.processing_files:
                 await file.close()
             self.processing_files = None
+            self.logger.debug("文件资源已清理")
 
     @staticmethod
     async def _get_file_suffix(filename: Optional[str]) -> str:
@@ -163,11 +164,12 @@ class FilesLoaders:
             self.logger.error(f"创建临时文件失败：{str(e)}")
             return None
 
-    async def _process_images(self, files: List[UploadFileWithId])->  List[OutputFormat]:
+    async def _process_images(self, files: List[UploadFileWithId]) -> List[OutputFormat]:
         """
         处理传入的图片文件，转化为base64字符串
         """
         outputs: List[OutputFormat] = []
+        self.logger.info(f"开始处理{len(files)}个图片文件")
 
         for file in files:
             output = OutputFormat(
@@ -188,20 +190,23 @@ class FilesLoaders:
 
                 output.image_content = base64_data
                 outputs.append(output)
+                self.logger.debug(f"图片处理成功: {file.filename}")
 
             except Exception as e:
-                self.logger.error(f"处理图片文件失败：{str(e)}")
+                self.logger.error(f"处理图片文件失败({file.filename}): {e}")
                 outputs.append(output)
 
+        self.logger.info(f"图片处理完成，成功{sum(1 for o in outputs if o.image_content)}/{len(files)}个")
         return outputs
 
-    async def _process_texts(self, files: List[UploadFileWithId])->  List[OutputFormat]:
+    async def _process_texts(self, files: List[UploadFileWithId]) -> List[OutputFormat]:
         """
         使用langchain的document_loader组件处理传入文件信息，类型为txt，md等常见文本类型
         :param files:
         :return: text_list
         """
         outputs: List[OutputFormat] = []
+        self.logger.info(f"开始处理{len(files)}个文本文件")
 
         for file in files:
             output = OutputFormat(
@@ -217,61 +222,32 @@ class FilesLoaders:
                 output.file_type = await self._switch_suffix_to_file_type(suffix)
 
                 loader: Optional[BaseLoader] = None
-                """
-                将 UploadFile 的内容写入本地临时文件；
-                传入 UnstructuredFileLoader；
-                解析完成后删除临时文件（避免占用磁盘）。
-                """
                 if suffix == ".md":
-                    loader = UnstructuredMarkdownLoader(
-                        file_path,
-                        mode="single",
-                        strategy="fast",
-                    )
+                    loader = UnstructuredMarkdownLoader(file_path, mode="single", strategy="fast")
                 elif suffix == ".csv":
-                    loader = UnstructuredCSVLoader(
-                        file_path = file_path,
-                        mode="single",
-                        strategy="fast",
-                    )
+                    loader = UnstructuredCSVLoader(file_path=file_path, mode="single", strategy="fast")
                 elif suffix == ".txt":
-                    loader = TextLoader(
-                        file_path = file_path,
-                        encoding="utf-8"  # 指定编码
-                    )
+                    loader = TextLoader(file_path=file_path, encoding="utf-8")
                 elif suffix == ".xml":
-                    loader = UnstructuredXMLLoader(
-                        file_path = file_path,
-                        mode="single",
-                        strategy="fast",
-                    )
+                    loader = UnstructuredXMLLoader(file_path=file_path, mode="single", strategy="fast")
                 elif suffix == ".json":
-                    loader = JSONLoader(
-                        file_path = file_path,
-                        jq_schema=".[]",  # 解析所有数组元素，可根据需求调整
-                        text_content=True  # False：保留原始JSON结构，True：仅提取文本
-                    )
+                    loader = JSONLoader(file_path=file_path, jq_schema=".[]", text_content=True)
                 else:
                     self.logger.warning(f"不支持的文件类型：{file.filename}")
+                    outputs.append(output)
+                    continue
 
-                # loader都为BaseLoader的子类 ，都有aload方法可以调用
                 documents = await loader.aload()
                 file_text = documents[0].page_content if documents else ""
-
                 output.text_content = file_text
                 outputs.append(output)
+                self.logger.debug(f"文本文件处理成功: {file.filename}({len(file_text)}字符)")
 
             except Exception as e:
-                self.logger.error(f"处理文件 {file.filename} 失败：{str(e)}")
-                outputs.append(output) # 保证列表完整性
-            # finally:
-            #     if file_path and os.path.exists(file_path):
-            #         try:
-            #             os.remove(file_path)
-            #             self.logger.info(f"成功删除临时文件：{file_path}")
-            #         except Exception as e:
-            #             self.logger.error(f"删除临时文件失败：{file_path}，错误信息：{str(e)}")
+                self.logger.error(f"处理文本文件失败({file.filename}): {e}")
+                outputs.append(output)
 
+        self.logger.info(f"文本文件处理完成，成功{sum(1 for o in outputs if o.text_content)}/{len(files)}个")
         return outputs
 
     async def _process_documents(self, files: List[UploadFileWithId])->  List[OutputFormat]:
@@ -302,11 +278,10 @@ class FilesLoaders:
         )
 
         outputs: List[OutputFormat] = []
+        self.logger.info(f"开始处理{len(files)}个文档")
+
         for file in files:
-            output = OutputFormat(
-                text_content = "",
-                image_content = "",
-            )
+            output = OutputFormat(text_content="", image_content="")
             file_path = None
             try:
                 suffix = await self._get_file_suffix(file.filename)
@@ -316,14 +291,11 @@ class FilesLoaders:
                 output.file_type = await self._switch_suffix_to_file_type(suffix)
 
                 result = converter.convert(file_path)
-
                 doc = result.document
 
                 output_dir = Path(file_path).parent / f"{Path(file_path).stem}_output"
                 output_dir.mkdir(exist_ok=True)
-
                 output_path = output_dir / "document.md"
-
                 doc.save_as_markdown(output_path, image_mode=ImageRefMode.REFERENCED)
 
                 ads_prefix = str(output_dir) + '/'
@@ -339,18 +311,15 @@ class FilesLoaders:
                         open(temp_path, "w", encoding=detected_encoding) as f_out:
                     for i, line in enumerate(f_in):
                         if line.startswith("!["):
-                            # 修改默认的图片生成名，为了节省tokens
                             import re
                             img_pattern = r'!\[(.*?)\]\(([^)]+)\)'
                             if match := re.search(img_pattern, line):
                                 prefix_name = match.group(1)
                                 new_name = f"{prefix_name}_{i}.png"
-
                                 match_dir = match.group(2)
                                 dir_with_new_name = f"{output_dir}/document_artifacts/{new_name}"
                                 os.rename(match_dir, dir_with_new_name)
                                 line = line.replace(match_dir, dir_with_new_name)
-
                                 line = line.replace(ads_prefix, rel_prefix)
                         f_out.write(line)
                     temp_path.replace(output_path)
@@ -358,31 +327,26 @@ class FilesLoaders:
                 file_content = output_path.read_text(encoding=detected_encoding)
                 output.text_content = file_content
 
-                # 获取可能存在的文件内容
                 path = output_dir / "document_artifacts"
                 if path.exists():
                     images = []
                     for img in path.iterdir():
-                        img_name = img.name
-
                         img_blob = img.read_bytes()
                         img_base64 = base64.b64encode(img_blob).decode('utf-8')
-
-                        img_dict = {
-                            "name": img_name,
-                            "base64": img_base64
-                        }
-                        images.append(img_dict)
+                        images.append({"name": img.name, "base64": img_base64})
+                    output.image_content = images
 
                 outputs.append(output)
+                self.logger.debug(f"文档处理成功: {file.filename}({len(file_content)}字符)")
 
             except Exception as e:
-                self.logger.error(f"{file.filename}处理失败: ", str(e))
+                self.logger.error(f"文档处理失败({file.filename}): {e}")
                 outputs.append(output)
 
+        self.logger.info(f"文档处理完成，成功{sum(1 for o in outputs if o.text_content)}/{len(files)}个")
         return outputs
 
-    async def loading_files(self)-> Optional[List[OutputFormat]]:
+    async def loading_files(self) -> Optional[List[OutputFormat]]:
         """
         处理传入文件信息，返回处理好的二进制文件内容
         :return: images_content（含图片信息列表）, text_content（含文本信息列表）
@@ -475,13 +439,13 @@ class FilesLoaders:
         """
         suffix = suffix.lower()
 
-        if file_type == "image":
+        if file_type == "IMAGE":
             return f"data:{content_type};base64,{base64_content}"
 
-        elif file_type == "text":
+        elif file_type == "TEXT":
             return f"data:{content_type};base64,{base64_content}"
 
-        elif file_type == "document":
+        elif file_type == "DOCUMENT":
             if suffix == ".pdf":
                 return f"data:{content_type};base64,{base64_content}"
             elif suffix in [".docx", ".pptx", ".xlsx"]:

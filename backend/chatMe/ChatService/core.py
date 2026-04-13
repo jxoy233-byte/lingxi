@@ -1,4 +1,5 @@
 import json
+import os
 import traceback
 import uuid
 from datetime import datetime
@@ -112,6 +113,17 @@ class ChatService:
             return outputs
         finally:
             await fl.cleanup()
+
+    @staticmethod
+    async def remove_processed_files(output: OutputFormat):
+        """
+        删除处理后的文件
+
+        Args:
+            output: 需要删除的处理后的输出格式
+        """
+        file_path = output.file_info["file_path"]
+        os.remove(file_path)
 
     @staticmethod
     def _get_mime_type(suffix: str) -> str:
@@ -236,7 +248,7 @@ class ChatService:
             status = await self.state_saver.write_checkpoint(session_id, checkpoint_id)
 
             if status:
-                self.logger.info(f"保存每轮检查点成功(session_id:{session_id})")
+                self.logger.debug(f"保存检查点(thread_id={session_id})")
                 if isinstance(state.values["messages"][-1], AIMessage):
                     last_ai_message = list(state.values["messages"])[-1]
                     last_ai_message.additional_kwargs["checkpoint_id"] = checkpoint_id
@@ -275,8 +287,9 @@ class ChatService:
         # 会话ID处理：无则新建，有则校验是否存在
         if session_id == "" or session_id is None:
             session_id = str(uuid.uuid4().hex)
+            self.logger.info(f"创建新会话(session_id={session_id})")
         elif session_id not in session_ids:
-            # 会话ID不存在，返回错误信息
+            self.logger.warning(f"会话不存在(session_id={session_id})")
             yield json.dumps(
                 {"type": "error", "error": f"会话ID {session_id} 不存在，请检查后重试"},
                 ensure_ascii=False
@@ -304,6 +317,7 @@ class ChatService:
         messages.append(message_content)
 
         full_response = ""
+        tool_count = 0
         try:
             async for chunk in self.chat_workflow.astream(messages=messages, config=input_config):
                 if chunk['event'] == 'on_chat_model_stream':
@@ -330,8 +344,10 @@ class ChatService:
                     else:
                         continue
                 elif chunk['event'] == 'on_tool_start':
-                    tool_call_args = chunk['data'].get('input',{})
+                    tool_count += 1
+                    tool_call_args = chunk['data'].get('input', {})
                     tool_call_name = chunk['name']
+                    self.logger.debug(f"工具调用: {tool_call_name}")
                     yield json.dumps(
                         {"type": "tool_call_name", "content": {'args': tool_call_args, 'name': tool_call_name}},
                         ensure_ascii=False,
@@ -343,13 +359,12 @@ class ChatService:
                         if isinstance(output_content, list):
                             for op in output_content:
                                 if op['type'] == "text":
-                                    tool_call_result = op['text']
                                     yield json.dumps(
-                                        {"type": "tool_call_result", "content": tool_call_result},
+                                        {"type": "tool_call_result", "content": op['text']},
                                         ensure_ascii=False,
                                         default=str
                                     ) + "\n\n"
-                        if isinstance(output_content, str):
+                        elif isinstance(output_content, str):
                             yield json.dumps(
                                 {"type": "tool_call_result", "content": output_content},
                                 ensure_ascii=False,
@@ -367,6 +382,8 @@ class ChatService:
             ) + "\n\n"
 
         checkpoint_id = await self._save_round_checkpoint(session_id)
+
+        self.logger.info(f"会话完成(session_id={session_id}, 工具调用={tool_count}次, 响应长度={len(full_response)})")
 
         # 返回最终完整结果
         yield json.dumps({

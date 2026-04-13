@@ -1,5 +1,5 @@
 
-FILE_MAX_LENGTH = 100*1024*1024  # 100MB
+FILE_MAX_LENGTH = 25*1024*1024  # 25MB
 
 FILE_ALLOWED_TYPES = {
     "IMAGE": { # 图片类型 + 图片后缀白名单 + 对应MIME类型

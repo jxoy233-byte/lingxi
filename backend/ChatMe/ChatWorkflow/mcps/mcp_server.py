@@ -1,3 +1,4 @@
+from pathlib import Path
 from shutil import which
 from typing import Any, Annotated, Literal, Optional
 
@@ -9,7 +10,7 @@ import platform
 import re
 import sys
 
-from chatMe.logging_config import get_logger
+from ChatMe.LoggingManager.logging_config import get_logger
 
 server = FastMCP(name="ChatMe Agent Skills", )
 
@@ -124,14 +125,37 @@ def is_dangerous_command(command: Annotated[ str, "系统执行命令"]) -> tupl
 def execute_code(code: str, language: Literal["python", "nodejs", "javascript", "js"] = "python") -> Optional[str]:
     """在沙盒中执行代码"""
     try:
-        venv_path = os.path.dirname(sys.executable)
+        # 向上查找项目根目录
+        project_root = Path.cwd()  # backend 目录
+        skills_dir = project_root / ".chatme" / "skills"
+
+        # 查找虚拟环境
+        venv_candidates = [
+            project_root / ".venv",
+            project_root / "venv",
+            project_root.parent / ".venv",
+            project_root.parent / "venv",
+        ]
+
+        venv_python = None
+        for venv in venv_candidates:
+            if (venv / "bin" / "python").exists():
+                venv_python = str(venv / "bin" / "python")
+                break
+            elif (venv / "Scripts" / "python.exe").exists():
+                venv_python = str(venv / "Scripts" / "python.exe")
+                break
+
+        if not venv_python:
+            venv_python = sys.executable  # fallback
+
         env = os.environ.copy()
         current_path = env.get('PATH', '')
 
         # 确保虚拟环境路径在最前面
-        if not current_path.startswith(venv_path):
-            env['PATH'] = f"{venv_path}:{current_path}"
-        skills_dir = os.path.join(os.path.dirname(__file__), 'skills')
+        venv_bin = str(Path(venv_python).parent)
+        if not current_path.startswith(venv_bin):
+            env['PATH'] = f"{venv_bin}:{current_path}"
 
         if language == "python":
             with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False,dir=skills_dir) as f:
@@ -140,7 +164,7 @@ def execute_code(code: str, language: Literal["python", "nodejs", "javascript", 
 
             try:
                 result = subprocess.run(
-                    ["python", temp_file],
+                    [venv_python, temp_file],
                     capture_output=True,
                     text=True,
                     timeout=30,
@@ -187,12 +211,29 @@ def execute_command(command: Annotated[ str, "系统执行命令"], timeout: int
     if is_dangerous:
         return f"Error: 安全拦截：{reason}"
 
-    venv_path = os.path.dirname(sys.executable)
+    # 向上查找项目根目录的虚拟环境
+    project_root = Path.cwd()
+    venv_candidates = [
+        project_root / ".venv",
+        project_root / "venv",
+        project_root.parent / ".venv",
+        project_root.parent / "venv",
+    ]
+
+    venv_path = None
+    for venv in venv_candidates:
+        if venv.exists() and (venv / "bin" / "python").exists():
+            venv_path = str(venv / "bin")
+            break
+        elif venv.exists() and (venv / "Scripts" / "python.exe").exists():
+            venv_path = str(venv / "Scripts")
+            break
+
     env = os.environ.copy()
     current_path = env.get('PATH', '')
 
     # 确保虚拟环境路径在最前面
-    if not current_path.startswith(venv_path):
+    if venv_path and not current_path.startswith(venv_path):
         env['PATH'] = f"{venv_path}:{current_path}"
 
     try:
@@ -202,7 +243,7 @@ def execute_command(command: Annotated[ str, "系统执行命令"], timeout: int
             capture_output=True,
             text=True,
             timeout=timeout,
-            cwd=tempfile.gettempdir(),
+            cwd=str(project_root),
             env=env,
         )
 
@@ -213,32 +254,10 @@ def execute_command(command: Annotated[ str, "系统执行命令"], timeout: int
         return f"Error: {str(e)}"
 
 @server.tool
-def read_skill_file(skill: Annotated[str, "技能文件名称,必须包含文件后缀"]) -> str:
-    """
-    读取技能文件内容
-    ** 如果不确定文件名，请先调用 get_skills_overview 查看完整的文件名列表 **
-
-    Args:
-        skill: 技能文件名称，必须包含文件后缀（如: 'Exa.py', 'DateTime.py'）
-
-    """
-    skills_dir = os.path.join(os.path.dirname(__file__), 'skills')
-    skill_file = os.path.join(skills_dir, skill)
-    
-    if os.path.exists(skill_file):
-        with open(skill_file, 'r', encoding='utf-8') as f:
-            logger.info(f"读取技能文件成功: {skill}")
-            return f.read()
-    else:
-        logger.error(f"未找到技能文件: {skill}")
-        return f"未找到技能文件: {skill}"
-
-
-@server.tool
 def get_skills_overview() -> str:
     """获取ai可以技能的使用指南概括"""
     skills_md = ["skills", "Skills", "SKILLS"]
-    skills_dir = os.path.join(os.path.dirname(__file__), 'skills')
+    skills_dir = Path.cwd() / ".chatme" / "skills"
     skill_file = Any
     for name in skills_md:
         skill_file = os.path.join(skills_dir, f"{name}.md")

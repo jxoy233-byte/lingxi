@@ -17,12 +17,10 @@ from langchain_core.document_loaders import BaseLoader
 
 from langchain_community.document_loaders import UnstructuredMarkdownLoader, UnstructuredCSVLoader, \
     TextLoader, UnstructuredXMLLoader, JSONLoader
-from markdown_it.common.html_re import processing
-from multipart import file_path
 from starlette.datastructures import Headers
 
-from chatMe.ChatService.FilesLoaders.config import FILE_ALLOWED_TYPES
-from chatMe.logging_config import get_logger
+from ChatMe.ChatService.FilesLoaders.config import FILE_ALLOWED_TYPES
+from ChatMe.LoggingManager.logging_config import get_logger
 
 class UploadFileWithId(UploadFile):
     """
@@ -75,10 +73,8 @@ class FilesLoaders:
     def __init__(self, processing_files: Optional[list[UploadFileWithId]]):
         self.logger = get_logger("FilesLoader")
         self.processing_files = processing_files
-        self.processing_dir = str(Path.cwd()) + "/cached"
+        self.processing_dir = Path.cwd() / ".chatme" / "cached"
 
-    async def mkdir(self):
-        """创建文件操作目录"""
         os.makedirs(self.processing_dir, exist_ok=True)
 
     async def cleanup(self):
@@ -351,7 +347,6 @@ class FilesLoaders:
         处理传入文件信息，返回处理好的二进制文件内容
         :return: images_content（含图片信息列表）, text_content（含文本信息列表）
         """
-        await self.mkdir()
         (images, texts, docs) = await self._classifying_files()
 
         outputs: List[OutputFormat] = []
@@ -526,5 +521,3 @@ class FilesLoaders:
             return f"{size_bytes / (1024 * 1024):.2f} MB"
         else:
             return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
-
-

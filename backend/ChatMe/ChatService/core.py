@@ -5,21 +5,19 @@ import uuid
 from datetime import datetime
 from typing import AsyncGenerator, Set, List, Any, Optional
 
-import redis.asyncio as redis
-
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from langgraph_sdk.auth.exceptions import HTTPException
 from redisvl.query import FilterQuery
 from langgraph.checkpoint.redis.util import from_storage_safe_id
 
-from chatMe.ChatService import FILE_MAX_LENGTH, FILE_ALLOWED_TYPES
-from chatMe.ChatService.FilesLoaders import UploadFileWithId
-from chatMe.ChatService.RedisStateSaver.core import RedisStateSaver
-from chatMe.ChatService.config.models import MessageRole, Message, Conversation
-from chatMe.ChatService.FilesLoaders.core import FilesLoaders, OutputFormat
-from chatMe.ChatWorkflow import ChatWorkflow
-from chatMe.ChatWorkflow.config.models import AIMessageType
-from chatMe.logging_config import get_logger
+from ChatMe.ChatService import FILE_MAX_LENGTH, FILE_ALLOWED_TYPES
+from ChatMe.ChatService.FilesLoaders import UploadFileWithId
+from ChatMe.ChatService.RedisStateSaver.core import RedisStateSaver
+from ChatMe.ChatService.config.models import MessageRole, Message, Conversation
+from ChatMe.ChatService.FilesLoaders.core import FilesLoaders, OutputFormat
+from ChatMe.ChatWorkflow import ChatWorkflow
+from ChatMe.ChatWorkflow.config.models import AIMessageType
+from ChatMe.LoggingManager.logging_config import get_logger
 
 
 class ChatService:
@@ -179,6 +177,10 @@ class ChatService:
                     if img.image_content:
                         mime_type = self._get_mime_type(img.file_info["suffix"])
                         content.append({
+                            "type": "text",
+                            "text": f"-- {img.file_info['file_name']} --\n",
+                        })
+                        content.append({
                             "type": "image_url",
                             "image_url": {"url": f"data:{mime_type};base64,{img.image_content}"},
                             "detail": "auto",
@@ -186,12 +188,11 @@ class ChatService:
 
             # 处理文本文件
             if texts:
-                for text_file in texts:
-                    mime_type = self._get_mime_type(text_file.file_info["suffix"])
-                    if text_file.text_content:
+                for text in texts:
+                    if text.text_content:
                         content.append({
                             "type": "text",
-                            "text": f"-- {mime_type}文本内容 --\n{text_file.text_content}\n",
+                            "text": f"-- {text.file_info['file_name']} --\n{text.text_content}\n",
                         })
 
             # 处理文档文件
@@ -201,7 +202,7 @@ class ChatService:
                         doc_label = self._get_mime_type(doc.file_info["suffix"])
                         content.append({
                             "type": "text",
-                            "text": f"-- {doc_label} --\n{doc.text_content}\n",
+                            "text": f"-- {doc_label}:{doc.file_info['file_name']} --\n{doc.text_content}\n",
                         })
                         for img in doc.image_content:
                             name = img.get("name")
@@ -594,8 +595,7 @@ class ChatService:
             return False
 
         try:
-            redis_url_checkpoint = "redis://:123456@localhost:6379/0"
-            redis_client = redis.from_url(url=redis_url_checkpoint)
+            redis_client = self.state_saver._redis
             deleted_count = 0
 
             # 1. 删除主 checkpoint 数据 (JSON类型)
@@ -713,7 +713,7 @@ class ChatService:
         优化用户需求函数，使后续ai更好理解用户需求
         返回两个参数: 优化后的输入,状态码
         """
-        improved_text =input_text
+        improved_text = input_text
         try:
             resp = await self.chat_workflow.llm_imp_ipt.ainvoke(input_text)
             improved_text = resp.content
@@ -740,5 +740,4 @@ class ChatService:
                 "mimeTypes": list(FILE_ALLOWED_TYPES["DOCUMENT"]["DOCUMENT_MIME"])
             }
         }
-
 

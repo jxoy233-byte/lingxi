@@ -3,7 +3,8 @@ import re
 from pathlib import Path
 from typing import Optional, Dict, Any, AsyncGenerator, List
 
-from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
@@ -11,9 +12,11 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.redis import AsyncRedisSaver
 from langgraph.prebuilt import ToolNode
 
-from chatMe.ChatWorkflow import ChatStateCore, get_imp_ipt_config, get_agent_node_config, get_graph_final_node_config, \
-    AIMessageType, get_history_summary_node_config
-from chatMe.logging_config import get_logger
+from .config.graph_config import get_agent_node_config, get_graph_final_node_config, \
+    get_imp_ipt_config, get_history_summary_node_config, get_llm_memory_config
+from .config.models import ChatStateCore, ChatStateCore2, AIMessageType, MemoryUpdateFormat
+from .Memory.core import MemoryManager
+from ..LoggingManager.logging_config import get_logger
 
 
 class ChatWorkflow:
@@ -33,6 +36,7 @@ class ChatWorkflow:
         self.graph = None
         self.checkpointer = None
         self.mcp_client = None
+        self.memory_manager = None
         self.files_cached_dir = None
 
     async def init_mcps(self):
@@ -46,7 +50,12 @@ class ChatWorkflow:
             }
         )
 
-    async def init_llm(self):
+    async def init_memory_manager(self):
+        llm_memory_config, llm_memory_prompt = get_llm_memory_config()
+
+        self.memory_manager = MemoryManager(llm_config=llm_memory_config, memory_prompt=llm_memory_prompt)
+
+    async def init_llms(self):
         # 最终节点配置
         llm_config, system_prompt = get_graph_final_node_config()
 
@@ -84,15 +93,43 @@ class ChatWorkflow:
 
         await self.init_mcps()
 
+        await self.init_memory_manager()
+
         # 短期存储(redis)
         redis_url_checkpoint = "redis://:123456@localhost:6379/0"
         self.checkpointer = AsyncRedisSaver(redis_url=redis_url_checkpoint)
         await self.checkpointer.setup()
 
         # 初始化所有llm
-        await self.init_llm()
+        await self.init_llms()
 
-        self.graph = await self._create_graph_core()
+        # self.graph = await self._create_graph_core()
+        self.graph = await self._create_graph_core2()
+
+    async def _get_message_content_string(self, message: BaseMessage)-> str:
+        content_string = ""
+
+        if not message:
+            return content_string
+
+        message_content = message.content
+
+        if isinstance(message_content, str):
+            content_string = message_content
+        elif isinstance(message_content, list):
+            for item in message_content:
+                if isinstance(item, dict):
+                    if hasattr(item, "type") and item["type"] == "text":
+                        content_string += item["text"]
+                elif isinstance(item, str):
+                    content_string += item + "\n"
+        elif isinstance(message_content, dict):
+            if hasattr(message_content, "type") and message_content["type"] == "text":
+                content_string = message_content["text"]
+
+
+        return content_string
+
 
     def _parse_content_to_tool_calls(self, ai_message: AIMessage):
         """
@@ -116,7 +153,6 @@ class ChatWorkflow:
                         "name": tool_call_data.get("name"),
                         "args": tool_call_data.get("args",{}),
                         "id": tool_call_data.get("id", "") or f"call_{i+1}",
-                        "type": "tool_call"
                     }
                     if tool_call["name"]:
                         tool_calls.append(tool_call)
@@ -185,6 +221,24 @@ class ChatWorkflow:
             input_msg.append(msg)
 
         return input_msg
+
+    async def _get_current_round_conversation_cycling(self, messages: List[BaseMessage]) -> List[BaseMessage]:
+        """
+            获取本轮对话每次循环部分内容
+
+            Args:
+                messages: langgraph状态消息
+
+            Return:
+                本轮对话消息除了文件传入部分
+        """
+        cycle_msg = []
+        for msg in reversed(messages): # agent_node每一次循环都会更新一次AIMessage和ToolMessage
+            cycle_msg.append(msg)
+            if isinstance(msg, AIMessage) and msg.additional_kwargs.get("type") ==AIMessageType.REASONING.value:
+                break
+        return cycle_msg
+
 
     async def _create_graph_core(self):
         """
@@ -338,6 +392,176 @@ class ChatWorkflow:
         workflow.add_edge("final_node", END)
 
         return workflow.compile(checkpointer=self.checkpointer)
+
+    async def _create_graph_core2(self):
+        """
+        工程化图工作流对象:
+        usr_input -> input_parse -> context_assembly
+        -> agent_node -> tool_node --↗
+                   ↘--> final_node
+        """
+        TOOL_CALL_TIMES = 20
+
+        tools = await self.mcp_client.get_tools()
+
+        agent_node_llm = self.agent_llm.bind(tools=tools)
+
+        workflow = StateGraph(ChatStateCore2)
+
+        async def input_parse_node(state: ChatStateCore2):
+            input_msg = []
+            messages = list(state["messages"])
+            current_input = await self._get_current_round_conversation(messages)
+            history_messages = await self._get_validate_history_message(messages)
+
+            if history_messages and len(history_messages) >= 8: # 四轮对话
+                history_invoke = history_messages[-8:]
+            else:
+                history_invoke = history_messages
+
+            input_msg.extend(history_invoke)
+            input_msg.extend(current_input)
+
+            imp_ipt = await self.llm_imp_ipt.ainvoke({"messages": input_msg})
+
+            imp_ipt_content = imp_ipt.content
+            imp_ipt_additional_kwargs = imp_ipt.additional_kwargs
+            imp_ipt_response_metadata = imp_ipt.response_metadata
+            imp_ipt_id = imp_ipt.id
+            imp_ipt_usage_metadata = imp_ipt.usage_metadata
+
+            imp_ipt = HumanMessage(content=imp_ipt_content,additional_kwargs=imp_ipt_additional_kwargs,response_metadata=imp_ipt_response_metadata,id=imp_ipt_id,usage_metadata=imp_ipt_usage_metadata)
+
+            return {
+                "imp_ipt": imp_ipt,
+                "memory_user_message": imp_ipt_content,
+                "tool_call_times": 0,
+                "memory_tool_results": [],
+                "memory_tool_calls": [],
+                "memory_ai_response": None,
+            }
+
+        async def context_assembly_node(state: ChatStateCore2, config: RunnableConfig):
+            context = []
+            tool_results = state["memory_tool_results"] if state["memory_tool_results"] else []
+
+            if "context" not in state or not state["context"]:
+                thread_id = config["configurable"]["thread_id"]
+                memory_message :SystemMessage = self.memory_manager.get_relevant_memory(thread_id)
+                context.append(memory_message)
+
+                imp_ipt_msg: HumanMessage = state["imp_ipt"]
+                context.append(imp_ipt_msg)
+            else:
+                context = state["context"]
+
+                cycle_msg = await self._get_current_round_conversation_cycling(state["messages"])
+                context.extend(cycle_msg)
+
+                for msg in cycle_msg:
+                    if isinstance(msg, ToolMessage):
+                        content_string = await self._get_message_content_string(msg)
+                        tool_results.append(content_string)
+
+            return {
+                "context": context,
+                "memory_tool_results": tool_results
+            }
+
+        async def agent_node(state: ChatStateCore2):
+            """AI 代理节点，处理用户消息并决定是否调用工具"""
+            if state["memory_tool_calls"]:
+                tool_calls = state["memory_tool_calls"]
+            else:
+                tool_calls = []
+
+            tool_call_times = state["tool_call_times"]
+
+            input_msg = state["context"]
+
+            if tool_call_times >= TOOL_CALL_TIMES:
+                interrupt_msg = SystemMessage(content=f"已超过{TOOL_CALL_TIMES}次调用工具次数，请整理当前信息提前结束对话")
+                input_msg.append(interrupt_msg)
+
+            response = await agent_node_llm.ainvoke({"messages": input_msg})
+
+            # 符合ToolNode节点的AIMessage(REASONING)
+            format_response = self._parse_content_to_tool_calls(response)
+
+            tool_calls.extend(format_response.tool_calls)
+
+            return {
+                "messages": [format_response],
+                "tool_call_times": tool_call_times,
+                "memory_tool_calls": tool_calls,
+            }
+
+
+        tool_execution_node = ToolNode(tools=tools)  # 使用langgraph官方工具节点
+
+
+        async def final_node(state: ChatStateCore2, config: RunnableConfig):
+            input_msg = state["context"]
+            thread_id = config["configurable"]["thread_id"]
+
+            response = await self.llm_core.ainvoke({"messages": input_msg})
+            # AIMessage字段支持解包复制
+            response_dict = dict(response)
+            response_dict["additional_kwargs"] = {**response.additional_kwargs, "type": AIMessageType.SUMMARY.value}
+
+            response_better = AIMessage(**response_dict)
+
+            memory_user_message = state["memory_user_message"]
+            memory_ai_message = response.content
+            memory_tool_calls = state["memory_tool_calls"]
+            memory_tool_results = state["memory_tool_results"]
+
+            memory_update = MemoryUpdateFormat(
+                user_message= memory_user_message,
+                ai_response= memory_ai_message,
+                tool_calls= memory_tool_calls,
+                tool_results= memory_tool_results,
+            )
+
+            await self.memory_manager.update_memory(thread_id=thread_id, memory_data=memory_update)
+
+            return {
+                "messages": [response_better],
+                "memory_ai_response": memory_ai_message
+            }
+
+        workflow.add_node("input_parse_node", input_parse_node)
+        workflow.add_node("context_assembly_node", context_assembly_node)
+        workflow.add_node("agent_node", agent_node)
+        workflow.add_node("tool_execution_node", tool_execution_node)
+        workflow.add_node("final_node", final_node)
+
+        def route_agent_output(state: ChatStateCore2) -> str:
+            """根据代理输出决定下一步"""
+            last_message = state["messages"][-1]
+            if isinstance(last_message, AIMessage) and hasattr(last_message, "tool_calls") and last_message.tool_calls:
+                return "tool_execution_node"
+            return "final_node"
+
+        workflow.set_entry_point("input_parse_node")
+        workflow.add_edge("input_parse_node", "context_assembly_node")
+
+        workflow.add_edge("context_assembly_node", "agent_node")
+
+        workflow.add_conditional_edges("agent_node",
+            route_agent_output,
+            {
+                "tool_execution_node": "tool_execution_node",
+                "final_node": "final_node"
+            }
+        )
+
+        workflow.add_edge("tool_execution_node", "context_assembly_node")
+
+        workflow.add_edge("final_node", END)
+
+        return workflow.compile(checkpointer=self.checkpointer)
+
 
 
     def invoke(self, messages: list[BaseMessage], config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

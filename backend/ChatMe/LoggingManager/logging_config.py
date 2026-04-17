@@ -5,10 +5,10 @@ from logging.handlers import RotatingFileHandler
 
 def set_logger(
         name: str="ChatMe",
-        log_level:int =logging.INFO,
-        log_dir: str=None,
-        max_bytes: int=10*1024*1024,
-        backup_count: int=5
+        log_level:int= logging.INFO,
+        max_bytes: int= 10*1024*1024,
+        backup_count: int= 5,
+        log_dir= Path.cwd() / ".chatme" / "logs"
 ):
     """
     配置日志处理器
@@ -16,25 +16,20 @@ def set_logger(
     Args:
         name: 日志名称
         log_level: 日志级别
-        log_dir: 日志目录，默认在当前目录下创建 logs 文件夹
         max_bytes: 单个日志文件最大大小（字节），默认 10MB
         backup_count: 保留的备份文件数量，默认 5 个
+        log_dir:输出路径
 
     Returns:
         配置好的 Logger 实例
     """
+    log_dir.mkdir(parents=True, exist_ok=True)
+
     logger = logging.getLogger(name)
     logger.setLevel(log_level)
 
     if logger.handlers:
         return logger # 配置过了就跳过
-
-    if log_dir is None:
-        log_dir = Path(__file__).parent/ "logs"
-    else:
-        log_dir = Path(log_dir)
-
-    log_dir.mkdir(parents=True, exist_ok=True)
 
     log_file = log_dir / f"{datetime.now().strftime('%Y-%m-%d')}.log"
 
@@ -61,6 +56,7 @@ def get_logger(name: str=None) -> logging.Logger:
     """获取指定名字的logger"""
     if name is None:
         return set_logger()
-    return set_logger(name)
+    return set_logger(name=name)
+
 
 

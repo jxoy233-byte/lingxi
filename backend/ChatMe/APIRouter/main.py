@@ -4,12 +4,12 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException, FastAPI, Path, Body, Query, File, Form, UploadFile
 from fastapi.responses import StreamingResponse
 
-from chatMe.ChatService.FilesLoaders import UploadFileWithId
-from chatMe.ChatService.FilesLoaders.core import OutputFormat
-from chatMe.ChatService.config.models import ChatRequest, Conversation
-from chatMe.ChatService import ChatService, FILE_MAX_LENGTH
-from chatMe.ChatWorkflow import ChatWorkflow
-from chatMe.logging_config import get_logger
+from ChatMe.ChatService.FilesLoaders import UploadFileWithId
+from ChatMe.ChatService.FilesLoaders.core import OutputFormat
+from ChatMe.ChatService.config.models import ChatRequest, Conversation
+from ChatMe.ChatService import ChatService, FILE_MAX_LENGTH
+from ChatMe.ChatWorkflow import ChatWorkflow
+from ChatMe.LoggingManager.logging_config import get_logger
 
 chatMe_app = APIRouter(prefix="/chat")
 
@@ -31,10 +31,11 @@ async def create_chat_service() -> ChatService:
         try:
             await asyncio.wait_for(workflow.ainit(), timeout=30.0)
             logger.info("ChatWorkflow 初始化成功")
+
         except asyncio.TimeoutError:
             logger.error("ChatWorkflow 初始化超时（30秒），请检查：")
-            logger.error("1. MCP 服务器是否启动 (http://127.0.0.1:18080)")
-            logger.error("2. Redis 是否启动 (localhost:6379)")
+            logger.error("1. MCP 服务器是否启动")
+            logger.error("2. Redis 是否启动")
             raise
 
         chat_service = ChatService(workflow)

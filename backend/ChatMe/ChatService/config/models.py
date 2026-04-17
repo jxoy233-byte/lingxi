@@ -2,10 +2,9 @@ from enum import Enum
 from datetime import datetime
 from typing import List, Optional, Dict
 
-from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 
-from chatMe.ChatService.FilesLoaders.core import OutputFormat
+from ChatMe.ChatService.FilesLoaders.core import OutputFormat
 
 
 class ChatRequest(BaseModel):

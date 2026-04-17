@@ -73,3 +73,7 @@ cache/
 # Logs
 logs/
 *.log.*
+
+# memory
+memory/
+*.memory.*

@@ -40,10 +40,19 @@ class ChatWorkflow:
         self.files_cached_dir = None
 
     async def init_mcps(self):
-        core_mcp_config = {
-            'url': 'http://127.0.0.1:18080/streamable',
-            'transport': 'streamable_http'
-        }
+        try:
+            from ChatMe.ChatMeConfig import get_mcp_config
+            mcp_config = get_mcp_config()
+            core_mcp_config = {
+                'url': mcp_config.get('url', 'http://127.0.0.1:18080/streamable'),
+                'transport': mcp_config.get('transport', 'streamable_http')
+            }
+        except Exception:
+            core_mcp_config = {
+                'url': 'http://127.0.0.1:18080/streamable',
+                'transport': 'streamable_http'
+            }
+
         self.mcp_client = MultiServerMCPClient(
             {
                 'core_mcp': core_mcp_config
@@ -96,7 +105,12 @@ class ChatWorkflow:
         await self.init_memory_manager()
 
         # 短期存储(redis)
-        redis_url_checkpoint = "redis://:123456@localhost:6379/0"
+        try:
+            from ChatMe.ChatMeConfig import get_redis_checkpointer_url
+            redis_url_checkpoint = get_redis_checkpointer_url()
+        except Exception:
+            redis_url_checkpoint = "redis://:123456@localhost:6379/0"
+
         self.checkpointer = AsyncRedisSaver(redis_url=redis_url_checkpoint)
         await self.checkpointer.setup()
 
@@ -502,7 +516,6 @@ class ChatWorkflow:
 
         async def final_node(state: ChatStateCore2, config: RunnableConfig):
             input_msg = state["context"]
-            thread_id = config["configurable"]["thread_id"]
 
             response = await self.llm_core.ainvoke({"messages": input_msg})
             # AIMessage字段支持解包复制
@@ -511,23 +524,8 @@ class ChatWorkflow:
 
             response_better = AIMessage(**response_dict)
 
-            memory_user_message = state["memory_user_message"]
-            memory_ai_message = response.content
-            memory_tool_calls = state["memory_tool_calls"]
-            memory_tool_results = state["memory_tool_results"]
-
-            memory_update = MemoryUpdateFormat(
-                user_message= memory_user_message,
-                ai_response= memory_ai_message,
-                tool_calls= memory_tool_calls,
-                tool_results= memory_tool_results,
-            )
-
-            await self.memory_manager.update_memory(thread_id=thread_id, memory_data=memory_update)
-
             return {
                 "messages": [response_better],
-                "memory_ai_response": memory_ai_message
             }
 
         workflow.add_node("input_parse_node", input_parse_node)

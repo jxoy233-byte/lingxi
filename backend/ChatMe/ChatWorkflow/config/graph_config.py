@@ -1,6 +1,25 @@
 from dotenv import load_dotenv
 import os
 
+try:
+    from ChatMe.ChatMeConfig import get_llm_config
+    _use_config_loader = True
+except ImportError:
+    _use_config_loader = False
+
+
+def _get_llm_config_primary(provider: str):
+    """从 ChatMeConfig 获取配置，获取不到时返回 None"""
+    if _use_config_loader:
+        try:
+            config = get_llm_config(provider)
+            if config.get("api_key"):
+                return config
+        except Exception:
+            pass
+    return None
+
+
 def get_graph_final_node_config():
     """
     最终图节点配置
@@ -8,15 +27,23 @@ def get_graph_final_node_config():
     llm_config :Dict,
     prompt :str
     """
-    # 加载环境变量
     load_dotenv()
 
-    model_name = os.getenv("OPENAI_MODEL_NAME")
-    api_key = os.getenv("OPENAI_API_KEY")
-    base_url = os.getenv("OPENAI_BASE_URL")
-    temperature = os.getenv("OPENAI_TEMPERATURE", "0.5")
-    max_tokens = os.getenv("OPENAI_MAX_TOKENS", "32768")
-    top_p = os.getenv("OPENAI_TOP_P", "1.0")
+    # 优先从 ChatMeConfig 获取，失败则用环境变量
+    config_primary = _get_llm_config_primary("openai")
+
+    if config_primary and config_primary.get("model_name"):
+        model_name = config_primary.get("model_name")
+        api_key = config_primary.get("api_key")
+        base_url = config_primary.get("base_url")
+    else:
+        model_name = os.getenv("OPENAI_MODEL_NAME")
+        api_key = os.getenv("OPENAI_API_KEY")
+        base_url = os.getenv("OPENAI_BASE_URL")
+
+    temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.5"))
+    max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "32768"))
+    top_p = float(os.getenv("OPENAI_TOP_P", "1.0"))
     frequency_penalty = float(os.getenv("OPENAI_FREQUENCY_PENALTY", "0.0"))
     presence_penalty = float(os.getenv("OPENAI_PRESENCE_PENALTY", "0.0"))
 
@@ -53,12 +80,14 @@ Markdown output guidelines:
 - Use **bold** for key terms and important conclusions
 - Use bullet lists (-) for multiple related points, numbered lists (1. 2. 3.) for sequences
 - Use code blocks (```) for code, commands, or structured data
-- Links: [**text**](url) format, with space after the URL if followed by other text
+- **Links: place source URLs near the claims they support, not all at the bottom**
+- **Images: use ![描述](url) near the relevant paragraph**
+- A summary "来源" section is fine when there are many sources, but each URL should map to a specific claim in the body
 - Avoid:
-  - Large blocks of continuous text (>5 lines) — break into shorter sections
-  - Forced emoji chains (❌ ✅ ⚠️ 👉) or rigid template formatting
-  - Repeating the same information in different words
-  - Being verbose just to appear thorough
+  - Large blocks of continuous text — use headers, lists, or paragraphs to separate
+  - Emoji chains and rigid template formatting
+  - Verbose repetition
+  - Writing links as standalone lines mid-sentence or between paragraphs
 
 When you have clear results: state them directly. When you don't have enough info: say so and ask what else would help.
 
@@ -75,19 +104,25 @@ def get_agent_node_config():
     llm_config :Dict,
     prompt :str
     """
-    # 加载环境变量
     load_dotenv()
 
-    model_name = os.getenv("OPENAI_MODEL_NAME")
-    api_key = os.getenv("OPENAI_API_KEY")
-    base_url = os.getenv("OPENAI_BASE_URL")
-    temperature = os.getenv("OPENAI_TEMPERATURE", "0.2")
-    max_tokens = os.getenv("OPENAI_MAX_TOKENS", "32768")
-    top_p = os.getenv("OPENAI_TOP_P", "1.0")
+    config_primary = _get_llm_config_primary("openai")
+
+    if config_primary and config_primary.get("model_name"):
+        model_name = config_primary.get("model_name")
+        api_key = config_primary.get("api_key")
+        base_url = config_primary.get("base_url")
+    else:
+        model_name = os.getenv("OPENAI_MODEL_NAME")
+        api_key = os.getenv("OPENAI_API_KEY")
+        base_url = os.getenv("OPENAI_BASE_URL")
+
+    temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.2"))
+    max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "32768"))
+    top_p = float(os.getenv("OPENAI_TOP_P", "1.0"))
     frequency_penalty = float(os.getenv("OPENAI_FREQUENCY_PENALTY", "0.0"))
     presence_penalty = float(os.getenv("OPENAI_PRESENCE_PENALTY", "0.0"))
 
-    # 大模型配置：
     llm_config = {
         "model_name": model_name,
         "api_key": api_key,
@@ -99,6 +134,7 @@ def get_agent_node_config():
         "presence_penalty": presence_penalty
     }
 
+    # system_prompt 配置
     prompt = """你是"智能执行代理"，负责分析任务、调用工具、整合结果，最终答案由下游 final_node 节点输出。
 
 【节点位置】
@@ -141,35 +177,31 @@ def get_agent_node_config():
 当你知道要执行什么任务时，使用对应的 skill 工具。技能是封装好的专用工具，比通用命令更精准。
 参数：各技能不同，通常包含 `query` 或 `input` 等
 
-【.chatme 目录结构】
+【项目目录结构】
 
 ```
-.chatme/
-├── skills/          # 技能库，所有可用的 skill 都在这里
-│   ├── DateTime.py  # 日期时间处理技能
-│   ├── Exa.py       # 搜索技能
-│   └── ...          # 其他技能
-├── ...
+skills/          # 技能库
+cached/           # 缓存文件（上传的文件等）
+.chatme/          # 配置和运行时数据
 ```
 
 **探索技能的正确方式**：
 当你需要完成一个任务，先想这个任务属于什么领域。
-如果不确定，直接 `ls .chatme/skills/` 看看有没有相关技能。
-如果有，用 `cat .chatme/skills/xxx.py` 看看技能怎么用。
+如果不确定，直接 `ls skills/` 看看有没有相关技能。
+如果有，用 `cat skills/xxx.py` 看看技能怎么用。
 
 【工具使用决策 — 像人一样思考】
 
 人的思考方式是这样的：
 
 **场景1：用户问"帮我查一下今天北京的天气"**
-思考：这是一个天气查询任务
-判断：我有天气相关的技能吗？→ `ls .chatme/skills/` 看看
-行动：找到 Weather 或类似技能，执行它
+思考：这是一个天气查询任务，需要确认"今天"的具体日期
+行动：先用 `get_current_datetime` 工具确认当前时间，再执行天气查询
 结束：拿到天气信息，不需要更多调用
 
 **场景2：用户上传了一个 CSV 文件问"帮我分析一下"**
 思考：这是数据分析任务
-判断：先用 `ls .chatme/cached/` 找到上传的文件
+判断：先用 `ls cached/` 找到上传的文件
 行动：`cat` 或 `head` 查看文件内容，了解数据结构
 决策：如果数据简单，直接用 execute_code 计算；如果复杂，先看有没有数据分析技能
 结束：输出分析结果
@@ -177,25 +209,38 @@ def get_agent_node_config():
 **场景3：用户问"这个报错是什么意思"**
 思考：需要先看到报错信息才知道
 判断：用户上传了文件还是直接描述？
-行动：如果是文件，`cat .chatme/cached/` 找到它；如果是描述，直接理解
+行动：如果是文件，`cat cached/` 找到它；如果是描述，直接理解
 决策：报错信息够判断就判断，不够就再要更多信息
 结束：给出解释或解决方案
+
+【时间相关任务 — 先确认时间】
+
+处理涉及"今天"、"明天"、"这周"等模糊时间表达时，**必须先用 `get_current_datetime` 工具确认当前时间**，再进行后续操作。
+
+原因：你的知识有截止日期，但用户的"今天"每天都不同。
+
+**正确流程**：
+1. 用户问"明天天气" → 先调用 `get_current_datetime()` 获取当前时间
+2. 根据当前时间算出"明天"的具体日期 → 再执行天气查询
+
+**错误流程**：
+1. 用户问"明天天气" → 直接调用天气技能（此时你不知道"明天"是哪天）
 
 【连续调用的逻辑】
 
 当你需要多次调用工具时，每次调用都应该推动任务前进：
 
 **正确示范**：
-1. `ls .chatme/skills/` → 发现有 Exa 技能
-2. `cat .chatme/skills/Exa.py` → 了解用法
+1. `ls skills/` → 发现有 Exa 技能
+2. `cat skills/Exa.py` → 了解用法
 3. 执行 Exa 搜索 → 拿到结果
 4. 判断结果够不够 → 够了就停止
 
 **错误示范**：
-1. `ls .chatme/skills/` → 发现 Exa
-2. `cat .chatme/skills/Exa.py` → 了解用法
-3. `ls .chatme/skills/` → 又看一遍（重复）
-4. `cat .chatme/skills/Exa.py` → 又看一遍（重复）
+1. `ls skills/` → 发现 Exa
+2. `cat skills/Exa.py` → 了解用法
+3. `ls skills/` → 又看一遍（重复）
+4. `cat skills/Exa.py` → 又看一遍（重复）
 
 每次调用必须产生新信息，推动任务前进。如果连续两次调用产生同类信息，说明在兜圈子。
 
@@ -223,6 +268,17 @@ def get_agent_node_config():
 - 确认了当前方法走不通，给出了已尝试的路径和结论，或
 - 循环次数过多，提前终止
 
+【来源信息与图片】
+
+调用搜索类工具时，来源信息（标题、URL、摘要）不要丢弃，确保用户需要时可以直接提供。
+
+当工具返回图片 URL 时，可用 markdown 图片格式 `![alt](url)` 嵌入传递给 final_node，无需下载或转存。
+
+**链接和图片**：
+- 来源 URL 放在它所证实的论点旁边，让用户能直接点击验证，而不是全部堆在文末
+- 图片直接用 markdown 格式插入到相关段落附近即可
+- 来源很多时底部汇总也合理，但每个链接都要能在正文中找到对应的具体论点
+
 【输出格式】
 
 你的输出应该像正常对话一样，思考过程自然融入。
@@ -230,7 +286,7 @@ def get_agent_node_config():
 发现需要什么信息，直接调用工具。
 
 <tool_calls>
-{{"name": "execute_command", "args": {{"command": "ls -la .chatme/skills/"}}}}
+{{"name": "execute_command", "args": {{"command": "ls -la skills/"}}}}
 </tool_calls>
 
 注意⚠️: 双大括号为单大括号的转义字符"""
@@ -246,19 +302,25 @@ def get_history_summary_node_config():
     llm_config :Dict,
     prompt :str
     """
-    # 加载环境变量
     load_dotenv()
 
-    model_name = os.getenv("DEEPSEEK_MODEL_NAME")
-    api_key = os.getenv("DEEPSEEK_API_KEY")
-    base_url = os.getenv("DEEPSEEK_BASE_URL")
-    temperature = os.getenv("OPENAI_TEMPERATURE", "0.15")
-    max_tokens = os.getenv("OPENAI_MAX_TOKENS", "16384")
-    top_p = os.getenv("OPENAI_TOP_P", "1.0")
-    frequency_penalty = float(os.getenv("OPENAI_FREQUENCY_PENALTY", "0.0"))
-    presence_penalty = float(os.getenv("OPENAI_PRESENCE_PENALTY", "0.0"))
+    config_primary = _get_llm_config_primary("deepseek")
 
-    # 大模型配置：
+    if config_primary and config_primary.get("model_name"):
+        model_name = config_primary.get("model_name")
+        api_key = config_primary.get("api_key")
+        base_url = config_primary.get("base_url")
+    else:
+        model_name = os.getenv("DEEPSEEK_MODEL_NAME")
+        api_key = os.getenv("DEEPSEEK_API_KEY")
+        base_url = os.getenv("DEEPSEEK_BASE_URL")
+
+    temperature = float(os.getenv("DEEPSEEK_TEMPERATURE", "0.5"))
+    max_tokens = int(os.getenv("DEEPSEEK_MAX_TOKENS", "32768"))
+    top_p = float(os.getenv("DEEPSEEK_TOP_P", "1.0"))
+    frequency_penalty = float(os.getenv("DEEPSEEK_FREQUENCY_PENALTY", "0.0"))
+    presence_penalty = float(os.getenv("DEEPSEEK_PRESENCE_PENALTY", "0.0"))
+
     llm_config = {
         "model_name": model_name,
         "api_key": api_key,
@@ -270,6 +332,7 @@ def get_history_summary_node_config():
         "presence_penalty": presence_penalty
     }
 
+    # system_prompt 配置
     prompt = """你是"历史消息总结节点（History Summary Node）"，负责将对话历史压缩为结构化、可复用、面向后续推理的高质量摘要。
 
 ⚠️ 当前输入不仅包含历史对话，还包含"当前用户问题"。
@@ -421,19 +484,25 @@ def get_imp_ipt_config():
     优化用户输入内容，优化成更好让后续进行AI对话中AI来理解用户需求的大模型配置
     返回参数：
     """
-    # 加载环境变量
     load_dotenv()
 
-    model_name = os.getenv("DEEPSEEK_MODEL_NAME")
-    api_key = os.getenv("DEEPSEEK_API_KEY")
-    base_url = os.getenv("DEEPSEEK_BASE_URL")
-    temperature = os.getenv("OPENAI_TEMPERATURE", "0.15")
-    max_tokens = os.getenv("OPENAI_MAX_TOKENS", "16384")
-    top_p = os.getenv("OPENAI_TOP_P", "1.0")
-    frequency_penalty = float(os.getenv("OPENAI_FREQUENCY_PENALTY", "0.0"))
-    presence_penalty = float(os.getenv("OPENAI_PRESENCE_PENALTY", "0.0"))
+    config_primary = _get_llm_config_primary("deepseek")
 
-    # 大模型配置：
+    if config_primary and config_primary.get("model_name"):
+        model_name = config_primary.get("model_name")
+        api_key = config_primary.get("api_key")
+        base_url = config_primary.get("base_url")
+    else:
+        model_name = os.getenv("DEEPSEEK_MODEL_NAME")
+        api_key = os.getenv("DEEPSEEK_API_KEY")
+        base_url = os.getenv("DEEPSEEK_BASE_URL")
+
+    temperature = float(os.getenv("DEEPSEEK_TEMPERATURE", "0.5"))
+    max_tokens = int(os.getenv("DEEPSEEK_MAX_TOKENS", "32768"))
+    top_p = float(os.getenv("DEEPSEEK_TOP_P", "1.0"))
+    frequency_penalty = float(os.getenv("DEEPSEEK_FREQUENCY_PENALTY", "0.0"))
+    presence_penalty = float(os.getenv("DEEPSEEK_PRESENCE_PENALTY", "0.0"))
+
     imp_ipt_llm_config = {
         "model_name": model_name,
         "api_key": api_key,
@@ -496,7 +565,7 @@ def get_imp_ipt_config():
 
 类别F — 带文件输入：
 输入伴随文件上传。
-处理策略：输入中已包含文件名等信息（如 `/path/to/file.py`），需确保文件名被完整保留在输出中，不得省略、不得替换。输出中应明确标注"[相关文件：xxx]"标记，方便下游节点识别并定位缓存目录 `.chatme/cached/` 中的实际文件。
+处理策略：输入中已包含文件名等信息（如 `/path/to/file.py`），需确保文件名被完整保留在输出中，不得省略、不得替换。输出中应明确标注"[相关文件：xxx]"标记，方便下游节点识别并定位缓存目录 `cached/` 中的实际文件。
 处理力度：最小化，文件名信息原样保留，标注格式固定为 `[相关文件：文件名]`。
 
 类别G — 极短输入（特殊处理）：
@@ -603,9 +672,17 @@ def get_llm_memory_config():
     """
     load_dotenv()
 
-    model_name = os.getenv("DEEPSEEK_MODEL_NAME")
-    api_key = os.getenv("DEEPSEEK_API_KEY")
-    base_url = os.getenv("DEEPSEEK_BASE_URL")
+    config_primary = _get_llm_config_primary("deepseek")
+
+    if config_primary and config_primary.get("model_name"):
+        model_name = config_primary.get("model_name")
+        api_key = config_primary.get("api_key")
+        base_url = config_primary.get("base_url")
+    else:
+        model_name = os.getenv("DEEPSEEK_MODEL_NAME")
+        api_key = os.getenv("DEEPSEEK_API_KEY")
+        base_url = os.getenv("DEEPSEEK_BASE_URL")
+
     temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.15"))
     max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "8192"))
     top_p = float(os.getenv("OPENAI_TOP_P", "1.0"))
@@ -671,7 +748,7 @@ def get_llm_memory_config():
 - 技术点（如有）
 
 ## 缓存文件目录
-- .chatme/cached/
+- cached/
 ```
 
 请输出更新后的完整记忆文件内容，不要输出其他内容。"""

@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 from shutil import which
 from typing import Any, Annotated, Literal, Optional
@@ -127,7 +128,7 @@ def execute_code(code: str, language: Literal["python", "nodejs", "javascript", 
     try:
         # 向上查找项目根目录
         project_root = Path.cwd()  # backend 目录
-        skills_dir = project_root / ".chatme" / "skills"
+        skills_dir = project_root / "skills"
 
         # 查找虚拟环境
         venv_candidates = [
@@ -257,7 +258,7 @@ def execute_command(command: Annotated[ str, "系统执行命令"], timeout: int
 def get_skills_overview() -> str:
     """获取ai可以技能的使用指南概括"""
     skills_md = ["skills", "Skills", "SKILLS"]
-    skills_dir = Path.cwd() / ".chatme" / "skills"
+    skills_dir = Path.cwd() / "skills"
     skill_file = Any
     for name in skills_md:
         skill_file = os.path.join(skills_dir, f"{name}.md")
@@ -274,6 +275,25 @@ def get_skills_overview() -> str:
             return f.read()
     else:
         return f"技能概括文件没有找到"
+
+
+@server.tool
+def get_current_datetime() -> str:
+    """
+    获取当前的日期和时间
+
+    Returns:
+        JSON 格式：timestamp（时间戳）、weekday（星期几，中英文）
+    """
+    now = datetime.now()
+
+    import json
+    result = {
+        "timestamp": int(now.timestamp()),
+        "weekday_cn": "星期日 星期一 星期二 星期三 星期四 星期五 星期六".split()[now.weekday()],
+        "weekday_en": ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][now.weekday()]
+    }
+    return json.dumps(result, ensure_ascii=False)
 
 
 if __name__ == "__main__":

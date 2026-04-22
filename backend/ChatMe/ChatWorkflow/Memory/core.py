@@ -50,6 +50,22 @@ class MemoryManager:
         # 确保目录存在
         Path(self._memory_dir).mkdir(parents=True, exist_ok=True)
 
+    def _get_memory_path_with_thread(self, thread_id: str) -> Path:
+        """
+        获取指定 thread_id 对应的记忆文件路径
+
+        Args:
+            thread_id: 对话线程 ID
+
+        Returns:
+            特定thread_id的记忆文件存放路径
+        """
+        # 清理 thread_id 中的非法字符
+        safe_thread_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in thread_id)
+        path_with_thread = Path(self._memory_dir) / f"{safe_thread_id}"
+        os.makedirs(path_with_thread, exist_ok=True)
+        return path_with_thread
+
     def _get_memory_file_path(self, thread_id: str) -> str:
         """
         获取指定 thread_id 对应的记忆文件路径
@@ -58,11 +74,11 @@ class MemoryManager:
             thread_id: 对话线程 ID
 
         Returns:
-            记忆文件完整路径
+            特定thread_id的记忆文件核心路径
         """
-        # 清理 thread_id 中的非法字符
-        safe_thread_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in thread_id)
-        return os.path.join(self._memory_dir, f"{safe_thread_id}.md")
+        path_with_thread = self._get_memory_path_with_thread(thread_id)
+        return os.path.join(path_with_thread, "current.md")
+
 
     def read_memory(self, thread_id: str) -> str:
         """
@@ -88,21 +104,31 @@ class MemoryManager:
             self.logger.error(f"读取记忆文件失败: {e}")
             return self._get_empty_memory_template()
 
-    def write_memory(self, thread_id: str, content: str) -> bool:
+    def write_memory(self, thread_id: str, checkpoint_id: str, content: str, timestamp: str) -> bool:
         """
-        写入指定 thread_id 的记忆文件
+        写入指定 thread_id 的记忆核心文件
+        以及检查点备份文件
 
         Args:
             thread_id: 对话线程 ID
+            checkpoint_id: 检查点 ID
             content: 记忆内容
 
         Returns:
             写入是否成功
         """
+        path_with_thread = self._get_memory_path_with_thread(thread_id)
+        memory_file_with_checkpoint = os.path.join(
+            path_with_thread,
+            f"{checkpoint_id}_{timestamp}.md"
+        )
+
         memory_file_path = self._get_memory_file_path(thread_id)
         try:
-            with open(memory_file_path, "w", encoding="utf-8") as f:
-                f.write(content)
+            with open(memory_file_path, "w", encoding="utf-8") as f1, \
+                 open(memory_file_with_checkpoint, "w", encoding="utf-8") as f2:
+                f1.write(content)
+                f2.write(content)
             self.logger.debug(f"记忆文件已更新: {memory_file_path}")
             return True
         except Exception as e:
@@ -112,6 +138,7 @@ class MemoryManager:
     async def update_memory(
         self,
         thread_id: str,
+        checkpoint_id: str,
         memory_data: MemoryUpdateFormat
     ) -> bool:
         """
@@ -119,6 +146,7 @@ class MemoryManager:
 
         Args:
             thread_id: 对话线程 ID
+            checkpoint_id: 检查点 ID
             memory_data: 记忆更新数据
 
         Returns:
@@ -127,7 +155,7 @@ class MemoryManager:
         existing_memory = self.read_memory(thread_id)
 
         # 获取当前时间
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         # 构建 prompt
         prompt = self._memory_prompt.format(
@@ -150,7 +178,7 @@ class MemoryManager:
                 return True
 
             # 写入新记忆
-            return self.write_memory(thread_id, new_memory)
+            return self.write_memory(thread_id, checkpoint_id, new_memory, timestamp)
 
         except Exception as e:
             self.logger.error(f"更新记忆失败: {e}")
@@ -180,6 +208,7 @@ class MemoryManager:
         Returns:
             清空是否成功
         """
+
         return self.write_memory(thread_id, self._get_empty_memory_template())
 
     def list_threads(self) -> List[str]:
@@ -198,9 +227,9 @@ class MemoryManager:
             self.logger.error(f"列出记忆线程失败: {e}")
             return []
 
-    def delete_memory(self, thread_id: str) -> bool:
+    async def delete_memory(self, thread_id: str) -> bool:
         """
-        删除指定 thread_id 的记忆文件
+        删除指定 thread_id 的记忆文件（包括该目录下的所有文件）
 
         Args:
             thread_id: 对话线程 ID
@@ -208,14 +237,129 @@ class MemoryManager:
         Returns:
             删除是否成功
         """
-        memory_file_path = self._get_memory_file_path(thread_id)
         try:
-            if os.path.exists(memory_file_path):
-                os.remove(memory_file_path)
-                self.logger.debug(f"删除记忆文件: {memory_file_path}")
+            path_with_thread = self._get_memory_path_with_thread(thread_id)
+
+            if not os.path.exists(path_with_thread):
+                self.logger.debug(f"记忆目录不存在: {path_with_thread}")
+                return True
+
+            # 删除目录下的所有文件
+            for filename in os.listdir(path_with_thread):
+                file_path = os.path.join(path_with_thread, filename)
+                try:
+                    if os.path.isfile(file_path):
+                        os.remove(file_path)
+                        self.logger.debug(f"删除记忆文件: {file_path}")
+                except Exception as e:
+                    self.logger.error(f"删除文件失败 {file_path}: {e}")
+
+            os.rmdir(path_with_thread)
+
             return True
         except Exception as e:
-            self.logger.error(f"删除记忆文件失败: {e}")
+            self.logger.error(f"删除记忆目录失败: {e}")
+            return False
+
+    async def backtrack_memory(self, thread_id: str, checkpoint_id: str) -> bool:
+        """
+        回溯指定 thread_id 的记忆到指定检查点
+
+        逻辑：
+        1. 找到对应 checkpoint_id 的记忆文件
+        2. 删除该时间点之后的所有记忆文件（时间戳更大的文件）
+        3. 将该 checkpoint 的内容恢复到 current.md
+
+        Args:
+            thread_id: 对话线程 ID
+            checkpoint_id: 检查点 ID
+
+        Returns:
+            回溯是否成功
+        """
+        try:
+            path_with_thread = self._get_memory_path_with_thread(thread_id)
+
+            if not os.path.exists(path_with_thread):
+                self.logger.warning(f"记忆目录不存在: {path_with_thread}")
+                return False
+
+            # 获取目录下所有 .md 文件
+            all_files = [f for f in os.listdir(path_with_thread) if f.endswith('.md')]
+
+            # 查找目标 checkpoint 文件（格式：{checkpoint_id}_{timestamp}.md）
+            target_file = None
+            target_timestamp = None
+
+            for filename in all_files:
+                # 跳过 current.md
+                if filename == 'current.md':
+                    continue
+
+                # 文件名格式：{checkpoint_id}_{timestamp}.md
+                # checkpoint_id 只包含 - 和字母数字，timestamp 格式为 YYYY-MM-DD HH:MM:SS
+                # 所以从右边倒数第二个 _ 分割：左边是 checkpoint_id，右边是 timestamp
+                if '_' in filename and filename.endswith('.md'):
+                    parts = filename.rsplit('_', 1)  # 从右边分割最后一个下划线
+                    if len(parts) == 2:
+                        checkpoint_part = parts[0]
+                        timestamp_part = parts[1][:-3]  # 去掉 ".md"
+
+                        if checkpoint_part == checkpoint_id:
+                            target_file = filename
+                            target_timestamp = timestamp_part
+                            break
+
+            if not target_file:
+                self.logger.warning(f"未找到 checkpoint 文件: {checkpoint_id}")
+                return False
+
+            # 读取目标 checkpoint 的内容
+            target_file_path = os.path.join(path_with_thread, target_file)
+            with open(target_file_path, 'r', encoding='utf-8') as f:
+                target_content = f.read()
+
+            self.logger.debug(f"找到目标 checkpoint 文件: {target_file}, 时间戳: {target_timestamp}")
+
+            # 找出所有时间戳大于目标时间戳的文件并删除
+            files_to_delete = []
+            for filename in all_files:
+                if filename == 'current.md' or filename == target_file:
+                    continue
+
+                # 解析文件名中的时间戳
+                # 文件名格式：{checkpoint_id}_{timestamp}.md
+                if '_' in filename and filename.endswith('.md'):
+                    parts = filename.rsplit('_', 1)  # 从右边分割最后一个下划线
+                    if len(parts) == 2:
+                        file_timestamp = parts[1][:-3]  # 去掉 ".md"
+
+                        # 比较时间戳（字符串比较即可，因为格式是 YYYY-MM-DD HH:MM:SS）
+                        if file_timestamp > target_timestamp:
+                            files_to_delete.append(filename)
+
+            # 删除时间戳更大的文件
+            for filename in files_to_delete:
+                file_path = os.path.join(path_with_thread, filename)
+                try:
+                    os.remove(file_path)
+                    self.logger.debug(f"删除过期记忆文件: {filename}")
+                except Exception as e:
+                    self.logger.error(f"删除文件失败 {filename}: {e}")
+
+            # 将目标 checkpoint 内容写入 current.md
+            current_file_path = self._get_memory_file_path(thread_id)
+            with open(current_file_path, 'w', encoding='utf-8') as f:
+                f.write(target_content)
+
+            self.logger.info(f"记忆回溯成功: thread_id={thread_id}, checkpoint_id={checkpoint_id}, "
+                             f"删除了 {len(files_to_delete)} 个过期文件")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"记忆回溯失败: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
             return False
 
     def _format_tool_calls(self, tool_calls: Optional[List[Dict]]) -> str:
@@ -238,7 +382,7 @@ class MemoryManager:
 
     def _get_empty_memory_template(self) -> str:
         """获取空记忆模板"""
-        return """# 对话记忆 (thread_id: 暂无)
+        return """# 对话记忆
 
 > 最后更新：暂无
 

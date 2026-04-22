@@ -43,3 +43,9 @@ class ConversationListResp(BaseModel):
     limit: int = Field(default=10, description="本次返回条数")
     conversations: List[Conversation] = Field(default=[], description="会话列表")
 
+class ConversationSimple(BaseModel):
+    """简化版会话列表项，仅包含ID、标题和更新时间"""
+    session_id: str
+    title: str = "新对话"
+    updated_at: Optional[datetime] = Field(default=None)
+

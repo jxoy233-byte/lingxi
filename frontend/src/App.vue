@@ -5,11 +5,13 @@
         :collapsed="sidebarCollapsed"
         :conversations="conversations"
         :active-session-id="currentSessionId"
+        :display-count="displayCount"
         @toggle="toggleSidebar"
         @new-chat="createNewChat"
         @select-conversation="loadConversation"
         @delete-conversation="deleteConversation"
         @update-title="updateConversationTitle"
+        @load-more="loadMoreConversations"
       />
 
       <main class="chat-area">
@@ -125,7 +127,8 @@ export default {
       responseStartTime: null,
       responseTimerInterval: null,
       currentResponseTime: 0,
-      currentAiMessageIndex: null
+      currentAiMessageIndex: null,
+      displayCount: 10
     }
   },
   mounted() {
@@ -256,13 +259,19 @@ export default {
     },
     async loadConversations() {
       try {
-        const response = await fetch('/chat/conversations?limit=50')
+        const response = await fetch('/chat/conversations')
         if (response.ok) {
-          this.conversations = await response.json()
+          const data = await response.json()
+          // 后端返回完整会话列表，前端进行冷加载处理
+          this.conversations = data
         }
       } catch (error) {
         console.error('加载对话列表失败:', error)
       }
+    },
+    async loadMoreConversations() {
+      // 冷加载：每次滚动到底部时增加显示数量
+      this.displayCount += 10
     },
     createNewChat() {
       this.currentSessionId = null

@@ -6,7 +6,7 @@ from fastapi.responses import StreamingResponse
 
 from ChatMe.ChatService.FilesLoaders import UploadFileWithId
 from ChatMe.ChatService.FilesLoaders.core import OutputFormat
-from ChatMe.ChatService.config.models import ChatRequest, Conversation
+from ChatMe.ChatService.config.models import ChatRequest, Conversation, ConversationSimple
 from ChatMe.ChatService import ChatService, FILE_MAX_LENGTH
 from ChatMe.ChatWorkflow import ChatWorkflow
 from ChatMe.LoggingManager.logging_config import get_logger
@@ -101,12 +101,10 @@ async def chat_stream(
         headers=headers,
     )
 
-@chatMe_app.get("/conversations", summary="获取历史会话列表【默认返回最新20条】", response_model=List[Conversation])
-async def get_conversations(
-    limit: int = Query(default=20, ge=1, le=50, description="返回会话数量，默认20条，最多50条")
-):
-    """获取所有历史会话，按【更新时间倒序】排列，最新的会话在最前面，自动过滤空会话"""
-    conversations = await chat_service.get_conversation_list(limit=limit)
+@chatMe_app.get("/conversations", summary="获取历史会话列表", response_model=List[ConversationSimple])
+async def get_conversations():
+    """获取所有历史会话列表，按【更新时间倒序】排列，最新的会话在最前面，自动过滤空会话"""
+    conversations = await chat_service.get_conversation_list()
     return conversations
 
 @chatMe_app.get("/{session_id}/conversation", summary="获取指定会话内容")
@@ -158,13 +156,6 @@ async def get_conversation_title(
         raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
     return {"session_id": session_id, "title": conversation.title}
 
-@chatMe_app.get("/common/latest", summary="获取最新的一条会话ID")
-async def get_latest_conversation():
-    """前端默认进入最新会话，无需手动点击，提升体验"""
-    conv_list = await chat_service.get_conversation_list(limit=1)
-    if not conv_list:
-        return {"session_id": None}
-    return {"session_id": conv_list[0].session_id, "title": conv_list[0].title}
 
 @chatMe_app.post("/improve_input", summary="优化用户输入内容")
 async def improve_input(
@@ -177,7 +168,7 @@ async def improve_input(
     return {"improved_text": improved_text}
 
 
-@chatMe_app.get("/file-config", summary="获取文件上传配置")
+@chatMe_app.get("/file-ChatMeConfig", summary="获取文件上传配置")
 async def get_file_config():
     """
     获取文件上传配置信息，包括：

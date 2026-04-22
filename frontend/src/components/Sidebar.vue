@@ -10,9 +10,9 @@
       </button>
     </div>
 
-    <div v-if="!collapsed" class="conversation-list">
+    <div v-if="!collapsed" class="conversation-list" ref="conversationListRef" @scroll="handleScroll">
       <ConversationItem
-        v-for="conv in conversations"
+        v-for="(conv, index) in displayConversations"
         :key="conv.session_id"
         :conversation="conv"
         :is-active="conv.session_id === activeSessionId"
@@ -47,9 +47,30 @@ export default {
     activeSessionId: {
       type: String,
       default: null
+    },
+    displayCount: {
+      type: Number,
+      default: 10
     }
   },
-  emits: ['toggle', 'new-chat', 'select-conversation', 'delete-conversation', 'update-title']
+  computed: {
+    displayConversations() {
+      return this.conversations.slice(0, this.displayCount)
+    }
+  },
+  emits: ['toggle', 'new-chat', 'select-conversation', 'delete-conversation', 'update-title', 'load-more'],
+  methods: {
+    handleScroll() {
+      const listEl = this.$refs.conversationListRef
+      if (!listEl) return
+
+      const { scrollTop, scrollHeight, clientHeight } = listEl
+      // 当距离底部不到 50px 时，加载更多
+      if (scrollHeight - scrollTop - clientHeight < 50) {
+        this.$emit('load-more')
+      }
+    }
+  }
 }
 </script>
 

@@ -1,0 +1,26 @@
+  {
+    "mcp_server": {
+      "url": "http://127.0.0.1:18080/streamable",
+      "transport": "streamable_http"
+    },
+    "redis": {
+      "checkpointer_url": "redis://:123456@localhost:6379/0",
+      "state_saver_url": "redis://:123456@localhost:6379/1"
+    },
+    "llm_providers": {
+      "openai": {
+        "model_name": "grok-4-fast",
+        "api_key": "sk-u6aIc4nm6bQjPtdFGiEVS2R4jDCJ2m0peTw9ZLoVDtjElGEY",
+        "base_url": "https://ai.nengyongai.cn/v1"
+      },
+      "deepseek": {
+        "model_name": "deepseek-chat",
+        "api_key": "sk-3d465d1a82ad4eaca24e6378e67fd384",
+        "base_url": "https://api.deepseek.com/"
+      }
+    },
+    "directories": {
+      "skills_dir": "./skills",
+      "cached_dir": "./cached"
+    }
+  }

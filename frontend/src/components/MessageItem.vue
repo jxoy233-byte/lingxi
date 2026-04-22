@@ -1,111 +1,7 @@
 <template>
   <div :class="['message', message.role === 'user' ? 'user-message' : 'ai-message']">
     <div :class="['message-wrapper', message.role === 'user' ? 'user-wrapper' : 'ai-wrapper']">
-      <div class="message-content">
-      <!-- 文件附件显示 -->
-      <div v-if="message.files && message.files.length > 0" class="message-files">
-        <div
-          v-for="(file, index) in message.files"
-          :key="index"
-          class="file-attachment"
-          @click="handleFileClick(file)"
-        >
-          <!-- 图片预览 -->
-          <img
-            v-if="(file.preview || file.iframe_url || file.preview_url) && isImageFile(file)"
-            :src="file.preview || file.iframe_url || file.preview_url"
-            :alt="file.name"
-            class="file-attachment-img"
-          />
-          <!-- 文本文件预览（有内容） -->
-          <div v-else-if="isTextFile(file) && file.content" class="file-text-preview">
-            <div class="file-text-icon">
-              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                <polyline points="14 2 14 8 20 8"/>
-                <line x1="16" y1="13" x2="8" y2="13"/>
-                <line x1="16" y1="17" x2="8" y2="17"/>
-                <line x1="10" y1="9" x2="8" y2="9"/>
-              </svg>
-            </div>
-            <div class="file-text-content">{{ truncateText(file.content, 50) }}</div>
-            <div class="file-attachment-name">{{ file.name }}</div>
-          </div>
-          <!-- 普通文件图标（包括没有预览的图片和文本文件） -->
-          <div v-else class="file-attachment-icon">
-            <!-- 根据文件类型显示不同图标 -->
-            <svg v-if="isImageFile(file)" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
-              <circle cx="8.5" cy="8.5" r="1.5"/>
-              <polyline points="21 15 16 10 5 21"/>
-            </svg>
-            <svg v-else-if="isTextFile(file)" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-              <polyline points="14 2 14 8 20 8"/>
-              <line x1="16" y1="13" x2="8" y2="13"/>
-              <line x1="16" y1="17" x2="8" y2="17"/>
-              <line x1="10" y1="9" x2="8" y2="9"/>
-            </svg>
-            <svg v-else-if="isDocumentFile(file)" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-              <polyline points="14 2 14 8 20 8"/>
-              <line x1="16" y1="13" x2="8" y2="13"/>
-              <line x1="16" y1="17" x2="8" y2="17"/>
-              <polyline points="10 9 9 9 8 9"/>
-            </svg>
-            <svg v-else xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
-              <polyline points="13 2 13 9 20 9"/>
-            </svg>
-            <div class="file-attachment-name">{{ file.name }}</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- 搜索结果显示 -->
-
-      <!-- 思考过程区块 -->
-      <div v-if="message.role === 'ai' && hasThinking" class="thinking-section" :class="{ 'thinking-active': !message.thinkingDone, 'thinking-collapsed': thinkingCollapsed }">
-        <div class="thinking-header" @click="toggleThinking">
-          <div class="thinking-header-left">
-            <span class="thinking-status-dot" :class="{ 'dot-active': !message.thinkingDone }"></span>
-            <span class="thinking-label">{{ message.thinkingDone ? '思考过程' : '正在思考...' }}</span>
-            <span v-if="message.toolCalls && message.toolCalls.length" class="tool-badge">
-              {{ message.toolCalls.length }} 个工具调用
-            </span>
-          </div>
-          <svg class="thinking-chevron" :class="{ rotated: !thinkingCollapsed }" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="9 18 15 12 9 6"/>
-          </svg>
-        </div>
-        <div class="thinking-body" v-show="!thinkingCollapsed">
-          <!-- 工具调用列表 -->
-          <div v-if="message.toolCalls && message.toolCalls.length" class="tool-calls">
-            <div v-for="(tool, i) in message.toolCalls" :key="i" class="tool-call-item" :class="{ 'tool-done': tool.result !== null }">
-              <div class="tool-call-header" @click="toggleTool(i)" :style="tool.result !== null ? 'cursor:pointer' : ''">
-                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
-                </svg>
-                <span class="tool-name">{{ tool.name }}</span>
-                <span v-if="tool.result !== null" class="tool-check">✓</span>
-                <span v-else class="tool-running-dot"></span>
-                <svg v-if="tool.result !== null" class="tool-expand-chevron" :class="{ rotated: expandedTools[i] }" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <polyline points="9 18 15 12 9 6"/>
-                </svg>
-              </div>
-              <div v-if="tool.args && hasArgs(tool.args)" class="tool-args">{{ formatArgs(tool.args) }}</div>
-              <div v-if="tool.result !== null && expandedTools[i]" class="tool-result">{{ tool.result }}</div>
-            </div>
-          </div>
-          <!-- 推理文本 -->
-          <div v-if="message.reasoning" class="reasoning-text">{{ message.reasoning }}</div>
-        </div>
-      </div>
-
-      <!-- 消息文本 -->
-      <div v-if="message.content" class="message-text" v-html="renderedContent" @click.capture="handleLinkClick"></div>
-
-      <!-- 用户消息的复制按钮 -->
+      <!-- 用户消息的复制按钮 — 气泡左侧 -->
       <div v-if="message.role === 'user' && message.content" class="user-message-copy">
         <button
           class="user-copy-button"
@@ -122,35 +18,125 @@
           </svg>
         </button>
       </div>
-    </div>
 
-    <!-- 操作按钮组：AI 消息文本下方，hover 显示 -->
-    <div v-if="message.role === 'ai' && message.content && !message.streaming" class="action-buttons">
-      <button
-        v-if="message.checkpointId"
-        class="action-button"
-        @click="handleRestore"
-        title="回溯到此对话"
-      >
-        <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <polyline points="1 4 1 10 7 10"/>
-          <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
-        </svg>
-      </button>
-      <button
-        class="action-button"
-        @click="copyMessage"
-        :title="copied ? '已复制' : '复制'"
-      >
-        <svg v-if="!copied" xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
-          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-        </svg>
-        <svg v-else xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <polyline points="20 6 9 17 4 12"/>
-        </svg>
-      </button>
-    </div>
+      <div class="message-content">
+        <!-- 文件附件显示 -->
+        <div v-if="message.files && message.files.length > 0" class="message-files">
+          <div
+            v-for="(file, index) in message.files"
+            :key="index"
+            class="file-attachment"
+            @click="handleFileClick(file)"
+          >
+            <!-- 图片预览 -->
+            <img
+              v-if="(file.preview || file.iframe_url || file.preview_url) && isImageFile(file)"
+              :src="file.preview || file.iframe_url || file.preview_url"
+              :alt="file.name"
+              class="file-attachment-img"
+            />
+            <!-- 文本文件预览（有内容） -->
+            <div v-else-if="isTextFile(file) && file.content" class="file-text-preview">
+              <div class="file-text-icon">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                  <polyline points="14 2 14 8 20 8"/>
+                  <line x1="16" y1="13" x2="8" y2="13"/>
+                  <line x1="16" y1="17" x2="8" y2="17"/>
+                  <line x1="10" y1="9" x2="8" y2="9"/>
+                </svg>
+              </div>
+              <div class="file-text-content">{{ truncateText(file.content, 50) }}</div>
+              <div class="file-attachment-name">{{ file.name }}</div>
+            </div>
+            <!-- 普通文件图标 -->
+            <div v-else class="file-attachment-icon">
+              <svg v-if="isImageFile(file)" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                <circle cx="8.5" cy="8.5" r="1.5"/>
+                <polyline points="21 15 16 10 5 21"/>
+              </svg>
+              <svg v-else-if="isTextFile(file)" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <polyline points="14 2 14 8 20 8"/>
+                <line x1="16" y1="13" x2="8" y2="13"/>
+                <line x1="16" y1="17" x2="8" y2="17"/>
+                <polyline points="10 9 9 9 8 9"/>
+              </svg>
+              <svg v-else-if="isDocumentFile(file)" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <polyline points="14 2 14 8 20 8"/>
+                <line x1="16" y1="13" x2="8" y2="13"/>
+                <line x1="16" y1="17" x2="8" y2="17"/>
+                <polyline points="10 9 9 9 8 9"/>
+              </svg>
+              <svg v-else xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
+                <polyline points="13 2 13 9 20 9"/>
+              </svg>
+              <div class="file-attachment-name">{{ file.name }}</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 思考过程区块 -->
+        <div v-if="message.role === 'ai' && hasThinking" class="thinking-section" :class="{ 'thinking-active': !message.thinkingDone, 'thinking-collapsed': thinkingCollapsed }">
+          <div class="thinking-header" @click="toggleThinking">
+            <div class="thinking-header-left">
+              <span class="thinking-status-dot" :class="{ 'dot-active': !message.thinkingDone }"></span>
+              <span class="thinking-label">{{ message.thinkingDone ? '思考过程' : '正在思考...' }}</span>
+              <span v-if="message.toolCalls && message.toolCalls.length" class="tool-badge">
+                {{ message.toolCalls.length }} 个工具调用
+              </span>
+            </div>
+            <svg class="thinking-chevron" :class="{ rotated: !thinkingCollapsed }" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="9 18 15 12 9 6"/>
+            </svg>
+          </div>
+          <div class="thinking-body" v-show="!thinkingCollapsed">
+            <div v-if="message.toolCalls && message.toolCalls.length" class="tool-calls">
+              <div v-for="(tool, i) in message.toolCalls" :key="i" class="tool-call-item" :class="{ 'tool-done': tool.result !== null }">
+                <div class="tool-call-header" @click="toggleTool(i)" :style="tool.result !== null ? 'cursor:pointer' : ''">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+                  </svg>
+                  <span class="tool-name">{{ tool.name }}</span>
+                  <span v-if="tool.result !== null" class="tool-check">✓</span>
+                  <span v-else class="tool-running-dot"></span>
+                  <svg v-if="tool.result !== null" class="tool-expand-chevron" :class="{ rotated: expandedTools[i] }" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="9 18 15 12 9 6"/>
+                  </svg>
+                </div>
+                <div v-if="tool.args && hasArgs(tool.args)" class="tool-args">{{ formatArgs(tool.args) }}</div>
+                <div v-if="tool.result !== null && expandedTools[i]" class="tool-result">{{ tool.result }}</div>
+              </div>
+            </div>
+            <div v-if="message.reasoning" class="reasoning-text">{{ message.reasoning }}</div>
+          </div>
+        </div>
+
+        <!-- 消息文本 -->
+        <div v-if="message.content" class="message-text" v-html="renderedContent" @click.capture="handleLinkClick"></div>
+      </div>
+
+      <!-- 操作按钮组：AI 消息下方，hover 显示 -->
+      <div v-if="message.role === 'ai' && message.content && !message.streaming" class="action-buttons">
+        <button v-if="message.checkpointId" class="action-button" @click="handleRestore" title="回溯到此对话">
+          <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="1 4 1 10 7 10"/>
+            <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
+          </svg>
+        </button>
+        <button class="action-button" @click="copyMessage" :title="copied ? '已复制' : '复制'">
+          <svg v-if="!copied" xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+          </svg>
+          <svg v-else xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="20 6 9 17 4 12"/>
+          </svg>
+        </button>
+      </div>
     </div>
   </div>
 </template>
@@ -299,17 +285,36 @@ export default {
     }
   },
   methods: {
-    // 预处理原始文本 - 手动创建链接，避免 marked 错误解析
+    // 预处理原始文本 - 清理可能破坏 Markdown 解析的字符，但保留 [text](url) 语法
     preprocessContent(content) {
       if (typeof content !== 'string') return content
 
-      // 使用与成功案例相同的 URL 正则，直接创建 <a> 标签
-      // 这个正则的字符集自然排除中文
-      const urlRegex = /\b(https?|ftp|file):\/\/[-A-Za-z0-9+&@#\/%?=~_|!:,;.]+[-A-Za-z0-9+&@#\/%=~_|]/gi
+      // 策略：先用占位符保护已有的 Markdown 链接语法
+      // 匹配 [text](url) 格式，在 preprocess 阶段跳过这类 URL
 
-      // 直接替换 URL 为 <a> 标签，保留原始 URL 作为显示文本
-      let result = content.replace(urlRegex, (url) => {
+      // 临时替换 Markdown 链接为占位符
+      const markdownLinkRegex = /\[([^\]]*)\]\(([^)]+)\)/g
+      const placeholders = []
+      let index = 0
+
+      let result = content.replace(markdownLinkRegex, (match, text, url) => {
+        const placeholder = `__MARKDOWN_LINK_${index}__`
+        placeholders.push({ placeholder, text, url })
+        index++
+        return placeholder
+      })
+
+      // 现在只处理不在 Markdown 链接内的纯 URL（裸 URL）
+      const urlRegex = /\b(https?|ftp|file):\/\/[-A-Za-z0-9+&@#\/%?=~_|!:,;.]+[-A-Za-z0-9+&@#\/%=~_|]/gi
+      result = result.replace(urlRegex, (url) => {
         return `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`
+      })
+
+      // 恢复 Markdown 链接
+      placeholders.forEach(({ placeholder, text, url }) => {
+        // 清理 URL 末尾的中文标点
+        let cleanUrl = url.replace(/[，。、；：？！""''（）【】《》…——]+$/, '')
+        result = result.replace(placeholder, `<a href="${cleanUrl}" target="_blank" rel="noopener noreferrer">${text}</a>`)
       })
 
       return result
@@ -483,12 +488,13 @@ export default {
   align-items: flex-start;
 }
 
-/* User wrapper：右对齐，收缩气泡 */
+/* User wrapper：右对齐，收缩气泡，relative 用于定位复制按钮 */
 .user-wrapper {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   max-width: 68%;
   align-items: flex-end;
+  position: relative;
 }
 
 .message-content {
@@ -514,7 +520,7 @@ export default {
   position: relative;
 }
 
-.user-message .message-content:hover .user-message-copy {
+.user-message:hover .user-message-copy {
   opacity: 1;
 }
 
@@ -867,16 +873,13 @@ export default {
   color: white;
 }
 
-/* 用户消息复制按钮 */
+/* 用户消息复制按钮 — 气泡左侧 */
 .user-message-copy {
-  position: absolute;
-  bottom: 8px;
-  right: 8px;
   display: flex;
-  justify-content: flex-end;
+  align-items: flex-end;
+  padding-right: 6px;
   opacity: 0;
   transition: opacity 0.15s ease;
-  pointer-events: none;
 }
 
 .user-message-copy > * {

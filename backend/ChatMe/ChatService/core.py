@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import traceback
@@ -13,9 +14,9 @@ from langgraph.checkpoint.redis.util import from_storage_safe_id
 from ChatMe.ChatService import FILE_MAX_LENGTH, FILE_ALLOWED_TYPES
 from ChatMe.ChatService.FilesLoaders import UploadFileWithId
 from ChatMe.ChatService.RedisStateSaver.core import RedisStateSaver
-from ChatMe.ChatService.config.models import MessageRole, Message, Conversation
+from ChatMe.ChatService.config.models import MessageRole, Message, Conversation, ConversationSimple
 from ChatMe.ChatService.FilesLoaders.core import FilesLoaders, OutputFormat
-from ChatMe.ChatWorkflow import ChatWorkflow
+from ChatMe.ChatWorkflow import ChatWorkflow, MemoryUpdateFormat
 from ChatMe.ChatWorkflow.config.models import AIMessageType
 from ChatMe.LoggingManager.logging_config import get_logger
 
@@ -233,7 +234,6 @@ class ChatService:
     async def _save_round_checkpoint(self, session_id: str)-> Optional[str]:
         """
         获取指定会话的所有 checkpoint_id 列表
-        :param session_id: 会话 ID (thread_id)
 
         更新状态使得带有对应的checkpoint_id在最后一条SUMMARY的AI消息
 
@@ -259,11 +259,48 @@ class ChatService:
                         config=config,
                         values=state.values,  # 把修改后的完整state值更新回去
                     )
+
+                try: # 更新每轮记忆文件 — 后台静默执行，不阻塞返回
+                    memory_user_message = state.values.get("memory_user_message")
+                    memory_ai_response = state.values.get("memory_ai_response")
+                    memory_tool_calls = state.values.get("memory_tool_calls")
+                    memory_tool_results = state.values.get("memory_tool_results")
+
+                    memory_update_format = MemoryUpdateFormat(
+                        user_message=memory_user_message,
+                        ai_response=memory_ai_response,
+                        tool_calls=memory_tool_calls,
+                        tool_results=memory_tool_results
+                    )
+
+                    # 后台执行记忆更新，不等待完成
+                    asyncio.create_task(
+                        self._update_memory_bg(session_id, checkpoint_id, memory_update_format)
+                    )
+                except Exception as e:
+                    self.logger.error(f"更新记忆文件失败(thread_id={session_id}): {str(e)}")
+
                     return checkpoint_id
 
         except Exception as e:
             self.logger.error(f"保存每轮检查点失败(session_id:{session_id}): {str(e)}")
             return None
+
+    async def _update_memory_bg(
+        self,
+        session_id: str,
+        checkpoint_id: str,
+        memory_data: "MemoryUpdateFormat",
+    ):
+        """后台静默更新记忆，不阻塞主流程"""
+        try:
+            await self.chat_workflow.memory_manager.update_memory(
+                thread_id=session_id,
+                checkpoint_id=checkpoint_id,
+                memory_data=memory_data
+            )
+        except Exception as e:
+            self.logger.error(f"后台更新记忆失败(thread_id={session_id}): {str(e)}")
 
 
     async def message_stream(
@@ -455,13 +492,15 @@ class ChatService:
                             additional_kwargs=msg.additional_kwargs
                         ))
                         checkpoint_index += 1
+                    elif msg.additional_kwargs.get("type") == AIMessageType.REASONING.value:
+                            messages_list.append(Message(
+                                role=role,
+                                content=msg.content,
+                                files=None,
+                                additional_kwargs=msg.additional_kwargs
+                            ))
                     else:
-                        messages_list.append(Message(
-                            role=role,
-                            content=msg.content,
-                            files=None,
-                            additional_kwargs=msg.additional_kwargs
-                        ))
+                        continue
 
                 elif isinstance(msg, ToolMessage):
                     role = MessageRole.AI
@@ -496,10 +535,10 @@ class ChatService:
 
         return conversations
 
-    async def get_conversation_list(self, limit: int = 10) -> List[Conversation]:
+    async def get_conversation_list(self) -> List[ConversationSimple]:
         """
-        获取会话列表，返回最新的N条会话
-        :param limit: 返回条数，默认10
+        获取所有会话列表
+
         :return: 按更新时间倒序的会话列表，自动过滤空会话
         """
         try:
@@ -512,8 +551,17 @@ class ChatService:
                     conversation_list.append(conv)
             # 按更新时间倒序，最新对话在最前面
             conversation_list.sort(key=lambda x: x.updated_at, reverse=True)
-            # 只返回前N条
-            return conversation_list[:limit]
+
+            conversations = [
+                ConversationSimple(
+                    session_id=conv.session_id,
+                    title=conv.title,
+                    updated_at=conv.updated_at
+                )
+                for conv in conversation_list
+            ]
+
+            return conversations
         except HTTPException as e:
             self.logger.error(f"获取会话列表异常：{str(e)}")
             return []
@@ -529,6 +577,8 @@ class ChatService:
             await self.checkpointer.adelete_thread(
                 thread_id=session_id,
             )
+            await self.chat_workflow.memory_manager.delete_memory(thread_id=session_id)
+
             self.logger.info(f"会话删除成功(session_id:{session_id})")
             return True
 
@@ -698,6 +748,8 @@ class ChatService:
             await self.graph.aupdate_state(config=backtrack_config, values=backtrack_state.values)
 
             await self._delete_specific_checkpoint(session_id, checkpoint_id)
+
+            await self.chat_workflow.memory_manager.backtrack_memory(thread_id=session_id, checkpoint_id=checkpoint_id)
 
             self.logger.info(f"会话回溯成功(session_id:{session_id}, checkpoint_id:{checkpoint_id})")
 

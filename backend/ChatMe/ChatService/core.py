@@ -447,7 +447,7 @@ class ChatService:
             state = await self.graph.aget_state(config=config)
             self.logger.info(f"get_conversation state values keys: {state.values.keys() if state.values else 'None'}")
             self.logger.info(f"get_conversation messages count: {len(state.values.get('messages', [])) if state.values else 0}")
-            # print(state.values)
+            print(state.values)
         except HTTPException as e:
             self.logger.error(f"获取会话状态异常(session_id:{session_id})：{str(e)}")
             return Conversation(session_id=session_id)
@@ -550,7 +550,6 @@ class ChatService:
             created_at=created_at,
             updated_at=updated_at,
         )
-        print(conversations)
 
         return conversations
 

@@ -120,7 +120,8 @@ class ChatWorkflow:
         # self.graph = await self._create_graph_core()
         self.graph = await self._create_graph_core2()
 
-    async def _get_message_content_string(self, message: BaseMessage)-> str:
+    async def _get_message_content_string(self, message: BaseMessage) -> str:
+        """提取消息内容为字符串"""
         content_string = ""
 
         if not message:
@@ -133,14 +134,17 @@ class ChatWorkflow:
         elif isinstance(message_content, list):
             for item in message_content:
                 if isinstance(item, dict):
-                    if hasattr(item, "type") and item["type"] == "text":
-                        content_string += item["text"]
+                    item_type = item.get("type")
+                    if item_type == "text":
+                        content_string += item.get("text", "")
                 elif isinstance(item, str):
                     content_string += item + "\n"
         elif isinstance(message_content, dict):
-            if hasattr(message_content, "type") and message_content["type"] == "text":
-                content_string = message_content["text"]
-
+            msg_type = message_content.get("type")
+            if msg_type == "text":
+                content_string = message_content.get("text", "")
+            elif msg_type == "tool":
+                content_string = message_content.get("content", "")
 
         return content_string
 
@@ -155,30 +159,76 @@ class ChatWorkflow:
             return ai_message
 
         content = str(ai_message.content)
+        tool_calls = []
 
-        tool_call_pattern = r'<tool_calls>\s*(\{.*?\})\s*</tool_calls>'
-        matches = re.findall(tool_call_pattern,content,re.DOTALL)
-        if matches:
-            tool_calls = []
-            for i, match in enumerate(matches):
-                try:
-                    tool_call_data = json.loads(match)
-                    tool_call = {
-                        "name": tool_call_data.get("name"),
-                        "args": tool_call_data.get("args",{}),
-                        "id": tool_call_data.get("id", "") or f"call_{i+1}",
-                    }
-                    if tool_call["name"]:
-                        tool_calls.append(tool_call)
-                except json.JSONDecodeError as e:
-                    self.logger.warning(f"解析工具调用JSON失败: {e}")
-                    continue
+        # 找到所有 <tool_calls>...</tool_calls> 块
+        tag_pattern = r'<tool_calls>'
+        end_tag = '</tool_calls>'
+        start_idx = 0
 
-            if tool_calls:
-                ai_message.tool_calls = tool_calls
-                # 清理 content 中的工具调用标记
-                clean_content = re.sub(r'\n*<tool_calls>.*?</tool_calls>\n*', '', content, flags=re.DOTALL).strip()
-                ai_message.content = clean_content if clean_content else ""
+        while True:
+            tag_start = content.find(tag_pattern, start_idx)
+            if tag_start == -1:
+                break
+
+            # 找到 <tool_calls> 后的第一个 { 或 [
+            json_start = tag_start + len(tag_pattern)
+            while json_start < len(content) and content[json_start] in ' \t\n\r':
+                json_start += 1
+
+            if json_start >= len(content) or content[json_start] not in '{[':
+                start_idx = json_start + 1
+                continue
+
+            # 尝试逐步扩展 JSON 范围来解析（处理嵌套结构）
+            bracket_count = 0
+            json_end = json_start
+            json_chars = []
+
+            for idx in range(json_start, len(content)):
+                ch = content[idx]
+                json_chars.append(ch)
+
+                if ch in '{[':
+                    bracket_count += 1
+                elif ch in '}]':
+                    bracket_count -= 1
+                    if bracket_count == 0:
+                        json_end = idx + 1
+                        json_str = ''.join(json_chars)
+                        try:
+                            tool_call_data = json.loads(json_str)
+                            if isinstance(tool_call_data, list):
+                                for j, item in enumerate(tool_call_data):
+                                    tc = {
+                                        "name": item.get("name"),
+                                        "args": item.get("args", {}),
+                                        "id": item.get("id", "") or f"call_{len(tool_calls)+j+1}",
+                                    }
+                                    if tc["name"]:
+                                        tool_calls.append(tc)
+                            else:
+                                tc = {
+                                    "name": tool_call_data.get("name"),
+                                    "args": tool_call_data.get("args", {}),
+                                    "id": tool_call_data.get("id", "") or f"call_{len(tool_calls)+1}",
+                                }
+                                if tc["name"]:
+                                    tool_calls.append(tc)
+                        except json.JSONDecodeError as e:
+                            self.logger.warning(f"解析工具调用JSON失败: {e}")
+
+                        start_idx = json_end
+                        break
+            else:
+                # 没找到匹配的结束括号
+                start_idx = json_start + 1
+
+        if tool_calls:
+            ai_message.tool_calls = tool_calls
+            # 清理 content 中的工具调用标记
+            clean_content = re.sub(r'\n*<tool_calls>.*?</tool_calls>\n*', '', content, flags=re.DOTALL).strip()
+            ai_message.content = clean_content if clean_content else ""
 
         ai_message.additional_kwargs = {"type": AIMessageType.REASONING.value}
         return ai_message
@@ -474,6 +524,7 @@ class ChatWorkflow:
 
                 cycle_msg = await self._get_current_round_conversation_cycling(state["messages"])
                 context.extend(cycle_msg)
+                print(cycle_msg)
 
                 for msg in cycle_msg:
                     if isinstance(msg, ToolMessage):
@@ -525,8 +576,12 @@ class ChatWorkflow:
 
             response_better = AIMessage(**response_dict)
 
+            # 提取AI回复内容用于memory
+            memory_ai_response = await self._get_message_content_string(response_better)
+
             return {
                 "messages": [response_better],
+                "memory_ai_response": memory_ai_response,
             }
 
         workflow.add_node("input_parse_node", input_parse_node)

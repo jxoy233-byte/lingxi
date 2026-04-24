@@ -14,7 +14,7 @@ from langgraph.prebuilt import ToolNode
 
 from .config.graph_config import get_agent_node_config, get_graph_final_node_config, \
     get_imp_ipt_config, get_history_summary_node_config, get_llm_memory_config
-from .config.models import ChatStateCore, ChatStateCore2, AIMessageType, MemoryUpdateFormat
+from .config.models import ChatStateCore, ChatStateCore2, AIMessageType
 from .Memory.core import MemoryManager
 from ..LoggingManager.logging_config import get_logger
 
@@ -423,6 +423,9 @@ class ChatWorkflow:
         workflow = StateGraph(ChatStateCore2)
 
         async def input_parse_node(state: ChatStateCore2):
+            """
+            输入预处理节点
+            """
             input_msg = []
             messages = list(state["messages"])
             current_input = await self._get_current_round_conversation(messages)
@@ -449,10 +452,10 @@ class ChatWorkflow:
             return {
                 "imp_ipt": imp_ipt,
                 "memory_user_message": imp_ipt_content,
-                "tool_call_times": 0,
                 "memory_tool_results": [],
                 "memory_tool_calls": [],
                 "memory_ai_response": None,
+                "tool_call_times": 0,
             }
 
         async def context_assembly_node(state: ChatStateCore2, config: RunnableConfig):
@@ -510,9 +513,7 @@ class ChatWorkflow:
                 "memory_tool_calls": tool_calls,
             }
 
-
         tool_execution_node = ToolNode(tools=tools)  # 使用langgraph官方工具节点
-
 
         async def final_node(state: ChatStateCore2, config: RunnableConfig):
             input_msg = state["context"]

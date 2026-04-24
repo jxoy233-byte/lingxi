@@ -11,6 +11,7 @@
         :key="index"
         :message="msg"
         @restore="$emit('restore', $event)"
+        @restream="$emit('restream', $event)"
         @open-link="$emit('open-link', $event)"
         @preview-file="$emit('preview-file', $event)"
       />
@@ -43,7 +44,7 @@ export default {
       default: false
     }
   },
-  emits: ['restore', 'open-link', 'preview-file'],
+  emits: ['restore', 'restream', 'open-link', 'preview-file'],
   data() {
     return {
       userInterrupted: false,   // 用户主动介入，打断自动滚动

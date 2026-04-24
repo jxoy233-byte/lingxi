@@ -119,12 +119,3 @@ exa_result = exa_search("某话题深度分析", num_results=5)
 ```
 
 ---
-
-# 🕐 Skill: DateTime
-
-获取当前时间和日期的工具
-
-**文件名称**: `DateTime.py`  
-**类型**: 系统工具 / 时间服务  
-**能力**: 获取实时时间、日期、星期等信息
-**描述**: 提供 get_current_datetime()、get_formatted_date()、get_formatted_time() 三个函数

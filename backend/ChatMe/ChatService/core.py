@@ -3,6 +3,7 @@ import json
 import os
 import traceback
 import uuid
+from dataclasses import asdict
 from datetime import datetime
 from typing import AsyncGenerator, Set, List, Any, Optional
 
@@ -121,8 +122,9 @@ class ChatService:
         Args:
             output: 需要删除的处理后的输出格式
         """
-        file_path = output.file_info["file_path"]
-        os.remove(file_path)
+        file_path = output.file_path
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
 
     @staticmethod
     def _get_mime_type(suffix: str) -> str:
@@ -168,18 +170,18 @@ class ChatService:
                 return None
 
             # 分离不同类型的文件
-            images = [f for f in processed_files if f.file_info["file_type"] == "IMAGE"]
-            texts = [f for f in processed_files if f.file_info["file_type"] == "TEXT"]
-            documents = [f for f in processed_files if f.file_info["file_type"] == "DOCUMENT"]
+            images = [f for f in processed_files if f.type == "IMAGE"]
+            texts = [f for f in processed_files if f.type == "TEXT"]
+            documents = [f for f in processed_files if f.type == "DOCUMENT"]
 
             # 处理图片
             if images:
                 for img in images:
                     if img.image_content:
-                        mime_type = self._get_mime_type(img.file_info["suffix"])
+                        mime_type = img.content_type or self._get_mime_type(img.suffix)
                         content.append({
                             "type": "text",
-                            "text": f"-- {img.file_info['file_name']} --\n",
+                            "text": f"-- {img.name} --\n",
                         })
                         content.append({
                             "type": "image_url",
@@ -193,19 +195,19 @@ class ChatService:
                     if text.text_content:
                         content.append({
                             "type": "text",
-                            "text": f"-- {text.file_info['file_name']} --\n{text.text_content}\n",
+                            "text": f"-- {text.name} --\n{text.text_content}\n",
                         })
 
             # 处理文档文件
             if documents:
                 for doc in documents:
                     if doc.text_content:
-                        doc_label = self._get_mime_type(doc.file_info["suffix"])
+                        doc_label = self._get_mime_type(doc.suffix)
                         content.append({
                             "type": "text",
-                            "text": f"-- {doc_label}:{doc.file_info['file_name']} --\n{doc.text_content}\n",
+                            "text": f"-- {doc_label}:{doc.name} --\n{doc.text_content}\n",
                         })
-                        for img in doc.image_content:
+                        for img in (doc.image_content or []):
                             name = img.get("name")
                             base64 = img.get("base64")
                             content.append(
@@ -215,12 +217,9 @@ class ChatService:
                                 {"type": "image_url", "image_url": {"url": f"data:{self._get_mime_type(name)};base64,{base64}"}}
                             )
 
-            files_info_list = []
-            for i in processed_files:
-                files_info_list.append(i.file_info)
-
+            # 直接存储整个 OutputFormat 列表到 additional_kwargs
             additional_kwargs = {
-                "file_info_list": files_info_list,
+                "files": [asdict(f) for f in processed_files],  # dataclass 转 dict
                 "is_file": True,
             }
 
@@ -431,7 +430,6 @@ class ChatService:
             "checkpoint_id": checkpoint_id,
         }) + "\n\n"
 
-
     async def get_conversation(self, session_id: str) ->Conversation:
         """
         获取会话内容
@@ -447,20 +445,23 @@ class ChatService:
 
         try:
             state = await self.graph.aget_state(config=config)
-            print(state)
+            self.logger.info(f"get_conversation state values keys: {state.values.keys() if state.values else 'None'}")
+            self.logger.info(f"get_conversation messages count: {len(state.values.get('messages', [])) if state.values else 0}")
+            # print(state.values)
         except HTTPException as e:
             self.logger.error(f"获取会话状态异常(session_id:{session_id})：{str(e)}")
             return Conversation(session_id=session_id)
 
         messages_list = []
         if "messages" in state.values and state.values["messages"]:
+            self.logger.info(f"Processing {len(state.values['messages'])} messages")
             for msg in state.values["messages"]:
                 if isinstance(msg, HumanMessage):
                     role = MessageRole.USER
                     files = []
                     is_file = msg.additional_kwargs.get("is_file", False)
                     if is_file:
-                        files = msg.additional_kwargs.get("file_info_list", [])
+                        files = msg.additional_kwargs.get("files", [])
                         messages_list.append(Message(
                             role=role,
                             content="",
@@ -484,7 +485,18 @@ class ChatService:
                 elif isinstance(msg, AIMessage):
                     role = MessageRole.AI
                     if msg.additional_kwargs.get("type") == AIMessageType.SUMMARY.value:
-                        msg.additional_kwargs["checkpoint_id"] = checkpoints[checkpoint_index]["checkpoint_id"]
+                        # 添加边界检查，避免数组越界
+                        if checkpoint_index < len(checkpoints):
+                            msg.additional_kwargs["checkpoint_id"] = checkpoints[checkpoint_index]["checkpoint_id"]
+                            # 第一个 SUMMARY 消息的 last_checkpoint_id 为空
+                            if checkpoint_index > 0:
+                                msg.additional_kwargs["last_checkpoint_id"] = checkpoints[checkpoint_index - 1].get("checkpoint_id", "")
+                            else:
+                                msg.additional_kwargs["last_checkpoint_id"] = ""
+                        else:
+                            self.logger.warning(f"checkpoint_index({checkpoint_index}) >= len(checkpoints)({len(checkpoints)})")
+                            msg.additional_kwargs["checkpoint_id"] = None
+                            msg.additional_kwargs["last_checkpoint_id"] = ""
                         messages_list.append(Message(
                             role=role,
                             content=msg.content,
@@ -516,14 +528,20 @@ class ChatService:
                     ))
 
         created_at = state.created_at if hasattr(state, "created_at") else datetime.now()
-        updated_at = None
+        updated_at = datetime.now()
+        title = "新对话"
+
         if "messages" in state.values and state.values["messages"]:
+            # 获取 updated_at
             for msg in reversed(state.values["messages"]):
                 if isinstance(msg, HumanMessage):
-                    updated_at = msg.additional_kwargs.get("updated_at")
+                    updated_at = msg.additional_kwargs.get("updated_at") or datetime.now()
                     break
-
-        title = state.values["messages"][-1].additional_kwargs.get("title","新对话")  # 读取你之前更新的真实标题
+            # 获取 title
+            if len(state.values["messages"]) > 0:
+                last_msg = state.values["messages"][-1]
+                if hasattr(last_msg, 'additional_kwargs') and last_msg.additional_kwargs:
+                    title = last_msg.additional_kwargs.get("title", "新对话")
 
         conversations = Conversation(
             session_id=session_id,
@@ -532,6 +550,7 @@ class ChatService:
             created_at=created_at,
             updated_at=updated_at,
         )
+        print(conversations)
 
         return conversations
 
@@ -560,7 +579,6 @@ class ChatService:
                 )
                 for conv in conversation_list
             ]
-
             return conversations
         except HTTPException as e:
             self.logger.error(f"获取会话列表异常：{str(e)}")
@@ -645,7 +663,7 @@ class ChatService:
             return False
 
         try:
-            redis_client = self.state_saver._redis
+            redis_client = self.checkpointer._redis
             deleted_count = 0
 
             # 1. 删除主 checkpoint 数据 (JSON类型)
@@ -735,18 +753,25 @@ class ChatService:
                     target_index = i
                     break
 
+            # 删除比目标更新的 checkpoints
             if target_index != 0:
                 checkpoints_to_del = checkpoints[:target_index]
-
                 for cp in checkpoints_to_del:
                     cp_id_to_del = cp["checkpoint_id"]
                     if cp_id_to_del:
                         await self.state_saver.delete_checkpoint(thread_id=session_id, checkpoint_id=cp_id_to_del)
+                        await self._delete_specific_checkpoint(session_id, cp_id_to_del)
 
+            # 获取回溯后的状态
             backtrack_state = await self.graph.aget_state(config=backtrack_config)
 
-            await self.graph.aupdate_state(config=backtrack_config, values=backtrack_state.values)
+            # 更新想要的回溯检查点状态到当前会话状态
+            cur_state = await self.graph.aupdate_state(config=backtrack_config, values=backtrack_state.values)
+            new_checkpoint = cur_state["configurable"]["checkpoint_id"]
 
+            # 确保新 checkpoint 已写入后再删除旧的
+            await self.state_saver.delete_checkpoint(thread_id=session_id, checkpoint_id=checkpoint_id)
+            await self.state_saver.write_checkpoint(session_id, new_checkpoint)
             await self._delete_specific_checkpoint(session_id, checkpoint_id)
 
             await self.chat_workflow.memory_manager.backtrack_memory(thread_id=session_id, checkpoint_id=checkpoint_id)
@@ -758,7 +783,6 @@ class ChatService:
         except Exception as e:
             self.logger.error(f"会话回溯失败(session_id:{session_id}, checkpoint_id:{checkpoint_id}): {str(e)}")
             return False
-
 
     async def get_imp_usr_ipt(self, input_text:str):
         """

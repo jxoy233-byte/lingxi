@@ -168,7 +168,7 @@ async def improve_input(
     return {"improved_text": improved_text}
 
 
-@chatMe_app.get("/file-ChatMeConfig", summary="获取文件上传配置")
+@chatMe_app.get("/file-config", summary="获取文件上传配置")
 async def get_file_config():
     """
     获取文件上传配置信息，包括：
@@ -194,6 +194,7 @@ async def backtrack_checkpoint(
         return {"code": 500, "msg": "回溯失败", "session_id": session_id, "backtrack_id": backtrack_id}
 
     return {"code": 200, "msg": "回溯成功", "session_id": session_id, "backtrack_id": backtrack_id}
+
 
 @chatMe_app.post("/upload_file", summary="上传文件")
 async def upload_file(
@@ -254,7 +255,7 @@ async def cancel_upload_file(
 
     index = -1
     for i,op in enumerate(processed_outputs):
-        if file_id == op.file_info["file_id"]:
+        if file_id == op.file_id:
             index = i
             break
 

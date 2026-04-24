@@ -127,6 +127,14 @@
             <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
           </svg>
         </button>
+        <button v-if="message.checkpointId" class="action-button" @click="handleRestream" title="重新生成">
+          <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 2v6h-6"/>
+            <path d="M3 12a9 9 0 0 1 15-6.7L21 8"/>
+            <path d="M3 22v-6h6"/>
+            <path d="M21 12a9 9 0 0 1-15 6.7L3 16"/>
+          </svg>
+        </button>
         <button class="action-button" @click="copyMessage" :title="copied ? '已复制' : '复制'">
           <svg v-if="!copied" xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
@@ -215,7 +223,7 @@ export default {
       required: true
     }
   },
-  emits: ['restore', 'open-link', 'preview-file'],
+  emits: ['restore', 'restream', 'open-link', 'preview-file'],
   data() {
     return {
       copied: false,
@@ -397,6 +405,12 @@ export default {
     handleRestore() {
       if (this.message.checkpointId) {
         this.$emit('restore', this.message.checkpointId)
+      }
+    },
+
+    handleRestream() {
+      if (this.message.checkpointId) {
+        this.$emit('restream', this.message.checkpointId)
       }
     },
 

@@ -12,6 +12,7 @@
         @delete-conversation="deleteConversation"
         @update-title="updateConversationTitle"
         @load-more="loadMoreConversations"
+        @refresh-conversation="refreshConversation"
       />
 
       <main class="chat-area">
@@ -27,6 +28,7 @@
           :messages="messages"
           :is-loading="isLoading"
           @restore="restoreCheckpoint"
+          @restream="handleRestream"
           @open-link="openWebPreview"
           @preview-file="previewFile"
         />
@@ -128,7 +130,8 @@ export default {
       responseTimerInterval: null,
       currentResponseTime: 0,
       currentAiMessageIndex: null,
-      displayCount: 10
+      displayCount: 10,
+      isRestreaming: false
     }
   },
   mounted() {
@@ -139,18 +142,23 @@ export default {
 
     this.loadConversations()
 
-    // 从 URL 加载会话
-    const sessionId = this.$route.params.sessionId
-    if (sessionId) {
-      this.loadConversation(sessionId)
-    }
+    // 直接显示新对话界面，不调用 get_conversation 获取会话详情
+    // 延迟初始化：确保 router 完全就绪后再处理 URL 参数
+    this.$nextTick(() => {
+      const initialSessionId = this.$route.params.sessionId
+      if (initialSessionId) {
+        this.loadConversation(initialSessionId)
+      } else {
+        this.createNewChat()
+      }
+    })
   },
   watch: {
     '$route.params.sessionId'(newSessionId) {
       // 监听 URL 变化
-      if (newSessionId) {
+      if (newSessionId && newSessionId !== this.currentSessionId && newSessionId.trim() !== '') {
         this.loadConversation(newSessionId)
-      } else {
+      } else if (!newSessionId || newSessionId.trim() === '') {
         this.createNewChat()
       }
     }
@@ -225,6 +233,218 @@ export default {
       this.restoreTargetId = checkpointId
       this.showRestoreConfirm = true
     },
+    async handleRestream(checkpointId) {
+      // 防止重复点击
+      if (this.isRestreaming) {
+        return
+      }
+      this.isRestreaming = true
+
+      // 找到对应 checkpoint 的 AI 消息
+      const aiIndex = this.messages.findIndex(
+        msg => msg.role === 'ai' && msg.checkpointId === checkpointId
+      )
+      if (aiIndex === -1) {
+        console.error('未找到对应的 AI 消息')
+        return
+      }
+
+      const aiMessage = this.messages[aiIndex]
+
+      // 获取当前标题（用于回溯后恢复）
+      const currentTitle = aiMessage.additional_kwargs?.title ||
+                          this.conversations.find(c => c.session_id === this.currentSessionId)?.title ||
+                          '新对话'
+
+      // 从 AI 消息的 additional_kwargs.last_checkpoint_id 获取该轮对话开始前的 checkpoint
+      const restreamCheckpointId = aiMessage.additional_kwargs?.last_checkpoint_id
+      if (!restreamCheckpointId) {
+        console.error('第一轮对话无法重新对话')
+        this.isRestreaming = false
+        return
+      }
+
+      // 检查是否是最新一轮对话（只有最新一轮才能重新对话）
+      let latestAiIndex = this.messages.length - 1
+      while (latestAiIndex >= 0 && this.messages[latestAiIndex].role !== 'ai') {
+        latestAiIndex--
+      }
+      if (aiIndex !== latestAiIndex) {
+        console.error('只能对最新一轮对话进行重新对话')
+        this.isRestreaming = false
+        return
+      }
+
+      // 向前遍历找到最近的用户消息（跳过 reasoning、tool_calls 等中间消息）
+      let userMessageIndex = aiIndex - 1
+      while (userMessageIndex >= 0 && this.messages[userMessageIndex].role !== 'user') {
+        userMessageIndex--
+      }
+      if (userMessageIndex < 0) {
+        console.error('未找到对应的用户消息')
+        return
+      }
+      const userMessage = this.messages[userMessageIndex]
+
+      const message = (userMessage.content || '').trim()
+      const processedOutputs = userMessage.files || []
+
+      const requestSessionId = this.currentSessionId
+
+      try {
+        // 1. 调用 backtrack API 回溯状态（等待完成）
+        const backtrackResponse = await fetch(`/chat/${requestSessionId}/backtrack`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            backtrack_id: restreamCheckpointId
+          })
+        })
+
+        if (!backtrackResponse.ok) {
+          throw new Error('回溯失败')
+        }
+
+        // 2. 调用 get_conversation 获取回溯后的新状态
+        const convResponse = await fetch(`/chat/${requestSessionId}/conversation`)
+        if (!convResponse.ok) {
+          throw new Error('获取回溯后状态失败')
+        }
+        const conversation = await convResponse.json()
+        this.$refs.messageList?.suppressNextScroll()
+        this.messages = this.processConversationMessages(conversation.messages)
+
+        // 3. 立即显示用户消息（用户体验优化）
+        this.messages.push({
+          role: 'user',
+          content: message,
+          files: processedOutputs,
+          additional_kwargs: {}
+        })
+        this.$refs.messageList?.scrollToBottom(true)
+
+        // 4. 调用 message_stream 重新发送消息
+        this.isLoading = true
+        this.currentResponseTime = 0
+
+        const aiMessageIndex = this.messages.length
+
+        this.messages.push({
+          role: 'ai',
+          content: '',
+          reasoning: '',
+          toolCalls: [],
+          thinkingDone: false,
+          streaming: true,
+          responseTime: 0
+        })
+
+        this.startResponseTimer()
+        this.$refs.messageList?.scrollToBottom(true)
+
+        const streamResponse = await fetch('/chat/', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            message: message,
+            session_id: requestSessionId,
+            processed_outputs: processedOutputs
+          })
+        })
+
+        if (!streamResponse.ok) {
+          throw new Error(`请求失败: ${streamResponse.status}`)
+        }
+
+        const reader = streamResponse.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+
+          buffer += decoder.decode(value, { stream: true })
+          const parts = buffer.split('\n\n')
+          buffer = parts.pop() || ''
+
+          for (const part of parts) {
+            const line = part.trim()
+            if (!line) continue
+
+            try {
+              const data = JSON.parse(line)
+
+              if (data.type === 'content') {
+                this.messages[aiMessageIndex] = {
+                  ...this.messages[aiMessageIndex],
+                  content: this.messages[aiMessageIndex].content + data.content,
+                  thinkingDone: true,
+                  responseTime: this.currentResponseTime
+                }
+              } else if (data.type === 'reasoning') {
+                this.messages[aiMessageIndex] = {
+                  ...this.messages[aiMessageIndex],
+                  reasoning: this.messages[aiMessageIndex].reasoning + data.content,
+                  responseTime: this.currentResponseTime
+                }
+              } else if (data.type === 'tool_call_name') {
+                const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
+                toolCalls.push({ name: data.content.name, args: data.content.args, result: null })
+                this.messages[aiMessageIndex] = {
+                  ...this.messages[aiMessageIndex],
+                  toolCalls,
+                  responseTime: this.currentResponseTime
+                }
+              } else if (data.type === 'tool_call_result') {
+                const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
+                if (toolCalls.length > 0) {
+                  toolCalls[toolCalls.length - 1] = { ...toolCalls[toolCalls.length - 1], result: data.content }
+                }
+                this.messages[aiMessageIndex] = {
+                  ...this.messages[aiMessageIndex],
+                  toolCalls,
+                  responseTime: this.currentResponseTime
+                }
+              } else if (data.type === 'done') {
+                this.stopResponseTimer()
+                this.messages[aiMessageIndex] = {
+                  role: 'ai',
+                  content: data.full_response,
+                  reasoning: this.messages[aiMessageIndex].reasoning,
+                  toolCalls: this.messages[aiMessageIndex].toolCalls,
+                  thinkingDone: true,
+                  streaming: false,
+                  responseTime: this.currentResponseTime,
+                  checkpointId: data.checkpoint_id || null
+                }
+
+                // 恢复标题
+                if (currentTitle && currentTitle !== '新对话' && requestSessionId) {
+                  await this.updateConversationTitle({ sessionId: requestSessionId, title: currentTitle })
+                }
+
+                // 4. 最后刷新会话
+                await this.refreshCurrentConversation()
+              }
+            } catch (e) {
+              console.error('解析消息失败:', e)
+            }
+          }
+
+          this.$refs.messageList?.scrollToBottom(true)
+        }
+      } catch (error) {
+        console.error('重新对话失败:', error)
+      } finally {
+        this.isLoading = false
+        this.isRestreaming = false
+      }
+    },
     async confirmRestore() {
       if (!this.restoreTargetId || !this.currentSessionId) return
 
@@ -241,7 +461,12 @@ export default {
 
         if (response.ok) {
           // 重新加载对话界面
-          await this.loadConversation(this.currentSessionId)
+          const convResponse = await fetch(`/chat/${this.currentSessionId}/conversation`)
+          if (convResponse.ok) {
+            const conversation = await convResponse.json()
+            this.$refs.messageList?.suppressNextScroll()
+            this.messages = this.processConversationMessages(conversation.messages)
+          }
           this.showCheckpoints = false
         } else {
           console.error('恢复检查点失败')
@@ -282,6 +507,16 @@ export default {
       }
     },
     async loadConversation(sessionId) {
+      // 防止加载无效的 sessionId
+      if (!sessionId || sessionId.trim() === '') {
+        return
+      }
+
+      // 防止重复加载同一个会话
+      if (sessionId === this.currentSessionId && this.messages.length > 0) {
+        return
+      }
+
       try {
         const response = await fetch(`/chat/${sessionId}/conversation`)
         if (response.ok) {
@@ -311,6 +546,28 @@ export default {
         }
       } catch (error) {
         console.error('刷新消息失败:', error)
+      }
+    },
+    // 右键刷新指定会话
+    async refreshConversation(sessionId) {
+      try {
+        const response = await fetch(`/chat/${sessionId}/conversation`)
+        if (response.ok) {
+          const conversation = await response.json()
+          if (sessionId === this.currentSessionId) {
+            // 如果是当前会话，静默刷新
+            this.$refs.messageList?.suppressNextScroll()
+            this.messages = this.processConversationMessages(conversation.messages)
+          }
+          // 更新侧边栏的标题和时间
+          const conv = this.conversations.find(c => c.session_id === sessionId)
+          if (conv) {
+            conv.title = conversation.title
+            conv.updated_at = conversation.updated_at
+          }
+        }
+      } catch (error) {
+        console.error('刷新会话失败:', error)
       }
     },
     async deleteConversation(sessionId) {
@@ -373,20 +630,19 @@ export default {
 
       if (files && files.length > 0) {
         userMessage.files = files.map(file => {
-          // 优先使用后端返回的 preview_url（包含 base64 编码的 data URL）
-          const previewUrl = file.preview || file.iframe_url || file.preview_url
-
+          // 直接使用后端返回的 OutputFormat 扁平结构
           const fileInfo = {
-            name: file.name,
-            size: file.size,
-            type: file.type,
-            preview: previewUrl,  // 直接使用后端返回的 preview_url
-            iframe_url: file.iframe_url || previewUrl,
-            fileId: file.fileId,
-            file_type: file.file_type || null,
-            preview_method: file.preview_method || null,
+            name: file.name || file.file_name || file.filename,
+            size: file.size || file.file_size || 0,
+            type: file.type || file.file_type || file.content_type,
+            preview: file.preview || file.preview_url || null,
+            iframe_url: file.iframe_url || null,
+            content: file.content || null,
+            fileId: file.file_id || file.fileId || null,
+            file_type: file.type || file.file_type || null,
+            preview_method: file.preview_method || 'download',
             preview_hint: file.preview_hint || null,
-            size_human: file.size_human || null,
+            size_human: file.size_human || file.file_size_human || null,
             suffix: file.suffix || null,
             is_previewable: file.is_previewable !== undefined ? file.is_previewable : true
           }
@@ -399,13 +655,6 @@ export default {
               } catch (e) {
                 console.warn('创建图片预览失败:', e)
               }
-            }
-          }
-
-          // 文本文件：保存 content 用于预览
-          if (file.type && (file.type.startsWith('text/') || file.type === 'application/json')) {
-            if (file.content) {
-              fileInfo.content = file.content
             }
           }
 
@@ -769,57 +1018,30 @@ export default {
           const processedMsg = { ...msg }
           if (msg.files && msg.files.length > 0) {
             processedMsg.files = msg.files.map(file => {
+              // 直接使用后端返回的 OutputFormat 扁平结构
               const fileInfo = {
-                name: file.file_name || file.filename,
-                type: file.file_type || file.content_type,
-                preview: file.preview_url || null,
-                content: null,
-                fileId: file.file_id || null,
+                name: file.name || file.file_name || file.filename,
+                size: file.size || file.file_size || 0,
+                type: file.type || file.file_type || file.content_type,
+                preview: file.preview || file.preview_url || null,
                 iframe_url: file.iframe_url || null,
+                content: file.content || null,
+                fileId: file.file_id || file.fileId || null,
+                file_type: file.type || file.file_type || null,
                 preview_method: file.preview_method || 'download',
-                is_previewable: file.is_previewable !== undefined ? file.is_previewable : true,
                 preview_hint: file.preview_hint || '不支持在线预览，请下载后查看',
-                size: file.file_size || 0,
-                size_human: file.file_size_human || ''
+                size_human: file.size_human || file.file_size_human || null,
+                suffix: file.suffix || null,
+                is_previewable: file.is_previewable !== undefined ? file.is_previewable : true
               }
 
-              // 处理预览逻辑
-              if (fileInfo.preview_method === 'iframe' && fileInfo.preview) {
-                if (file.file_type === 'IMAGE' || (file.content_type && file.content_type.startsWith('image/'))) {
-                  // 图片：确保 preview 是有效的 data URL
-                  if (file.preview_url && file.preview_url.startsWith('data:')) {
-                    fileInfo.preview = file.preview_url
-                  } else if (file.base64_data) {
-                    fileInfo.preview = `data:${file.content_type || 'image/png'};base64,${file.base64_data}`
-                  }
-                } else if (file.file_type === 'TEXT' || (file.content_type && (
-                  file.content_type.startsWith('text/') ||
-                  file.content_type === 'application/json' ||
-                  file.content_type === 'text/csv' ||
-                  file.content_type === 'text/xml'
-                ))) {
-                  // 文本：content 字段用于直接显示文本内容
-                  // 如果 preview_url 是 data URL，提取实际文本内容
-                  if (file.preview_url && file.preview_url.startsWith('data:')) {
-                    try {
-                      const base64Match = file.preview_url.match(/^data:[^;]+;base64,(.+)$/)
-                      if (base64Match) {
-                        fileInfo.content = atob(base64Match[1])
-                      } else {
-                        fileInfo.content = file.preview_url
-                      }
-                    } catch (e) {
-                      fileInfo.content = file.preview_url
-                    }
-                  } else {
-                    fileInfo.content = file.preview_url
-                  }
-                }
+              // 处理文本文件 content
+              if (!fileInfo.content && file.text_content) {
+                fileInfo.content = file.text_content
               }
 
               // 文档文件（DOCUMENT）的 iframe_office 方法处理
               if (fileInfo.preview_method === 'iframe_office') {
-                // iframe_office 使用 iframe_url 作为预览源
                 if (file.iframe_url) {
                   fileInfo.iframe_url = file.iframe_url
                 }
@@ -839,7 +1061,8 @@ export default {
             toolCalls: [],
             thinkingDone: true,
             streaming: false,
-            checkpointId: null  // 添加 checkpoint_id 字段
+            checkpointId: null,  // 添加 checkpoint_id 字段
+            additional_kwargs: {}  // 保存原始 additional_kwargs
           }
 
           // 配对队列：AIMessage 推入工具名/参数，ToolMessage 填入结果
@@ -859,9 +1082,13 @@ export default {
                   .map(c => c.text || '')
                   .join('\n')
               }
-              // 提取 checkpoint_id
+              // 提取 checkpoint_id 和 additional_kwargs
               if (aiMsg.additional_kwargs?.checkpoint_id) {
                 aiTurn.checkpointId = aiMsg.additional_kwargs.checkpoint_id
+              }
+              // 保存完整的 additional_kwargs（包含 last_checkpoint_id）
+              if (aiMsg.additional_kwargs) {
+                aiTurn.additional_kwargs = aiMsg.additional_kwargs
               }
             } else if (msgType === 'REASONING') {
               if (isTool) {

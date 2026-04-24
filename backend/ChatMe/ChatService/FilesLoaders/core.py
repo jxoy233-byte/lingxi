@@ -64,9 +64,33 @@ class UploadFileWithId(UploadFile):
 
 @dataclass
 class OutputFormat:
-    text_content: Annotated[Optional[str], "文件处理过后的返回的相应的文本内容"] = None
-    image_content: Annotated[Optional[Union[str,List[dict]]], "文件处理过后的返回的相应的图片内容"] = None
-    file_info: Annotated[Optional[dict], "文件处理过后的返回的相应的文件信息"] = None
+    # === 内容字段（用于 AI 处理 / message_stream）===
+    text_content: Annotated[Optional[str], "文本文件内容"] = None
+    image_content: Annotated[Optional[Union[str, List[dict]]], "图片 base64 或文档图片列表"] = None
+
+    # === 文件标识 ===
+    file_id: Annotated[Optional[str], "文件唯一ID"] = None
+    file_path: Annotated[Optional[str], "缓存文件路径"] = None
+
+    # === 前端显示字段 ===
+    name: Annotated[Optional[str], "文件名"] = None
+    type: Annotated[Optional[str], "文件类型 IMAGE/TEXT/DOCUMENT"] = None
+    content_type: Annotated[Optional[str], "MIME type"] = None
+    size: Annotated[int, "文件大小字节"] = 0
+    size_human: Annotated[Optional[str], "人类可读文件大小"] = None
+
+    # === 预览字段 ===
+    preview: Annotated[Optional[str], "预览 URL (data: 或 http:)"] = None
+    iframe_url: Annotated[Optional[str], "iframe 预览 URL"] = None
+    content: Annotated[Optional[str], "文本文件内容（前端直接显示）"] = None
+
+    # === 预览控制 ===
+    is_previewable: Annotated[bool, "是否可预览"] = True
+    preview_method: Annotated[Optional[str], "预览方式 iframe/iframe_office/download"] = None
+    preview_hint: Annotated[Optional[str], "预览提示"] = None
+
+    # === 下载支持 ===
+    suffix: Annotated[Optional[str], "文件后缀"] = None
 
 class FilesLoaders:
 
@@ -177,13 +201,27 @@ class FilesLoaders:
                 suffix = await self._get_file_suffix(file.filename)
                 file_path = await self._create_temp_file_path(file, suffix)
 
-                output.file_info = await self.create_file_additional_kwargs(file, suffix, file_path)
-                output.file_type = await self._switch_suffix_to_file_type(suffix)
+                # 获取文件基础信息
+                file_kwargs = await self.create_file_additional_kwargs(file, suffix, file_path)
 
                 with open(file_path, "rb") as f:
                     image_data = f.read()
                     base64_data = base64.b64encode(image_data).decode('utf-8')
 
+                # 直接设置 OutputFormat 字段
+                output.file_id = file_kwargs.file_id
+                output.file_path = file_kwargs.file_path
+                output.name = file_kwargs.name
+                output.type = file_kwargs.type
+                output.content_type = file_kwargs.content_type
+                output.size = file_kwargs.size
+                output.size_human = file_kwargs.size_human
+                output.preview = file_kwargs.preview
+                output.iframe_url = file_kwargs.iframe_url
+                output.is_previewable = file_kwargs.is_previewable
+                output.preview_method = file_kwargs.preview_method
+                output.preview_hint = file_kwargs.preview_hint
+                output.suffix = file_kwargs.suffix
                 output.image_content = base64_data
                 outputs.append(output)
                 self.logger.debug(f"图片处理成功: {file.filename}")
@@ -214,8 +252,8 @@ class FilesLoaders:
                 suffix = await self._get_file_suffix(file.filename)
                 file_path = await self._create_temp_file_path(file, suffix)
 
-                output.file_info = await self.create_file_additional_kwargs(file, suffix, file_path)
-                output.file_type = await self._switch_suffix_to_file_type(suffix)
+                # 获取文件基础信息
+                file_kwargs = await self.create_file_additional_kwargs(file, suffix, file_path)
 
                 loader: Optional[BaseLoader] = None
                 if suffix == ".md":
@@ -235,7 +273,23 @@ class FilesLoaders:
 
                 documents = await loader.aload()
                 file_text = documents[0].page_content if documents else ""
+
+                # 直接设置 OutputFormat 字段
+                output.file_id = file_kwargs.file_id
+                output.file_path = file_kwargs.file_path
+                output.name = file_kwargs.name
+                output.type = file_kwargs.type
+                output.content_type = file_kwargs.content_type
+                output.size = file_kwargs.size
+                output.size_human = file_kwargs.size_human
+                output.preview = file_kwargs.preview
+                output.iframe_url = file_kwargs.iframe_url
+                output.is_previewable = file_kwargs.is_previewable
+                output.preview_method = file_kwargs.preview_method
+                output.preview_hint = file_kwargs.preview_hint
+                output.suffix = file_kwargs.suffix
                 output.text_content = file_text
+                output.content = file_text  # 前端直接显示用
                 outputs.append(output)
                 self.logger.debug(f"文本文件处理成功: {file.filename}({len(file_text)}字符)")
 
@@ -283,8 +337,8 @@ class FilesLoaders:
                 suffix = await self._get_file_suffix(file.filename)
                 file_path = await self._create_temp_file_path(file, suffix)
 
-                output.file_info = await self.create_file_additional_kwargs(file, suffix, file_path)
-                output.file_type = await self._switch_suffix_to_file_type(suffix)
+                # 获取文件基础信息
+                file_kwargs = await self.create_file_additional_kwargs(file, suffix, file_path)
 
                 result = converter.convert(file_path)
                 doc = result.document
@@ -321,16 +375,32 @@ class FilesLoaders:
                     temp_path.replace(output_path)
 
                 file_content = output_path.read_text(encoding=detected_encoding)
-                output.text_content = file_content
 
                 path = output_dir / "document_artifacts"
+                images = []
                 if path.exists():
-                    images = []
                     for img in path.iterdir():
                         img_blob = img.read_bytes()
                         img_base64 = base64.b64encode(img_blob).decode('utf-8')
                         images.append({"name": img.name, "base64": img_base64})
-                    output.image_content = images
+
+                # 直接设置 OutputFormat 字段
+                output.file_id = file_kwargs.file_id
+                output.file_path = file_kwargs.file_path
+                output.name = file_kwargs.name
+                output.type = file_kwargs.type
+                output.content_type = file_kwargs.content_type
+                output.size = file_kwargs.size
+                output.size_human = file_kwargs.size_human
+                output.preview = file_kwargs.preview
+                output.iframe_url = file_kwargs.iframe_url
+                output.is_previewable = file_kwargs.is_previewable
+                output.preview_method = file_kwargs.preview_method
+                output.preview_hint = file_kwargs.preview_hint
+                output.suffix = file_kwargs.suffix
+                output.text_content = file_content
+                output.content = file_content  # 前端直接显示用
+                output.image_content = images
 
                 outputs.append(output)
                 self.logger.debug(f"文档处理成功: {file.filename}({len(file_content)}字符)")
@@ -360,15 +430,15 @@ class FilesLoaders:
 
         return outputs if outputs else []
 
-    async def create_file_additional_kwargs(self, file: UploadFileWithId, suffix: str, file_path: str)-> dict:
+    async def create_file_additional_kwargs(self, file: UploadFileWithId, suffix: str, file_path: str) -> OutputFormat:
         """
-        创建用于前端预览的文件信息列表
+        创建用于前端预览的文件信息
 
         Returns:
-            dict: 包含文件预览信息的字典列表，支持 iframe 直接预览
+            OutputFormat: 包含文件预览信息的对象，支持 iframe 直接预览
         """
         if not file:
-            return {}
+            return OutputFormat()
 
         await file.seek(0)
         file_content = await file.read()
@@ -379,22 +449,21 @@ class FilesLoaders:
 
         preview_info = self._get_preview_info(file_type_category, suffix)
 
-        file_info = {
-            "file_id": file.file_id,
-            "file_name": file.filename,
-            "file_path": file_path,
-            "file_type": file_type_category,
-            "file_size": file_size,
-            "file_size_human": self._format_file_size(file_size),
-            "preview_url": f"data:{file.content_type};base64,{base64_content}",
-            "iframe_url": self._get_iframe_url(file_type_category, suffix, file.content_type, base64_content),
-            "is_previewable": preview_info["is_previewable"],
-            "preview_method": preview_info["preview_method"],
-            "preview_hint": preview_info["preview_hint"],
-            "suffix": suffix
-        }
-
-        return file_info
+        return OutputFormat(
+            file_id=file.file_id,
+            file_path=file_path,
+            name=file.filename,
+            type=file_type_category,
+            content_type=file.content_type,
+            size=file_size,
+            size_human=self._format_file_size(file_size),
+            preview=f"data:{file.content_type};base64,{base64_content}",
+            iframe_url=self._get_iframe_url(file_type_category, suffix, file.content_type, base64_content),
+            is_previewable=preview_info["is_previewable"],
+            preview_method=preview_info["preview_method"],
+            preview_hint=preview_info["preview_hint"],
+            suffix=suffix,
+        )
 
     @staticmethod
     def _get_file_type_category(suffix: str) -> str:

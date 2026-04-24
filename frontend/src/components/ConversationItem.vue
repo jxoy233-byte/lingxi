@@ -2,6 +2,7 @@
   <div
     :class="['conversation-item', { 'active': isActive }]"
     @click="$emit('select')"
+    @contextmenu.prevent="$emit('refresh')"
   >
     <div
       class="conv-title"
@@ -39,7 +40,7 @@ export default {
       default: false
     }
   },
-  emits: ['select', 'delete', 'update-title'],
+  emits: ['select', 'delete', 'update-title', 'refresh'],
   data() {
     return {
       isEditing: false,

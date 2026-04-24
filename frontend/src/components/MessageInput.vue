@@ -494,16 +494,16 @@ export default {
           // 更新每个文件的信息
           fileObjs.forEach(fileObj => {
             const output = this.processedOutputs.find(
-              op => op.file_info && op.file_info.file_name === fileObj.name
+              op => op.name === fileObj.name
             )
 
-            if (output && output.file_info) {
-              fileObj.fileId = output.file_info.file_id
-              if (output.file_info.preview_url) {
-                fileObj.preview = output.file_info.preview_url
+            if (output) {
+              fileObj.fileId = output.file_id
+              if (output.preview) {
+                fileObj.preview = output.preview
               }
-              if (output.file_info.iframe_url) {
-                fileObj.iframe_url = output.file_info.iframe_url
+              if (output.iframe_url) {
+                fileObj.iframe_url = output.iframe_url
               }
             }
           })

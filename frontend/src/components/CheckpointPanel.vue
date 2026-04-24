@@ -25,7 +25,6 @@
             v-for="(checkpoint, index) in checkpoints"
             :key="checkpoint.checkpoint_id"
             class="checkpoint-item"
-            @click="handleRestore(checkpoint)"
           >
             <div class="checkpoint-icon">
               <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -37,7 +36,7 @@
               <div class="checkpoint-title">对话 {{ checkpoints.length - index }}</div>
               <div class="checkpoint-preview">{{ checkpoint.content_preview }}...</div>
             </div>
-            <button class="restore-btn" title="恢复到此版本">
+            <button class="restore-btn" title="恢复到此版本" @click.stop="handleRestore(checkpoint)">
               <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="1 4 1 10 7 10"/>
                 <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>

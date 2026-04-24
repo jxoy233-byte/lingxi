@@ -19,6 +19,7 @@
         @select="$emit('select-conversation', conv.session_id)"
         @delete="$emit('delete-conversation', conv.session_id)"
         @update-title="$emit('update-title', $event)"
+        @refresh="$emit('refresh-conversation', conv.session_id)"
       />
       <div v-if="conversations.length === 0" class="empty-state">
         暂无历史对话
@@ -58,7 +59,7 @@ export default {
       return this.conversations.slice(0, this.displayCount)
     }
   },
-  emits: ['toggle', 'new-chat', 'select-conversation', 'delete-conversation', 'update-title', 'load-more'],
+  emits: ['toggle', 'new-chat', 'select-conversation', 'delete-conversation', 'update-title', 'load-more', 'refresh-conversation'],
   methods: {
     handleScroll() {
       const listEl = this.$refs.conversationListRef

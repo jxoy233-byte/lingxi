@@ -127,7 +127,7 @@
             <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
           </svg>
         </button>
-        <button v-if="message.checkpointId" class="action-button" @click="handleRestream" title="重新生成">
+        <button v-if="message.checkpointId && !isFirstAiMessage" class="action-button" @click="handleRestream" title="重新生成">
           <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21 2v6h-6"/>
             <path d="M3 12a9 9 0 0 1 15-6.7L21 8"/>
@@ -221,6 +221,10 @@ export default {
     message: {
       type: Object,
       required: true
+    },
+    isFirstAiMessage: {
+      type: Boolean,
+      default: false
     }
   },
   emits: ['restore', 'restream', 'open-link', 'preview-file'],

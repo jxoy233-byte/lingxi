@@ -399,5 +399,5 @@ class MemoryManager:
 暂无
 
 ## 缓存文件目录
-- .chatme/cached/
+- cached/
 """

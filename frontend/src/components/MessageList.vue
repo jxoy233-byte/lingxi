@@ -10,6 +10,7 @@
         v-for="(msg, index) in messages"
         :key="index"
         :message="msg"
+        :is-first-ai-message="isFirstAiMessage(index)"
         @restore="$emit('restore', $event)"
         @restream="$emit('restream', $event)"
         @open-link="$emit('open-link', $event)"
@@ -53,6 +54,17 @@ export default {
     }
   },
   methods: {
+    // 判断指定索引的AI消息是否是该会话的第一轮AI消息
+    isFirstAiMessage(index) {
+      // 向前遍历找到第一个AI消息
+      for (let i = 0; i < index; i++) {
+        if (this.messages[i].role === 'ai') {
+          return false
+        }
+      }
+      return true
+    },
+
     // 平滑滚动到底部，duration 根据距离动态计算
     scrollToBottom(force = false) {
       const container = this.$refs.messagesContainer

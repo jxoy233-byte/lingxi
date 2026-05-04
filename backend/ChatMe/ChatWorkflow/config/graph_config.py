@@ -787,7 +787,7 @@ def get_model_vl_config():
     api_key = vl_config.get("api_key") or os.getenv("VL_API_KEY", "empty")
     base_url = vl_config.get("base_url") or os.getenv("VL_BASE_URL", "http://127.0.0.1:8211/api/v1")
 
-    temperature = float(os.getenv("VL_TEMPERATURE", "0.8"))
+    temperature = float(os.getenv("VL_TEMPERATURE", "0.7"))
     max_tokens = int(os.getenv("VL_MAX_TOKENS", "8192"))
     top_p = float(os.getenv("VL_TOP_P", "1.0"))
     frequency_penalty = float(os.getenv("VL_FREQUENCY_PENALTY", "0.0"))

@@ -219,27 +219,27 @@ class ChatService:
                             "text": f"-- {doc_label}:{doc.name} --\n{doc.text_content}\n",
                             "index": id
                         })
-                        content.append({
-                            "type": "text",
-                            "text": f"-- {doc.name} 内的图片 --\n",
-                            "index": id
-                        })
-                        if doc.is_oss:
-                            for img_url in doc.image_content:
-                                content.append({
-                                    "type": "image_url",
-                                    "image_url": {"url": img_url},
-                                    "detail": "auto",
-                                    "index": id
-                                })
-                        else:
-                            for base64 in doc.image_content:
-                                content.append({
-                                    "type": "image_url",
-                                    "image_url": {"url": f"data:image/png;base64,{base64}"},
-                                    "detail": "auto",
-                                    "index": id
-                                })
+                        # content.append({
+                        #     "type": "text",
+                        #     "text": f"-- {doc.name} 内的图片 --\n",
+                        #     "index": id
+                        # })
+                        # if doc.is_oss:
+                        #     for img_url in doc.image_content:
+                        #         content.append({
+                        #             "type": "image_url",
+                        #             "image_url": {"url": img_url},
+                        #             "detail": "auto",
+                        #             "index": id
+                        #         })
+                        # else:
+                        #     for base64 in doc.image_content:
+                        #         content.append({
+                        #             "type": "image_url",
+                        #             "image_url": {"url": f"data:image/png;base64,{base64}"},
+                        #             "detail": "auto",
+                        #             "index": id
+                        #         })
                         id += 1
 
             # 直接存储整个 OutputFormat 列表到 additional_kwargs

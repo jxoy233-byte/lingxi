@@ -723,9 +723,25 @@ export default {
       // 记录当前选中的文件索引
       this.activeFileIndex = index
 
+      console.log('[DEBUG] handleFileCardClick called, file keys:', Object.keys(file))
+      console.log('[DEBUG] file full:', JSON.stringify({
+        name: file.name,
+        type: file.type,
+        file_type: file.file_type,
+        suffix: file.suffix,
+        hasTextContent: !!file.text_content,
+        hasContent: !!file.content,
+        textContentLength: file.text_content ? file.text_content.length : 0,
+        contentLength: file.content ? file.content.length : 0,
+        iframe_url: file.iframe_url,
+        preview_url: file.preview_url,
+        preview_method: file.preview_method
+      }).substring(0, 300))
+
       // 根据文件类型决定处理方式
       const isImage = this.isImageFileType(file)
       const isText = this.isTextFileType(file)
+      const isPdf = this.isPdfFileType(file)
 
       // 图片文件：直接弹出预览
       if (isImage) {
@@ -742,23 +758,51 @@ export default {
           })
         }
       }
-      // 文本文件：如果有内容则显示预览面板，不需要弹出
-      else if (isText && (file.text_content || file.content)) {
-        // 已经在上面的 v-if 中通过 hasTextPreview 控制显示
-      }
-      // PDF或其他文件：尝试用 iframe 或 preview_url 预览
-      else {
-        const previewUrl = file.iframe_url || file.preview_url
-        if (previewUrl) {
+      // 文本文件：如果有内容则使用 FilePreviewPanel 渲染 markdown
+      else if (isText) {
+        const textContent = file.text_content || file.content
+        console.log('[DEBUG] Text file detected, textContent:', textContent ? `${textContent.substring(0, 80)}...` : null)
+        if (typeof textContent === 'string' && textContent.trim().length > 0) {
+          console.log('[DEBUG] Emitting preview-file for text file:', file.name)
           this.$emit('preview-file', {
-            preview_url: previewUrl,
-            url: previewUrl,
             name: file.name,
             type: file.type,
             file_type: file.file_type,
             suffix: file.suffix,
-            preview_method: file.preview_method
+            text_content: textContent,
+            content: textContent
           })
+        } else {
+          console.log('[DEBUG] Text content is empty or invalid:', textContent)
+        }
+      }
+      // PDF 或其他文件：优先使用 text_content 渲染 markdown
+      else {
+        const textContent = file.text_content || file.content
+        if (typeof textContent === 'string' && textContent.trim().length > 0) {
+          console.log('[DEBUG] Emitting preview-file for doc with text_content:', file.name)
+          this.$emit('preview-file', {
+            name: file.name,
+            type: file.type,
+            file_type: file.file_type,
+            suffix: file.suffix,
+            text_content: textContent,
+            content: textContent
+          })
+        } else {
+          const previewUrl = file.iframe_url || file.preview_url
+          if (previewUrl) {
+            console.log('[DEBUG] Emitting preview-file for doc with iframe_url:', file.name)
+            this.$emit('preview-file', {
+              preview_url: previewUrl,
+              url: previewUrl,
+              name: file.name,
+              type: file.type,
+              file_type: file.file_type,
+              suffix: file.suffix,
+              preview_method: file.preview_method
+            })
+          }
         }
       }
     }
@@ -1264,6 +1308,20 @@ export default {
   flex-wrap: wrap;
   gap: 10px;
   align-items: flex-start;
+}
+
+/* 用户文本消息（在文件下方显示） */
+.user-message-text {
+  width: 100%;
+  margin-top: 8px;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1.7;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  word-break: break-word;
+  min-width: 0;
 }
 
 /* 图片文件网格 */

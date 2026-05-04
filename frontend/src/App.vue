@@ -219,6 +219,17 @@ export default {
       this.showWebPreview = true
     },
     previewFile(file) {
+      console.log('[DEBUG] previewFile called, full file object:', JSON.stringify({
+        name: file.name,
+        type: file.type,
+        file_type: file.file_type,
+        suffix: file.suffix,
+        text_content: file.text_content,
+        content: file.content,
+        iframe_url: file.iframe_url,
+        preview_url: file.preview_url,
+        preview_method: file.preview_method
+      }).substring(0, 500))
       // 根据文件类型决定预览方式
       const fileType = (file.file_type || file.type || '').toUpperCase()
       const suffix = (file.suffix || (file.name ? '.' + file.name.split('.').pop().toLowerCase() : '')).toLowerCase()
@@ -248,20 +259,10 @@ export default {
 
       // 如果文件有 text_content 或 content，优先使用文件预览面板展示
       const textContent = file.text_content || file.content || ''
-      if (textContent) {
+      if (typeof textContent === 'string' && textContent.length > 0) {
         this.filePreviewName = file.name || '文件预览'
         this.filePreviewContent = textContent
         this.showFilePreview = true
-        return
-      }
-
-      // PDF 文件：有 text_content 会在上面处理，这里处理没有内容的情况
-      if (suffix === '.pdf') {
-        const pdfUrl = file.preview_url || file.iframe_url
-        if (pdfUrl) {
-          this.webPreviewUrl = pdfUrl
-          this.showWebPreview = true
-        }
         return
       }
 
@@ -332,53 +333,89 @@ export default {
       let restreamMessage = ''
       let restreamProcessedOutputs = []
 
+      console.log('[Restream] 开始查找用户消息，aiIndex:', aiIndex)
+      console.log('[Restream] this.messages 结构:', this.messages.map((m, i) => ({
+        index: i,
+        role: m.role,
+        hasFiles: !!(m.files && m.files.length),
+        filesCount: m.files?.length || 0,
+        contentLength: (m.content || '').length,
+        _isFilesOnly: m._isFilesOnly,
+        _isTextOnly: m._isTextOnly
+      })))
+
       // 向前查找用户消息
       while (userMessageIndex >= 0) {
         const msg = this.messages[userMessageIndex]
+        console.log('[Restream] 检查消息', userMessageIndex, {
+          role: msg.role,
+          hasFiles: !!(msg.files && msg.files.length),
+          hasContent: !!(msg.content && msg.content.trim()),
+          isFile: msg.additional_kwargs?.is_file,
+          content: msg.content?.substring(0, 50)
+        })
         if (msg.role === 'user') {
-          // 如果这个消息有 files，优先使用这个
+          // 优先找有文件的消息
           if (msg.files && msg.files.length > 0) {
             userMessage = msg
             restreamProcessedOutputs = msg.files || []
-            // 尝试找相邻的文本消息（_isTextOnly）获取文本内容
+            console.log('[Restream] 找到带文件的消息，restreamProcessedOutputs:', restreamProcessedOutputs.length, '个文件')
+            // 尝试找相邻的文本消息（content 有内容且没有文件）
             if (userMessageIndex + 1 < this.messages.length &&
                 this.messages[userMessageIndex + 1].role === 'user' &&
-                this.messages[userMessageIndex + 1]._isTextOnly) {
+                !this.messages[userMessageIndex + 1].files?.length &&
+                this.messages[userMessageIndex + 1].content?.trim()) {
               restreamMessage = (this.messages[userMessageIndex + 1].content || '').trim()
+              console.log('[Restream] 从相邻消息获取文本:', restreamMessage.substring(0, 50))
             } else {
               restreamMessage = (msg.content || '').trim()
+              console.log('[Restream] 从当前消息获取文本:', restreamMessage.substring(0, 50))
             }
             break
           }
-          // 如果是 _isTextOnly 但没有文件消息在其后面，继续往前找
-          if (msg._isTextOnly && (!msg.files || msg.files.length === 0)) {
+          // 如果消息没有文件但有内容（纯文本消息），继续往前找文件消息
+          if (msg.content && msg.content.trim() && (!msg.files || msg.files.length === 0)) {
             restreamMessage = (msg.content || '').trim()
+            console.log('[Restream] 找到纯文本消息，继续往前找文件消息')
             // 往前找一个有 files 的消息
             let fileMsgIndex = userMessageIndex - 1
             while (fileMsgIndex >= 0) {
               const fileMsg = this.messages[fileMsgIndex]
-              if (fileMsg.role === 'user' && fileMsg._isFilesOnly && fileMsg.files && fileMsg.files.length > 0) {
+              console.log('[Restream] 往前查找文件消息', fileMsgIndex, {
+                hasFiles: !!(fileMsg.files && fileMsg.files.length),
+                content: fileMsg.content?.substring(0, 30)
+              })
+              if (fileMsg.role === 'user' && fileMsg.files && fileMsg.files.length > 0) {
                 userMessage = fileMsg
                 restreamProcessedOutputs = fileMsg.files || []
+                console.log('[Restream] 从前面的消息找到文件:', restreamProcessedOutputs.length, '个文件')
                 break
               }
-              if (fileMsg.role === 'user' && !fileMsg._isFilesOnly) {
+              if (fileMsg.role === 'user' && fileMsg.content && fileMsg.content.trim()) {
+                // 遇到有内容的用户消息停止
+                console.log('[Restream] 遇到有内容的用户消息，停止查找文件')
                 break
               }
               fileMsgIndex--
             }
             if (userMessage) break
-          }
-          // 普通用户消息（没有 _isFilesOnly/_isTextOnly 标记）
-          if (!msg._isFilesOnly && !msg._isTextOnly) {
+            // 如果没找到文件消息，使用当前的纯文本消息
             userMessage = msg
-            restreamMessage = (msg.content || '').trim()
-            restreamProcessedOutputs = msg.files || []
+            restreamProcessedOutputs = []
+            console.log('[Restream] 没找到文件消息，使用纯文本消息')
             break
           }
         }
         userMessageIndex--
       }
+
+      console.log('[Restream] 最终结果 - restreamMessage:', restreamMessage?.substring(0, 100), 'restreamProcessedOutputs:', restreamProcessedOutputs.length, '个文件')
+        console.log('[Restream] restreamProcessedOutputs 详情:', restreamProcessedOutputs.map(f => ({
+          name: f.name,
+          type: f.type,
+          text_content: f.text_content ? f.text_content.substring(0, 50) : null,
+          image_content: f.image_content ? (typeof f.image_content === 'string' ? f.image_content.substring(0, 50) : f.image_content) : null
+        })))
 
       if (!userMessage) {
         console.error('未找到对应的用户消息')
@@ -413,12 +450,23 @@ export default {
         this.messages = this.processConversationMessages(conversation.messages)
 
         // 3. 将用户消息添加回 messages（backtrack 后的对话不包含当前输入）
-        this.messages.push({
-          role: 'user',
-          content: restreamMessage,
-          files: restreamProcessedOutputs,
-          additional_kwargs: {}
-        })
+        // 注意：文件消息和文本消息分开推送，与 sendMessage 保持一致
+        if (restreamProcessedOutputs.length > 0) {
+          this.messages.push({
+            role: 'user',
+            content: '',
+            files: restreamProcessedOutputs,
+            additional_kwargs: { is_file: true }
+          })
+        }
+        if (restreamMessage) {
+          this.messages.push({
+            role: 'user',
+            content: restreamMessage,
+            files: [],
+            additional_kwargs: {}
+          })
+        }
 
         // 4. 添加 AI 消息占位
         this.isLoading = true
@@ -440,6 +488,13 @@ export default {
         this.$refs.messageList?.scrollToBottom(true)
 
         // 5. 调用 message_stream
+        console.log('[Restream] 准备调用 message_stream:', {
+          message: restreamMessage?.substring(0, 100),
+          session_id: requestSessionId,
+          processed_outputs_count: restreamProcessedOutputs.length,
+          processed_outputs: restreamProcessedOutputs
+        })
+
         const streamResponse = await fetch('/chat/', {
           method: 'POST',
           headers: {
@@ -451,6 +506,8 @@ export default {
             processed_outputs: restreamProcessedOutputs
           })
         })
+
+        console.log('[Restream] message_stream 响应状态:', streamResponse.status)
 
         if (!streamResponse.ok) {
           throw new Error(`请求失败: ${streamResponse.status}`)
@@ -748,54 +805,63 @@ export default {
       const files = typeof data === 'object' ? data.files : []
       const processedOutputs = typeof data === 'object' ? data.processedOutputs : []
 
-      const userMessage = {
-        role: 'user',
-        content: message,
-        additional_kwargs: {}
-      }
-
+      // 构建文件消息（只包含 files 信息）
       if (files && files.length > 0) {
-        userMessage.additional_kwargs.is_file = true
-        userMessage.files = files.map((file, index) => {
-          // 合并原始文件信息和处理结果
-          const processed = processedOutputs && processedOutputs[index] ? processedOutputs[index] : {}
-          // 直接使用后端返回的 OutputFormat 扁平结构
-          const fileInfo = {
-            name: file.name || file.file_name || file.filename || processed.name,
-            size: file.size || file.file_size || 0,
-            type: file.type || file.file_type || file.content_type || processed.type,
-            preview: file.preview || file.preview_url || processed.preview || null,
-            iframe_url: file.iframe_url || processed.iframe_url || null,
-            content: file.content || processed.content || null,
-            fileId: file.file_id || file.fileId || processed.file_id || null,
-            file_type: file.type || file.file_type || processed.file_type || null,
-            preview_method: file.preview_method || processed.preview_method || 'download',
-            preview_hint: file.preview_hint || processed.preview_hint || null,
-            size_human: file.size_human || file.file_size_human || processed.size_human || null,
-            suffix: file.suffix || processed.suffix || null,
-            is_previewable: file.is_previewable !== undefined ? file.is_previewable : (processed.is_previewable !== undefined ? processed.is_previewable : true),
-            // 后端处理后的字段
-            text_content: processed.text_content || null,
-            image_content: processed.image_content || null,
-            is_oss: processed.is_oss || false
-          }
+        const fileMessage = {
+          role: 'user',
+          content: '',
+          additional_kwargs: { is_file: true },
+          files: files.map((file, index) => {
+            // 合并原始文件信息和处理结果
+            const processed = processedOutputs && processedOutputs[index] ? processedOutputs[index] : {}
+            // 直接使用后端返回的 OutputFormat 扁平结构
+            const fileInfo = {
+              name: file.name || file.file_name || file.filename || processed.name,
+              size: file.size || file.file_size || 0,
+              type: file.type || file.file_type || file.content_type || processed.type,
+              preview: file.preview || file.preview_url || processed.preview || null,
+              iframe_url: file.iframe_url || processed.iframe_url || null,
+              content: file.content || processed.content || null,
+              fileId: file.file_id || file.fileId || processed.file_id || null,
+              file_type: file.type || file.file_type || processed.file_type || null,
+              preview_method: file.preview_method || processed.preview_method || 'download',
+              preview_hint: file.preview_hint || processed.preview_hint || null,
+              size_human: file.size_human || file.file_size_human || processed.size_human || null,
+              suffix: file.suffix || processed.suffix || null,
+              is_previewable: file.is_previewable !== undefined ? file.is_previewable : (processed.is_previewable !== undefined ? processed.is_previewable : true),
+              // 后端处理后的字段
+              text_content: processed.text_content || null,
+              image_content: processed.image_content || null,
+              is_oss: processed.is_oss || false
+            }
 
-          // 如果没有 preview，图片类型则创建本地预览
-          if (!fileInfo.preview && file.type && file.type.startsWith('image/')) {
-            if (file.file) {
-              try {
-                fileInfo.preview = URL.createObjectURL(file.file)
-              } catch (e) {
-                console.warn('创建图片预览失败:', e)
+            // 如果没有 preview，图片类型则创建本地预览
+            if (!fileInfo.preview && file.type && file.type.startsWith('image/')) {
+              if (file.file) {
+                try {
+                  fileInfo.preview = URL.createObjectURL(file.file)
+                } catch (e) {
+                  console.warn('创建图片预览失败:', e)
+                }
               }
             }
-          }
 
-          return fileInfo
-        })
+            return fileInfo
+          })
+        }
+        this.messages.push(fileMessage)
       }
 
-      this.messages.push(userMessage)
+      // 构建文本消息（只包含用户输入的文本）
+      if (message && message.trim()) {
+        const textMessage = {
+          role: 'user',
+          content: message.trim(),
+          additional_kwargs: {},
+          files: []
+        }
+        this.messages.push(textMessage)
+      }
 
       this.isLoading = true
 
@@ -1149,7 +1215,7 @@ export default {
 
         if (msg.role === 'user') {
           const processedMsg = { ...msg }
-          // 确保 is_file 标志正确设置
+          // 确保 is_file 标志正确设置（如果有文件就设为 true，不论是否有文本内容）
           if (msg.files && msg.files.length > 0) {
             processedMsg.additional_kwargs = { ...processedMsg.additional_kwargs, is_file: true }
             processedMsg.files = msg.files.map(file => {

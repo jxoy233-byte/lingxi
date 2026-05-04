@@ -19,84 +19,70 @@
         </button>
       </div>
 
-      <!-- 用户文件消息：独立显示在message-content外 -->
+      <!-- 用户文件消息：独立显示 -->
       <div
         v-if="message.role === 'user' && message.additional_kwargs?.is_file && message.files?.length"
         class="user-files-display"
       >
-        <!-- 文件网格显示 -->
-        <div class="file-grid">
+        <!-- 图片文件：直接显示缩略图网格 -->
+        <div v-if="imageFiles.length" class="file-images-grid">
           <div
-            v-for="(file, index) in (message.files || message.additional_kwargs?.files || [])"
+            v-for="(file, index) in imageFiles"
             :key="index"
-            class="file-card"
-            :class="{ active: activeFileIndex === index }"
+            class="file-image-item"
             @click="handleFileCardClick(file, index)"
           >
-            <!-- 图片文件：缩略图 -->
-            <div v-if="isImageFileType(file)" class="file-thumbnail image-thumbnail">
-              <img
-                v-if="getFilePreview(file)"
-                :src="getFilePreview(file)"
-                :alt="file.name"
-                class="thumbnail-img"
-              />
-              <div v-else class="file-icon-wrapper">
-                <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
-                  <circle cx="8.5" cy="8.5" r="1.5"/>
-                  <polyline points="21 15 16 10 5 21"/>
-                </svg>
-              </div>
+            <img
+              v-if="getFilePreview(file)"
+              :src="getFilePreview(file)"
+              :alt="file.name"
+              class="file-image-preview"
+            />
+            <div v-else class="file-image-placeholder">
+              <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                <circle cx="8.5" cy="8.5" r="1.5"/>
+                <polyline points="21 15 16 10 5 21"/>
+              </svg>
             </div>
-            <!-- 文本文件：文档图标 -->
-            <div v-else-if="isTextFileType(file)" class="file-thumbnail text-thumbnail">
-              <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          </div>
+        </div>
+
+        <!-- 其他文件：水平排列的附件列表 -->
+        <div v-if="otherFiles.length" class="file-attachments-list">
+          <div
+            v-for="(file, index) in otherFiles"
+            :key="index"
+            class="file-attachment-item"
+            :class="getFileTypeClass(file)"
+            @click="handleFileCardClick(file, index)"
+          >
+            <div class="file-attachment-icon">
+              <!-- 文本文件图标 -->
+              <svg v-if="isTextFileType(file)" xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
                 <polyline points="14 2 14 8 20 8"/>
                 <line x1="16" y1="13" x2="8" y2="13"/>
                 <line x1="16" y1="17" x2="8" y2="17"/>
                 <polyline points="10 9 9 9 8 9"/>
               </svg>
-            </div>
-            <!-- PDF文件 -->
-            <div v-else-if="isPdfFileType(file)" class="file-thumbnail pdf-thumbnail">
-              <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <!-- PDF文件图标 -->
+              <svg v-else-if="isPdfFileType(file)" xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
                 <polyline points="14 2 14 8 20 8"/>
                 <line x1="16" y1="13" x2="8" y2="13"/>
                 <line x1="16" y1="17" x2="8" y2="17"/>
                 <polyline points="10 9 9 9 8 9"/>
               </svg>
-            </div>
-            <!-- 其他文件 -->
-            <div v-else class="file-thumbnail generic-thumbnail">
-              <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <!-- 通用文件图标 -->
+              <svg v-else xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
                 <polyline points="13 2 13 9 20 9"/>
               </svg>
             </div>
-            <!-- 文件名 -->
-            <div class="file-name">{{ file.name || `文件${index + 1}` }}</div>
-            <!-- 文件大小 -->
-            <div v-if="file.size_human" class="file-size-label">{{ file.size_human }}</div>
-          </div>
-        </div>
-
-        <!-- 当前选中文件的预览内容（文本文件显示解析内容） -->
-        <div v-if="activeParsedFile && hasTextPreview(activeParsedFile)" class="file-preview-panel">
-          <div class="preview-header">
-            <span class="preview-title">{{ activeParsedFile.name }}</span>
-            <span class="preview-type">{{ getFileTypeLabel(activeParsedFile.type) }}</span>
-          </div>
-          <div class="preview-body">
-            <div
-              v-if="activeParsedFile.text_content"
-              class="preview-text-content"
-              v-html="renderFileContent(activeParsedFile.text_content)"
-            ></div>
-            <div v-else-if="activeParsedFile.content" class="preview-text-content">
-              {{ activeParsedFile.content }}
+            <div class="file-attachment-info">
+              <span class="file-attachment-name">{{ file.name || `文件${index + 1}` }}</span>
+              <span v-if="file.size_human" class="file-attachment-size">{{ file.size_human }}</span>
             </div>
           </div>
         </div>
@@ -392,6 +378,16 @@ export default {
       const files = this.message.files || this.message.additional_kwargs?.files || []
       if (!Array.isArray(files)) return []
       return files
+    },
+    imageFiles() {
+      // 图片类型文件
+      const files = this.message.files || []
+      return files.filter(f => this.isImageFileType(f))
+    },
+    otherFiles() {
+      // 非图片类型文件
+      const files = this.message.files || []
+      return files.filter(f => !this.isImageFileType(f))
     },
     activeParsedFile() {
       // 直接从 message.files 或 additional_kwargs.files 获取
@@ -717,6 +713,11 @@ export default {
       if (!file) return false
       const isText = file.type === 'TEXT' || (file.type && file.type.startsWith('text/'))
       return isText && (file.text_content || file.content)
+    },
+    getFileTypeClass(file) {
+      if (this.isTextFileType(file)) return 'file-type-text'
+      if (this.isPdfFileType(file)) return 'file-type-pdf'
+      return 'file-type-other'
     },
     handleFileCardClick(file, index) {
       // 记录当前选中的文件索引
@@ -1257,152 +1258,137 @@ export default {
   color: white;
 }
 
-/* 用户文件消息显示区域 - 豆包风格 */
+/* 用户文件消息显示区域 */
 .user-files-display {
-  width: 100%;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-color);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+/* 图片文件网格 */
+.file-images-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.file-image-item {
+  width: 120px;
+  height: 120px;
   border-radius: 12px;
   overflow: hidden;
-}
-
-/* 用户文件消息中的文本内容 */
-.user-message-text {
-  padding: 12px 16px;
-  border-top: 1px solid var(--border-color);
-  font-size: 14px;
-  line-height: 1.6;
-  color: var(--text-primary);
-  white-space: pre-wrap;
-  word-wrap: break-word;
-}
-
-/* 文件网格（豆包风格） */
-.file-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
-  gap: 12px;
-  padding: 16px;
-}
-
-/* 文件卡片 */
-.file-card {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding: 12px 8px;
-  border-radius: 12px;
   cursor: pointer;
-  transition: all 0.2s;
   border: 1px solid var(--border-color);
-  background: var(--bg-primary);
+  background: var(--bg-secondary);
+  transition: all 0.15s;
 }
 
-.file-card:hover {
-  background: var(--bg-hover);
-  transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
-}
-
-.file-card.active {
+.file-image-item:hover {
   border-color: var(--button-bg);
-  background: color-mix(in srgb, var(--button-bg) 8%, transparent);
+  transform: scale(1.03);
 }
 
-/* 文件缩略图 */
-.file-thumbnail {
-  width: 56px;
-  height: 56px;
-  border-radius: 8px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin-bottom: 8px;
-  overflow: hidden;
-  flex-shrink: 0;
-}
-
-.image-thumbnail {
-  background: var(--bg-primary);
-}
-
-.image-thumbnail .thumbnail-img {
+.file-image-preview {
   width: 100%;
   height: 100%;
   object-fit: cover;
 }
 
-.text-thumbnail {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: white;
-}
-
-.pdf-thumbnail {
-  background: linear-gradient(135deg, #ff6b6b 0%, #ee5a5a 100%);
-  color: white;
-}
-
-.generic-thumbnail {
-  background: var(--bg-primary);
-  color: var(--text-secondary);
-}
-
-.file-icon-wrapper {
+.file-image-placeholder {
+  width: 100%;
+  height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 100%;
-  height: 100%;
   color: var(--text-secondary);
 }
 
-/* 文件名 */
-.file-name {
-  font-size: 11px;
-  color: var(--text-primary);
-  text-align: center;
-  max-width: 80px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+/* 文件附件列表 */
+.file-attachments-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
-/* 文件大小 */
-.file-size-label {
-  font-size: 10px;
-  color: var(--text-secondary);
-  margin-top: 2px;
-}
-
-/* 文件预览面板（文本文件） */
-.file-preview-panel {
-  border-top: 1px solid var(--border-color);
-  padding: 12px 16px;
-  max-height: 250px;
-  overflow-y: auto;
-}
-
-.preview-header {
+.file-attachment-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 10px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--border-color);
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+  max-width: 300px;
+  min-width: 180px;
 }
 
-.preview-title {
-  font-weight: 500;
-  font-size: 13px;
-  color: var(--text-primary);
+.file-attachment-item:hover {
+  border-color: var(--button-bg);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
 }
 
-.preview-type {
-  font-size: 11px;
+/* 文件类型颜色 */
+.file-attachment-item.file-type-text {
+  border-left: 3px solid #667eea;
+}
+
+.file-attachment-item.file-type-pdf {
+  border-left: 3px solid #ff6b6b;
+}
+
+.file-attachment-item.file-type-other {
+  border-left: 3px solid var(--text-secondary);
+}
+
+.file-attachment-icon {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+.file-type-text .file-attachment-icon {
+  background: rgba(102, 126, 234, 0.1);
+  color: #667eea;
+}
+
+.file-type-pdf .file-attachment-icon {
+  background: rgba(255, 107, 107, 0.1);
+  color: #ff6b6b;
+}
+
+.file-type-other .file-attachment-icon {
+  background: var(--bg-secondary);
   color: var(--text-secondary);
-  background: var(--bg-hover);
-  padding: 2px 8px;
-  border-radius: 10px;
+}
+
+.file-attachment-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.file-attachment-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-attachment-size {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 4px;
 }
 
 .preview-body {
@@ -1429,194 +1415,6 @@ export default {
   padding: 2px 6px;
   border-radius: 4px;
   font-size: 0.9em;
-}
-
-.preview-empty {
-  color: var(--text-secondary);
-  font-size: 13px;
-  text-align: center;
-  padding: 20px;
-}
-
-/* 文件选择器标签（保留兼容性） */
-.file-tabs {
-  display: flex;
-  gap: 2px;
-  padding: 8px 8px 0;
-  background: var(--bg-primary);
-  border-bottom: 1px solid var(--border-color);
-  overflow-x: auto;
-  flex-shrink: 0;
-}
-
-.file-tab {
-  padding: 6px 14px;
-  border: none;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 13px;
-  cursor: pointer;
-  border-radius: 6px 6px 0 0;
-  transition: all 0.15s;
-  white-space: nowrap;
-  max-width: 160px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.file-tab:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
-.file-tab.active {
-  background: var(--bg-secondary);
-  color: var(--button-bg);
-  font-weight: 500;
-}
-
-/* 文件内容视图 */
-.file-content-view {
-  padding: 12px 16px;
-  min-height: 120px;
-  max-height: 400px;
-  overflow-y: auto;
-}
-
-.file-content-header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 10px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--border-color);
-}
-
-.file-content-name {
-  font-weight: 500;
-  color: var(--text-primary);
-  font-size: 14px;
-}
-
-.file-content-type {
-  font-size: 11px;
-  color: var(--text-secondary);
-  background: var(--bg-hover);
-  padding: 2px 8px;
-  border-radius: 10px;
-}
-
-.file-content-body {
-  font-size: 14px;
-  line-height: 1.7;
-  color: var(--text-primary);
-  word-wrap: break-word;
-}
-
-/* 文件内容 markdown 样式 */
-.file-content-body :deep(h1),
-.file-content-body :deep(h2),
-.file-content-body :deep(h3),
-.file-content-body :deep(h4) {
-  margin: 16px 0 10px;
-  font-weight: 600;
-  line-height: 1.4;
-}
-
-.file-content-body :deep(h1) { font-size: 1.3em; }
-.file-content-body :deep(h2) { font-size: 1.2em; }
-.file-content-body :deep(h3) { font-size: 1.1em; }
-
-.file-content-body :deep(p) {
-  margin: 8px 0;
-}
-
-.file-content-body :deep(code) {
-  background: var(--code-inline-bg);
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-family: 'SF Mono', 'Monaco', 'Consolas', 'Courier New', monospace;
-  font-size: 0.85em;
-  color: var(--code-inline-color);
-}
-
-.file-content-body :deep(pre) {
-  background: var(--code-block-bg);
-  padding: 12px 16px;
-  border-radius: 8px;
-  overflow-x: auto;
-  margin: 12px 0;
-  border: 1px solid var(--code-block-border);
-}
-
-.file-content-body :deep(pre code) {
-  background: transparent;
-  padding: 0;
-  font-size: 13px;
-  color: var(--code-block-text);
-}
-
-.file-content-body :deep(ul),
-.file-content-body :deep(ol) {
-  margin: 8px 0;
-  padding-left: 24px;
-}
-
-.file-content-body :deep(li) {
-  margin: 4px 0;
-}
-
-.file-content-body :deep(img) {
-  max-width: 100%;
-  height: auto;
-  border-radius: 6px;
-  margin: 8px 0;
-  cursor: pointer;
-}
-
-.file-content-images {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.file-content-img {
-  max-width: 200px;
-  max-height: 200px;
-  object-fit: cover;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: transform 0.2s;
-}
-
-.file-content-img:hover {
-  transform: scale(1.02);
-}
-
-.file-content-empty {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 100px;
-  color: var(--text-secondary);
-  font-size: 13px;
-}
-
-/* 文件预览区域 */
-.file-content-preview {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  margin-top: 8px;
-}
-
-.file-preview-img {
-  max-width: 100%;
-  max-height: 400px;
-  object-fit: contain;
-  border-radius: 8px;
-  cursor: pointer;
 }
 
 .file-preview-iframe {

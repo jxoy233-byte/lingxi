@@ -78,6 +78,21 @@
         </div>
       </div>
 
+      <!-- 文件预览面板 -->
+      <FilePreviewPanel
+        :visible="showFilePreview"
+        :file-name="filePreviewName"
+        :content="filePreviewContent"
+        @close="showFilePreview = false"
+      />
+
+      <!-- 点击空白区域关闭文件预览面板 -->
+      <div
+        v-if="showFilePreview"
+        class="file-preview-overlay"
+        @click="showFilePreview = false"
+      />
+
       <!-- 点击空白区域关闭历史记录面板 -->
       <div
         v-if="showCheckpoints"
@@ -116,6 +131,7 @@ import MessageInput from './components/MessageInput.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import CheckpointPanel from './components/CheckpointPanel.vue'
 import WebPreviewPanel from './components/WebPreviewPanel.vue'
+import FilePreviewPanel from './components/FilePreviewPanel.vue'
 
 export default {
   name: 'App',
@@ -126,7 +142,8 @@ export default {
     MessageInput,
     ConfirmDialog,
     CheckpointPanel,
-    WebPreviewPanel
+    WebPreviewPanel,
+    FilePreviewPanel
   },
   data() {
     return {
@@ -146,6 +163,9 @@ export default {
       isResizingWebPreview: false,
       showImagePreview: false,
       imagePreviewUrl: '',
+      showFilePreview: false,
+      filePreviewName: '',
+      filePreviewContent: '',
       responseStartTime: null,
       responseTimerInterval: null,
       currentResponseTime: 0,
@@ -226,8 +246,17 @@ export default {
         return
       }
 
-      // PDF 文件：使用 iframe 预览
-      if (suffix === '.pdf' || fileType === 'DOCUMENT') {
+      // 如果文件有 text_content 或 content，优先使用文件预览面板展示
+      const textContent = file.text_content || file.content || ''
+      if (textContent) {
+        this.filePreviewName = file.name || '文件预览'
+        this.filePreviewContent = textContent
+        this.showFilePreview = true
+        return
+      }
+
+      // PDF 文件：有 text_content 会在上面处理，这里处理没有内容的情况
+      if (suffix === '.pdf') {
         const pdfUrl = file.preview_url || file.iframe_url
         if (pdfUrl) {
           this.webPreviewUrl = pdfUrl
@@ -242,22 +271,7 @@ export default {
         return
       }
 
-      // 文本文件：使用 iframe 或 content 显示
-      if (fileType === 'TEXT' || (file.type && (file.type.startsWith('text/') || file.type === 'application/json'))) {
-        const textPreviewUrl = file.preview_url || file.iframe_url
-        if (textPreviewUrl) {
-          this.webPreviewUrl = textPreviewUrl
-          this.showWebPreview = true
-        } else if (file.content) {
-          // 如果有文本内容，创建一个 data URL
-          const dataUrl = 'data:text/plain;charset=utf-8,' + encodeURIComponent(file.content)
-          this.webPreviewUrl = dataUrl
-          this.showWebPreview = true
-        }
-        return
-      }
-
-      // 其他文件：尝试使用 preview_url
+      // 其他文件：使用 iframe 预览
       const otherPreviewUrl = file.preview_url || file.iframe_url
       if (otherPreviewUrl) {
         this.webPreviewUrl = otherPreviewUrl
@@ -1373,6 +1387,13 @@ body {
 }
 
 .web-preview-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 99;
+}
+
+/* 文件预览遮罩 */
+.file-preview-overlay {
   position: fixed;
   inset: 0;
   z-index: 99;

@@ -1,17 +1,17 @@
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, FastAPI, Path, Body, Query, File, Form, UploadFile
+from fastapi import APIRouter, HTTPException, FastAPI, Path, Body, File, Form, UploadFile
 from fastapi.responses import StreamingResponse
 
 from ChatMe.ChatService.FilesLoaders import UploadFileWithId
 from ChatMe.ChatService.FilesLoaders.core import OutputFormat
-from ChatMe.ChatService.config.models import ChatRequest, Conversation, ConversationSimple
+from ChatMe.ChatService.config.models import ChatRequest, ConversationSimple
 from ChatMe.ChatService import ChatService, FILE_MAX_LENGTH
 from ChatMe.ChatWorkflow import ChatWorkflow
 from ChatMe.LoggingManager.logging_config import get_logger
 
-chatMe_app = APIRouter(prefix="/chat")
+ChatMe_app = APIRouter(prefix="/chat")
 
 chat_service: Optional[ChatService] = None
 
@@ -57,7 +57,7 @@ async def lifespan(app :FastAPI):
     logger.info("ChatService关闭成功")
 
 
-@chatMe_app.post("/", summary="新建对话/继续对话-流式响应，无session_id则新建对话")
+@ChatMe_app.post("/", summary="新建对话/继续对话-流式响应，无session_id则新建对话")
 async def chat_stream(
         # chatRequest: str = Form(...),
         chat_request: ChatRequest = Body(...),
@@ -101,13 +101,13 @@ async def chat_stream(
         headers=headers,
     )
 
-@chatMe_app.get("/conversations", summary="获取历史会话列表", response_model=List[ConversationSimple])
+@ChatMe_app.get("/conversations", summary="获取历史会话列表", response_model=List[ConversationSimple])
 async def get_conversations():
     """获取所有历史会话列表，按【更新时间倒序】排列，最新的会话在最前面，自动过滤空会话"""
     conversations = await chat_service.get_conversation_list()
     return conversations
 
-@chatMe_app.get("/{session_id}/conversation", summary="获取指定会话内容")
+@ChatMe_app.get("/{session_id}/conversation", summary="获取指定会话内容")
 async def get_conversation_content(session_id :str = Path(..., description="会话ID")):
     """
     进入指定会话详情页核心接口：
@@ -124,7 +124,7 @@ async def get_conversation_content(session_id :str = Path(..., description="会�
     return conversation
 
 
-@chatMe_app.delete("/{session_id}/clear", summary="删除指定历史会话（含聊天记录）")
+@ChatMe_app.delete("/{session_id}/clear", summary="删除指定历史会话（含聊天记录）")
 async def delete_conversation(
     session_id: str = Path(..., description="会话唯一ID")
 ):
@@ -135,7 +135,7 @@ async def delete_conversation(
     return {"code": 200, "msg": "会话删除成功", "session_id": session_id}
 
 
-@chatMe_app.put("/{session_id}/title", summary="修改会话标题")
+@ChatMe_app.put("/{session_id}/title", summary="修改会话标题")
 async def update_conversation_title(
     session_id: str = Path(..., description="会话唯一ID"),
     title: str = Body(..., embed=True, min_length=1, max_length=50, description="会话标题")
@@ -146,7 +146,7 @@ async def update_conversation_title(
         raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在，修改失败")
     return {"code": 200, "msg": "标题修改成功", "session_id": session_id, "new_title": title}
 
-@chatMe_app.get("/{session_id}/title", summary="获取单个会话的标题")
+@ChatMe_app.get("/{session_id}/title", summary="获取单个会话的标题")
 async def get_conversation_title(
     session_id: str = Path(..., description="会话唯一ID")
 ):
@@ -157,7 +157,7 @@ async def get_conversation_title(
     return {"session_id": session_id, "title": conversation.title}
 
 
-@chatMe_app.post("/improve_input", summary="优化用户输入内容")
+@ChatMe_app.post("/improve_input", summary="优化用户输入内容")
 async def improve_input(
     input_text: str = Body(..., embed=True, min_length=1, max_length=500, description="用户输入内容")
 ):
@@ -168,7 +168,7 @@ async def improve_input(
     return {"improved_text": improved_text}
 
 
-@chatMe_app.get("/file-config", summary="获取文件上传配置")
+@ChatMe_app.get("/file-config", summary="获取文件上传配置")
 async def get_file_config():
     """
     获取文件上传配置信息，包括：
@@ -178,7 +178,7 @@ async def get_file_config():
     return await chat_service.get_file_config()
 
 
-@chatMe_app.post("/{session_id}/backtrack", summary="会话回溯")
+@ChatMe_app.post("/{session_id}/backtrack", summary="会话回溯")
 async def backtrack_checkpoint(
     session_id: str = Path(..., description="会话唯一ID"),
     backtrack_id: str = Body(..., embed=True, description="回溯ID")
@@ -196,7 +196,7 @@ async def backtrack_checkpoint(
     return {"code": 200, "msg": "回溯成功", "session_id": session_id, "backtrack_id": backtrack_id}
 
 
-@chatMe_app.post("/upload_file", summary="上传文件")
+@ChatMe_app.post("/upload_file", summary="上传文件")
 async def upload_file(
     files: Optional[list[UploadFile]] = File(default=None, max_length=FILE_MAX_LENGTH),
     processed_outputs: str = Form(default="[]", description="已处理好的文件信息(JSON字符串)")):
@@ -242,7 +242,7 @@ async def upload_file(
         "processed_outputs": processed_outputs_list,
     }
 
-@chatMe_app.post("/cancel_upload_file", summary="取消已上传的文件")
+@ChatMe_app.post("/cancel_upload_file", summary="取消已上传的文件")
 async def cancel_upload_file(
     file_id: str = Body(..., embed=True, description="每个文件自带的独特id"),
     processed_outputs: List[OutputFormat] = Body(default=[], description="已处理好的文件信息",embed=True)

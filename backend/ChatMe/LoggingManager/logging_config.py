@@ -5,7 +5,7 @@ from logging.handlers import RotatingFileHandler
 
 def set_logger(
         name: str="ChatMe",
-        log_level:int= logging.INFO,
+        log_level:int= logging.DEBUG,
         max_bytes: int= 10*1024*1024,
         backup_count: int= 5,
         log_dir= Path.cwd() / ".chatme" / "logs"

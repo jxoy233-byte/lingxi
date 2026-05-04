@@ -2,7 +2,8 @@ from dotenv import load_dotenv
 import os
 
 try:
-    from ChatMe.ChatMeConfig import get_llm_config
+    from ChatMe.ChatMeConfig import get_llm_config, get_app_config
+
     _use_config_loader = True
 except ImportError:
     _use_config_loader = False
@@ -42,21 +43,22 @@ def get_graph_final_node_config():
         base_url = os.getenv("OPENAI_BASE_URL")
 
     temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.5"))
-    max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "32768"))
+    max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "16384"))
     top_p = float(os.getenv("OPENAI_TOP_P", "1.0"))
     frequency_penalty = float(os.getenv("OPENAI_FREQUENCY_PENALTY", "0.0"))
     presence_penalty = float(os.getenv("OPENAI_PRESENCE_PENALTY", "0.0"))
 
     # 大模型配置：
     llm_config = {
-        "model_name": model_name,
+        "model": model_name,
         "api_key": api_key,
         "base_url": base_url,
         "temperature": temperature,
         "max_tokens": max_tokens,
         "top_p": top_p,
         "frequency_penalty": frequency_penalty,
-        "presence_penalty": presence_penalty
+        "presence_penalty": presence_penalty,
+        "timeout": 300,  # 5分钟超时，处理图片可能需要更长时间
     }
 
     # system_prompt 配置
@@ -107,9 +109,8 @@ Short answer → light formatting. Complex answer → rich structure.
 - If many sources, group them where they're relevant, not all at once
 
 **When content has images**:
-- Place images near the paragraph they illustrates
-- Add brief captions naturally: "The architecture is shown below"
-- Don't let images float alone without connection to text
+- Use `![alt](url)` format, place images near related paragraphs
+- ⚠️ **Never** output `data:image/...;base64,...` format — use standard URLs only
 
 **When content has data/results**:
 - Use tables for comparison: `| Method | Accuracy | Speed |`
@@ -235,13 +236,13 @@ def get_agent_node_config():
         base_url = os.getenv("OPENAI_BASE_URL")
 
     temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.2"))
-    max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "32768"))
+    max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "8192"))
     top_p = float(os.getenv("OPENAI_TOP_P", "1.0"))
     frequency_penalty = float(os.getenv("OPENAI_FREQUENCY_PENALTY", "0.0"))
     presence_penalty = float(os.getenv("OPENAI_PRESENCE_PENALTY", "0.0"))
 
     llm_config = {
-        "model_name": model_name,
+        "model": model_name,
         "api_key": api_key,
         "base_url": base_url,
         "temperature": temperature,
@@ -319,15 +320,23 @@ skills/ 目录下是预置的技能模块，是你完成任务的**首选方式*
 
 ```
 skills/          # 技能库（用 ls skills/ 探索，用 cat skills/xxx.py 看用法）
-cached/           # 缓存文件（上传的文件等）
-.chatme/          # 配置和运行时数据
+cached/          # 缓存文件（仅在需要且输入未提供时才访问）
+.chatme/         # 配置和运行时数据
 ```
+
+**重要原则：信息已提供时不重复获取**
+- 如果输入（input_parse_node输出）已包含文件解析结果，直接使用，不要再去读取缓存文件
+- cached/ 仅在以下情况才访问：
+  1. 当前输入未提供所需文件信息
+  2. 需要从历史上下文获取之前上传过的文件内容
+- 输入已提供的答案不要重复获取
 
 **探索模式**：
 1. 先想这个任务属于什么领域，有没有现成技能
 2. 如果不确定，`ls skills/` 看看有没有相关技能
 3. 如果有，`cat skills/xxx.py` 了解用法（通常看后30行就能知道怎么用）
 4. 调用对应的技能完成任务
+5. **已提供的信息不要重复获取**
 
 **技能优先原则**：
 - 技能是你的第一选项，不是备选
@@ -352,9 +361,9 @@ execute_code("python", code)  # 执行：调用技能 ✅
 **好的调用链2**（需要环境探索时）：
 ```
 ls skills/                    # 探索：没有相关技能
-ls cached/                    # 看看上传了什么文件
-cat cached/data.csv           # 了解数据结构
-execute_code("python", code)  # 执行：用技能处理数据 ✅
+ls cached/                   # 仅在输入未提供文件信息时才查看
+cat cached/data.csv          # 了解数据结构（如需要）
+execute_code("python", code) # 执行：用技能处理数据 ✅
 ```
 
 **坏的调用链**（绕远路/原地打转）：
@@ -375,7 +384,7 @@ python...                     # 本可以用技能，却手写代码
 | 文件找不到 | 路径可能不对 | 换路径，或 ls 看实际有什么 |
 | 搜索无结果 | 关键词可能不对 | 换关键词，或换个搜索方向 |
 | 命令报错 | 语法或权限问题 | 检查命令，或换种方式达到同样目的 |
-| 技能不适用 | 这个领域没有合适技能 | 退回通用命令/代码方式 |
+| 问题无法完全解决 | 如实告知能力不足 | 返回对应的相关解决方案 |
 
 【终止判断】
 
@@ -386,8 +395,7 @@ python...                     # 本可以用技能，却手写代码
 
 【来源信息处理】
 
-搜索类工具返回的来源信息（标题、URL、摘要）**必须保留**，传递给 final_node。
-图片 URL 直接用 `![alt](url)` 格式嵌入，不需要下载或转存。
+图片 URL 直接用 `![alt](url)` 格式嵌入，不要用 `data:image/...;base64,...` 格式
 
 **链接放置原则**：
 - 链接要放在它所支持的论点旁边，不是堆在底部
@@ -429,13 +437,13 @@ def get_history_summary_node_config():
         base_url = os.getenv("DEEPSEEK_BASE_URL")
 
     temperature = float(os.getenv("DEEPSEEK_TEMPERATURE", "0.5"))
-    max_tokens = int(os.getenv("DEEPSEEK_MAX_TOKENS", "32768"))
+    max_tokens = int(os.getenv("DEEPSEEK_MAX_TOKENS", "8192"))
     top_p = float(os.getenv("DEEPSEEK_TOP_P", "1.0"))
     frequency_penalty = float(os.getenv("DEEPSEEK_FREQUENCY_PENALTY", "0.0"))
     presence_penalty = float(os.getenv("DEEPSEEK_PRESENCE_PENALTY", "0.0"))
 
     llm_config = {
-        "model_name": model_name,
+        "model": model_name,
         "api_key": api_key,
         "base_url": base_url,
         "temperature": temperature,
@@ -611,13 +619,13 @@ def get_imp_ipt_config():
         base_url = os.getenv("DEEPSEEK_BASE_URL")
 
     temperature = float(os.getenv("DEEPSEEK_TEMPERATURE", "0.5"))
-    max_tokens = int(os.getenv("DEEPSEEK_MAX_TOKENS", "32768"))
+    max_tokens = int(os.getenv("DEEPSEEK_MAX_TOKENS", "8192"))
     top_p = float(os.getenv("DEEPSEEK_TOP_P", "1.0"))
     frequency_penalty = float(os.getenv("DEEPSEEK_FREQUENCY_PENALTY", "0.0"))
     presence_penalty = float(os.getenv("DEEPSEEK_PRESENCE_PENALTY", "0.0"))
 
     imp_ipt_llm_config = {
-        "model_name": model_name,
+        "model": model_name,
         "api_key": api_key,
         "base_url": base_url,
         "temperature": temperature,
@@ -628,148 +636,49 @@ def get_imp_ipt_config():
     }
 
     imp_ipt_llm_prompt = """
-你是"用户输入优化器"，职责是将用户原始输入转化为下游 agent 节点最容易理解的形态。你不是回答者，而是翻译者。
+你是用户输入优化器，负责将原始输入转化为下游Agent可处理的形态。
 
-【处理流程】
+【核心原则】
+1. 你不是回答者，是翻译者/重构者
+2. 只做格式和表达方式的优化，不改变用户原始意图
+3. 文件解析结果是用户的输入素材，必须原样保留
+4. 复杂问题转化为可执行的规划输入
 
-第一步：判断输入是否清晰
+【处理规则】
 
-拿到输入后，先判断输入本身是否已经是清晰、无歧义的需求描述。
-- 是 → 进入已优化输入处理流程（类别A）
-- 否 → 进入下一步
+优先级1 - 带文件输入：
+输入包含文件解析结果（【文件：xxx】格式）。
+处理：直接拼接 [文件解析结果] + [用户问题]，不做删改。
 
-第二步：判断上下文相关性
+优先级2 - 指代模糊：
+输入含"它、那个、继续、上次"等指代词，且无法从上下文推断。
+处理：输出加一行 [注意：基于假设...]，假设内容需明确标注。
 
-你可能会同时收到"用户当前输入"和"历史上下文信息"。对上下文判断相关性：
-- 密切相关/中相关 → 整合到输入中，适度补全背景
-- 无关 → 丢弃，不混入输出
-- 矛盾 → 以当前输入为准，注明差异
+优先级3 - 极短输入：
+输入少于5个字。
+处理：能推断意图则补全，无法推断则保留原输入并加引导标注。
 
-整合约束：上下文只是辅助，不喧宾夺主；整合不等于复述；不写"根据上文"
-
-第三步：综合判断输入类别
-
-根据输入本身特征，确定主要类别：
-
-类别A — 已清晰输入（最低处理）：
-用户输入本身已经是清晰、无歧义的需求描述。
-处理策略：仅做格式清理，去掉口语化语气词，保留原意不动。
-处理力度：最小化，仅修正表达方式，不补充任何信息。
-
-类别B — 简单任务（轻处理）：
-用户有明确目标，但表达口语化或不够简洁。
-处理策略：转换为清晰的需求陈述，补充最小必要信息。
-处理力度：轻，保持输入规模基本不变。
-
-类别C — 中等任务（适度处理）：
-有明确目标，但背景较复杂或涉及多个子问题。
-处理策略：明确核心目标与次要目标，补全缺失背景。
-处理力度：中等，允许输入适度扩展。
-
-类别D — 复杂任务（充分处理）：
-目标模糊，或涉及多层次问题，或存在隐含假设。
-处理策略：重构需求，明确真实意图和约束条件，充分补全信息。
-处理力度：充分，必要时可显著扩展。
-
-类别E — 指代模糊（特殊处理）：
-输入包含"它"、"那个"、"继续"、"上次"等指代，且缺少完整上下文；或者上下文不足以推断指代对象。
-处理策略：从输入和上下文尽可能推断指代对象；若完全无法推断，输出开头标注"[注意：以下存在基于假设的指代]"，并自然融入假设内容。
-处理力度：适中，假设需明确标注，不做隐藏假设。
-
-类别F — 带文件输入：
-输入伴随文件上传。
-处理策略：输入中已包含文件名等信息（如 `/path/to/file.py`），需确保文件名被完整保留在输出中，不得省略、不得替换。输出中应明确标注"[相关文件：xxx]"标记，方便下游节点识别并定位缓存目录 `cached/` 中的实际文件。
-处理力度：最小化，文件名信息原样保留，标注格式固定为 `[相关文件：文件名]`。
-
-类别G — 极短输入（特殊处理）：
-输入少于5个字，如"报错"、"不懂"、"怎么做"。
-处理策略：结合是否有文件、是否有上下文来判断用户意图。若能推断意图，则补全需求后正常输出；若完全无法判断，则输出原始输入并补充引导性问题，确保对话可继续。
-处理力度：最小化，优先保证对话流畅进行。
-
-类别H — 混合语言输入：
-输入混杂中英文或其他语言。
-处理策略：统一语言环境，确保技术术语准确，需求描述清晰。
-处理力度：最小化，不改变实际内容。
-
-【优化维度（按需选用）】
-
-根据输入类别，从以下维度中选择性补充：
-
-- 核心意图：用户真正想要什么？表面需求和深层目的一致吗？
-- 技术上下文：涉及代码/系统/技术时，明确环境、版本、已知的约束
-- 文件上下文：如有文件，保留输入中已有的文件名信息，自然融入需求描述
-- 历史上下文：指代不清晰时给出假设并标注，不隐藏
-- 成功标准：用户怎么就算"完成了"
-- 约束条件：用户明确提到的限制条件
-
-【防过度优化（强制规则）】
-
-1. 输入已经是清晰需求描述 → 不再扩展，直接清理格式
-2. 输入已经是英文或中英混合的技术描述 → 保持原样，不翻译
-3. 输入包含具体文件名/函数名/变量名 → 原样保留，不解释
-4. 输入是对上一个问题的直接追问 → 最小化处理，不重复上文背景
-5. 任何情况下不添加输入中没有的新约束、新目标、新假设
-6. 上下文整合后不喧宾夺主，不能让上下文背景成为输出的主要内容
-
-判断标准：优化后的输入是否改变了用户的原始意图？改变了就不对。
+优先级4 - 复杂任务（需规划）：
+输入涉及多步骤、多文件、多个目标，或目标模糊需拆解。
+处理：重构为【规划输入】格式：
+  [目标] 用户想要完成什么
+  [输入] 用户提供了什么（文件/上下文/约束）
+  [步骤] 拆解的子任务（1、2、3...）
+  [要求] 明确成功标准和约束
+输出时【】括号保留，去掉内部标签文字。
 
 【禁止事项】
-
-- 禁止回答用户问题
-- 禁止生成方案、步骤、示例代码
-- 禁止改变或扩展用户的实际需求边界
-- 禁止输出 Markdown、列表、编号
-- 禁止在结果中加入"我认为"、"建议"、"可能"等主观表述
-- 禁止在类别A的情况下做扩展处理
-- 禁止对指代模糊处做隐蔽假设，必须显式标注
-- 禁止在输出中写"根据上文"、"结合上下文"等引用说明
+- 禁止直接回答问题、生成完整方案或代码
+- 禁止添加输入中没有的约束或目标
+- 禁止改变用户意图
+- 禁止输出Markdown、列表（规划输入除外）
+- 禁止写"根据上文"、"请根据"等引用说明
+- 禁止对类别A做扩展处理
 
 【输出格式】
-
-仅输出纯文本，不带任何标签、注释或额外说明。
-标注信息（如有假设标注）仅在绝对必要时出现，格式为一行独立标注。
-
-【示例】
-
-示例1 — 类别A（已优化）：
-用户输入：我需要一个Python函数，接收一个列表，返回其中所有偶数
-优化后：写一个Python函数，输入列表，输出其中的所有偶数
-
-示例2 — 类别B（简单任务）：
-用户输入：帮我看看这个接口怎么写比较好
-优化后：用户希望我分析一个接口的写法，从代码结构、可维护性和最佳实践角度给出建议
-
-示例3 — 类别D（复杂任务）：
-用户输入：做个聊天机器人
-优化后：用户需要构建一个支持多轮对话的AI聊天机器人，技术栈不限，需要支持文件上传和图片理解，具备上下文记忆能力，可接入外部API获取实时数据，请提供架构设计方案和技术选型建议
-
-示例4 — 类别E（指代模糊，有上下文）：
-上下文：用户上一次在实现一个用户登录模块，已完成注册功能
-当前输入：继续上面的，用另一种方式实现
-优化后：[注意：以下存在基于假设的指代]用户已完成登录模块的注册功能，现在需要用另一种方式实现登录接口的代码
-
-示例5 — 类别E（指代模糊，无上下文）：
-用户输入：继续上面的
-优化后：[注意：以下存在基于假设的指代]用户希望继续上文中提到的实现，改用另一种方式完成相同功能
-
-示例6 — 类别G（极短输入）：
-用户输入：报错
-优化后：[用户输入极简，可能需要更多信息]用户遇到一个错误，请查看并分析错误信息，指出原因和解决方法
-
-示例7 — 上下文整合（高相关）：
-上下文：用户上一次在实现一个用户登录模块，已完成注册功能
-当前输入：帮我看看这个登录接口的报错
-优化后：用户正在开发用户登录模块，上文已实现注册功能，现在登录接口出现报错，请分析报错原因并修复
-
-示例8 — 上下文整合（弱相关丢弃）：
-上下文：用户三天前问过一个Python列表排序的问题
-当前输入：帮我看看这个Promise怎么写
-优化后：用户有一个JavaScript Promise的编写问题，请帮忙写出符合需求的Promise代码
-
-示例9 — 上下文与输入矛盾：
-上下文：上文中提到用户想用React实现某个功能
-当前输入：帮我用Vue实现这个组件
-优化后：[上下文与当前输入存在差异，以当前输入为准]用户想用Vue实现一个组件，请提供Vue版本的组件实现代码
+简单输入：纯文本，保持原意
+带文件：[文件：xxx]\n文件内容\n用户问题
+复杂输入：【规划】\n[目标]...\n[输入]...\n[步骤]...\n[要求]...
 """
 
     return imp_ipt_llm_config, imp_ipt_llm_prompt
@@ -803,7 +712,7 @@ def get_llm_memory_config():
     presence_penalty = float(os.getenv("OPENAI_PRESENCE_PENALTY", "0.0"))
 
     llm_config = {
-        "model_name": model_name,
+        "model": model_name,
         "api_key": api_key,
         "base_url": base_url,
         "temperature": temperature,
@@ -865,5 +774,46 @@ def get_llm_memory_config():
 ```
 
 请输出更新后的完整记忆文件内容，不要输出其他内容。"""
+
+    return llm_config, prompt
+
+
+def get_model_vl_config():
+    from ChatMe.ChatMeConfig import get_model_vl_config as get_config
+
+    vl_config = get_config()
+
+    model_name = vl_config.get("model_name") or os.getenv("VL_MODEL_NAME", "Qwen3-VL-2B")
+    api_key = vl_config.get("api_key") or os.getenv("VL_API_KEY", "empty")
+    base_url = vl_config.get("base_url") or os.getenv("VL_BASE_URL", "http://127.0.0.1:8211/api/v1")
+
+    temperature = float(os.getenv("VL_TEMPERATURE", "0.8"))
+    max_tokens = int(os.getenv("VL_MAX_TOKENS", "8192"))
+    top_p = float(os.getenv("VL_TOP_P", "1.0"))
+    frequency_penalty = float(os.getenv("VL_FREQUENCY_PENALTY", "0.0"))
+    presence_penalty = float(os.getenv("VL_PRESENCE_PENALTY", "0.0"))
+
+    llm_config = {
+        "model": model_name,
+        "api_key": api_key,
+        "base_url": base_url,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "top_p": top_p,
+        "frequency_penalty": frequency_penalty,
+        "presence_penalty": presence_penalty,
+    }
+
+    prompt = """你是文件解析助手。根据输入的图片进行解析，输出对应格式的结果。
+
+【文件解析规则】
+- 解析文档（如PDF、Word等）：返回文本内容 + 图片解析（如有）
+- 解析图片（如照片、截图等）：只返回图片内容描述
+- 解析文本（如TXT等）：返回解析好的文本内容
+- 无文件时输出"无文件内容" 
+
+【输出格式】
+【文件：xxx】
+图片内容描述/文本内容/无文件内容"""
 
     return llm_config, prompt

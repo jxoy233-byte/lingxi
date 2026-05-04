@@ -144,6 +144,7 @@
 <script>
 export default {
   name: 'MessageInput',
+  expose: ['clearInput'],
   props: {
     isLoading: {
       type: Boolean,
@@ -599,6 +600,12 @@ export default {
       this.selectedFiles = []
       this.processedOutputs = []
       this.uploadQueue = []
+    },
+
+    // 清理输入框内容（切换/删除对话时调用）
+    clearInput() {
+      this.inputText = ''
+      this.clearFiles()
     },
 
     getFileExtension(filename) {

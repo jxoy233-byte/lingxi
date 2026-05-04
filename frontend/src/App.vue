@@ -34,6 +34,7 @@
         />
 
         <MessageInput
+          ref="messageInput"
           :is-loading="isLoading"
           @send="sendMessage"
         />
@@ -59,6 +60,23 @@
         class="web-preview-overlay"
         @click="showWebPreview = false"
       />
+
+      <!-- 图片预览弹窗 -->
+      <div
+        v-if="showImagePreview"
+        class="image-preview-overlay"
+        @click="showImagePreview = false"
+      >
+        <div class="image-preview-content" @click.stop>
+          <button class="image-preview-close" @click="showImagePreview = false">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"/>
+              <line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+          <img :src="imagePreviewUrl" alt="预览图片" class="image-preview-img" />
+        </div>
+      </div>
 
       <!-- 点击空白区域关闭历史记录面板 -->
       <div
@@ -126,6 +144,8 @@ export default {
       showWebPreview: false,
       webPreviewUrl: '',
       isResizingWebPreview: false,
+      showImagePreview: false,
+      imagePreviewUrl: '',
       responseStartTime: null,
       responseTimerInterval: null,
       currentResponseTime: 0,
@@ -181,23 +201,36 @@ export default {
     previewFile(file) {
       // 根据文件类型决定预览方式
       const fileType = (file.file_type || file.type || '').toUpperCase()
-      // 优先使用 iframe_url，其次是 preview_url，最后是 iframe_url（通用）
-      const previewUrl = file.iframe_url || file.preview_url || ''
       const suffix = (file.suffix || (file.name ? '.' + file.name.split('.').pop().toLowerCase() : '')).toLowerCase()
 
-      // 图片文件：直接使用 preview_url（base64 data URL）
+      // 图片文件：使用专用图片预览
       if (fileType === 'IMAGE' || (file.type && file.type.startsWith('image/'))) {
-        if (previewUrl) {
-          this.webPreviewUrl = previewUrl
-          this.showWebPreview = true
+        // 图片URL优先从preview_url获取，其次是image_content
+        let imageUrl = file.preview_url || ''
+        if (!imageUrl && file.image_content) {
+          if (typeof file.image_content === 'string') {
+            imageUrl = file.image_content
+          } else if (Array.isArray(file.image_content) && file.image_content.length > 0) {
+            const first = file.image_content[0]
+            if (typeof first === 'string') {
+              imageUrl = first
+            } else if (typeof first === 'object' && first.url) {
+              imageUrl = first.url
+            }
+          }
+        }
+        if (imageUrl) {
+          this.imagePreviewUrl = imageUrl
+          this.showImagePreview = true
         }
         return
       }
 
       // PDF 文件：使用 iframe 预览
       if (suffix === '.pdf' || fileType === 'DOCUMENT') {
-        if (previewUrl) {
-          this.webPreviewUrl = previewUrl
+        const pdfUrl = file.preview_url || file.iframe_url
+        if (pdfUrl) {
+          this.webPreviewUrl = pdfUrl
           this.showWebPreview = true
         }
         return
@@ -211,8 +244,9 @@ export default {
 
       // 文本文件：使用 iframe 或 content 显示
       if (fileType === 'TEXT' || (file.type && (file.type.startsWith('text/') || file.type === 'application/json'))) {
-        if (previewUrl) {
-          this.webPreviewUrl = previewUrl
+        const textPreviewUrl = file.preview_url || file.iframe_url
+        if (textPreviewUrl) {
+          this.webPreviewUrl = textPreviewUrl
           this.showWebPreview = true
         } else if (file.content) {
           // 如果有文本内容，创建一个 data URL
@@ -224,8 +258,9 @@ export default {
       }
 
       // 其他文件：尝试使用 preview_url
-      if (previewUrl) {
-        this.webPreviewUrl = previewUrl
+      const otherPreviewUrl = file.preview_url || file.iframe_url
+      if (otherPreviewUrl) {
+        this.webPreviewUrl = otherPreviewUrl
         this.showWebPreview = true
       }
     },
@@ -251,7 +286,7 @@ export default {
 
       const aiMessage = this.messages[aiIndex]
 
-      // 获取当前标题（用于回溯后恢复）
+      // 获取当前标题
       const currentTitle = aiMessage.additional_kwargs?.title ||
                           this.conversations.find(c => c.session_id === this.currentSessionId)?.title ||
                           '新对话'
@@ -264,7 +299,7 @@ export default {
         return
       }
 
-      // 检查是否是最新一轮对话（只有最新一轮才能重新对话）
+      // 检查是否是最新一轮对话
       let latestAiIndex = this.messages.length - 1
       while (latestAiIndex >= 0 && this.messages[latestAiIndex].role !== 'ai') {
         latestAiIndex--
@@ -275,24 +310,71 @@ export default {
         return
       }
 
-      // 向前遍历找到最近的用户消息（跳过 reasoning、tool_calls 等中间消息）
+      // 找到用户消息，保存 content 和 files
+      // 注意：flattenedMessages 可能将用户消息拆分为文件消息(_isFilesOnly)和文本消息(_isTextOnly)
+      // 需要找到包含 files 的那个消息
       let userMessageIndex = aiIndex - 1
-      while (userMessageIndex >= 0 && this.messages[userMessageIndex].role !== 'user') {
+      let userMessage = null
+      let restreamMessage = ''
+      let restreamProcessedOutputs = []
+
+      // 向前查找用户消息
+      while (userMessageIndex >= 0) {
+        const msg = this.messages[userMessageIndex]
+        if (msg.role === 'user') {
+          // 如果这个消息有 files，优先使用这个
+          if (msg.files && msg.files.length > 0) {
+            userMessage = msg
+            restreamProcessedOutputs = msg.files || []
+            // 尝试找相邻的文本消息（_isTextOnly）获取文本内容
+            if (userMessageIndex + 1 < this.messages.length &&
+                this.messages[userMessageIndex + 1].role === 'user' &&
+                this.messages[userMessageIndex + 1]._isTextOnly) {
+              restreamMessage = (this.messages[userMessageIndex + 1].content || '').trim()
+            } else {
+              restreamMessage = (msg.content || '').trim()
+            }
+            break
+          }
+          // 如果是 _isTextOnly 但没有文件消息在其后面，继续往前找
+          if (msg._isTextOnly && (!msg.files || msg.files.length === 0)) {
+            restreamMessage = (msg.content || '').trim()
+            // 往前找一个有 files 的消息
+            let fileMsgIndex = userMessageIndex - 1
+            while (fileMsgIndex >= 0) {
+              const fileMsg = this.messages[fileMsgIndex]
+              if (fileMsg.role === 'user' && fileMsg._isFilesOnly && fileMsg.files && fileMsg.files.length > 0) {
+                userMessage = fileMsg
+                restreamProcessedOutputs = fileMsg.files || []
+                break
+              }
+              if (fileMsg.role === 'user' && !fileMsg._isFilesOnly) {
+                break
+              }
+              fileMsgIndex--
+            }
+            if (userMessage) break
+          }
+          // 普通用户消息（没有 _isFilesOnly/_isTextOnly 标记）
+          if (!msg._isFilesOnly && !msg._isTextOnly) {
+            userMessage = msg
+            restreamMessage = (msg.content || '').trim()
+            restreamProcessedOutputs = msg.files || []
+            break
+          }
+        }
         userMessageIndex--
       }
-      if (userMessageIndex < 0) {
+
+      if (!userMessage) {
         console.error('未找到对应的用户消息')
         return
       }
-      const userMessage = this.messages[userMessageIndex]
-
-      const message = (userMessage.content || '').trim()
-      const processedOutputs = userMessage.files || []
 
       const requestSessionId = this.currentSessionId
 
       try {
-        // 1. 调用 backtrack API 回溯状态（等待完成）
+        // 1. 调用 backtrack API
         const backtrackResponse = await fetch(`/chat/${requestSessionId}/backtrack`, {
           method: 'POST',
           headers: {
@@ -307,7 +389,7 @@ export default {
           throw new Error('回溯失败')
         }
 
-        // 2. 调用 get_conversation 获取回溯后的新状态
+        // 2. 调用 get_conversation 获取回溯后的历史消息
         const convResponse = await fetch(`/chat/${requestSessionId}/conversation`)
         if (!convResponse.ok) {
           throw new Error('获取回溯后状态失败')
@@ -316,16 +398,15 @@ export default {
         this.$refs.messageList?.suppressNextScroll()
         this.messages = this.processConversationMessages(conversation.messages)
 
-        // 3. 立即显示用户消息（用户体验优化）
+        // 3. 将用户消息添加回 messages（backtrack 后的对话不包含当前输入）
         this.messages.push({
           role: 'user',
-          content: message,
-          files: processedOutputs,
+          content: restreamMessage,
+          files: restreamProcessedOutputs,
           additional_kwargs: {}
         })
-        this.$refs.messageList?.scrollToBottom(true)
 
-        // 4. 调用 message_stream 重新发送消息
+        // 4. 添加 AI 消息占位
         this.isLoading = true
         this.currentResponseTime = 0
 
@@ -344,15 +425,16 @@ export default {
         this.startResponseTimer()
         this.$refs.messageList?.scrollToBottom(true)
 
+        // 5. 调用 message_stream
         const streamResponse = await fetch('/chat/', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({
-            message: message,
+            message: restreamMessage,
             session_id: requestSessionId,
-            processed_outputs: processedOutputs
+            processed_outputs: restreamProcessedOutputs
           })
         })
 
@@ -499,12 +581,33 @@ export default {
       this.displayCount += 10
     },
     createNewChat() {
+      // 清理正在加载的状态
+      this.cleanupLoadingState()
+      // 清理输入框和文件
+      this.$refs.messageInput?.clearInput()
+
       this.currentSessionId = null
       this.messages = []
       // 更新 URL 到根路径
       if (this.$route.path !== '/') {
         this.$router.push('/')
       }
+    },
+    cleanupLoadingState() {
+      // 停止计时器
+      this.stopResponseTimer()
+
+      // 如果有正在思考的 AI 消息（正在流式输出），移除它
+      if (this.isLoading && this.messages.length > 0) {
+        const lastMsg = this.messages[this.messages.length - 1]
+        if (lastMsg?.role === 'ai' && lastMsg?.streaming) {
+          this.messages.pop()
+        }
+      }
+
+      this.isLoading = false
+      this.isRestreaming = false
+      this.currentAiMessageIndex = null
     },
     async loadConversation(sessionId) {
       // 防止加载无效的 sessionId
@@ -516,6 +619,11 @@ export default {
       if (sessionId === this.currentSessionId && this.messages.length > 0) {
         return
       }
+
+      // 清理之前正在加载的状态
+      this.cleanupLoadingState()
+      // 清理输入框和文件
+      this.$refs.messageInput?.clearInput()
 
       try {
         const response = await fetch(`/chat/${sessionId}/conversation`)
@@ -577,6 +685,9 @@ export default {
     async confirmDelete() {
       if (!this.deleteTargetId) return
 
+      // 清理正在加载的状态
+      this.cleanupLoadingState()
+
       try {
         const response = await fetch(`/chat/${this.deleteTargetId}/clear`, {
           method: 'DELETE'
@@ -625,26 +736,34 @@ export default {
 
       const userMessage = {
         role: 'user',
-        content: message
+        content: message,
+        additional_kwargs: {}
       }
 
       if (files && files.length > 0) {
-        userMessage.files = files.map(file => {
+        userMessage.additional_kwargs.is_file = true
+        userMessage.files = files.map((file, index) => {
+          // 合并原始文件信息和处理结果
+          const processed = processedOutputs && processedOutputs[index] ? processedOutputs[index] : {}
           // 直接使用后端返回的 OutputFormat 扁平结构
           const fileInfo = {
-            name: file.name || file.file_name || file.filename,
+            name: file.name || file.file_name || file.filename || processed.name,
             size: file.size || file.file_size || 0,
-            type: file.type || file.file_type || file.content_type,
-            preview: file.preview || file.preview_url || null,
-            iframe_url: file.iframe_url || null,
-            content: file.content || null,
-            fileId: file.file_id || file.fileId || null,
-            file_type: file.type || file.file_type || null,
-            preview_method: file.preview_method || 'download',
-            preview_hint: file.preview_hint || null,
-            size_human: file.size_human || file.file_size_human || null,
-            suffix: file.suffix || null,
-            is_previewable: file.is_previewable !== undefined ? file.is_previewable : true
+            type: file.type || file.file_type || file.content_type || processed.type,
+            preview: file.preview || file.preview_url || processed.preview || null,
+            iframe_url: file.iframe_url || processed.iframe_url || null,
+            content: file.content || processed.content || null,
+            fileId: file.file_id || file.fileId || processed.file_id || null,
+            file_type: file.type || file.file_type || processed.file_type || null,
+            preview_method: file.preview_method || processed.preview_method || 'download',
+            preview_hint: file.preview_hint || processed.preview_hint || null,
+            size_human: file.size_human || file.file_size_human || processed.size_human || null,
+            suffix: file.suffix || processed.suffix || null,
+            is_previewable: file.is_previewable !== undefined ? file.is_previewable : (processed.is_previewable !== undefined ? processed.is_previewable : true),
+            // 后端处理后的字段
+            text_content: processed.text_content || null,
+            image_content: processed.image_content || null,
+            is_oss: processed.is_oss || false
           }
 
           // 如果没有 preview，图片类型则创建本地预览
@@ -1016,7 +1135,9 @@ export default {
 
         if (msg.role === 'user') {
           const processedMsg = { ...msg }
+          // 确保 is_file 标志正确设置
           if (msg.files && msg.files.length > 0) {
+            processedMsg.additional_kwargs = { ...processedMsg.additional_kwargs, is_file: true }
             processedMsg.files = msg.files.map(file => {
               // 直接使用后端返回的 OutputFormat 扁平结构
               const fileInfo = {
@@ -1032,7 +1153,11 @@ export default {
                 preview_hint: file.preview_hint || '不支持在线预览，请下载后查看',
                 size_human: file.size_human || file.file_size_human || null,
                 suffix: file.suffix || null,
-                is_previewable: file.is_previewable !== undefined ? file.is_previewable : true
+                is_previewable: file.is_previewable !== undefined ? file.is_previewable : true,
+                // 后端需要的字段
+                text_content: file.text_content || null,
+                image_content: file.image_content || null,
+                is_oss: file.is_oss || false
               }
 
               // 处理文本文件 content
@@ -1251,6 +1376,64 @@ body {
   position: fixed;
   inset: 0;
   z-index: 99;
+}
+
+/* 图片预览弹窗 */
+.image-preview-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.9);
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+  animation: fadeIn 0.2s;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.image-preview-content {
+  position: relative;
+  max-width: 90vw;
+  max-height: 90vh;
+  animation: scaleIn 0.2s;
+}
+
+@keyframes scaleIn {
+  from { transform: scale(0.9); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+.image-preview-close {
+  position: absolute;
+  top: -40px;
+  right: 0;
+  width: 36px;
+  height: 36px;
+  border: none;
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s;
+}
+
+.image-preview-close:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.image-preview-img {
+  max-width: 100%;
+  max-height: 90vh;
+  object-fit: contain;
+  border-radius: 8px;
 }
 
 ::-webkit-scrollbar {

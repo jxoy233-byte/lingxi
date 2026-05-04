@@ -33,7 +33,7 @@ env/
 *~
 
 # Environment variables
-.env.1
+test/.env.1
 
 # Testing
 .pytest_cache/

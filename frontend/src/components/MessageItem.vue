@@ -1,8 +1,8 @@
 <template>
-  <div :class="['message', message.role === 'user' ? 'user-message' : 'ai-message']">
-    <div :class="['message-wrapper', message.role === 'user' ? 'user-wrapper' : 'ai-wrapper']">
+  <div :class="['message', message.role === 'user' ? 'user-message' : 'ai-message', (message.role === 'user' && message.additional_kwargs?.is_file && message.files?.length) ? 'files-only-message' : '']">
+    <div :class="['message-wrapper', message.role === 'user' ? 'user-wrapper' : 'ai-wrapper', (message.role === 'user' && message.additional_kwargs?.is_file && message.files?.length) ? 'user-file-wrapper' : '']">
       <!-- 用户消息的复制按钮 — 气泡左侧 -->
-      <div v-if="message.role === 'user' && message.content" class="user-message-copy">
+      <div v-if="message.role === 'user' && message.content && !(message.additional_kwargs?.is_file && parsedFiles.length > 0)" class="user-message-copy">
         <button
           class="user-copy-button"
           :class="{ 'copy-success': userCopied }"
@@ -19,8 +19,92 @@
         </button>
       </div>
 
-      <div class="message-content">
-        <!-- 文件附件显示 -->
+      <!-- 用户文件消息：独立显示在message-content外 -->
+      <div
+        v-if="message.role === 'user' && message.additional_kwargs?.is_file && message.files?.length"
+        class="user-files-display"
+      >
+        <!-- 文件网格显示 -->
+        <div class="file-grid">
+          <div
+            v-for="(file, index) in (message.files || message.additional_kwargs?.files || [])"
+            :key="index"
+            class="file-card"
+            :class="{ active: activeFileIndex === index }"
+            @click="handleFileCardClick(file, index)"
+          >
+            <!-- 图片文件：缩略图 -->
+            <div v-if="isImageFileType(file)" class="file-thumbnail image-thumbnail">
+              <img
+                v-if="getFilePreview(file)"
+                :src="getFilePreview(file)"
+                :alt="file.name"
+                class="thumbnail-img"
+              />
+              <div v-else class="file-icon-wrapper">
+                <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                  <circle cx="8.5" cy="8.5" r="1.5"/>
+                  <polyline points="21 15 16 10 5 21"/>
+                </svg>
+              </div>
+            </div>
+            <!-- 文本文件：文档图标 -->
+            <div v-else-if="isTextFileType(file)" class="file-thumbnail text-thumbnail">
+              <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <polyline points="14 2 14 8 20 8"/>
+                <line x1="16" y1="13" x2="8" y2="13"/>
+                <line x1="16" y1="17" x2="8" y2="17"/>
+                <polyline points="10 9 9 9 8 9"/>
+              </svg>
+            </div>
+            <!-- PDF文件 -->
+            <div v-else-if="isPdfFileType(file)" class="file-thumbnail pdf-thumbnail">
+              <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <polyline points="14 2 14 8 20 8"/>
+                <line x1="16" y1="13" x2="8" y2="13"/>
+                <line x1="16" y1="17" x2="8" y2="17"/>
+                <polyline points="10 9 9 9 8 9"/>
+              </svg>
+            </div>
+            <!-- 其他文件 -->
+            <div v-else class="file-thumbnail generic-thumbnail">
+              <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
+                <polyline points="13 2 13 9 20 9"/>
+              </svg>
+            </div>
+            <!-- 文件名 -->
+            <div class="file-name">{{ file.name || `文件${index + 1}` }}</div>
+            <!-- 文件大小 -->
+            <div v-if="file.size_human" class="file-size-label">{{ file.size_human }}</div>
+          </div>
+        </div>
+
+        <!-- 当前选中文件的预览内容（文本文件显示解析内容） -->
+        <div v-if="activeParsedFile && hasTextPreview(activeParsedFile)" class="file-preview-panel">
+          <div class="preview-header">
+            <span class="preview-title">{{ activeParsedFile.name }}</span>
+            <span class="preview-type">{{ getFileTypeLabel(activeParsedFile.type) }}</span>
+          </div>
+          <div class="preview-body">
+            <div
+              v-if="activeParsedFile.text_content"
+              class="preview-text-content"
+              v-html="renderFileContent(activeParsedFile.text_content)"
+            ></div>
+            <div v-else-if="activeParsedFile.content" class="preview-text-content">
+              {{ activeParsedFile.content }}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 普通消息内容区域（AI消息或非文件用户消息） -->
+      <div v-else class="message-content">
+        <!-- 文件附件显示（仅AI消息或非文件用户消息） -->
         <div v-if="message.files && message.files.length > 0" class="message-files">
           <div
             v-for="(file, index) in message.files"
@@ -115,8 +199,8 @@
           </div>
         </div>
 
-        <!-- 消息文本 -->
-        <div v-if="message.content" class="message-text" v-html="renderedContent" @click.capture="handleLinkClick"></div>
+        <!-- 消息文本（文件消息不显示content） -->
+        <div v-if="message.content && !message.additional_kwargs?.is_file" class="message-text" v-html="renderedContent" @click.capture="handleLinkClick"></div>
       </div>
 
       <!-- 操作按钮组：AI 消息下方，hover 显示 -->
@@ -180,6 +264,35 @@ renderer.link = function(token) {
   return `<a href="${cleanHref}"${titleAttr} target="_blank" rel="noopener noreferrer">${text}</a>`
 }
 
+// 自定义图片渲染器，支持懒加载和路径处理
+renderer.image = function(token) {
+  let src = token.href || ''
+  const alt = token.text || ''
+  const title = token.title || ''
+
+  if (!src) return alt || ''
+
+  // 处理相对路径，拼接服务器基础 URL
+  if (src.startsWith('./')) {
+    // 相对路径：拼接当前域名 + /chat/static/ 前缀
+    src = `${window.location.origin}/chat/static/${src.slice(2)}`
+  } else if (src.startsWith('/Users/jx')) {
+    // macOS 本地路径：/Users/jx/coding/projects/ChatMe/backend/cached/...
+    // 转换成 /chat/static/cached/...
+    src = src.replace('/Users/jx/coding/projects/ChatMe/backend', '/chat/static')
+    src = `${window.location.origin}${src}`
+  } else if (src.startsWith('/')) {
+    // 其他以 / 开头的绝对路径
+    src = `${window.location.origin}${src}`
+  } else if (src.startsWith('http')) {
+    // 已经是完整 URL（OSS 等），直接使用
+  }
+
+  const titleAttr = title ? ` title="${title}"` : ''
+  // 添加 loading="lazy" 实现懒加载
+  return `<img src="${src}" alt="${alt}"${titleAttr} loading="lazy" class="markdown-image" onclick="window.markdownImageClick && window.markdownImageClick(this)" />`
+}
+
 renderer.code = function(token) {
   // marked v5+ 接收 token 对象
   const code = token.text || ''
@@ -234,7 +347,8 @@ export default {
       userCopied: false,
       // 如果消息已完成（thinkingDone: true），默认折叠思考区块
       thinkingCollapsed: this.message.thinkingDone === true,
-      expandedTools: {}
+      expandedTools: {},
+      activeFileIndex: 0
     }
   },
   computed: {
@@ -272,6 +386,19 @@ export default {
       return (this.message.reasoning && this.message.reasoning.length > 0) ||
              (this.message.toolCalls && this.message.toolCalls.length > 0) ||
              (this.message.additional_kwargs?.type === 'REASONING')
+    },
+    parsedFiles() {
+      // 文件数据可能在 message.files 或 message.additional_kwargs.files 中
+      const files = this.message.files || this.message.additional_kwargs?.files || []
+      if (!Array.isArray(files)) return []
+      return files
+    },
+    activeParsedFile() {
+      // 直接从 message.files 或 additional_kwargs.files 获取
+      const files = this.message.files || this.message.additional_kwargs?.files || []
+      if (!Array.isArray(files) || files.length === 0) return null
+      const idx = Math.min(this.activeFileIndex, files.length - 1)
+      return files[idx] || null
     }
   },
   watch: {
@@ -297,37 +424,74 @@ export default {
     }
   },
   methods: {
-    // 预处理原始文本 - 清理可能破坏 Markdown 解析的字符，但保留 [text](url) 语法
+    // 预处理原始文本 - 只处理裸 URL，让 marked 原样处理 markdown 图片和链接
     preprocessContent(content) {
       if (typeof content !== 'string') return content
 
-      // 策略：先用占位符保护已有的 Markdown 链接语法
-      // 匹配 [text](url) 格式，在 preprocess 阶段跳过这类 URL
+      // 策略：找到所有 markdown 图片和链接语法的位置，
+      // 只处理不在这些语法内的裸 URL，避免破坏 markdown 语法
 
-      // 临时替换 Markdown 链接为占位符
-      const markdownLinkRegex = /\[([^\]]*)\]\(([^)]+)\)/g
-      const placeholders = []
-      let index = 0
+      // 找到所有需要跳过的 markdown 区域
+      const skipRanges = []
 
-      let result = content.replace(markdownLinkRegex, (match, text, url) => {
-        const placeholder = `__MARKDOWN_LINK_${index}__`
-        placeholders.push({ placeholder, text, url })
-        index++
-        return placeholder
-      })
+      // 匹配图片 ![alt](url) 和链接 [text](url)
+      // 使用括号计数找到正确的结束位置
+      const findMarkdownRanges = (regex) => {
+        let i = 0
+        while (i < content.length) {
+          const match = content.slice(i).match(regex)
+          if (!match || match.index === undefined) break
 
-      // 现在只处理不在 Markdown 链接内的纯 URL（裸 URL）
-      const urlRegex = /\b(https?|ftp|file):\/\/[-A-Za-z0-9+&@#\/%?=~_|!:,;.]+[-A-Za-z0-9+&@#\/%=~_|]/gi
-      result = result.replace(urlRegex, (url) => {
-        return `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`
-      })
+          const start = i + match.index
+          const firstParen = content.indexOf('(', start)
+          if (firstParen === -1) break
 
-      // 恢复 Markdown 链接
-      placeholders.forEach(({ placeholder, text, url }) => {
-        // 清理 URL 末尾的中文标点
-        let cleanUrl = url.replace(/[，。、；：？！""''（）【】《》…——]+$/, '')
-        result = result.replace(placeholder, `<a href="${cleanUrl}" target="_blank" rel="noopener noreferrer">${text}</a>`)
-      })
+          // 括号计数找到匹配的 )
+          let depth = 1
+          let j = firstParen + 1
+          while (j < content.length && depth > 0) {
+            if (content[j] === '(') depth++
+            else if (content[j] === ')') depth--
+            j++
+          }
+          const end = j
+
+          skipRanges.push({ start, end })
+          i = end
+        }
+      }
+
+      findMarkdownRanges(/!?\[/)
+      findMarkdownRanges(/(?<!!)\[/)
+
+      // 去重并排序
+      skipRanges.sort((a, b) => a.start - b.start)
+
+      // 替换裸 URL（不在 markdown 语法内的）
+      const urlRegex = /\b(https?|ftp|file):\/\/[^\s"'<>\[\]]+/gi
+      let result = ''
+      let lastEnd = 0
+
+      for (const match of content.matchAll(urlRegex)) {
+        const matchStart = match.index
+        const matchEnd = match.index + match[0].length
+
+        // 检查是否在需要跳过的区域内
+        const inSkipRange = skipRanges.some(
+          range => matchStart >= range.start && matchStart < range.end
+        )
+
+        if (inSkipRange) {
+          continue
+        }
+
+        // 添加匹配前的文本
+        result += content.slice(lastEnd, matchStart)
+        // 添加转换后的 URL
+        result += `<a href="${match[0]}" target="_blank" rel="noopener noreferrer">${match[0]}</a>`
+        lastEnd = matchEnd
+      }
+      result += content.slice(lastEnd)
 
       return result
     },
@@ -476,6 +640,126 @@ export default {
       } catch {
         return String(args)
       }
+    },
+    getFileTypeLabel(type) {
+      if (!type) return '未知'
+      const typeMap = {
+        'image': '图片',
+        'pdf': 'PDF',
+        'doc': 'Word',
+        'docx': 'Word',
+        'text': '文本',
+        'txt': '文本',
+        'csv': 'CSV',
+        'json': 'JSON',
+        'markdown': 'Markdown',
+        'md': 'Markdown'
+      }
+      const lowerType = (type || '').toLowerCase()
+      for (const [key, label] of Object.entries(typeMap)) {
+        if (lowerType.includes(key)) return label
+      }
+      return type || '未知'
+    },
+    renderFileContent(content) {
+      if (!content) return ''
+      // 使用 marked 渲染 markdown 内容
+      try {
+        return marked(content)
+      } catch (e) {
+        console.warn('文件内容 markdown 渲染失败:', e)
+        return this.escapeHtml(content)
+      }
+    },
+    handleImageClick(src) {
+      // 触发图片预览事件
+      if (src) {
+        this.$emit('preview-file', { preview: src, url: src, name: '图片预览' })
+      }
+    },
+    // 文件类型判断方法
+    isImageFileType(file) {
+      if (!file) return false
+      const type = (file.type || file.file_type || '').toUpperCase()
+      return type === 'IMAGE' || (file.type && file.type.startsWith('image/'))
+    },
+    isTextFileType(file) {
+      if (!file) return false
+      const type = (file.type || file.file_type || '').toUpperCase()
+      return type === 'TEXT' || (file.type && file.type.startsWith('text/'))
+    },
+    isPdfFileType(file) {
+      if (!file) return false
+      const suffix = (file.suffix || '').toLowerCase()
+      const type = (file.type || '').toLowerCase()
+      return suffix === '.pdf' || type.includes('pdf')
+    },
+    getFilePreview(file) {
+      if (!file) return null
+      // 图片预览URL优先级
+      if (file.preview) return file.preview
+      if (file.preview_url) return file.preview_url
+      if (file.image_content) {
+        if (typeof file.image_content === 'string') return file.image_content
+        if (Array.isArray(file.image_content)) {
+          // 如果是数组，取第一个元素的url
+          if (file.image_content.length > 0) {
+            const first = file.image_content[0]
+            if (typeof first === 'string') return first
+            if (typeof first === 'object' && first.url) return first.url
+          }
+        }
+      }
+      return null
+    },
+    hasTextPreview(file) {
+      // 检查文件是否有文本预览内容（TEXT类型且有text_content或content）
+      if (!file) return false
+      const isText = file.type === 'TEXT' || (file.type && file.type.startsWith('text/'))
+      return isText && (file.text_content || file.content)
+    },
+    handleFileCardClick(file, index) {
+      // 记录当前选中的文件索引
+      this.activeFileIndex = index
+
+      // 根据文件类型决定处理方式
+      const isImage = this.isImageFileType(file)
+      const isText = this.isTextFileType(file)
+
+      // 图片文件：直接弹出预览
+      if (isImage) {
+        const previewUrl = this.getFilePreview(file)
+        if (previewUrl) {
+          this.$emit('preview-file', {
+            preview_url: previewUrl,
+            url: previewUrl,
+            name: file.name,
+            type: file.type,
+            file_type: file.file_type || file.type,
+            suffix: file.suffix,
+            image_content: file.image_content
+          })
+        }
+      }
+      // 文本文件：如果有内容则显示预览面板，不需要弹出
+      else if (isText && (file.text_content || file.content)) {
+        // 已经在上面的 v-if 中通过 hasTextPreview 控制显示
+      }
+      // PDF或其他文件：尝试用 iframe 或 preview_url 预览
+      else {
+        const previewUrl = file.iframe_url || file.preview_url
+        if (previewUrl) {
+          this.$emit('preview-file', {
+            preview_url: previewUrl,
+            url: previewUrl,
+            name: file.name,
+            type: file.type,
+            file_type: file.file_type,
+            suffix: file.suffix,
+            preview_method: file.preview_method
+          })
+        }
+      }
     }
   }
 }
@@ -491,6 +775,20 @@ export default {
 
 .user-message {
   align-items: flex-end;
+}
+
+/* 仅文件消息的用户消息，宽度自适应内容 */
+.files-only-message .user-wrapper {
+  max-width: 80%;
+}
+
+/* 文件消息隐藏气泡框但保留内容显示 */
+.files-only-message .message-content {
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  width: auto !important;
+  max-width: 100% !important;
 }
 
 .ai-message {
@@ -515,6 +813,12 @@ export default {
   position: relative;
 }
 
+/* 用户文件消息 wrapper：全宽显示 */
+.user-file-wrapper {
+  max-width: 100%;
+  align-items: flex-start;
+}
+
 .message-content {
   border-radius: 16px;
   position: relative;
@@ -528,7 +832,7 @@ export default {
   width: 100%;
 }
 
-/* User：圆角气泡 */
+/* User：圆角气泡（文件消息隐藏气泡背景） */
 .user-message .message-content {
   background-color: var(--user-msg-bg);
   border: 1px solid var(--user-msg-border);
@@ -536,6 +840,17 @@ export default {
   width: fit-content;
   max-width: 100%;
   position: relative;
+}
+
+/* 文件用户消息隐藏气泡 */
+.user-message.files-only-message .message-content,
+.user-message:has(.user-files-display) .message-content {
+  display: none;
+}
+
+/* 当message-wrapper包含user-files-display时，隐藏同级的message-content */
+.user-message .message-wrapper:has(.user-files-display) > .message-content {
+  display: none;
 }
 
 .user-message:hover .user-message-copy {
@@ -852,6 +1167,14 @@ export default {
   margin: 12px 0;
 }
 
+/* Markdown 图片自适应大小（最大高度限制，保持比例） */
+.message-text :deep(.markdown-image) {
+  max-height: 150px;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+}
+
 /* 操作按钮组：AI 文本下方，hover 显示 */
 .action-buttons {
   display: flex;
@@ -932,6 +1255,375 @@ export default {
 .user-copy-button.copy-success:hover {
   background: var(--button-bg);
   color: white;
+}
+
+/* 用户文件消息显示区域 - 豆包风格 */
+.user-files-display {
+  width: 100%;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+/* 用户文件消息中的文本内容 */
+.user-message-text {
+  padding: 12px 16px;
+  border-top: 1px solid var(--border-color);
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+/* 文件网格（豆包风格） */
+.file-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+  gap: 12px;
+  padding: 16px;
+}
+
+/* 文件卡片 */
+.file-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 12px 8px;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+}
+
+.file-card:hover {
+  background: var(--bg-hover);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+.file-card.active {
+  border-color: var(--button-bg);
+  background: color-mix(in srgb, var(--button-bg) 8%, transparent);
+}
+
+/* 文件缩略图 */
+.file-thumbnail {
+  width: 56px;
+  height: 56px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 8px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.image-thumbnail {
+  background: var(--bg-primary);
+}
+
+.image-thumbnail .thumbnail-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.text-thumbnail {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+}
+
+.pdf-thumbnail {
+  background: linear-gradient(135deg, #ff6b6b 0%, #ee5a5a 100%);
+  color: white;
+}
+
+.generic-thumbnail {
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+}
+
+.file-icon-wrapper {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  color: var(--text-secondary);
+}
+
+/* 文件名 */
+.file-name {
+  font-size: 11px;
+  color: var(--text-primary);
+  text-align: center;
+  max-width: 80px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 文件大小 */
+.file-size-label {
+  font-size: 10px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+/* 文件预览面板（文本文件） */
+.file-preview-panel {
+  border-top: 1px solid var(--border-color);
+  padding: 12px 16px;
+  max-height: 250px;
+  overflow-y: auto;
+}
+
+.preview-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.preview-title {
+  font-weight: 500;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.preview-type {
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--bg-hover);
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+.preview-body {
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.preview-text-content {
+  color: var(--text-primary);
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+.preview-text-content :deep(pre) {
+  background: var(--code-block-bg);
+  padding: 12px;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-size: 12px;
+}
+
+.preview-text-content :deep(code) {
+  background: var(--code-inline-bg);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+
+.preview-empty {
+  color: var(--text-secondary);
+  font-size: 13px;
+  text-align: center;
+  padding: 20px;
+}
+
+/* 文件选择器标签（保留兼容性） */
+.file-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 8px 8px 0;
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border-color);
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+
+.file-tab {
+  padding: 6px 14px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  border-radius: 6px 6px 0 0;
+  transition: all 0.15s;
+  white-space: nowrap;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-tab:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.file-tab.active {
+  background: var(--bg-secondary);
+  color: var(--button-bg);
+  font-weight: 500;
+}
+
+/* 文件内容视图 */
+.file-content-view {
+  padding: 12px 16px;
+  min-height: 120px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.file-content-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.file-content-name {
+  font-weight: 500;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.file-content-type {
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--bg-hover);
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+.file-content-body {
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--text-primary);
+  word-wrap: break-word;
+}
+
+/* 文件内容 markdown 样式 */
+.file-content-body :deep(h1),
+.file-content-body :deep(h2),
+.file-content-body :deep(h3),
+.file-content-body :deep(h4) {
+  margin: 16px 0 10px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.file-content-body :deep(h1) { font-size: 1.3em; }
+.file-content-body :deep(h2) { font-size: 1.2em; }
+.file-content-body :deep(h3) { font-size: 1.1em; }
+
+.file-content-body :deep(p) {
+  margin: 8px 0;
+}
+
+.file-content-body :deep(code) {
+  background: var(--code-inline-bg);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: 'SF Mono', 'Monaco', 'Consolas', 'Courier New', monospace;
+  font-size: 0.85em;
+  color: var(--code-inline-color);
+}
+
+.file-content-body :deep(pre) {
+  background: var(--code-block-bg);
+  padding: 12px 16px;
+  border-radius: 8px;
+  overflow-x: auto;
+  margin: 12px 0;
+  border: 1px solid var(--code-block-border);
+}
+
+.file-content-body :deep(pre code) {
+  background: transparent;
+  padding: 0;
+  font-size: 13px;
+  color: var(--code-block-text);
+}
+
+.file-content-body :deep(ul),
+.file-content-body :deep(ol) {
+  margin: 8px 0;
+  padding-left: 24px;
+}
+
+.file-content-body :deep(li) {
+  margin: 4px 0;
+}
+
+.file-content-body :deep(img) {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+  margin: 8px 0;
+  cursor: pointer;
+}
+
+.file-content-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.file-content-img {
+  max-width: 200px;
+  max-height: 200px;
+  object-fit: cover;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: transform 0.2s;
+}
+
+.file-content-img:hover {
+  transform: scale(1.02);
+}
+
+.file-content-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+/* 文件预览区域 */
+.file-content-preview {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.file-preview-img {
+  max-width: 100%;
+  max-height: 400px;
+  object-fit: contain;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.file-preview-iframe {
+  width: 100%;
+  height: 400px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
 }
 
 @keyframes live-pulse {

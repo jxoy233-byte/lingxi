@@ -1,8 +1,10 @@
 import base64
 import os
 import uuid
+import re
 from dataclasses import dataclass
 from pathlib import Path
+from datetime import datetime
 
 from tempfile import NamedTemporaryFile
 from typing import List, Optional, Dict, Annotated, BinaryIO, Union
@@ -21,6 +23,58 @@ from starlette.datastructures import Headers
 
 from ChatMe.ChatService.FilesLoaders.config import FILE_ALLOWED_TYPES
 from ChatMe.LoggingManager.logging_config import get_logger
+from ChatMe.ChatMeConfig.core import get_oss_config, get_oss_bucket, get_oss_endpoint
+
+
+def _upload_local_image_to_oss(local_path: str, original_filename: str = None) -> Optional[str]:
+    """
+    上传本地图片到 OSS，返回 OSS URL
+
+    Args:
+        local_path: 本地文件路径（如 /Users/jx/.../Image_10.png）
+        original_filename: 原始文件名，用于生成 OSS key
+
+    Returns:
+        OSS URL 字符串，失败返回 None
+    """
+    try:
+        import oss2
+
+        oss_cfg = get_oss_config()
+        access_key_id = oss_cfg.get("access_key_id")
+        access_key_secret = oss_cfg.get("access_key_secret")
+        bucket_name = oss_cfg.get("bucket")
+        endpoint = oss_cfg.get("endpoint")
+
+        if not all([access_key_id, access_key_secret, bucket_name, endpoint]):
+            logger = get_logger("FilesLoaders")
+            logger.warning(f"OSS 配置不完整，跳过上传: {local_path}")
+            return None
+
+        # 生成 OSS key：chatme/{年份月份}/{uuid}_{原文件名}
+        date_prefix = datetime.now().strftime("%Y-%m")
+        filename = original_filename or os.path.basename(local_path)
+        oss_key = f"chatme/{date_prefix}/{uuid.uuid4().hex[:8]}_{filename}"
+
+        # 上传到 OSS
+        auth = oss2.Auth(access_key_id, access_key_secret)
+        bucket = oss2.Bucket(auth, endpoint, bucket_name)
+        bucket.put_object_from_file(oss_key, local_path)
+
+        # 返回 OSS URL
+        oss_url = f"https://{bucket_name}.{endpoint.replace('https://', '')}/{oss_key}"
+        logger = get_logger("FilesLoaders")
+        logger.info(f"图片上传 OSS 成功: {local_path} -> {oss_url}")
+        return oss_url
+
+    except ImportError:
+        logger = get_logger("FilesLoaders")
+        logger.warning(f"oss2 模块未安装，无法上传到 OSS: {local_path}")
+        return None
+    except Exception as e:
+        logger = get_logger("FilesLoaders")
+        logger.error(f"上传图片到 OSS 失败: {local_path}, 错误: {e}")
+        return None
 
 class UploadFileWithId(UploadFile):
     """
@@ -66,7 +120,10 @@ class UploadFileWithId(UploadFile):
 class OutputFormat:
     # === 内容字段（用于 AI 处理 / message_stream）===
     text_content: Annotated[Optional[str], "文本文件内容"] = None
-    image_content: Annotated[Optional[Union[str, List[dict]]], "图片 base64 或文档图片列表"] = None
+    image_content: Annotated[Optional[Union[str, List[str]]], "图片 base64 或文档图片列表"] = None
+
+    # === OSS 标识 ===
+    is_oss: Annotated[bool, "文档图片是否已上传 OSS（markdown 中已包含 URL，不再传图片）"] = False
 
     # === 文件标识 ===
     file_id: Annotated[Optional[str], "文件唯一ID"] = None
@@ -97,7 +154,7 @@ class FilesLoaders:
     def __init__(self, processing_files: Optional[list[UploadFileWithId]]):
         self.logger = get_logger("FilesLoader")
         self.processing_files = processing_files
-        self.processing_dir = Path.cwd() / ".chatme" / "cached"
+        self.processing_dir = Path.cwd() / "cached"
 
         os.makedirs(self.processing_dir, exist_ok=True)
 
@@ -186,10 +243,15 @@ class FilesLoaders:
 
     async def _process_images(self, files: List[UploadFileWithId]) -> List[OutputFormat]:
         """
-        处理传入的图片文件，转化为base64字符串
+        处理传入的图片文件，优先用 OSS URL， fallback 到 base64
         """
         outputs: List[OutputFormat] = []
         self.logger.info(f"开始处理{len(files)}个图片文件")
+
+        # 检测 OSS 配置
+        oss_cfg = get_oss_config()
+        use_oss = bool(oss_cfg.get("access_key_id") and oss_cfg.get("bucket"))
+        self.logger.info(f"OSS 配置检测: use_oss={use_oss}, bucket={oss_cfg.get('bucket')}")
 
         for file in files:
             output = OutputFormat(
@@ -204,9 +266,26 @@ class FilesLoaders:
                 # 获取文件基础信息
                 file_kwargs = await self.create_file_additional_kwargs(file, suffix, file_path)
 
-                with open(file_path, "rb") as f:
-                    image_data = f.read()
-                    base64_data = base64.b64encode(image_data).decode('utf-8')
+                # 尝试上传 OSS
+                if use_oss:
+                    oss_url = _upload_local_image_to_oss(file_path, file.filename)
+                    if oss_url:
+                        output.image_content = oss_url
+                        output.is_oss = True
+                    else:
+                        # OSS 上传失败，用 base64
+                        with open(file_path, "rb") as f:
+                            image_data = f.read()
+                            base64_data = base64.b64encode(image_data).decode('utf-8')
+                        output.image_content = base64_data
+                        output.is_oss = False
+                else:
+                    # 未配置 OSS，用 base64
+                    with open(file_path, "rb") as f:
+                        image_data = f.read()
+                        base64_data = base64.b64encode(image_data).decode('utf-8')
+                    output.image_content = base64_data
+                    output.is_oss = False
 
                 # 直接设置 OutputFormat 字段
                 output.file_id = file_kwargs.file_id
@@ -222,9 +301,9 @@ class FilesLoaders:
                 output.preview_method = file_kwargs.preview_method
                 output.preview_hint = file_kwargs.preview_hint
                 output.suffix = file_kwargs.suffix
-                output.image_content = base64_data
+
                 outputs.append(output)
-                self.logger.debug(f"图片处理成功: {file.filename}")
+                self.logger.debug(f"图片处理成功: {file.filename}, is_oss={output.is_oss}")
 
             except Exception as e:
                 self.logger.error(f"处理图片文件失败({file.filename}): {e}")
@@ -290,6 +369,8 @@ class FilesLoaders:
                 output.suffix = file_kwargs.suffix
                 output.text_content = file_text
                 output.content = file_text  # 前端直接显示用
+                output.is_oss = False
+
                 outputs.append(output)
                 self.logger.debug(f"文本文件处理成功: {file.filename}({len(file_text)}字符)")
 
@@ -331,7 +412,7 @@ class FilesLoaders:
         self.logger.info(f"开始处理{len(files)}个文档")
 
         for file in files:
-            output = OutputFormat(text_content="", image_content="")
+            output = OutputFormat(text_content="", image_content=[])
             file_path = None
             try:
                 suffix = await self._get_file_suffix(file.filename)
@@ -351,7 +432,7 @@ class FilesLoaders:
                 ads_prefix = str(output_dir) + '/'
                 rel_prefix = "./"
                 with open(output_path, 'rb') as f:
-                    raw_data = f.read(10000)
+                    raw_data = f.read(2000)
                     import chardet
                     result = chardet.detect(raw_data)
                     detected_encoding = result.get("encoding", "utf-8")
@@ -361,7 +442,6 @@ class FilesLoaders:
                         open(temp_path, "w", encoding=detected_encoding) as f_out:
                     for i, line in enumerate(f_in):
                         if line.startswith("!["):
-                            import re
                             img_pattern = r'!\[(.*?)\]\(([^)]+)\)'
                             if match := re.search(img_pattern, line):
                                 prefix_name = match.group(1)
@@ -371,18 +451,26 @@ class FilesLoaders:
                                 os.rename(match_dir, dir_with_new_name)
                                 line = line.replace(match_dir, dir_with_new_name)
                                 line = line.replace(ads_prefix, rel_prefix)
+
+                                # 尝试上传 OSS
+                                oss_url = _upload_local_image_to_oss(dir_with_new_name, new_name)
+                                if oss_url:
+                                    # OSS 上传成功，用 OSS URL
+                                    line = line.replace(f"./document_artifacts/{new_name}", oss_url)
+                                    output.image_content.append(oss_url)
+                                    output.is_oss = True
+                                else:
+                                    output.is_oss = False
+                                    # OSS 上传失败，用 base64
+                                    with open(dir_with_new_name, "rb") as f:
+                                        image_content = f.read()
+                                        base64_data = base64.b64encode(image_content).decode("utf-8")
+                                        output.image_content.append(base64_data)
+
                         f_out.write(line)
                     temp_path.replace(output_path)
 
                 file_content = output_path.read_text(encoding=detected_encoding)
-
-                path = output_dir / "document_artifacts"
-                images = []
-                if path.exists():
-                    for img in path.iterdir():
-                        img_blob = img.read_bytes()
-                        img_base64 = base64.b64encode(img_blob).decode('utf-8')
-                        images.append({"name": img.name, "base64": img_base64})
 
                 # 直接设置 OutputFormat 字段
                 output.file_id = file_kwargs.file_id
@@ -400,7 +488,6 @@ class FilesLoaders:
                 output.suffix = file_kwargs.suffix
                 output.text_content = file_content
                 output.content = file_content  # 前端直接显示用
-                output.image_content = images
 
                 outputs.append(output)
                 self.logger.debug(f"文档处理成功: {file.filename}({len(file_content)}字符)")

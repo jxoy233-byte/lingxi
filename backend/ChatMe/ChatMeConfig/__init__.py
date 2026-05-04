@@ -10,6 +10,8 @@ from .core import (
     get_redis_checkpointer_url,
     get_redis_state_saver_url,
     get_directory,
+    get_app_config,
+    get_model_vl_config,
 )
 
 __all__ = [
@@ -21,4 +23,6 @@ __all__ = [
     "get_redis_checkpointer_url",
     "get_redis_state_saver_url",
     "get_directory",
+    "get_app_config",
+    "get_model_vl_config",
 ]

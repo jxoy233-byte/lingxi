@@ -1,20 +1,10 @@
+from operator import add
 from typing import TypedDict, Annotated, List, Optional, Dict, Any, Literal
 
 from langgraph.graph import add_messages
 from langchain_core.messages import BaseMessage, HumanMessage
 from pydantic import BaseModel
 from enum import Enum
-
-
-class SearchDecision(BaseModel):
-    should_search: bool = False
-    query: str = ""
-
-    def __init__(self, should_search: bool, query: str):
-        super().__init__()
-        self.should_search = should_search
-        self.query = query
-
 
 class MemoryUpdateFormat(BaseModel):
     """记忆更新所需的数据结构"""
@@ -29,16 +19,6 @@ class MemoryUpdateFormat(BaseModel):
         self.ai_response = ai_response
         self.tool_calls = tool_calls
         self.tool_results = tool_results
-
-
-class ChatStateCore(TypedDict):
-    """State for the ChatMe graph"""
-    messages: Annotated[list[BaseMessage], add_messages]
-    history_summary: Annotated[Optional[BaseMessage], "对于长历史上下文的历史对话总结"]
-    summary_or_not: Annotated[bool, "是否需要历史上下文总结"]
-    has_file_or_not_cur: Annotated[bool, "本轮对话是否包含文件"]
-    tool_call_times: Annotated[int, "当前轮对话中调用工具次数"]
-
 
 class ChatStateCore2(TypedDict):
     """State for the ChatMe graph2"""
@@ -60,3 +40,10 @@ class AIMessageType(str, Enum):
     """AIMessage区分消息类型的枚举类"""
     REASONING = "REASONING"
     SUMMARY = "SUMMARY"
+
+
+class FileParseState(TypedDict):
+    messages: List[BaseMessage]
+    files: List[List[dict]]  # 拆分出的文件消息
+    parsed_results: Annotated[List[str], add]  # 各节点解析结果
+    combined_result: HumanMessage  # 汇总结果

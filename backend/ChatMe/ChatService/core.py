@@ -162,7 +162,6 @@ class ChatService:
         Returns:
             HumanMessage: 符合 OpenAI 多模态格式的HumanMessage消息内容
         """
-        # todo 未来待优化：按用户传入文件顺序来解析文件
         try:
             content = []
 
@@ -174,6 +173,8 @@ class ChatService:
             texts = [f for f in processed_files if f.type == "TEXT"]
             documents = [f for f in processed_files if f.type == "DOCUMENT"]
 
+            id = 0 # 用来区分每单个文件
+
             # 处理图片
             if images:
                 for img in images:
@@ -182,12 +183,20 @@ class ChatService:
                         content.append({
                             "type": "text",
                             "text": f"-- {img.name} --\n",
+                            "index": id
                         })
+                        if img.is_oss:
+                            image_url = img.image_content
+                        else:
+                            image_url = f"data:image/{mime_type};base64,{img.image_content}"
                         content.append({
                             "type": "image_url",
-                            "image_url": {"url": f"data:{mime_type};base64,{img.image_content}"},
+                            "image_url": {"url": image_url},
                             "detail": "auto",
+                            "index": id
                         })
+                        id += 1
+
 
             # 处理文本文件
             if texts:
@@ -196,7 +205,9 @@ class ChatService:
                         content.append({
                             "type": "text",
                             "text": f"-- {text.name} --\n{text.text_content}\n",
+                            "index": id
                         })
+                        id += 1
 
             # 处理文档文件
             if documents:
@@ -206,20 +217,38 @@ class ChatService:
                         content.append({
                             "type": "text",
                             "text": f"-- {doc_label}:{doc.name} --\n{doc.text_content}\n",
+                            "index": id
                         })
-                        for img in (doc.image_content or []):
-                            name = img.get("name")
-                            base64 = img.get("base64")
-                            content.append(
-                                {"type": "text", "text": f"-- 文档中({name})的图片 --\n"},
-                            )
-                            content.append(
-                                {"type": "image_url", "image_url": {"url": f"data:{self._get_mime_type(name)};base64,{base64}"}}
-                            )
+                        content.append({
+                            "type": "text",
+                            "text": f"-- {doc.name} 内的图片 --\n",
+                            "index": id
+                        })
+                        if doc.is_oss:
+                            for img_url in doc.image_content:
+                                content.append({
+                                    "type": "image_url",
+                                    "image_url": {"url": img_url},
+                                    "detail": "auto",
+                                    "index": id
+                                })
+                        else:
+                            for base64 in doc.image_content:
+                                content.append({
+                                    "type": "image_url",
+                                    "image_url": {"url": f"data:image/png;base64,{base64}"},
+                                    "detail": "auto",
+                                    "index": id
+                                })
+                        id += 1
 
             # 直接存储整个 OutputFormat 列表到 additional_kwargs
             additional_kwargs = {
-                "files": [asdict(f) for f in processed_files],  # dataclass 转 dict
+                "files": [
+                    {
+                        **asdict(f),
+                    }
+                    for f in processed_files],  # dataclass 转 dict
                 "is_file": True,
             }
 
@@ -248,7 +277,6 @@ class ChatService:
             status = await self.state_saver.write_checkpoint(session_id, checkpoint_id)
 
             if status:
-                self.logger.debug(f"保存检查点(thread_id={session_id})")
                 if isinstance(state.values["messages"][-1], AIMessage):
                     last_ai_message = list(state.values["messages"])[-1]
                     last_ai_message.additional_kwargs["checkpoint_id"] = checkpoint_id
@@ -339,18 +367,19 @@ class ChatService:
             }
         }
 
-        additional_kwargs ={
-            "updated_at": datetime.now(),
-            "is_file": False,
-        }
+        # 如果有 processed_outputs（文件），设置 is_file=True
+        has_files = processed_outputs and len(processed_outputs) > 0
 
         messages = []
-        if processed_outputs:
+        if has_files:
             files_content = await self.build_files_content(processed_outputs)
             messages.append(files_content)
 
-        message_content = HumanMessage(content=[{"type": "text", "text": message} ], additional_kwargs=additional_kwargs)
-
+        additional_kwargs = {
+            "updated_at": datetime.now(),
+            "is_file": False,
+        }
+        message_content = HumanMessage(content=[{"type": "text", "text": message}], additional_kwargs=additional_kwargs)
         messages.append(message_content)
 
         full_response = ""
@@ -445,8 +474,6 @@ class ChatService:
 
         try:
             state = await self.graph.aget_state(config=config)
-            self.logger.info(f"get_conversation state values keys: {state.values.keys() if state.values else 'None'}")
-            self.logger.info(f"get_conversation messages count: {len(state.values.get('messages', [])) if state.values else 0}")
             print(state.values)
         except HTTPException as e:
             self.logger.error(f"获取会话状态异常(session_id:{session_id})：{str(e)}")
@@ -454,33 +481,34 @@ class ChatService:
 
         messages_list = []
         if "messages" in state.values and state.values["messages"]:
-            self.logger.info(f"Processing {len(state.values['messages'])} messages")
             for msg in state.values["messages"]:
                 if isinstance(msg, HumanMessage):
                     role = MessageRole.USER
                     files = []
                     is_file = msg.additional_kwargs.get("is_file", False)
+                    human_message = ""
+                    for content in msg.content:
+                        if content.get("type") == "text":
+                            human_message += content.get("text", "")
+                            human_message += '\n'
+                    human_message = human_message.strip()
+
                     if is_file:
                         files = msg.additional_kwargs.get("files", [])
+                        # 有文件时，也保留文本内容（content 可能包含文件描述和用户文本）
                         messages_list.append(Message(
                             role=role,
-                            content="",
+                            content=None,
+                            files=files,
+                            additional_kwargs={"is_file": True}
+                        ))
+                    elif human_message:
+                        messages_list.append(Message(
+                            role=role,
+                            content=human_message,
                             files=files,
                             additional_kwargs=None
                         ))
-                    else:
-                        human_message = ""
-                        for content in msg.content:
-                            if content.get("type") == "text":
-                                human_message += content.get("text", "")
-                                human_message += '\n'
-                        if human_message.strip():
-                            messages_list.append(Message(
-                                role=role,
-                                content=human_message,
-                                files=files,
-                                additional_kwargs=None
-                            ))
 
                 elif isinstance(msg, AIMessage):
                     role = MessageRole.AI

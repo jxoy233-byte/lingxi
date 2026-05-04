@@ -1,5 +1,6 @@
 import json
 import re
+from collections import defaultdict
 from pathlib import Path
 from typing import Optional, Dict, Any, AsyncGenerator, List
 
@@ -11,10 +12,11 @@ from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.redis import AsyncRedisSaver
 from langgraph.prebuilt import ToolNode
+from langgraph.types import Send
 
 from .config.graph_config import get_agent_node_config, get_graph_final_node_config, \
-    get_imp_ipt_config, get_history_summary_node_config, get_llm_memory_config
-from .config.models import ChatStateCore, ChatStateCore2, AIMessageType
+    get_imp_ipt_config, get_history_summary_node_config, get_llm_memory_config, get_model_vl_config
+from .config.models import ChatStateCore2, AIMessageType, FileParseState
 from .Memory.core import MemoryManager
 from ..LoggingManager.logging_config import get_logger
 
@@ -32,8 +34,10 @@ class ChatWorkflow:
         self.agent_llm = None
         self.summary_llm = None
         self.llm_imp_ipt = None
+        self.llm_imp_ipt_vl = None
 
         self.graph = None
+        self.graph_process_files = None
         self.checkpointer = None
         self.mcp_client = None
         self.memory_manager = None
@@ -93,6 +97,11 @@ class ChatWorkflow:
         prompt = ChatPromptTemplate.from_messages([("system", imp_ipt_llm_prompt), ("human", "{messages}")])
         self.llm_imp_ipt = prompt | self.llm_imp_ipt
 
+        # 输入优化视觉模型配置
+        imp_ipt_vl_llm_config, imp_ipt_vl_llm_prompt = get_model_vl_config()
+        self.llm_imp_ipt_vl = ChatOpenAI(**imp_ipt_vl_llm_config)
+        # prompt = ChatPromptTemplate.from_messages([("system", imp_ipt_vl_llm_prompt), ("human", "{messages}")])
+        # self.llm_imp_ipt_vl = prompt | self.llm_imp_ipt_vl
 
     async def ainit(self):
         """
@@ -108,8 +117,9 @@ class ChatWorkflow:
         try:
             from ChatMe.ChatMeConfig import get_redis_checkpointer_url
             redis_url_checkpoint = get_redis_checkpointer_url()
-        except Exception:
-            redis_url_checkpoint = "redis://:123456@localhost:6379/0"
+        except Exception as e:
+            self.logger.error(e)
+            raise e
 
         self.checkpointer = AsyncRedisSaver(redis_url=redis_url_checkpoint)
         await self.checkpointer.setup()
@@ -119,8 +129,9 @@ class ChatWorkflow:
 
         # self.graph = await self._create_graph_core()
         self.graph = await self._create_graph_core2()
+        self.graph_process_files = await self._create_graph_process_files()
 
-    async def _get_message_content_string(self, message: BaseMessage) -> str:
+    def _get_message_content_string(self, message: BaseMessage) -> str:
         """提取消息内容为字符串"""
         content_string = ""
 
@@ -236,15 +247,16 @@ class ChatWorkflow:
     async def _get_validate_history_message(self, history_messages: List[BaseMessage])-> List[BaseMessage]:
         """获取历史有效的聊天消息，包含文件缓存路径"""
         input_msg = []
-        files_cached_message = SystemMessage(content=f"文件缓存路径：{self.files_cached_dir}")
-        input_msg.append(files_cached_message)
-        for msg in history_messages:
-            if isinstance(msg, HumanMessage):
-                if not msg.additional_kwargs.get("is_file", False):
-                    input_msg.append(msg)
-            if isinstance(msg, AIMessage):
-                if msg.additional_kwargs.get("type") == AIMessageType.SUMMARY.value:
-                    input_msg.append(msg)
+        if history_messages:
+            files_cached_message = SystemMessage(content=f"文件缓存路径：{self.files_cached_dir}")
+            input_msg.append(files_cached_message)
+            for msg in history_messages:
+                if isinstance(msg, HumanMessage):
+                    if not msg.additional_kwargs.get("is_file", False):
+                        input_msg.append(msg)
+                if isinstance(msg, AIMessage):
+                    if msg.additional_kwargs.get("type") == AIMessageType.SUMMARY.value:
+                        input_msg.append(msg)
 
         return input_msg
 
@@ -267,7 +279,7 @@ class ChatWorkflow:
 
         return input_msg
 
-    async def _get_current_round_conversation_except_files(self, messages: List[BaseMessage]) -> List[BaseMessage]:
+    async def _get_current_round_conversation_except_files(self, messages: List[BaseMessage]):
         """
             获取本轮对话除了文件传入部分
 
@@ -303,159 +315,112 @@ class ChatWorkflow:
                 break
         return cycle_msg
 
-
-    async def _create_graph_core(self):
+    async def _switch_files_content_to_files(self, human_message: HumanMessage)-> List[List[dict]]:
         """
-        自定义工作流对象，可以调用工具实现agent-skills获取
+        把build_files_content中构造的HumanMessage笼统的内容，转化为每文件一部分的列表嵌套列表
         """
+        files = defaultdict(list)
 
-        tools = await self.mcp_client.get_tools()
+        files_chunks = human_message.content
+        for chunk in files_chunks:
+            if (index := chunk.get("index")) is not None:
+                files[index].append(chunk)
 
-        agent_node_llm = self.agent_llm.bind(tools=tools)
+        return [files[i] for i in sorted(files.keys())]
 
-        workflow = StateGraph(ChatStateCore)
+    async def _create_graph_process_files(self):
+        """
+        处理文件图工作流
+        """
+        workflow = StateGraph(FileParseState)
 
-        async def history_summary_node(state: ChatStateCore):
-            """历史消息节点，处理用户消息并返回历史消息"""
-            messages = state["messages"]
-
-            if not messages or len(messages) < 2:
-                return {
-                    "history_messages": None,
-                    "summary_or_not": False,
-                    "has_file_or_not_cur": False,
-                    "tool_call_times": 0,
-                }
-            last_message = messages[-1]
-            second_last_message = messages[-2]
-            has_file = (
-                isinstance(last_message, HumanMessage) and
-                not last_message.additional_kwargs.get("is_file", False) and
-                isinstance(second_last_message, HumanMessage) and
-                second_last_message.additional_kwargs.get("is_file", False)
-            )
-
-            if has_file:
-                history_messages = messages[:-2]
-                input_msg = await self._get_validate_history_message(history_messages)
-            else:
-                history_messages = messages[:-1]
-                input_msg = await self._get_validate_history_message(history_messages)
-
-            if len(input_msg) > 20:
-                summary_or_not = True
-
-                # 添加当轮对话用户消息，更好针对性总结历史对话
-                history_messages.append(state["messages"][-1])
-                history_summary = await self.summary_llm.ainvoke({"messages": input_msg})
-            else:
-                summary_or_not = False
-
-                history_summary = None
-
-            return {
-                "history_summary": history_summary,
-                "summary_or_not": summary_or_not,
-                "has_file_or_not_cur": has_file,
-                "tool_call_times": 0,
-            }
-
-        async def agent_node(state: ChatStateCore):
-            """AI 代理节点，处理用户消息并决定是否调用工具"""
-            messages = list(state["messages"])
-            # todo 现在的提示词优化导致每次一段对话如果要使用工具都要调用一次overview，长对话可能还好，但是短对话可能就不太好了
-            tool_call_times = state["tool_call_times"] if "tool_call_times" in state else 0
-            has_file = state["has_file_or_not_cur"]
-            current_msg = await self._get_current_round_conversation(state["messages"])
-
-            if not state["summary_or_not"]:
-                if has_file:
-                    history_messages = messages[:-2]
-                    input_msg = await self._get_validate_history_message(history_messages)
-                    # 有文件的话要确保文件只识别一次
-                    if tool_call_times < 1:
-                        input_msg.extend(current_msg)
-                    else:
-                        input_msg.extend(await self._get_current_round_conversation_except_files(state["messages"]))
-                else:
-                    history_messages = await self._get_validate_history_message( messages)
-                    input_msg = await self._get_validate_history_message(history_messages)
-                    input_msg.extend(current_msg)
-            else:
-                input_msg = []
-                history_messages = await self._get_validate_history_message( messages)
-                input_msg.extend(history_messages)
-                if has_file:
-                    if tool_call_times < 1:
-                        input_msg.extend(current_msg)
-                    else:
-                        input_msg.extend(await self._get_current_round_conversation_except_files(state["messages"]))
-                else:
-                    input_msg.extend(current_msg)
-
-            if tool_call_times >= 20:
-                interrupt_message = SystemMessage(content=f"当前工具调用次数过多，请整理好存在信息，合理结束本节点对话(响应中提示工具调用提前结束)")
-                input_msg.append(interrupt_message)
-
-            response = await agent_node_llm.ainvoke({"messages": input_msg})
-            tool_call_times += 1
-
-            # 符合ToolNode节点的AIMessage(REASONING)
-            format_response = self._parse_content_to_tool_calls(response)
-
-            return {
-                "messages": [format_response],
-                "tool_call_times": tool_call_times,
-            }
-
-        tool_execution_node = ToolNode(tools=tools)  # 使用langgraph官方工具节点
-
-        async def final_node(state: ChatStateCore):
-            # input_msg = list(state["messages"])
+        async def split_files_node(state: FileParseState):
+            """拆分文件节点"""
             messages = list(state["messages"])
 
-            if state["has_file_or_not_cur"]:
-                input_msg = await self._get_current_round_conversation_except_files(messages)
-            else:
-                input_msg = await self._get_current_round_conversation(messages)
+            current_message = await self._get_current_round_conversation(messages)
 
-            response = await self.llm_core.ainvoke({"messages": input_msg})
-            # AIMessage字段支持解包复制
-            response_dict = dict(response)
-            response_dict["additional_kwargs"] = {**response.additional_kwargs, "type": AIMessageType.SUMMARY.value}
+            files = []
+            for msg in current_message:
+                if isinstance(msg, HumanMessage) and msg.additional_kwargs.get("is_file", False):
+                    files = await self._switch_files_content_to_files(msg)
 
-            response_better = AIMessage(**response_dict)
+            # todo 增加对大文件的处理逻辑
 
             return {
-                "messages": [response_better]
+                "files": files,
             }
 
-        workflow.add_node("history_summary_node", history_summary_node)
-        workflow.add_node("agent_node", agent_node)
-        workflow.add_node("tool_execution_node", tool_execution_node)
-        workflow.add_node("final_node", final_node)
+        async def file_process_node(state: FileParseState):
+            """文件处理节点"""
+            prompt = """你是文件解析助手。解析输入的图片或文档内容。
 
-        def route_agent_output(state: ChatStateCore) -> str:
-            """根据代理输出决定下一步"""
-            last_message = state["messages"][-1]
-            if isinstance(last_message, AIMessage) and hasattr(last_message, "tool_calls") and last_message.tool_calls and state["tool_call_times"]<=20:
-                return "tool_execution_node"
-            return "final_node"
+【解析规则】
+- 文档（PDF、Word等）：返回文本内容 + 图片描述（如果比较关键）
+- 图片（照片、截图等）：返回图片内容描述
+- 文本（TXT等）：返回文本内容
+- 无文件：输出"无文件内容"
 
-        workflow.set_entry_point("history_summary_node")
-        workflow.add_edge("history_summary_node", "agent_node")
+【重要】
+如果解析结果因篇幅等原因不完整，务必在末尾附上所有图片URL，供下游节点展示使用。
 
-        workflow.add_conditional_edges("agent_node",
-            route_agent_output,
+【输出格式】
+【文件：文件名】
+解析结果内容
+【图片URL】（如有）: url1, url2, ..."""
+
+            file = state["single_file"]
+
+            file_msg = HumanMessage(content=[
+                {"type": "text", "text": prompt},
+                *file,
+            ])
+
+            resp = await self.llm_imp_ipt_vl.ainvoke([file_msg])
+
+            resp_str = self._get_message_content_string(resp)
+
+            return {"parsed_results": [resp_str]}
+
+        async def aggregator_node(state: FileParseState):
+            """
+            文件处理结果聚合节点
+            """
+            parsed_results = state["parsed_results"]
+
+            combined_content = "\n".join(parsed_results) if parsed_results else "无文件传入"
+            if not combined_content.strip():
+                combined_content = "无文件传入"
+
+            combined_result = HumanMessage(content=combined_content)
+
+            return {"combined_result": combined_result}
+
+        workflow.add_node("split_files_node", split_files_node)
+        workflow.add_node("file_process_node", file_process_node)
+        workflow.add_node("aggregator_node", aggregator_node)
+
+        def files_fan_out(state: FileParseState):
+            files = state.get("files", [])
+            if not files or all(not f for f in files):
+                return "aggregator_node"
+            # 用Send传参别的字段会被舍弃掉，除非用state_schema
+            return [Send("file_process_node", {"single_file": f}) for f in files]
+
+        workflow.set_entry_point("split_files_node")
+        workflow.add_conditional_edges(
+            "split_files_node",
+            files_fan_out,
             {
-                "tool_execution_node": "tool_execution_node",
-                "final_node": "final_node"
+                "file_process_node": "file_process_node",
+                "aggregator_node": "aggregator_node"
             }
         )
-        workflow.add_edge("tool_execution_node", "agent_node")
-        workflow.add_edge("final_node", END)
+        workflow.add_edge("file_process_node", "aggregator_node")
 
-        return workflow.compile(checkpointer=self.checkpointer)
+        workflow.add_edge("aggregator_node", END)
+
+        return workflow.compile()
 
     async def _create_graph_core2(self):
         """
@@ -478,7 +443,12 @@ class ChatWorkflow:
             """
             input_msg = []
             messages = list(state["messages"])
-            current_input = await self._get_current_round_conversation(messages)
+
+            processed_files = await self.graph_process_files.ainvoke({"messages": messages})
+
+            files_input: HumanMessage = processed_files["combined_result"]
+
+            user_input: List[HumanMessage] = await self._get_current_round_conversation_except_files( messages)
             history_messages = await self._get_validate_history_message(messages)
 
             if history_messages and len(history_messages) >= 8: # 四轮对话
@@ -487,17 +457,19 @@ class ChatWorkflow:
                 history_invoke = history_messages
 
             input_msg.extend(history_invoke)
-            input_msg.extend(current_input)
+            input_msg.append(files_input)
+            input_msg.extend(user_input)
+            self.logger.debug(f"输入传入消息结果: {input_msg}")
 
             imp_ipt = await self.llm_imp_ipt.ainvoke({"messages": input_msg})
 
             imp_ipt_content = imp_ipt.content
             imp_ipt_additional_kwargs = imp_ipt.additional_kwargs
-            imp_ipt_response_metadata = imp_ipt.response_metadata
             imp_ipt_id = imp_ipt.id
-            imp_ipt_usage_metadata = imp_ipt.usage_metadata
+            imp_ipt_response_metadata = imp_ipt.response_metadata
 
-            imp_ipt = HumanMessage(content=imp_ipt_content,additional_kwargs=imp_ipt_additional_kwargs,response_metadata=imp_ipt_response_metadata,id=imp_ipt_id,usage_metadata=imp_ipt_usage_metadata)
+            imp_ipt = HumanMessage(content=imp_ipt_content, additional_kwargs=imp_ipt_additional_kwargs, id=imp_ipt_id, response_metadata=imp_ipt_response_metadata)
+            self.logger.debug(f"优化后输入消息结果: {imp_ipt}")
 
             return {
                 "imp_ipt": imp_ipt,
@@ -524,11 +496,10 @@ class ChatWorkflow:
 
                 cycle_msg = await self._get_current_round_conversation_cycling(state["messages"])
                 context.extend(cycle_msg)
-                print(cycle_msg)
 
                 for msg in cycle_msg:
                     if isinstance(msg, ToolMessage):
-                        content_string = await self._get_message_content_string(msg)
+                        content_string = self._get_message_content_string(msg)
                         tool_results.append(content_string)
 
             return {
@@ -556,6 +527,8 @@ class ChatWorkflow:
             # 符合ToolNode节点的AIMessage(REASONING)
             format_response = self._parse_content_to_tool_calls(response)
 
+            tool_call_times += 1
+
             tool_calls.extend(format_response.tool_calls)
 
             return {
@@ -577,7 +550,7 @@ class ChatWorkflow:
             response_better = AIMessage(**response_dict)
 
             # 提取AI回复内容用于memory
-            memory_ai_response = await self._get_message_content_string(response_better)
+            memory_ai_response = self._get_message_content_string(response_better)
 
             return {
                 "messages": [response_better],

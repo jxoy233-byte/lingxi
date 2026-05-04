@@ -8,5 +8,5 @@ __all__ = [
     "ChatWorkflow",
     "AIMessageType",
     "MemoryManager",
-    "MemoryUpdateFormat"
+    "MemoryUpdateFormat",
 ]

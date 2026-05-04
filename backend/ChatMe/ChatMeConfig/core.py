@@ -106,6 +106,46 @@ class ChatMeConfig:
 
         return result
 
+    def get_app_config(self) -> dict:
+        """获取app配置"""
+        return {
+            "name": self.get("app.name"),
+            "version": self.get("app.version"),
+            "description": self.get("app.description"),
+            "host": self.get("app.host", fallback_env="APP_HOST"),
+            "port": self.get("app.port", fallback_env="APP_PORT"),
+        }
+
+    def get_model_vl_config(self) -> dict:
+        """获取 VL 模型配置"""
+        self._load()
+
+        provider_config = self.get("llm_providers.vl", {})
+
+        result = {}
+        for key in ["model_name", "api_key", "base_url"]:
+            config_value = provider_config.get(key, "") if isinstance(provider_config, dict) else ""
+            env_value = os.getenv(f"VL_{key.upper()}", None)
+
+            if config_value and config_value != "":
+                result[key] = config_value
+            elif env_value is not None:
+                result[key] = env_value
+            else:
+                result[key] = None
+
+        for key in ["temperature", "max_tokens", "top_p", "frequency_penalty", "presence_penalty"]:
+            env_value = os.getenv(f"VL_{key.upper()}", None)
+            if env_value is not None:
+                try:
+                    result[key] = float(env_value)
+                except (ValueError, TypeError):
+                    result[key] = env_value
+            else:
+                result[key] = None
+
+        return result
+
     def get_mcp_config(self) -> dict:
         """获取 MCP 服务器配置"""
         return {
@@ -124,6 +164,32 @@ class ChatMeConfig:
     def get_directory(self, name: str) -> str:
         """获取目录配置"""
         return self.get(f"directories.{name}", fallback_env=f"{name.upper()}_DIR")
+
+    def get_oss_config(self) -> dict:
+        """获取 OSS 配置"""
+        return {
+            "access_key_id": self.get("oss.access_key_id", fallback_env="OSS_ACCESS_KEY_ID"),
+            "access_key_secret": self.get("oss.access_key_secret", fallback_env="OSS_ACCESS_KEY_SECRET"),
+            "bucket": self.get("oss.bucket", fallback_env="OSS_BUCKET"),
+            "endpoint": self.get("oss.endpoint", fallback_env="OSS_ENDPOINT"),
+            "region": self.get("oss.region", fallback_env="OSS_REGION"),
+        }
+
+    def get_oss_bucket(self) -> str:
+        """获取 OSS bucket 名称"""
+        return self.get("oss.bucket", fallback_env="OSS_BUCKET")
+
+    def get_oss_endpoint(self) -> str:
+        """获取 OSS endpoint"""
+        return self.get("oss.endpoint", fallback_env="OSS_ENDPOINT")
+
+    def get_oss_access_key_id(self) -> str:
+        """获取 OSS AccessKeyId"""
+        return self.get("oss.access_key_id", fallback_env="OSS_ACCESS_KEY_ID")
+
+    def get_oss_access_key_secret(self) -> str:
+        """获取 OSS AccessKeySecret"""
+        return self.get("oss.access_key_secret", fallback_env="OSS_ACCESS_KEY_SECRET")
 
     @property
     def is_loaded(self) -> bool:
@@ -162,3 +228,28 @@ def get_redis_state_saver_url() -> str:
 def get_directory(name: str) -> str:
     """获取目录配置"""
     return config.get_directory(name)
+
+
+def get_oss_config() -> dict:
+    """获取 OSS 配置"""
+    return config.get_oss_config()
+
+
+def get_oss_bucket() -> str:
+    """获取 OSS bucket 名称"""
+    return config.get_oss_bucket()
+
+
+def get_oss_endpoint() -> str:
+    """获取 OSS endpoint"""
+    return config.get_oss_endpoint()
+
+
+def get_app_config() -> dict:
+    """获取 app 配置"""
+    return config.get_app_config()
+
+
+def get_model_vl_config() -> dict:
+    """获取 VL 模型配置"""
+    return config.get_model_vl_config()

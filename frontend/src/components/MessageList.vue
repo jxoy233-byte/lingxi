@@ -7,8 +7,8 @@
       </div>
 
       <MessageItem
-        v-for="(msg, index) in messages"
-        :key="index"
+        v-for="(msg, index) in flattenedMessages"
+        :key="msg._key || index"
         :message="msg"
         :is-first-ai-message="isFirstAiMessage(index)"
         @restore="$emit('restore', $event)"
@@ -53,12 +53,31 @@ export default {
       rafId: null               // requestAnimationFrame id
     }
   },
+  computed: {
+    // 将消息列表直接传递给 MessageItem，不拆分
+    // MessageItem 内部会处理文件消息和文本消息的显示
+    flattenedMessages() {
+      const result = []
+      let keyIndex = 0
+
+      for (const msg of this.messages) {
+        result.push({
+          ...msg,
+          _key: `msg_${keyIndex++}`
+        })
+      }
+
+      return result
+    }
+  },
   methods: {
     // 判断指定索引的AI消息是否是该会话的第一轮AI消息
     isFirstAiMessage(index) {
+      // 使用 flattenedMessages 来判断
+      const flattened = this.flattenedMessages
       // 向前遍历找到第一个AI消息
       for (let i = 0; i < index; i++) {
-        if (this.messages[i].role === 'ai') {
+        if (flattened[i] && flattened[i].role === 'ai') {
           return false
         }
       }

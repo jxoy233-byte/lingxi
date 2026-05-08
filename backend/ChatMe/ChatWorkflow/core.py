@@ -12,7 +12,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.redis import AsyncRedisSaver
 from langgraph.prebuilt import ToolNode
-from langgraph.types import Send
+from langgraph.types import Send, interrupt
 
 from .config.graph_config import get_agent_node_config, get_graph_final_node_config, \
     get_imp_ipt_config, get_history_summary_node_config, get_llm_memory_config, get_model_vl_config
@@ -39,6 +39,7 @@ class ChatWorkflow:
         self.graph = None
         self.graph_process_files = None
         self.checkpointer = None
+        self.redis_client = None
         self.mcp_client = None
         self.memory_manager = None
         self.files_cached_dir = None
@@ -118,11 +119,12 @@ class ChatWorkflow:
             from ChatMe.ChatMeConfig import get_redis_checkpointer_url
             redis_url_checkpoint = get_redis_checkpointer_url()
         except Exception as e:
-            self.logger.error(e)
+            self.logger.error(f"初始化Redis Checkpointer失败: {e}")
             raise e
 
         self.checkpointer = AsyncRedisSaver(redis_url=redis_url_checkpoint)
         await self.checkpointer.setup()
+        self.redis_client = self.checkpointer._redis
 
         # 初始化所有llm
         await self.init_llms()
@@ -227,7 +229,7 @@ class ChatWorkflow:
                                 if tc["name"]:
                                     tool_calls.append(tc)
                         except json.JSONDecodeError as e:
-                            self.logger.warning(f"解析工具调用JSON失败: {e}")
+                            self.logger.debug(f"解析工具调用JSON失败: {e}")
 
                         start_idx = json_end
                         break
@@ -250,7 +252,7 @@ class ChatWorkflow:
         if history_messages:
             files_cached_message = SystemMessage(content=f"文件缓存路径：{self.files_cached_dir}")
             input_msg.append(files_cached_message)
-            for msg in history_messages:
+            for msg in history_messages: # todo 逻辑有点问题
                 if isinstance(msg, HumanMessage):
                     if not msg.additional_kwargs.get("is_file", False):
                         input_msg.append(msg)
@@ -310,7 +312,7 @@ class ChatWorkflow:
         """
         cycle_msg = []
         for msg in reversed(messages): # agent_node每一次循环都会更新一次AIMessage和ToolMessage
-            cycle_msg.append(msg)
+            cycle_msg.insert(0, msg)
             if isinstance(msg, AIMessage) and msg.additional_kwargs.get("type") ==AIMessageType.REASONING.value:
                 break
         return cycle_msg
@@ -328,6 +330,22 @@ class ChatWorkflow:
 
         return [files[i] for i in sorted(files.keys())]
 
+    async def check_and_trigger_interrupt(self, session_id):
+        """
+        检查当前session_id下的对话是否被中断
+        """
+        try:
+            interrupt_key = f"interrupt:{session_id}"
+            # 检查中断
+            key_value = await self.redis_client.hgetall(interrupt_key)
+            if key_value :
+                return interrupt(value=key_value)
+
+        except Exception as e:
+            self.logger.debug(f"检查session_id是否被中断失败: {e}")
+
+        return None
+
     async def _create_graph_process_files(self):
         """
         处理文件图工作流
@@ -336,6 +354,7 @@ class ChatWorkflow:
 
         async def split_files_node(state: FileParseState):
             """拆分文件节点"""
+
             messages = list(state["messages"])
 
             current_message = await self._get_current_round_conversation(messages)
@@ -353,6 +372,7 @@ class ChatWorkflow:
 
         async def file_process_node(state: FileParseState):
             """文件处理节点"""
+
             prompt = """你是文件解析助手。根据输入的图片进行解析，输出对应格式的结果。
 
 【文件解析规则】
@@ -433,14 +453,18 @@ class ChatWorkflow:
 
         workflow = StateGraph(ChatStateCore2)
 
-        async def input_parse_node(state: ChatStateCore2):
+        async def input_parse_node(state: ChatStateCore2, config: RunnableConfig):
             """
             输入预处理节点
             """
+            thread_id = config["configurable"]["thread_id"]
+            await self.check_and_trigger_interrupt(thread_id)
+
             input_msg = []
             messages = list(state["messages"])
 
             processed_files = await self.graph_process_files.ainvoke({"messages": messages})
+            await self.check_and_trigger_interrupt(thread_id)
 
             files_input: HumanMessage = processed_files["combined_result"]
 
@@ -455,7 +479,7 @@ class ChatWorkflow:
             input_msg.extend(history_invoke)
             input_msg.append(files_input)
             input_msg.extend(user_input)
-            self.logger.debug(f"输入传入消息结果: {input_msg}")
+            self.logger.debug(f"[input_parse_node] 输入传入消息数量: {len(input_msg)}")
 
             imp_ipt = await self.llm_imp_ipt.ainvoke({"messages": input_msg})
 
@@ -465,7 +489,7 @@ class ChatWorkflow:
             imp_ipt_response_metadata = imp_ipt.response_metadata
 
             imp_ipt = HumanMessage(content=imp_ipt_content, additional_kwargs=imp_ipt_additional_kwargs, id=imp_ipt_id, response_metadata=imp_ipt_response_metadata)
-            self.logger.debug(f"优化后输入消息结果: {imp_ipt}")
+            self.logger.debug(f"[input_parse_node] 优化后输入内容长度: {len(imp_ipt.content)}")
 
             return {
                 "imp_ipt": imp_ipt,
@@ -477,11 +501,13 @@ class ChatWorkflow:
             }
 
         async def context_assembly_node(state: ChatStateCore2, config: RunnableConfig):
+            thread_id = config["configurable"]["thread_id"]
+            await self.check_and_trigger_interrupt(thread_id)
+
             context = []
             tool_results = state["memory_tool_results"] if state["memory_tool_results"] else []
 
             if "context" not in state or not state["context"]:
-                thread_id = config["configurable"]["thread_id"]
                 memory_message :SystemMessage = self.memory_manager.get_relevant_memory(thread_id)
                 context.append(memory_message)
 
@@ -503,8 +529,11 @@ class ChatWorkflow:
                 "memory_tool_results": tool_results
             }
 
-        async def agent_node(state: ChatStateCore2):
+        async def agent_node(state: ChatStateCore2, config: RunnableConfig):
             """AI 代理节点，处理用户消息并决定是否调用工具"""
+            thread_id = config["configurable"]["thread_id"]
+            await self.check_and_trigger_interrupt(thread_id)
+
             if state["memory_tool_calls"]:
                 tool_calls = state["memory_tool_calls"]
             else:
@@ -536,6 +565,9 @@ class ChatWorkflow:
         tool_execution_node = ToolNode(tools=tools)  # 使用langgraph官方工具节点
 
         async def final_node(state: ChatStateCore2, config: RunnableConfig):
+            thread_id = config["configurable"]["thread_id"]
+            await self.check_and_trigger_interrupt(thread_id)
+
             input_msg = state["context"]
 
             response = await self.llm_core.ainvoke({"messages": input_msg})
@@ -584,7 +616,6 @@ class ChatWorkflow:
         workflow.add_edge("final_node", END)
 
         return workflow.compile(checkpointer=self.checkpointer)
-
 
 
     def invoke(self, messages: list[BaseMessage], config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

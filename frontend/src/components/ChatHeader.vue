@@ -14,6 +14,16 @@
         </svg>
       </button>
       <button
+        v-if="isLoading"
+        @click="$emit('interrupt')"
+        class="interrupt-btn"
+        title="中断当前对话"
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="18" height="18" rx="2"/>
+        </svg>
+      </button>
+      <button
         @click="$emit('toggle-theme')"
         class="theme-toggle-btn"
         :title="isDarkTheme ? '切换到浅色模式' : '切换到深色模式'"
@@ -36,9 +46,13 @@ export default {
     hasSession: {
       type: Boolean,
       default: false
+    },
+    isLoading: {
+      type: Boolean,
+      default: false
     }
   },
-  emits: ['toggle-theme', 'toggle-checkpoints']
+  emits: ['toggle-theme', 'toggle-checkpoints', 'interrupt']
 }
 </script>
 

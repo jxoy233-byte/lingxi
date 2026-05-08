@@ -8,6 +8,8 @@ from datetime import datetime
 from typing import AsyncGenerator, Set, List, Any, Optional
 
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+from langgraph.errors import GraphInterrupt
+from langgraph.types import Command, StateSnapshot
 from langgraph_sdk.auth.exceptions import HTTPException
 from redisvl.query import FilterQuery
 from langgraph.checkpoint.redis.util import from_storage_safe_id
@@ -34,6 +36,7 @@ class ChatService:
         self.checkpointer = self.chat_workflow.checkpointer
         self.graph = self.chat_workflow.graph
         self.state_saver = RedisStateSaver()
+        self.redis_client = self.checkpointer._redis
 
     @property
     async def aget_conversation_ids(self) -> List[str]:
@@ -55,7 +58,7 @@ class ChatService:
 
             # 风险点1：处理search_results为None的情况
             if search_results is None:
-                self.logger.info("Redis搜索结果为空（search_results为None）")
+                self.logger.debug("Redis搜索结果为空（search_results为None）")
                 return []
 
             # 风险点2：确保docs是可遍历的列表
@@ -259,6 +262,7 @@ class ChatService:
 
         return files_content
 
+
     async def _save_round_checkpoint(self, session_id: str)-> Optional[str]:
         """
         获取指定会话的所有 checkpoint_id 列表
@@ -288,26 +292,14 @@ class ChatService:
                     )
 
                 try: # 更新每轮记忆文件 — 后台静默执行，不阻塞返回
-                    memory_user_message = state.values.get("memory_user_message")
-                    memory_ai_response = state.values.get("memory_ai_response")
-                    memory_tool_calls = state.values.get("memory_tool_calls")
-                    memory_tool_results = state.values.get("memory_tool_results")
-
-                    memory_update_format = MemoryUpdateFormat(
-                        user_message=memory_user_message,
-                        ai_response=memory_ai_response,
-                        tool_calls=memory_tool_calls,
-                        tool_results=memory_tool_results
-                    )
-
-                    # 后台执行记忆更新，不等待完成
                     asyncio.create_task(
-                        self._update_memory_bg(session_id, checkpoint_id, memory_update_format)
+                        self._update_memory_bg(session_id=session_id,checkpoint_id=checkpoint_id, state=state)
                     )
+
                 except Exception as e:
                     self.logger.error(f"更新记忆文件失败(thread_id={session_id}): {str(e)}")
 
-                    return checkpoint_id
+                return checkpoint_id
 
         except Exception as e:
             self.logger.error(f"保存每轮检查点失败(session_id:{session_id}): {str(e)}")
@@ -317,18 +309,58 @@ class ChatService:
         self,
         session_id: str,
         checkpoint_id: str,
-        memory_data: "MemoryUpdateFormat",
+        state: StateSnapshot
     ):
         """后台静默更新记忆，不阻塞主流程"""
         try:
+            memory_user_message = state.values.get("memory_user_message")
+            memory_ai_response = state.values.get("memory_ai_response")
+            memory_tool_calls = state.values.get("memory_tool_calls")
+            memory_tool_results = state.values.get("memory_tool_results")
+
+            memory_update_format = MemoryUpdateFormat(
+                user_message=memory_user_message,
+                ai_response=memory_ai_response,
+                tool_calls=memory_tool_calls,
+                tool_results=memory_tool_results
+            )
+
             await self.chat_workflow.memory_manager.update_memory(
                 thread_id=session_id,
                 checkpoint_id=checkpoint_id,
-                memory_data=memory_data
+                memory_data=memory_update_format
             )
         except Exception as e:
             self.logger.error(f"后台更新记忆失败(thread_id={session_id}): {str(e)}")
 
+    async def _delete_last_round_checkpoint(self, session_id: str):
+        """
+        删除指定会话的最新一个 checkpoint（与 _save_round_checkpoint 相反）
+        """
+        try:
+            # 获取所有 checkpoints，最新的在最后
+            checkpoints = await self.state_saver.get_checkpoints(session_id)
+            if not checkpoints:
+                self.logger.warning(f"无 checkpoint 可删除(session_id={session_id})")
+                return False
+
+            latest_checkpoint_id = checkpoints[-1]["checkpoint_id"]
+
+            # 删除 RedisStateSaver 中的索引记录
+            await self.state_saver.delete_checkpoint(session_id, latest_checkpoint_id)
+
+            # 删除对应的记忆备份文件
+            await self.chat_workflow.memory_manager.delete_latest_memory(thread_id=session_id)
+
+            self.logger.info(f"删除最新 checkpoint 成功(session_id={session_id}, checkpoint_id={latest_checkpoint_id})")
+            return latest_checkpoint_id
+
+        except Exception as e:
+            self.logger.error(f"删除最新 checkpoint 失败(session_id={session_id}): {e}")
+            return None
+
+    async def _judge_is_interrupted(self, session_id: str) -> bool:
+        return await self.redis_client.exists(f"interrupt:{session_id}")
 
     async def message_stream(
         self,
@@ -382,8 +414,11 @@ class ChatService:
         message_content = HumanMessage(content=[{"type": "text", "text": message}], additional_kwargs=additional_kwargs)
         messages.append(message_content)
 
+        # 清除中断状态，确保流式响应正常
+        if self._judge_is_interrupted(session_id):
+            await self.redis_client.hdel(f"interrupt:{session_id}")
+
         full_response = ""
-        tool_count = 0
         try:
             async for chunk in self.chat_workflow.astream(messages=messages, config=input_config):
                 if chunk['event'] == 'on_chat_model_stream':
@@ -410,10 +445,8 @@ class ChatService:
                     else:
                         continue
                 elif chunk['event'] == 'on_tool_start':
-                    tool_count += 1
                     tool_call_args = chunk['data'].get('input', {})
                     tool_call_name = chunk['name']
-                    self.logger.debug(f"工具调用: {tool_call_name}")
                     yield json.dumps(
                         {"type": "tool_call_name", "content": {'args': tool_call_args, 'name': tool_call_name}},
                         ensure_ascii=False,
@@ -436,6 +469,24 @@ class ChatService:
                                 ensure_ascii=False,
                                 default=str
                             ) + "\n\n"
+        except GraphInterrupt as e:
+            interrupt_value = e.args[0][0].value
+            self.logger.debug(f"会话中断: {e}")
+            reason = interrupt_value.get("reason", "unknown")
+
+            yield json.dumps(
+                {
+                    "type": "interrupt",
+                    "session_id": session_id,
+                    "reason": reason,
+                },
+                ensure_ascii=False,
+                default=str
+            ) + "\n\n"
+
+            await self._save_round_checkpoint(session_id)
+
+            return
 
         except Exception as e:
             error_detail = f"{str(e)}\n{traceback.format_exc()}"
@@ -448,8 +499,6 @@ class ChatService:
             ) + "\n\n"
 
         checkpoint_id = await self._save_round_checkpoint(session_id)
-
-        self.logger.info(f"会话完成(session_id={session_id}, 工具调用={tool_count}次, 响应长度={len(full_response)})")
 
         # 返回最终完整结果
         yield json.dumps({
@@ -475,6 +524,7 @@ class ChatService:
         try:
             state = await self.graph.aget_state(config=config)
             print(state.values)
+            is_interrupted = self._judge_is_interrupted(session_id)
         except HTTPException as e:
             self.logger.error(f"获取会话状态异常(session_id:{session_id})：{str(e)}")
             return Conversation(session_id=session_id)
@@ -577,6 +627,7 @@ class ChatService:
             title=title,
             created_at=created_at,
             updated_at=updated_at,
+            is_interrupted=is_interrupted if is_interrupted else False
         )
 
         return conversations
@@ -690,47 +741,46 @@ class ChatService:
             return False
 
         try:
-            redis_client = self.checkpointer._redis
             deleted_count = 0
 
             # 1. 删除主 checkpoint 数据 (JSON类型)
             # Key格式: checkpoint:{session_id}:{checkpoint_ns}:{checkpoint_id}
             checkpoint_key = f"checkpoint:{session_id}:{checkpoint_ns}:{checkpoint_id}"
-            if await redis_client.exists(checkpoint_key):
-                await redis_client.delete(checkpoint_key)
+            if await self.redis_client.exists(checkpoint_key):
+                await self.redis_client.delete(checkpoint_key)
                 deleted_count += 1
 
             # 2. 检查并更新 checkpoint_latest (String类型)
             # Key格式: checkpoint_latest:{session_id}
             # 值格式: checkpoint:{session_id}:{checkpoint_ns}:{checkpoint_id}
             checkpoint_latest_key = f"checkpoint_latest:{session_id}"
-            if await redis_client.exists(checkpoint_latest_key):
-                current_latest = await redis_client.get(checkpoint_latest_key)
+            if await self.redis_client.exists(checkpoint_latest_key):
+                current_latest = await self.redis_client.get(checkpoint_latest_key)
                 if current_latest:
                     latest_str = current_latest.decode('utf-8') if isinstance(current_latest, bytes) else current_latest
                     # 如果当前最新的checkpoint正是要删除的那个，需要清理
                     if checkpoint_id in latest_str:
-                        await redis_client.delete(checkpoint_latest_key)
+                        await self.redis_client.delete(checkpoint_latest_key)
                         deleted_count += 1
 
             # 3. 删除所有相关的 checkpoint_write 数据 (JSON类型)
             # Key格式: checkpoint_write:{session_id}:{checkpoint_ns}:{checkpoint_id}:{task_id}
             write_pattern = f"checkpoint_write:{session_id}:{checkpoint_ns}:{checkpoint_id}:*"
             write_keys = []
-            async for key in redis_client.scan_iter(match=write_pattern):
+            async for key in self.redis_client.scan_iter(match=write_pattern):
                 write_keys.append(key)
 
             if write_keys:
-                deleted = await redis_client.delete(*write_keys)
+                deleted = await self.redis_client.delete(*write_keys)
                 deleted_count += deleted
 
             # 4. 从 write_keys_zset 索引中清理相关的 write keys (ZSet类型)
             # Key格式: write_keys_zset:{session_id}:{checkpoint_ns}
             # Members: checkpoint_write:{session_id}:{checkpoint_ns}:{checkpoint_id}:{task_id}
             write_keys_zset_key = f"write_keys_zset:{session_id}:{checkpoint_ns}"
-            if await redis_client.exists(write_keys_zset_key):
+            if await self.redis_client.exists(write_keys_zset_key):
                 # 获取所有 members
-                all_members = await redis_client.zrange(write_keys_zset_key, 0, -1)
+                all_members = await self.redis_client.zrange(write_keys_zset_key, 0, -1)
                 members_to_remove = []
 
                 for member in all_members:
@@ -741,7 +791,7 @@ class ChatService:
                         members_to_remove.append(member)
 
                 if members_to_remove:
-                    removed = await redis_client.zrem(write_keys_zset_key, *members_to_remove)
+                    removed = await self.redis_client.zrem(write_keys_zset_key, *members_to_remove)
                     deleted_count += removed
 
             return True
@@ -801,7 +851,7 @@ class ChatService:
             await self.state_saver.write_checkpoint(session_id, new_checkpoint)
             await self._delete_specific_checkpoint(session_id, checkpoint_id)
 
-            await self.chat_workflow.memory_manager.backtrack_memory(thread_id=session_id, checkpoint_id=checkpoint_id)
+            await self.chat_workflow.memory_manager.backtrack_memory(thread_id=session_id, checkpoint_id=checkpoint_id, new_checkpoint_id=new_checkpoint)
 
             self.logger.info(f"会话回溯成功(session_id:{session_id}, checkpoint_id:{checkpoint_id})")
 
@@ -844,3 +894,122 @@ class ChatService:
             }
         }
 
+    async def interrupt_stream(self, session_id, interrupt_reason: str = "user_initiated_interrupt"):
+        """
+        中断当前session_id下的对话
+        """
+        try:
+            await self.redis_client.hset(
+                f"interrupt:{session_id}",
+                mapping={
+                    "reason": interrupt_reason,
+                }
+            )
+
+            self.logger.info(f"会话中断成功(session_id:{session_id})")
+            return True
+        except Exception as e:
+            self.logger.error(f"会话中断失败(session_id:{session_id}): {str(e)}")
+            return False
+
+    async def invoke_interrupted_stream(self, session_id, message: str = "CONTINUE..."):
+        """
+        重新进行中断了的对话，断点续接
+        """
+        try:
+            # 清除中断时留下的状态
+            await self.redis_client.hdel(f"interrupt:{session_id}")
+            await self._delete_last_round_checkpoint(session_id)
+
+            async for chunk in self.graph.astream(
+                    Command(resume={"message": message}),
+                    config={"configurable": {"thread_id": session_id}}
+            ):
+                if chunk['event'] == 'on_chat_model_stream':
+                    # 最终返回的chunk
+                    if chunk['metadata']['langgraph_node'] and chunk['metadata']['langgraph_node'] == 'final_node':
+                        content = chunk['data']['chunk'].content
+                        if not isinstance(content, str):
+                            content = str(content)
+                        yield json.dumps(
+                            {"type": "content", "content": content},
+                            ensure_ascii=False,
+                            default=str
+                        ) + "\n\n"
+                    elif chunk['metadata']['langgraph_node'] and chunk['metadata']['langgraph_node'] == 'agent_node':
+                        content = chunk['data']['chunk'].content
+                        if not isinstance(content, str):
+                            content = str(content)
+                        yield json.dumps(
+                            {"type": "reasoning", "content": content},
+                            ensure_ascii=False,
+                            default=str
+                        ) + "\n\n"
+                    else:
+                        continue
+                elif chunk['event'] == 'on_tool_start':
+                    tool_call_args = chunk['data'].get('input', {})
+                    tool_call_name = chunk['name']
+                    yield json.dumps(
+                        {"type": "tool_call_name", "content": {'args': tool_call_args, 'name': tool_call_name}},
+                        ensure_ascii=False,
+                        default=str
+                    ) + "\n\n"
+                elif chunk['event'] == 'on_tool_end':
+                    output_content = chunk['data']['output'].content
+                    if output_content:
+                        if isinstance(output_content, list):
+                            for op in output_content:
+                                if op['type'] == "text":
+                                    yield json.dumps(
+                                        {"type": "tool_call_result", "content": op['text']},
+                                        ensure_ascii=False,
+                                        default=str
+                                    ) + "\n\n"
+                        elif isinstance(output_content, str):
+                            yield json.dumps(
+                                {"type": "tool_call_result", "content": output_content},
+                                ensure_ascii=False,
+                                default=str
+                            ) + "\n\n"
+        except GraphInterrupt as e:
+            interrupt_value = e.args[0][0].value
+            self.logger.debug(f"会话中断: {e}")
+            reason = interrupt_value.get("reason", "unknown")
+
+            yield json.dumps(
+                {
+                    "type": "interrupt",
+                    "session_id": session_id,
+                    "reason": reason,
+                 },
+                ensure_ascii=False,
+                default=str
+            ) + "\n\n"
+
+            await self._save_round_checkpoint(session_id)
+
+            return
+
+        except Exception as e:
+            error_detail = f"{str(e)}\n{traceback.format_exc()}"
+            self.logger.error(f"流式响应异常(session_id:{session_id}): {error_detail}")
+            # 异常返回错误信息 + 双换行符 + 不执行return，避免生成器强制关闭
+            yield json.dumps(
+                {"type": "error", "error": str(e)},
+                ensure_ascii=False,
+                default=str
+            ) + "\n\n"
+
+        checkpoint_id = await self._save_round_checkpoint(session_id)
+
+        yield json.dumps(
+            {
+                "type": "done",
+                "session_id": session_id,
+                "checkpoint_id": checkpoint_id,
+                "interrupt_before": True
+             },
+            ensure_ascii=False,
+            default=str
+        ) + "\n\n"

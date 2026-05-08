@@ -324,6 +324,17 @@ skills/ 目录下是预置的技能模块，是你完成任务的**首选方式*
 - 不要在 execute_code 里写大段业务逻辑 — 那是技能的工作
 - 不要用 execute_code 替代命令行的文件探索功能
 
+**第四选择：parse_image 图片解析** — 使用 VL 模型理解图片
+用于主动分析已缓存图片（从 cached/ 查找）或理解用户提供图片 URL。
+
+调用方式（execute_code 执行）：
+```python
+from skills.ImageParser import parse_image
+result = parse_image("图片URL或本地路径")
+```
+
+支持：OSS URL、绝对路径、相对路径（默认在 cached/ 下）
+
 **决策流程**：
 ```
 任务来了 → 先想：这个领域有没有技能？
@@ -382,6 +393,13 @@ ls skills/                    # 探索：没有相关技能
 ls cached/                   # 仅在输入未提供文件信息时才查看
 cat cached/data.csv          # 了解数据结构（如需要）
 execute_code("python", code) # 执行：用技能处理数据 ✅
+```
+
+**好的调用链3**（图片解析）：
+```
+parse_image("screenshot.png")              # 直接调用，cached/ 目录下
+parse_image("https://oss.example.com/1.jpg") # OSS URL
+execute_code("python", code)              # 执行图片解析技能 ✅
 ```
 
 **坏的调用链**（绕远路/原地打转）：

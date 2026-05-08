@@ -120,3 +120,25 @@ class RedisStateSaver:
         except Exception as e:
             self.logger.error(f"删除会话失败(thread_id={thread_id}): {e}")
             return False
+
+    async def delete_latest_checkpoint(self, thread_id: str):
+        """                                                                                                               
+        删除指定thread_id下最新的checkpoint                                                                               
+        """
+        try:
+            checkpoints = await self.get_checkpoints(thread_id)
+            if not checkpoints:
+                return False
+
+            # checkpoints 按 ts 升序排列，最后一个就是最新的
+            latest = checkpoints[-1]
+            checkpoint_id = latest["checkpoint_id"]
+
+            key = self._build_key(thread_id)
+            await self.redis_client.hdel(key, checkpoint_id)
+
+            self.logger.debug(f"删除最新checkpoint成功(thread_id={thread_id}, checkpoint_id={checkpoint_id})")
+            return True
+        except Exception as e:
+            self.logger.error(f"删除最新checkpoint失败(thread_id={thread_id}): {e}")
+            return False

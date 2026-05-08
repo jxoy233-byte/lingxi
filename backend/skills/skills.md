@@ -104,6 +104,29 @@ Bocha 是一个**新闻/时效性**搜索引擎，支持按时间范围筛选
 
 ---
 
+# 🖼️ Skill: ImageParser
+
+ImageParser 是一个**图片解析**技能，使用 VL 模型（Qwen3-VL）来理解图片内容。
+
+**文件名称**: `ImageParser.py`
+**类型**: 图片解析 / 视觉理解
+**能力**: 解析 OSS URL、本地文件、Base64 图片，返回图片内容描述
+
+**适用场景**：
+- 需要解析截图、照片、文档图片
+- 从 cached/ 历史缓存中主动查找并解析图片
+- 用户提供图片 URL 需要 AI 理解
+
+**函数**：
+- `parse_image(image_source, prompt=None, max_tokens=2048, temperature=0.7)` — 解析单张图片
+- `parse_images_batch(image_sources, prompt=None, ...)` — 批量解析多张图片
+
+**路径解析**：
+- 绝对路径、OSS URL、相对路径（默认在 cached/ 下）均支持
+- 找不到文件时，错误信息会显示完整解析路径
+
+---
+
 ## 🔀 混合使用
 
 当单一引擎结果不够时，可以**组合使用**：

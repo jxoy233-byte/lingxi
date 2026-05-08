@@ -251,7 +251,7 @@ class FilesLoaders:
         # 检测 OSS 配置
         oss_cfg = get_oss_config()
         use_oss = bool(oss_cfg.get("access_key_id") and oss_cfg.get("bucket"))
-        self.logger.info(f"OSS 配置检测: use_oss={use_oss}, bucket={oss_cfg.get('bucket')}")
+        self.logger.debug(f"OSS 配置检测: use_oss={use_oss}, bucket={oss_cfg.get('bucket')}")
 
         for file in files:
             output = OutputFormat(

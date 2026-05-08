@@ -26,8 +26,9 @@ class ChatStateCore2(TypedDict):
     imp_ipt: Annotated[HumanMessage, "优化后的用户输入"]
     context: Annotated[Optional[List[BaseMessage]], "与上下文拼接好了的用户输入信息，含记忆"]
 
-    restream_checkpoint_id :Annotated[str, "重新开始会话的回溯checkpoint id"]
     tool_call_times: Annotated[int, "当前轮对话中调用工具次数"]
+
+    is_interrupted: bool
 
     # memory 累加字段（各节点各自填充）
     memory_user_message: Annotated[Optional[str], "待写入memory的用户消息"]

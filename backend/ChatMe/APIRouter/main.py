@@ -272,4 +272,44 @@ async def cancel_upload_file(
         "processed_outputs": processed_outputs,
     }
 
+@ChatMe_app.post("/{session_id}/interrupt", summary="中断当前对话")
+async def interrupt(
+    session_id: str = Path(..., embed=True, description="会话唯一ID"),
+    interrupt_reason: str = Body(..., embed=True, description="中断原因")
+):
+    """
+    中断当前对话
+    """
+    success = await chat_service.interrupt_stream(session_id=session_id, interrupt_reason=interrupt_reason)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"会话{session_id}中断失败")
+
+    return {"code": 200, "msg": f"会话中断成功，理由:{interrupt_reason}", "session_id": session_id}
+
+@ChatMe_app.post("/{session_id}/invoke_interrupted/{invoke_message}", summary="中断续接当前对话")
+async def invoke_interrupted(
+    session_id: str = Path(..., embed=True, description="会话唯一ID"),
+    invoke_message: str = Path(..., embed=True, description="中断续接消息")
+):
+    """
+    中断续接当前对话
+    """
+    async def event_generator():
+        async for data in chat_service.invoke_interrupted_stream(
+        session_id=session_id,
+        message=invoke_message
+        ):
+            yield f"{data}"
+
+    headers = {
+        "Cache-Control": "no-cache",  # 禁用缓存
+        "X-Accel-Buffering": "no",  # 禁用nginx/uvicorn缓冲区!
+        "Connection": "keep-alive"  # 长连接保持
+    }
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers=headers,
+    )
 

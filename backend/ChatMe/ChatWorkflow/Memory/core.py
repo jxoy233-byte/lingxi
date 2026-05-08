@@ -261,7 +261,7 @@ class MemoryManager:
             self.logger.error(f"删除记忆目录失败: {e}")
             return False
 
-    async def backtrack_memory(self, thread_id: str, checkpoint_id: str) -> bool:
+    async def backtrack_memory(self, thread_id: str, checkpoint_id: str, new_checkpoint_id: str) -> bool:
         """
         回溯指定 thread_id 的记忆到指定检查点
 
@@ -272,7 +272,8 @@ class MemoryManager:
 
         Args:
             thread_id: 对话线程 ID
-            checkpoint_id: 检查点 ID
+            checkpoint_id: 回溯目标的检查点 ID
+            new_checkpoint_id: 回溯更新后的检查点 ID
 
         Returns:
             回溯是否成功
@@ -347,6 +348,11 @@ class MemoryManager:
                 except Exception as e:
                     self.logger.error(f"删除文件失败 {filename}: {e}")
 
+            # 将备份文件名重命名为新 checkpoint id（保留原时间戳）
+            new_target_filename = f"{new_checkpoint_id}_{target_timestamp}.md"
+            new_target_path = os.path.join(path_with_thread, new_target_filename)
+            os.rename(target_file_path, new_target_path)
+
             # 将目标 checkpoint 内容写入 current.md
             current_file_path = self._get_memory_file_path(thread_id)
             with open(current_file_path, 'w', encoding='utf-8') as f:
@@ -401,3 +407,43 @@ class MemoryManager:
 ## 缓存文件目录
 - cached/
 """
+
+
+    async def delete_latest_memory(self, thread_id: str) -> bool:
+        """
+        删除指定 thread_id 下最新的记忆备份文件（但不删除 current.md）
+        """
+        try:
+            path_with_thread = self._get_memory_path_with_thread(thread_id)
+
+            if not os.path.exists(path_with_thread):
+                self.logger.warning(f"记忆目录不存在: {path_with_thread}")
+                return False
+
+            all_files = [f for f in os.listdir(path_with_thread) if f.endswith('.md') and f != 'current.md']
+
+            # 收集备份文件及其时间戳
+            backup_files = []
+            for filename in all_files:
+                if '_' in filename:
+                    parts = filename.rsplit('_', 1)
+                    if len(parts) == 2:
+                        try:
+                            timestamp = datetime.strptime(parts[1][:-3], "%Y-%m-%d %H:%M:%S")
+                            backup_files.append({"filename": filename, "timestamp": timestamp})
+                        except ValueError:
+                            continue
+
+            if not backup_files:
+                return False
+
+            # 按时间戳降序，删最新的
+            backup_files.sort(key=lambda x: x["timestamp"], reverse=True)
+            latest = backup_files[0]
+            os.remove(os.path.join(path_with_thread, latest["filename"]))
+            self.logger.info(f"删除最新记忆备份: {latest['filename']}")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"删除最新记忆失败: {e}")
+            return False

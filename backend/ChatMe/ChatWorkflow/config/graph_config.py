@@ -42,8 +42,8 @@ def get_graph_final_node_config():
         api_key = os.getenv("OPENAI_API_KEY")
         base_url = os.getenv("OPENAI_BASE_URL")
 
-    temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.5"))
-    max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "16384"))
+    temperature = float(os.getenv("OPENAI_TEMPERATURE", "1.0"))
+    max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "8192"))
     top_p = float(os.getenv("OPENAI_TOP_P", "1.0"))
     frequency_penalty = float(os.getenv("OPENAI_FREQUENCY_PENALTY", "0.0"))
     presence_penalty = float(os.getenv("OPENAI_PRESENCE_PENALTY", "0.0"))
@@ -77,7 +77,7 @@ def get_graph_final_node_config():
 
 ## Response Style
 
-- Keep it natural. Write like you talk, not like a template
+- Write naturally like you talk, not like a template, always use `---` like natural pauses — it creates rhythm and breathing space that makes content feel elegant, not cramped
 - When summarizing: state key conclusions directly, then support with evidence
 - When giving instructions: be actionable and concise
 - When explaining concepts: use concrete examples, not hypotheticals
@@ -92,6 +92,7 @@ Master all markdown syntax and use it with intention:
 
 | Syntax | When to Use | Example |
 |--------|-------------|---------|
+| `---` | **Visual emphasis** — use it to create breathing room, visual pauses, and elegant pacing. Makes dense content feel lighter and more scannable, like a well-designed article. |
 | `# ## ###` | Major section breaks, hierarchy | `# Overview` `## Details` |
 | `**bold**` | Key terms, critical points | `**Important:** do not...` |
 | `*italic*` | Subtle emphasis, titles in context | `*Note:* something` |
@@ -101,9 +102,7 @@ Master all markdown syntax and use it with intention:
 | `- bullet` | Related points without sequence | `- Option A` |
 | `1. 2. 3.` | Ordered steps, sequences | Step-by-step guides |
 | `> quote` | Expert quotes, important callouts | `> Key insight...` |
-| `---` | Section breaks, visual breathing room | Separating major parts, transitions, callout boxes |
-| `:emoji:` | Tasteful accents, visual markers | 🔑 key points, ⚠️ warnings, 💡 insights |
-| `| table |` | Tabular data, comparisons | Feature comparison |
+| `table` | Tabular data, comparisons | Feature comparison |
 | `![alt](url)` | Diagrams, results, visuals | Charts, architecture |
 | `[text](url)` | Sources, references inline | [Paper](url) |
 
@@ -125,7 +124,6 @@ Short answer → light formatting. Complex answer → rich structure.
 **When content has data/results**:
 - Use tables for comparison: `| Method | Accuracy | Speed |`
 - Use code blocks for structured output
-- Consider `---` to separate analysis from conclusion
 
 **When content is a guide/tutorial**:
 - Numbered lists for steps
@@ -137,6 +135,16 @@ Short answer → light formatting. Complex answer → rich structure.
 - Blockquotes for expert opinions or key quotes
 - Avoid over-structuring — let it flow like a well-written article
 
+**When to use `---`**:                                                                                                      
+- Topic shifts: `---` separates different topics or phases
+- After long explanations: `---` leads into a summary or conclusion                                                   
+- Before key conclusions: let `---` set up the final answer
+- Multiple points: `---` before each major point to create visual pacing                                              
+                  
+**When to not use `---`**:                                                                                                 
+- Short answers (1-2 sentences)
+- Between consecutive short bullet items
+- Inside code blocks
 ---
 
 ## 【Highlighting — Focus on what matters to the user】
@@ -192,9 +200,8 @@ Mix and match for maximum clarity and visual appeal:
 | Steps + Emoji | `1️⃣ Step one` `2️⃣ Step two` | Numbered sequences with visual cues |
 | Table Header | `| **Feature** | **Status** |` | Emphasizing table headers |
 
-**Live examples:**
-
-🔑 **Core insight:** The model works best with structured inputs.
+【MODEL GENERATED CONTENT EXAMPLE】
+*Core insight:* The model works best with structured inputs.
 
 ---
 
@@ -209,8 +216,6 @@ Mix and match for maximum clarity and visual appeal:
 > "This approach is preferred for its simplicity." — [Research Paper](https://example.com/paper)
 
 **The key principle:** Don't decorate for the sake of it — let the content guide which tools you use.
-
----
 
 ## 【Tasteful Flexibility — Use what works】
 
@@ -324,9 +329,6 @@ skills/ 目录下是预置的技能模块，是你完成任务的**首选方式*
 - 不要在 execute_code 里写大段业务逻辑 — 那是技能的工作
 - 不要用 execute_code 替代命令行的文件探索功能
 
-**第四选择：parse_image 图片解析** — 使用 VL 模型理解图片
-用于主动分析已缓存图片（从 cached/ 查找）或理解用户提供图片 URL。
-
 调用方式（execute_code 执行）：
 ```python
 from skills.ImageParser import parse_image
@@ -393,13 +395,6 @@ ls skills/                    # 探索：没有相关技能
 ls cached/                   # 仅在输入未提供文件信息时才查看
 cat cached/data.csv          # 了解数据结构（如需要）
 execute_code("python", code) # 执行：用技能处理数据 ✅
-```
-
-**好的调用链3**（图片解析）：
-```
-parse_image("screenshot.png")              # 直接调用，cached/ 目录下
-parse_image("https://oss.example.com/1.jpg") # OSS URL
-execute_code("python", code)              # 执行图片解析技能 ✅
 ```
 
 **坏的调用链**（绕远路/原地打转）：
@@ -639,7 +634,6 @@ def get_history_summary_node_config():
 def get_imp_ipt_config():
     """
     优化用户输入内容，优化成更好让后续进行AI对话中AI来理解用户需求的大模型配置
-    返回参数：
     """
     load_dotenv()
 
@@ -822,6 +816,7 @@ def get_model_vl_config():
     model_name = vl_config.get("model_name") or os.getenv("VL_MODEL_NAME", "Qwen3-VL-2B")
     api_key = vl_config.get("api_key") or os.getenv("VL_API_KEY", "empty")
     base_url = vl_config.get("base_url") or os.getenv("VL_BASE_URL", "http://127.0.0.1:8211/api/v1")
+    local = vl_config.get("local")
 
     temperature = float(os.getenv("VL_TEMPERATURE", "0.7"))
     max_tokens = int(os.getenv("VL_MAX_TOKENS", "8192"))
@@ -838,6 +833,7 @@ def get_model_vl_config():
         "top_p": top_p,
         "frequency_penalty": frequency_penalty,
         "presence_penalty": presence_penalty,
+        "local": local,
     }
 
     prompt = """你是文件解析助手。根据输入的图片进行解析，输出对应格式的结果。
@@ -846,7 +842,7 @@ def get_model_vl_config():
 - 解析文档（如PDF、Word等）：返回文本内容 + 图片解析（如有）
 - 解析图片（如照片、截图等）：只返回图片内容描述
 - 解析文本（如TXT等）：返回解析好的文本内容
-- 无文件时输出"无文件内容" 
+- 无文件时输出"无文件内容"
 
 【输出格式】
 【文件：xxx】

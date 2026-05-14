@@ -36,7 +36,18 @@ app.add_middleware(
 )
 
 app.include_router(ChatMe_app)
-app.include_router(model_vl_app)
+
+# 仅在 local=true 时加载本地 VL 模型并启用对应路由
+try:
+    from ChatMe.ChatMeConfig import get_model_vl_config
+    vl_config = get_model_vl_config()
+    if vl_config.get("local"):
+        app.include_router(model_vl_app)
+        logger.info("本地 VL 模型已启用（local=true）")
+    else:
+        logger.info("本地 VL 模型未启用（local=false），将使用外部 VL 模型")
+except Exception as e:
+    logger.warning(f"VL 模型配置获取失败: {e}")
 
 @app.get("/")
 async def root():

@@ -1,8 +1,18 @@
+"""
+智能体的底层自带的核心工具能力
+
+FASTMCP 实现
+
+tips:
+每个tool函数构建都需要带上session_id参数
+"""
+
 from datetime import datetime
 from pathlib import Path
 from shutil import which
-from typing import Any, Annotated, Literal, Optional
+from typing import Annotated, Literal, Optional
 
+import redis
 from fastmcp import FastMCP
 import subprocess
 import tempfile
@@ -12,10 +22,14 @@ import re
 import sys
 
 from ChatMe.LoggingManager.logging_config import get_logger
+from ChatMe.ChatMeConfig import get_redis_checkpointer_url
 
-server = FastMCP(name="ChatMe Agent Skills", )
+server = FastMCP(name="ChatMe Agent Core Skills")
 
 logger = get_logger("mcp_server")
+
+redis_url = get_redis_checkpointer_url()
+_redis_client = redis.from_url(redis_url)
 
 def is_dangerous_command(command: Annotated[ str, "系统执行命令"]) -> tuple[bool, str]:
     """
@@ -123,7 +137,7 @@ def is_dangerous_command(command: Annotated[ str, "系统执行命令"]) -> tupl
     return False, ""
 
 @server.tool
-def execute_code(code: str, language: Literal["python", "nodejs", "javascript", "js"] = "python") -> Optional[str]:
+def execute_code(code: str, language: Literal["python", "nodejs", "javascript", "js"] = "python", session_id: str="") -> Optional[str]:
     """在沙盒中执行代码"""
     try:
         # 向上查找项目根目录
@@ -172,8 +186,9 @@ def execute_code(code: str, language: Literal["python", "nodejs", "javascript", 
                     env=env,
                 )
 
-                logger.info(f"执行{language}代码成功")
-                return f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n\nReturn code: {result.returncode}"
+                output = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n\nReturn code: {result.returncode}"
+                logger.info(f"会话{session_id}中执行代码成功")
+                return  output
             finally:
                 os.unlink(temp_file)
 
@@ -185,7 +200,7 @@ def execute_code(code: str, language: Literal["python", "nodejs", "javascript", 
             try:
                 node_cmd = which("node")
                 if not node_cmd:
-                    logger.error("Error: Node.js 未找到")
+                    logger.error(f"会话{session_id}中错误: Node.js 未找到")
                     return "Error: Node.js 未找到"
 
                 result = subprocess.run(
@@ -196,20 +211,23 @@ def execute_code(code: str, language: Literal["python", "nodejs", "javascript", 
                     env=env,
                 )
 
-                logger.info(f"执行{language}代码成功")
-                return f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n\nReturn code: {result.returncode}"
+                output = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n\nReturn code: {result.returncode}"
+                logger.info(f"会话{session_id}中执行代码成功")
+                return output
             finally:
                 os.unlink(temp_file)
+
     except Exception as e:
-        logger.error(f"错误执行代码: {str(e)}")
+        logger.error(f"会话{session_id}中错误执行代码")
         return f"Error: {str(e)} "
 
 
 @server.tool
-def execute_command(command: Annotated[ str, "系统执行命令"], timeout: int = 30) -> str:
+def execute_command(command: Annotated[ str, "系统执行命令"], timeout: int = 30, session_id: str="") -> str:
     """在安全的沙盒环境中执行终端命令"""
     is_dangerous, reason = is_dangerous_command(command=command)
     if is_dangerous:
+        logger.warning(f"会话{session_id}中危险命令,已安全拦截")
         return f"Error: 安全拦截：{reason}"
 
     # 向上查找项目根目录的虚拟环境
@@ -248,37 +266,43 @@ def execute_command(command: Annotated[ str, "系统执行命令"], timeout: int
             env=env,
         )
 
-        return f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n\nReturn code: {result.returncode}"
+        output = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n\nReturn code: {result.returncode}"
+        logger.info(f"会话{session_id}中执行终端命令成功")
+        return output
     except subprocess.TimeoutExpired:
+        logger.error(f"会话{session_id}中终端命令执行超时")
         return f"Error: Command execution timed out ({timeout} seconds limit)"
     except Exception as e:
+        logger.error(f"会话{session_id}中错误执行终端命令")
         return f"Error: {str(e)}"
 
+@server.tool # todo 更新对应的prompt
+def interrupt(message: str, session_id: str = ""):
+      """
+      中断当前对话，向用户询问更多的信息
+
+      Args:
+          message: 中断原因/要询问用户的信息
+          session_id: 额外参数，包含 session_id
+      """
+      if not session_id:
+          logger.warning(f"interrupt 工具调用缺少 session_id 参数")
+          return "Error: 缺少 session_id 参数"
+
+      try:
+          _redis_client.hset(f"interrupt:{session_id}", mapping={
+              "reason": message,
+          })
+
+          logger.info(f"会话 {session_id} 触发中断: {message}")
+          return f"已触发中断，等待用户输入: {message}"
+      except Exception as e:
+          logger.error(f"会话 {session_id} 中断操作失败")
+          return f"中断失败: {str(e)}"
+
+
 @server.tool
-def get_skills_overview() -> str:
-    """获取ai可以技能的使用指南概括"""
-    skills_md = ["skills", "Skills", "SKILLS"]
-    skills_dir = Path.cwd() / "skills"
-    skill_file = Any
-    for name in skills_md:
-        skill_file = os.path.join(skills_dir, f"{name}.md")
-        break
-
-    if os.path.exists(skill_file):
-        with open(skill_file, 'rb') as f:
-            import chardet
-            raw_data = f.read(10000)
-            result = chardet.detect(raw_data)
-            detected_encoding = result.get("encoding", "utf-8")
-
-        with open(skill_file, 'r', encoding=detected_encoding) as f:
-            return f.read()
-    else:
-        return f"技能概括文件没有找到"
-
-
-@server.tool
-def get_current_datetime() -> str:
+def get_current_datetime(session_id: str = "") -> str:
     """
     获取当前的日期和时间
 
@@ -293,6 +317,8 @@ def get_current_datetime() -> str:
         "weekday_cn": "星期日 星期一 星期二 星期三 星期四 星期五 星期六".split()[now.weekday()],
         "weekday_en": ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][now.weekday()]
     }
+
+    logger.info(f"会话{session_id}中获取当前时间成功")
     return json.dumps(result, ensure_ascii=False)
 
 

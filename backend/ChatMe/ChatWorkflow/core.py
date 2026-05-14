@@ -100,6 +100,9 @@ class ChatWorkflow:
 
         # 输入优化视觉模型配置
         imp_ipt_vl_llm_config, imp_ipt_vl_llm_prompt = get_model_vl_config()
+        # local=true 时使用本地 VL 模型，否则使用外部 VL 模型
+        # 从配置中分离 local 标志，ChatOpenAI 不接受该参数
+        vl_local = imp_ipt_vl_llm_config.pop("local", None)
         self.llm_imp_ipt_vl = ChatOpenAI(**imp_ipt_vl_llm_config)
         # prompt = ChatPromptTemplate.from_messages([("system", imp_ipt_vl_llm_prompt), ("human", "{messages}")])
         # self.llm_imp_ipt_vl = prompt | self.llm_imp_ipt_vl
@@ -229,7 +232,7 @@ class ChatWorkflow:
                                 if tc["name"]:
                                     tool_calls.append(tc)
                         except json.JSONDecodeError as e:
-                            self.logger.debug(f"解析工具调用JSON失败: {e}")
+                            self.logger.error(f"解析工具调用JSON失败: {e}")
 
                         start_idx = json_end
                         break
@@ -333,16 +336,13 @@ class ChatWorkflow:
     async def check_and_trigger_interrupt(self, session_id):
         """
         检查当前session_id下的对话是否被中断
+        如果Redis中存在中断标记，返回interrupt事件
         """
-        try:
-            interrupt_key = f"interrupt:{session_id}"
-            # 检查中断
-            key_value = await self.redis_client.hgetall(interrupt_key)
-            if key_value :
-                return interrupt(value=key_value)
-
-        except Exception as e:
-            self.logger.debug(f"检查session_id是否被中断失败: {e}")
+        interrupt_key = f"interrupt:{session_id}"
+        # 检查中断
+        key_value = await self.redis_client.hgetall(interrupt_key)
+        if key_value:
+            return interrupt(value=key_value)
 
         return None
 
@@ -364,7 +364,7 @@ class ChatWorkflow:
                 if isinstance(msg, HumanMessage) and msg.additional_kwargs.get("is_file", False):
                     files = await self._switch_files_content_to_files(msg)
 
-            # todo 增加对大文件的处理逻辑
+            # todo 增加对大文件的处理逻辑，切片
 
             return {
                 "files": files,
@@ -449,8 +449,6 @@ class ChatWorkflow:
 
         tools = await self.mcp_client.get_tools()
 
-        agent_node_llm = self.agent_llm.bind(tools=tools)
-
         workflow = StateGraph(ChatStateCore2)
 
         async def input_parse_node(state: ChatStateCore2, config: RunnableConfig):
@@ -458,13 +456,11 @@ class ChatWorkflow:
             输入预处理节点
             """
             thread_id = config["configurable"]["thread_id"]
-            await self.check_and_trigger_interrupt(thread_id)
 
             input_msg = []
             messages = list(state["messages"])
 
             processed_files = await self.graph_process_files.ainvoke({"messages": messages})
-            await self.check_and_trigger_interrupt(thread_id)
 
             files_input: HumanMessage = processed_files["combined_result"]
 
@@ -479,7 +475,6 @@ class ChatWorkflow:
             input_msg.extend(history_invoke)
             input_msg.append(files_input)
             input_msg.extend(user_input)
-            self.logger.debug(f"[input_parse_node] 输入传入消息数量: {len(input_msg)}")
 
             imp_ipt = await self.llm_imp_ipt.ainvoke({"messages": input_msg})
 
@@ -489,7 +484,6 @@ class ChatWorkflow:
             imp_ipt_response_metadata = imp_ipt.response_metadata
 
             imp_ipt = HumanMessage(content=imp_ipt_content, additional_kwargs=imp_ipt_additional_kwargs, id=imp_ipt_id, response_metadata=imp_ipt_response_metadata)
-            self.logger.debug(f"[input_parse_node] 优化后输入内容长度: {len(imp_ipt.content)}")
 
             return {
                 "imp_ipt": imp_ipt,
@@ -547,10 +541,13 @@ class ChatWorkflow:
                 interrupt_msg = SystemMessage(content=f"已超过{TOOL_CALL_TIMES}次调用工具次数，请整理当前信息提前结束对话")
                 input_msg.append(interrupt_msg)
 
-            response = await agent_node_llm.ainvoke({"messages": input_msg})
+            response = await self.agent_llm.ainvoke({"messages": input_msg})
 
             # 符合ToolNode节点的AIMessage(REASONING)
             format_response = self._parse_content_to_tool_calls(response)
+
+            for tool_call in format_response.tool_calls:
+                tool_call["args"]["session_id"] = thread_id
 
             tool_call_times += 1
 
@@ -596,6 +593,8 @@ class ChatWorkflow:
             last_message = state["messages"][-1]
             if isinstance(last_message, AIMessage) and hasattr(last_message, "tool_calls") and last_message.tool_calls:
                 return "tool_execution_node"
+            elif isinstance(last_message, SystemMessage):
+                return "context_assembly_node"
             return "final_node"
 
         workflow.set_entry_point("input_parse_node")
@@ -606,8 +605,9 @@ class ChatWorkflow:
         workflow.add_conditional_edges("agent_node",
             route_agent_output,
             {
+                "context_assembly_node": "context_assembly_node",
                 "tool_execution_node": "tool_execution_node",
-                "final_node": "final_node"
+                "final_node": "final_node",
             }
         )
 
@@ -646,7 +646,7 @@ class ChatWorkflow:
         result = await self.graph.ainvoke({"messages": messages}, config=config)
         return result
 
-    async def astream(self, messages: list[BaseMessage], config: Optional[Dict[str, Any]] = None) -> AsyncGenerator[Any, None]:
+    async def astream(self, messages: Optional[list[BaseMessage]], config: Optional[Dict[str, Any]] = None) -> AsyncGenerator[Any, None]:
         """
         Stream workflow execution
 
@@ -657,8 +657,13 @@ class ChatWorkflow:
         Yields:
             Workflow execution chunks
         """
+        config = {
+            **config,
+            "recursion_limit": 1000,
+        }
+
         async for e in self.graph.astream_events({
             "messages": messages},
-            config=config
+            config=config,
         ):
                 yield e

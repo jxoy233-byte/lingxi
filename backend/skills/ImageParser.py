@@ -83,7 +83,8 @@ def parse_image(
     image_source: str,
     prompt: Optional[str] = None,
     max_tokens: int = 2048,
-    temperature: float = 0.7
+    temperature: float = 0.7,
+    **kwargs
 ) -> str:
     """
     使用 VL 模型解析图片
@@ -204,7 +205,8 @@ def parse_images_batch(
     image_sources: list[str],
     prompt: Optional[str] = None,
     max_tokens: int = 2048,
-    temperature: float = 0.7
+    temperature: float = 0.7,
+    **kwargs
 ) -> list[str]:
     """
     批量解析多张图片

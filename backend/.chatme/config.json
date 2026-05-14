@@ -28,7 +28,8 @@
     "vl": {
       "model_name": "Qwen3-VL-2B",
       "api_key": "empty",
-      "base_url": "http://127.0.0.1:8211/api/v1"
+      "base_url": "http://127.0.0.1:8211/api/v1",
+      "local": true
     }
   },
   "directories": {

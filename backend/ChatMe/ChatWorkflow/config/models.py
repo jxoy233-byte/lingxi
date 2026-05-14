@@ -28,8 +28,6 @@ class ChatStateCore2(TypedDict):
 
     tool_call_times: Annotated[int, "当前轮对话中调用工具次数"]
 
-    is_interrupted: bool
-
     # memory 累加字段（各节点各自填充）
     memory_user_message: Annotated[Optional[str], "待写入memory的用户消息"]
     memory_ai_response: Annotated[Optional[str], "待写入memory的AI回复"]

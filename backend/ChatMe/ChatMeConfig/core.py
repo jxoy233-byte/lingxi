@@ -123,7 +123,7 @@ class ChatMeConfig:
         provider_config = self.get("llm_providers.vl", {})
 
         result = {}
-        for key in ["model_name", "api_key", "base_url"]:
+        for key in ["model_name", "api_key", "base_url", "local"]:
             config_value = provider_config.get(key, "") if isinstance(provider_config, dict) else ""
             env_value = os.getenv(f"VL_{key.upper()}", None)
 
@@ -233,16 +233,6 @@ def get_directory(name: str) -> str:
 def get_oss_config() -> dict:
     """获取 OSS 配置"""
     return config.get_oss_config()
-
-
-def get_oss_bucket() -> str:
-    """获取 OSS bucket 名称"""
-    return config.get_oss_bucket()
-
-
-def get_oss_endpoint() -> str:
-    """获取 OSS endpoint"""
-    return config.get_oss_endpoint()
 
 
 def get_app_config() -> dict:

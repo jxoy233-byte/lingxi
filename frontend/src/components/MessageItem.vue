@@ -150,11 +150,11 @@
         </div>
 
         <!-- 思考过程区块 -->
-        <div v-if="message.role === 'ai' && hasThinking" class="thinking-section" :class="{ 'thinking-active': !message.thinkingDone, 'thinking-collapsed': thinkingCollapsed }">
+        <div v-if="message.role === 'ai' && hasThinking" class="thinking-section" :class="{ 'thinking-active': !message.thinkingDone, 'thinking-collapsed': thinkingCollapsed, 'thinking-interrupted': isInterrupted && isLatestAiMessage && (isInterruptedSessionId === currentSessionId || isInterruptedSessionId === _pendingInterruptSessionId) }">
           <div class="thinking-header" @click="toggleThinking">
             <div class="thinking-header-left">
-              <span class="thinking-status-dot" :class="{ 'dot-active': !message.thinkingDone }"></span>
-              <span class="thinking-label">{{ message.thinkingDone ? '思考过程' : '正在思考...' }}</span>
+              <span class="thinking-status-dot" :class="{ 'dot-active': !message.thinkingDone, 'dot-interrupted': isInterrupted && isLatestAiMessage && (isInterruptedSessionId === currentSessionId || isInterruptedSessionId === _pendingInterruptSessionId) }"></span>
+              <span class="thinking-label">{{ isInterrupted && isLatestAiMessage && (isInterruptedSessionId === currentSessionId || isInterruptedSessionId === _pendingInterruptSessionId) ? '思考已中断' : (message.thinkingDone ? '思考过程' : '正在思考...') }}</span>
               <span v-if="message.toolCalls && message.toolCalls.length" class="tool-badge">
                 {{ message.toolCalls.length }} 个工具调用
               </span>
@@ -186,34 +186,49 @@
         </div>
 
         <!-- 消息文本（文件消息不显示content） -->
-        <div v-if="message.content && !message.additional_kwargs?.is_file" class="message-text" v-html="renderedContent" @click.capture="handleLinkClick"></div>
-      </div>
+        <div v-if="message.content && !message.additional_kwargs?.is_file" class="message-text" :class="{ 'collapsed': isUserMessageCollapsed }" v-html="isUserMessageCollapsed ? collapsedContent : renderedContent" @click.capture="handleLinkClick"></div>
+        <button v-if="message.role === 'user' && message.content && isContentCollapsed" class="collapse-toggle" @click="toggleUserContent">
+          {{ isUserMessageCollapsed ? '展开' : '收起' }}
+        </button>
 
-      <!-- 操作按钮组：AI 消息下方，hover 显示 -->
-      <div v-if="message.role === 'ai' && message.content && !message.streaming" class="action-buttons">
-        <button v-if="message.checkpointId" class="action-button" @click="handleRestore" title="回溯到此对话">
-          <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="1 4 1 10 7 10"/>
-            <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
-          </svg>
-        </button>
-        <button v-if="message.checkpointId && !isFirstAiMessage" class="action-button" @click="handleRestream" title="重新生成">
-          <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 2v6h-6"/>
-            <path d="M3 12a9 9 0 0 1 15-6.7L21 8"/>
-            <path d="M3 22v-6h6"/>
-            <path d="M21 12a9 9 0 0 1-15 6.7L3 16"/>
-          </svg>
-        </button>
-        <button class="action-button" @click="copyMessage" :title="copied ? '已复制' : '复制'">
-          <svg v-if="!copied" xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
-            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-          </svg>
-          <svg v-else xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="20 6 9 17 4 12"/>
-          </svg>
-        </button>
+        <!-- 操作按钮组：AI 消息下方，hover 显示 -->
+        <div v-if="message.role === 'ai'" class="action-buttons">
+          <button v-if="message.streaming && hasReceivedInit && isLatestAiMessage" class="action-button interrupt-action" @click.stop="handleInterrupt" title="中断当前对话">
+            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="18" height="18" rx="2"/>
+            </svg>
+          </button>
+          <template v-else>
+            <button class="action-button" @click="handleRestore" title="回溯到此对话">
+              <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="1 4 1 10 7 10"/>
+                <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
+              </svg>
+            </button>
+            <button v-if="!isFirstAiMessage" class="action-button" @click="handleRestream" title="重新生成">
+              <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 2v6h-6"/>
+                <path d="M3 12a9 9 0 0 1 15-6.7L21 8"/>
+                <path d="M3 22v-6h6"/>
+                <path d="M21 12a9 9 0 0 1-15 6.7L3 16"/>
+              </svg>
+            </button>
+            <button class="action-button" @click="copyMessage" :title="copied ? '已复制' : '复制'">
+              <svg v-if="!copied" xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+              </svg>
+              <svg v-else xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="20 6 9 17 4 12"/>
+              </svg>
+            </button>
+            <button v-if="isInterrupted && isLatestAiMessage && (isInterruptedSessionId === currentSessionId || isInterruptedSessionId === _pendingInterruptSessionId)" class="action-button resume-action" @click="handleResume" title="续接对话">
+              <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="5 3 19 12 5 21 5 3"/>
+              </svg>
+            </button>
+          </template>
+        </div>
       </div>
     </div>
   </div>
@@ -324,9 +339,29 @@ export default {
     isFirstAiMessage: {
       type: Boolean,
       default: false
+    },
+    isLatestAiMessage: {
+      type: Boolean,
+      default: false
+    },
+    isInterrupted: {
+      type: Boolean,
+      default: false
+    },
+    isInterruptedSessionId: {
+      type: String,
+      default: null
+    },
+    currentSessionId: {
+      type: String,
+      default: null
+    },
+    hasReceivedInit: {
+      type: Boolean,
+      default: false
     }
   },
-  emits: ['restore', 'restream', 'open-link', 'preview-file'],
+  emits: ['restore', 'restream', 'open-link', 'preview-file', 'interrupt', 'resume'],
   data() {
     return {
       copied: false,
@@ -334,7 +369,8 @@ export default {
       // 如果消息已完成（thinkingDone: true），默认折叠思考区块
       thinkingCollapsed: this.message.thinkingDone === true,
       expandedTools: {},
-      activeFileIndex: 0
+      activeFileIndex: 0,
+      isUserMessageCollapsed: false
     }
   },
   computed: {
@@ -395,6 +431,17 @@ export default {
       if (!Array.isArray(files) || files.length === 0) return null
       const idx = Math.min(this.activeFileIndex, files.length - 1)
       return files[idx] || null
+    },
+    isContentCollapsed() {
+      // 用户消息超过8行则折叠
+      if (this.message.role !== 'user') return false
+      const lines = (this.message.content || '').split('\n').length
+      return lines > 8
+    },
+    collapsedContent() {
+      if (!this.isContentCollapsed) return this.message.content
+      const lines = (this.message.content || '').split('\n')
+      return lines.slice(0, 8).join('\n') + '\n...'
     }
   },
   watch: {
@@ -527,6 +574,9 @@ export default {
         })
       })
     },
+    toggleUserContent() {
+      this.isUserMessageCollapsed = !this.isUserMessageCollapsed
+    },
     escapeHtml(text) {
       const div = document.createElement('div')
       div.textContent = text
@@ -576,6 +626,22 @@ export default {
       if (this.message.checkpointId) {
         this.$emit('restream', this.message.checkpointId)
       }
+    },
+
+    handleInterrupt(e) {
+      console.log('[DEBUG MessageItem] handleInterrupt called')
+      console.log('[DEBUG MessageItem] message.streaming:', this.message.streaming)
+      console.log('[DEBUG MessageItem] currentSessionId:', this.currentSessionId)
+      console.log('[DEBUG MessageItem] isInterrupted:', this.isInterrupted)
+      console.log('[DEBUG MessageItem] isInterruptedSessionId:', this.isInterruptedSessionId)
+      e.stopPropagation()
+      this.$emit('interrupt')
+      console.log('[DEBUG MessageItem] emit interrupt done')
+    },
+
+    handleResume() {
+      console.log('[DEBUG MessageItem] handleResume called')
+      this.$emit('resume')
     },
 
     handleFileClick(file) {
@@ -1001,6 +1067,37 @@ export default {
   white-space: pre-wrap;
 }
 
+.message-text.collapsed {
+  max-height: 20em;
+  overflow: hidden;
+  position: relative;
+}
+
+.message-text.collapsed::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 60px;
+  background: linear-gradient(transparent, var(--user-bubble-bg));
+  pointer-events: none;
+}
+
+.collapse-toggle {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 12px;
+  padding: 2px 8px;
+  cursor: pointer;
+  margin-top: 2px;
+}
+
+.collapse-toggle:hover {
+  color: var(--button-bg);
+}
+
 /* Markdown 样式 */
 .message-text :deep(h1),
 .message-text :deep(h2),
@@ -1009,16 +1106,16 @@ export default {
 .message-text :deep(h5),
 .message-text :deep(h6) {
   margin: 20px 0 12px;
-  font-weight: 700;
+  font-weight: 1000;
   line-height: 1.4;
   color: var(--text-primary);
 }
 
-.message-text :deep(h1) { font-size: 1.7em; border-bottom: 1px solid var(--border-color); padding-bottom: 8px; }
-.message-text :deep(h2) { font-size: 1.45em; border-bottom: 1px solid var(--border-color); padding-bottom: 6px; }
-.message-text :deep(h3) { font-size: 1.25em; }
-.message-text :deep(h4) { font-size: 1.1em; }
-.message-text :deep(h5) { font-size: 1em; }
+.message-text :deep(h1) { font-size: 1.7em; font-weight: 1000; color: #16a34a; }
+.message-text :deep(h2) { font-size: 1.45em; font-weight: 900; color: #16a34a; }
+.message-text :deep(h3) { font-size: 1.25em; font-weight: 900; color: #16a34a; }
+.message-text :deep(h4) { font-size: 1.1em; color: var(--text-primary); }
+.message-text :deep(h5) { font-size: 1em; color: var(--text-primary); }
 .message-text :deep(h6) { font-size: 0.9em; color: var(--text-secondary); }
 
 .message-text :deep(p) {
@@ -1027,13 +1124,14 @@ export default {
 
 .message-text :deep(strong),
 .message-text :deep(b) {
-  font-weight: 700;
+  font-weight: 1000;
   color: var(--text-primary);
 }
 
 .message-text :deep(em),
 .message-text :deep(i) {
   font-style: italic;
+  color: var(--text-secondary);
 }
 
 .message-text :deep(code) {
@@ -1174,6 +1272,15 @@ export default {
   color: var(--button-hover);
 }
 
+.message-text :deep(del),
+.message-text :deep(s),
+.message-text :deep(strike) {
+  color: #1a1a1a;
+  font-weight: 700;
+  text-decoration: none;
+  background: none;
+}
+
 .message-text :deep(table) {
   border-collapse: collapse;
   width: 100%;
@@ -1230,7 +1337,8 @@ export default {
 }
 
 .ai-wrapper:hover .action-buttons,
-.action-buttons:hover {
+.action-buttons:hover,
+.action-buttons.show-interrupt {
   opacity: 1;
 }
 
@@ -1257,6 +1365,24 @@ export default {
 .action-button.copy-success:hover {
   background: var(--button-bg);
   color: white;
+}
+
+.interrupt-action {
+  color: #ef4444;
+}
+
+.interrupt-action:hover {
+  background: #fef2f2;
+  color: #dc2626;
+}
+
+.resume-action {
+  color: #10a37f;
+}
+
+.resume-action:hover {
+  background: #ecfdf5;
+  color: #059669;
 }
 
 /* 用户消息复制按钮 — 气泡左侧 */
@@ -1501,6 +1627,10 @@ export default {
   border-color: color-mix(in srgb, var(--button-bg) 40%, var(--border-color));
 }
 
+.thinking-section.thinking-interrupted {
+  border-color: #ef4444;
+}
+
 .thinking-header {
   display: flex;
   align-items: center;
@@ -1535,6 +1665,12 @@ export default {
   background: var(--button-bg);
   opacity: 1;
   animation: live-pulse 1.2s ease-in-out infinite;
+}
+
+.thinking-status-dot.dot-interrupted {
+  background: #ef4444;
+  opacity: 1;
+  animation: none;
 }
 
 .thinking-label {

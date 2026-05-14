@@ -11,17 +11,24 @@
         :key="msg._key || index"
         :message="msg"
         :is-first-ai-message="isFirstAiMessage(index)"
+        :is-latest-ai-message="index === latestAiMessageIndex"
+        :is-interrupted="isInterrupted"
+        :is-interrupted-session-id="isInterruptedSessionId"
+        :current-session-id="currentSessionId"
+        :has-received-init="hasReceivedInit"
         @restore="$emit('restore', $event)"
         @restream="$emit('restream', $event)"
         @open-link="$emit('open-link', $event)"
         @preview-file="$emit('preview-file', $event)"
+        @interrupt="$emit('interrupt', $event)"
+        @resume="$emit('resume', $event)"
       />
 
-      <div v-if="isLoading" class="loading-message">
-        <div class="typing-indicator">
+      <div v-if="isLoading" class="loading-message" :class="{ 'interrupted': isInterrupted && isInterruptedSessionId === currentSessionId }">
+        <div class="typing-indicator" :class="{ 'interrupted': isInterrupted && isInterruptedSessionId === currentSessionId }">
           <span></span><span></span><span></span>
         </div>
-        <div class="loading-text">AI酱 正在思考中...</div>
+        <div class="loading-text">{{ isInterrupted && isInterruptedSessionId === currentSessionId ? '思考已中断' : 'AI酱 正在思考中...' }}</div>
       </div>
     </div>
   </div>
@@ -43,9 +50,25 @@ export default {
     isLoading: {
       type: Boolean,
       default: false
+    },
+    isInterrupted: {
+      type: Boolean,
+      default: false
+    },
+    isInterruptedSessionId: {
+      type: String,
+      default: null
+    },
+    currentSessionId: {
+      type: String,
+      default: null
+    },
+    hasReceivedInit: {
+      type: Boolean,
+      default: false
     }
   },
-  emits: ['restore', 'restream', 'open-link', 'preview-file'],
+  emits: ['restore', 'restream', 'open-link', 'preview-file', 'interrupt', 'resume'],
   data() {
     return {
       userInterrupted: false,   // 用户主动介入，打断自动滚动
@@ -68,6 +91,16 @@ export default {
       }
 
       return result
+    },
+    // 最新一轮对话的 AI 消息索引（最后一个 AI 消息）
+    latestAiMessageIndex() {
+      let lastAiIndex = -1
+      for (let i = 0; i < this.messages.length; i++) {
+        if (this.messages[i].role === 'ai') {
+          lastAiIndex = i
+        }
+      }
+      return lastAiIndex
     }
   },
   methods: {
@@ -260,6 +293,22 @@ export default {
 
 @keyframes typing {
   0%, 60%, 100% { opacity: 0.3; transform: scale(0.8); }
+  30%            { opacity: 1;   transform: scale(1.2); }
+}
+
+/* 中断状态的红色样式 */
+.loading-message.interrupted .typing-indicator span {
+  background-color: #ef4444;
+  animation: typing-interrupted 1.4s infinite ease-in-out;
+}
+
+.loading-message.interrupted .loading-text {
+  color: #ef4444;
+  animation: none;
+}
+
+@keyframes typing-interrupted {
+  0%, 60%, 100% { opacity: 0.4; transform: scale(0.8); }
   30%            { opacity: 1;   transform: scale(1.2); }
 }
 

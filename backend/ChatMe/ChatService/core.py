@@ -5,11 +5,10 @@ import traceback
 import uuid
 from dataclasses import asdict
 from datetime import datetime
-from typing import AsyncGenerator, Set, List, Any, Optional
+from typing import AsyncGenerator, Set, List, Any, Optional, Dict
 
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
-from langgraph.errors import GraphInterrupt
-from langgraph.types import Command, StateSnapshot
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
+from langgraph.types import StateSnapshot
 from langgraph_sdk.auth.exceptions import HTTPException
 from redisvl.query import FilterQuery
 from langgraph.checkpoint.redis.util import from_storage_safe_id
@@ -267,9 +266,9 @@ class ChatService:
         """
         获取指定会话的所有 checkpoint_id 列表
 
-        更新状态使得带有对应的checkpoint_id在最后一条SUMMARY的AI消息
+        更新状态使得带有最新一轮的checkpoint_id写入state_saver和记忆文件
 
-        :return 保存成功返回对应session_id
+        :return 保存成功返回对应checkpoint_id
         """
         try:
             config = {"configurable": {"thread_id": session_id}}
@@ -335,7 +334,7 @@ class ChatService:
 
     async def _delete_last_round_checkpoint(self, session_id: str):
         """
-        删除指定会话的最新一个 checkpoint（与 _save_round_checkpoint 相反）
+        删除指定会话的最新一个 checkpoint 都索引以及对应检查点的记忆文件
         """
         try:
             # 获取所有 checkpoints，最新的在最后
@@ -361,6 +360,14 @@ class ChatService:
 
     async def _judge_is_interrupted(self, session_id: str) -> bool:
         return await self.redis_client.exists(f"interrupt:{session_id}")
+
+    async def _get_interrupted_info(self, session_id: str) -> Dict[str, Any]:
+        key_value = await self.redis_client.hgetall(f"interrupt:{session_id}")
+        # Redis 返回 bytes 类型，需要转换
+        return {
+            k.decode() if isinstance(k, bytes) else k: v.decode() if isinstance(v, bytes) else v
+            for k, v in key_value.items()
+        }
 
     async def message_stream(
         self,
@@ -415,11 +422,17 @@ class ChatService:
         messages.append(message_content)
 
         # 清除中断状态，确保流式响应正常
-        if self._judge_is_interrupted(session_id):
-            await self.redis_client.hdel(f"interrupt:{session_id}")
+        if await self._judge_is_interrupted(session_id):
+            await self.redis_client.delete(f"interrupt:{session_id}")
 
         full_response = ""
         try:
+            yield json.dumps(
+                {"type": "init", "session_id": session_id, "true_input": messages},
+                ensure_ascii=False,
+                default=str
+            ) + "\n\n"
+
             async for chunk in self.chat_workflow.astream(messages=messages, config=input_config):
                 if chunk['event'] == 'on_chat_model_stream':
                     # 最终返回的chunk
@@ -430,6 +443,15 @@ class ChatService:
                         full_response += content
                         yield json.dumps(
                             {"type": "content", "content": content},
+                            ensure_ascii=False,
+                            default=str
+                        ) + "\n\n"
+                    elif chunk['metadata']['langgraph_node'] and chunk['metadata']['langgraph_node'] == 'input_parse_node':
+                        content = chunk['data']['chunk'].content
+                        if not isinstance(content, str):
+                            content = str(content)
+                        yield json.dumps(
+                            {"type": "reasoning", "content": content},
                             ensure_ascii=False,
                             default=str
                         ) + "\n\n"
@@ -469,25 +491,6 @@ class ChatService:
                                 ensure_ascii=False,
                                 default=str
                             ) + "\n\n"
-        except GraphInterrupt as e:
-            interrupt_value = e.args[0][0].value
-            self.logger.debug(f"会话中断: {e}")
-            reason = interrupt_value.get("reason", "unknown")
-
-            yield json.dumps(
-                {
-                    "type": "interrupt",
-                    "session_id": session_id,
-                    "reason": reason,
-                },
-                ensure_ascii=False,
-                default=str
-            ) + "\n\n"
-
-            await self._save_round_checkpoint(session_id)
-
-            return
-
         except Exception as e:
             error_detail = f"{str(e)}\n{traceback.format_exc()}"
             self.logger.error(f"流式响应异常(session_id:{session_id}): {error_detail}")
@@ -497,6 +500,37 @@ class ChatService:
                 ensure_ascii=False,
                 default=str
             ) + "\n\n"
+
+        if await self._judge_is_interrupted(session_id):
+            key_value = await self._get_interrupted_info(session_id)
+            self.logger.debug(f"key_value: {key_value}")
+            reason = key_value.get("reason", "user_initiated_interrupt")
+
+            self.logger.info(f"会话{session_id}被中断: {reason}")
+
+            checkpoint_id = await self._save_round_checkpoint(session_id)
+
+            # 补充checkpoint_id字段进去
+            await self.redis_client.hset(
+                f"interrupt:{session_id}",
+                mapping={
+                    "reason": key_value.get("reason", "user_initiated_interrupt"),
+                    "checkpoint_id": checkpoint_id,
+                    "timestamp": key_value.get("timestamp", "")
+                })
+
+            yield json.dumps(
+                {
+                    "type": "interrupt",
+                    "session_id": session_id,
+                    "checkpoint_id": checkpoint_id,
+                    "reason": reason,
+                },
+                ensure_ascii=False,
+                default=str
+            ) + "\n\n"
+
+            return
 
         checkpoint_id = await self._save_round_checkpoint(session_id)
 
@@ -523,8 +557,8 @@ class ChatService:
 
         try:
             state = await self.graph.aget_state(config=config)
-            print(state.values)
-            is_interrupted = self._judge_is_interrupted(session_id)
+            print(state)
+            interrupted_info = await self._get_interrupted_info(session_id)
         except HTTPException as e:
             self.logger.error(f"获取会话状态异常(session_id:{session_id})：{str(e)}")
             return Conversation(session_id=session_id)
@@ -564,7 +598,7 @@ class ChatService:
                     role = MessageRole.AI
                     if msg.additional_kwargs.get("type") == AIMessageType.SUMMARY.value:
                         # 添加边界检查，避免数组越界
-                        if checkpoint_index < len(checkpoints):
+                        if checkpoint_index < len(checkpoints): # todo 中断后刷新会话中没有checkpoint_id由于没有summary字段
                             msg.additional_kwargs["checkpoint_id"] = checkpoints[checkpoint_index]["checkpoint_id"]
                             # 第一个 SUMMARY 消息的 last_checkpoint_id 为空
                             if checkpoint_index > 0:
@@ -605,7 +639,7 @@ class ChatService:
                         additional_kwargs={"type": AIMessageType.REASONING.value,"isTool": True} # 与调用工具的AIMessage进行区分
                     ))
 
-        created_at = state.created_at if hasattr(state, "created_at") else datetime.now()
+        created_at = state.created_at if hasattr(state, "created_at") and state.created_at else datetime.now()
         updated_at = datetime.now()
         title = "新对话"
 
@@ -627,7 +661,7 @@ class ChatService:
             title=title,
             created_at=created_at,
             updated_at=updated_at,
-            is_interrupted=is_interrupted if is_interrupted else False
+            interrupted_info=interrupted_info if interrupted_info else None
         )
 
         return conversations
@@ -693,15 +727,17 @@ class ChatService:
             # 面对langgraph对更新state的限制所制作的*神秘代码*
             if msg := state.values["messages"][-1]:
                 msg.additional_kwargs["title"] = new_title.strip()
-                new_msg = AIMessage(
-                    content=msg.content,
-                    additional_kwargs=msg.additional_kwargs,
-                    response_metadata=msg.response_metadata,
-                    id=msg.id,
-                    usage_metadata = msg.usage_metadata
-                )
-
-                state.values["messages"][1] = new_msg
+                # 只有 AIMessage 才能直接重建，其他类型（如 ToolMessage）直接替换
+                if isinstance(msg, AIMessage):
+                    new_msg = AIMessage(
+                        content=msg.content,
+                        additional_kwargs=msg.additional_kwargs,
+                        response_metadata=msg.response_metadata,
+                        id=msg.id,
+                        usage_metadata = getattr(msg, "usage_metadata", None)
+                    )
+                    state.values["messages"][-1] = new_msg
+                # 其他类型消息已经修改了 additional_kwargs，无需重建
                 # 调用aupdate_state：只传config和values
                 await self.graph.aupdate_state(
                     config=config,
@@ -815,6 +851,10 @@ class ChatService:
         """
         backtrack_config = {"configurable": {"thread_id": session_id, "checkpoint_id":checkpoint_id}}
 
+        # 清除中断状态，确保流式响应正常
+        if await self._judge_is_interrupted(session_id):
+            await self.redis_client.delete(f"interrupt:{session_id}")
+
         try:
             checkpoints = await self.state_saver.get_checkpoints(session_id)
 
@@ -903,6 +943,8 @@ class ChatService:
                 f"interrupt:{session_id}",
                 mapping={
                     "reason": interrupt_reason,
+                    "checkpoint_id": "",
+                    "timestamp": str(datetime.now()),
                 }
             )
 
@@ -912,18 +954,32 @@ class ChatService:
             self.logger.error(f"会话中断失败(session_id:{session_id}): {str(e)}")
             return False
 
-    async def invoke_interrupted_stream(self, session_id, message: str = "CONTINUE..."):
+    async def invoke_interrupted_stream(self, session_id, message: str = "CONTINUE"):
         """
         重新进行中断了的对话，断点续接
         """
         try:
+            key = f"interrupt:{session_id}"
+
+            if message == "CONTINUE" or not message or message.strip() == "":
+                reinvoke_message = []
+            else:
+                key_value = await self._get_interrupted_info(session_id)
+                reinvoke_message = [SystemMessage(content=f"中断原因:{key_value['reason']}\n用户进行中断续接,要求为: {message}")]
+
             # 清除中断时留下的状态
-            await self.redis_client.hdel(f"interrupt:{session_id}")
+            await self.redis_client.delete(key)
             await self._delete_last_round_checkpoint(session_id)
 
-            async for chunk in self.graph.astream(
-                    Command(resume={"message": message}),
-                    config={"configurable": {"thread_id": session_id}}
+            yield json.dumps(
+                {"type": "init", "session_id": session_id},
+                ensure_ascii=False,
+                default=str
+            ) + "\n\n"
+
+            async for chunk in self.chat_workflow.astream(
+                reinvoke_message,
+                config={"configurable": {"thread_id": session_id}},
             ):
                 if chunk['event'] == 'on_chat_model_stream':
                     # 最终返回的chunk
@@ -972,25 +1028,6 @@ class ChatService:
                                 ensure_ascii=False,
                                 default=str
                             ) + "\n\n"
-        except GraphInterrupt as e:
-            interrupt_value = e.args[0][0].value
-            self.logger.debug(f"会话中断: {e}")
-            reason = interrupt_value.get("reason", "unknown")
-
-            yield json.dumps(
-                {
-                    "type": "interrupt",
-                    "session_id": session_id,
-                    "reason": reason,
-                 },
-                ensure_ascii=False,
-                default=str
-            ) + "\n\n"
-
-            await self._save_round_checkpoint(session_id)
-
-            return
-
         except Exception as e:
             error_detail = f"{str(e)}\n{traceback.format_exc()}"
             self.logger.error(f"流式响应异常(session_id:{session_id}): {error_detail}")
@@ -1001,15 +1038,42 @@ class ChatService:
                 default=str
             ) + "\n\n"
 
+            if await self._judge_is_interrupted(session_id):
+                key_value = await self._get_interrupted_info(session_id)
+                reason = key_value.get("reason", "user_initiated_interrupt")
+
+                self.logger.info(f"会话{session_id}被中断: {reason}")
+
+                checkpoint_id = await self._save_round_checkpoint(session_id)
+
+                # 补充checkpoint_id字段进去
+                await self.redis_client.hset(
+                    f"interrupt:{session_id}",
+                    mapping={
+                        "reason": key_value.get("reason", "user_initiated_interrupt"),
+                        "checkpoint_id": checkpoint_id,
+                        "timestamp": key_value.get("timestamp", "")
+                    })
+
+                yield json.dumps(
+                    {
+                        "type": "interrupt",
+                        "session_id": session_id,
+                        "checkpoint_id": checkpoint_id,
+                        "reason": reason,
+                    },
+                    ensure_ascii=False,
+                    default=str
+                ) + "\n\n"
+
+                return
+
         checkpoint_id = await self._save_round_checkpoint(session_id)
 
-        yield json.dumps(
-            {
-                "type": "done",
-                "session_id": session_id,
-                "checkpoint_id": checkpoint_id,
-                "interrupt_before": True
-             },
-            ensure_ascii=False,
-            default=str
-        ) + "\n\n"
+        # 返回最终完整结果
+        yield json.dumps({
+            "type": "done",
+            "session_id": session_id,
+            "checkpoint_id": checkpoint_id,
+            "interrupted_before": True
+        }) + "\n\n"

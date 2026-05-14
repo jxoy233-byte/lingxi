@@ -27,10 +27,16 @@
           ref="messageList"
           :messages="messages"
           :is-loading="isLoading"
+          :is-interrupted="isInterrupted"
+          :is-interrupted-session-id="isInterruptedSessionId"
+          :current-session-id="currentSessionId"
+          :has-received-init="hasReceivedInit"
           @restore="restoreCheckpoint"
           @restream="handleRestream"
           @open-link="openWebPreview"
           @preview-file="previewFile"
+          @interrupt="handleInterrupt"
+          @resume="handleResume"
         />
 
         <MessageInput
@@ -171,7 +177,11 @@ export default {
       currentResponseTime: 0,
       currentAiMessageIndex: null,
       displayCount: 10,
-      isRestreaming: false
+      isRestreaming: false,
+      isInterrupted: false,  // 当前会话是否处于中断状态
+      isInterruptedSessionId: null,  // 最近一次中断的会话ID
+      hasReceivedInit: false,  // 流式响应是否已收到 init 消息
+      _pendingInterruptSessionId: null  // 临时存储流式响应中的 session_id
     }
   },
   mounted() {
@@ -213,6 +223,202 @@ export default {
     },
     toggleCheckpoints() {
       this.showCheckpoints = !this.showCheckpoints
+    },
+    async handleInterrupt() {
+      // 优先使用 currentSessionId，如果为空则使用流式响应中的 session_id
+      let sessionId = this.currentSessionId || this._pendingInterruptSessionId
+      console.log('[DEBUG App] handleInterrupt called, currentSessionId:', this.currentSessionId, 'pending sessionId:', this._pendingInterruptSessionId, 'use sessionId:', sessionId)
+      if (!sessionId) {
+        console.log('[DEBUG App] handleInterrupt early return - no sessionId')
+        return
+      }
+      const url = `/chat/${sessionId}/interrupt`
+      console.log('[DEBUG App] About to fetch:', url)
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ interrupt_reason: 'user_initiated' })
+        })
+        console.log('[DEBUG App] fetch completed, status:', response.status)
+        if (!response.ok) {
+          console.error('中断请求失败:', response.status)
+        }
+      } catch (error) {
+        console.error('中断请求异常:', error)
+      }
+    },
+    async handleResume() {
+      if (!this.currentSessionId || this.isLoading) return
+      this.isInterrupted = false
+      this.isLoading = true
+      try {
+        const response = await fetch(`/chat/${this.currentSessionId}/invoke_interrupted/CONTINUE`, {
+          method: 'POST'
+        })
+        if (!response.ok) {
+          throw new Error(`续接失败: ${response.status}`)
+        }
+        const reader = response.body.getReader()
+        const decoder = new TextDecoder()
+
+        // 找到最后一个 AI 消息，用它的索引续接
+        let aiMessageIndex = -1
+        for (let i = this.messages.length - 1; i >= 0; i--) {
+          if (this.messages[i].role === 'ai') {
+            aiMessageIndex = i
+            break
+          }
+        }
+        // 如果没有找到 AI 消息，创建新的
+        if (aiMessageIndex === -1) {
+          aiMessageIndex = this.messages.length
+          this.messages.push({
+            role: 'ai',
+            content: '',
+            reasoning: '',
+            toolCalls: [],
+            thinkingDone: false,
+            streaming: true,
+            responseTime: 0
+          })
+        } else {
+          // 复用最后一个 AI 消息，继续输出
+          this.messages[aiMessageIndex] = {
+            ...this.messages[aiMessageIndex],
+            streaming: true,
+            thinkingDone: false
+          }
+        }
+        this.currentAiMessageIndex = aiMessageIndex
+        this.startResponseTimer()
+        let buffer = ''
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          const parts = buffer.split('\n\n')
+          buffer = parts.pop() || ''
+          for (const part of parts) {
+            const line = part.trim()
+            if (!line) continue
+            try {
+              const data = JSON.parse(line)
+              if (data.type === 'init') {
+                this.hasReceivedInit = true
+                if (data.session_id) {
+                  this._pendingInterruptSessionId = data.session_id
+                }
+              } else if (data.type === 'content') {
+                this.messages[aiMessageIndex] = {
+                  ...this.messages[aiMessageIndex],
+                  content: this.messages[aiMessageIndex].content + data.content,
+                  thinkingDone: true,
+                  responseTime: this.currentResponseTime
+                }
+              } else if (data.type === 'reasoning') {
+                this.messages[aiMessageIndex] = {
+                  ...this.messages[aiMessageIndex],
+                  reasoning: this.messages[aiMessageIndex].reasoning + data.content,
+                  responseTime: this.currentResponseTime
+                }
+              } else if (data.type === 'tool_call_name') {
+                const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
+                toolCalls.push({ name: data.content.name, args: data.content.args, result: null })
+                this.messages[aiMessageIndex] = { ...this.messages[aiMessageIndex], toolCalls, responseTime: this.currentResponseTime }
+              } else if (data.type === 'tool_call_result') {
+                const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
+                if (toolCalls.length > 0) toolCalls[toolCalls.length - 1] = { ...toolCalls[toolCalls.length - 1], result: data.content }
+                this.messages[aiMessageIndex] = { ...this.messages[aiMessageIndex], toolCalls, responseTime: this.currentResponseTime }
+              } else if (data.type === 'done') {
+                this.stopResponseTimer()
+                this.messages[aiMessageIndex] = {
+                  role: 'ai',
+                  content: data.full_response,
+                  reasoning: this.messages[aiMessageIndex].reasoning,
+                  toolCalls: this.messages[aiMessageIndex].toolCalls,
+                  thinkingDone: true,
+                  streaming: false,
+                  responseTime: this.currentResponseTime,
+                  checkpointId: data.checkpoint_id || null
+                }
+                await this.updateTitleAndRefresh(this.currentSessionId, '')
+              } else if (data.type === 'error') {
+                console.error('续接响应错误:', data.error)
+                this.messages[aiMessageIndex] = { ...this.messages[aiMessageIndex], content: `续接失败：${data.error}`, streaming: false }
+              } else if (data.type === 'interrupt') {
+                this.stopResponseTimer()
+                this.messages[aiMessageIndex] = { ...this.messages[aiMessageIndex], streaming: false }
+                this.isInterrupted = true
+                this.isInterruptedSessionId = this.currentSessionId || this._pendingInterruptSessionId
+              }
+            } catch (e) {
+              console.error('解析 SSE 消息失败:', e, '原始内容:', line)
+            }
+          }
+        }
+        if (buffer.trim()) {
+          try {
+            const data = JSON.parse(buffer.trim())
+            if (data.type === 'reasoning') {
+              this.messages[aiMessageIndex] = {
+                ...this.messages[aiMessageIndex],
+                reasoning: this.messages[aiMessageIndex].reasoning + data.content,
+                responseTime: this.currentResponseTime
+              }
+            } else if (data.type === 'tool_call_name') {
+              const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
+              toolCalls.push({ name: data.content.name, args: data.content.args, result: null })
+              this.messages[aiMessageIndex] = {
+                ...this.messages[aiMessageIndex],
+                toolCalls,
+                responseTime: this.currentResponseTime
+              }
+            } else if (data.type === 'tool_call_result') {
+              const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
+              if (toolCalls.length > 0) {
+                toolCalls[toolCalls.length - 1] = { ...toolCalls[toolCalls.length - 1], result: data.content }
+              }
+              this.messages[aiMessageIndex] = {
+                ...this.messages[aiMessageIndex],
+                toolCalls,
+                responseTime: this.currentResponseTime
+              }
+            } else if (data.type === 'content') {
+              this.messages[aiMessageIndex] = {
+                ...this.messages[aiMessageIndex],
+                content: this.messages[aiMessageIndex].content + data.content,
+                thinkingDone: true,
+                responseTime: this.currentResponseTime
+              }
+            } else if (data.type === 'done') {
+              this.stopResponseTimer()
+              this.messages[aiMessageIndex] = {
+                role: 'ai',
+                content: data.full_response,
+                reasoning: this.messages[aiMessageIndex].reasoning,
+                toolCalls: this.messages[aiMessageIndex].toolCalls,
+                thinkingDone: true,
+                streaming: false,
+                responseTime: this.currentResponseTime,
+                checkpointId: data.checkpoint_id || null
+              }
+            } else if (data.type === 'interrupt') {
+              this.stopResponseTimer()
+              this.messages[aiMessageIndex] = { ...this.messages[aiMessageIndex], streaming: false }
+              this.isInterrupted = true
+              this.isInterruptedSessionId = this.currentSessionId
+            }
+          } catch (e) {
+            console.error('解析缓冲区剩余数据失败:', e)
+          }
+        }
+      } catch (error) {
+        console.error('续接异常:', error)
+      } finally {
+        this.isLoading = false
+        this.stopResponseTimer()
+      }
     },
     openWebPreview(url) {
       this.webPreviewUrl = url
@@ -532,7 +738,12 @@ export default {
             try {
               const data = JSON.parse(line)
 
-              if (data.type === 'content') {
+              if (data.type === 'init') {
+                this.hasReceivedInit = true
+                if (data.session_id) {
+                  this._pendingInterruptSessionId = data.session_id
+                }
+              } else if (data.type === 'content') {
                 this.messages[aiMessageIndex] = {
                   ...this.messages[aiMessageIndex],
                   content: this.messages[aiMessageIndex].content + data.content,
@@ -659,6 +870,9 @@ export default {
 
       this.currentSessionId = null
       this.messages = []
+      // 清理中断状态
+      this.isInterrupted = false
+      this.isInterruptedSessionId = null
       // 更新 URL 到根路径
       if (this.$route.path !== '/') {
         this.$router.push('/')
@@ -707,6 +921,16 @@ export default {
           }
 
           this.messages = this.processConversationMessages(conversation.messages)
+
+          // 检查是否处于中断状态（interrupted_info 存在表示有中断原因）
+          const interruptedReason = conversation.interrupted_info?.reason
+          if (interruptedReason) {
+            this.isInterrupted = true
+            this.isInterruptedSessionId = sessionId
+          } else {
+            this.isInterrupted = false
+            this.isInterruptedSessionId = null
+          }
         }
       } catch (error) {
         console.error('加载对话失败:', error)
@@ -950,7 +1174,13 @@ export default {
                 continue
               }
 
-              if (data.type === 'content') {
+              if (data.type === 'init') {
+                // 收到 init 后标记，并存储 session_id
+                this.hasReceivedInit = true
+                if (data.session_id) {
+                  this._pendingInterruptSessionId = data.session_id
+                }
+              } else if (data.type === 'content') {
                 this.messages[aiMessageIndex] = {
                   ...this.messages[aiMessageIndex],
                   content: this.messages[aiMessageIndex].content + data.content,
@@ -1032,6 +1262,14 @@ export default {
                   content: `抱歉，出现了一些问题：${data.error}`,
                   streaming: false
                 }
+              } else if (data.type === 'interrupt') {
+                this.stopResponseTimer()
+                this.messages[aiMessageIndex] = {
+                  ...this.messages[aiMessageIndex],
+                  streaming: false
+                }
+                this.isInterrupted = true
+                this.isInterruptedSessionId = this.currentSessionId
               }
             } catch (e) {
               console.error('解析 SSE 消息失败:', e, '原始内容:', line)
@@ -1050,7 +1288,31 @@ export default {
                 await this.refreshSession(requestSessionId)
               }
             } else {
-              if (data.type === 'content') {
+              if (data.type === 'reasoning') {
+                this.messages[aiMessageIndex] = {
+                  ...this.messages[aiMessageIndex],
+                  reasoning: this.messages[aiMessageIndex].reasoning + data.content,
+                  responseTime: this.currentResponseTime
+                }
+              } else if (data.type === 'tool_call_name') {
+                const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
+                toolCalls.push({ name: data.content.name, args: data.content.args, result: null })
+                this.messages[aiMessageIndex] = {
+                  ...this.messages[aiMessageIndex],
+                  toolCalls,
+                  responseTime: this.currentResponseTime
+                }
+              } else if (data.type === 'tool_call_result') {
+                const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
+                if (toolCalls.length > 0) {
+                  toolCalls[toolCalls.length - 1] = { ...toolCalls[toolCalls.length - 1], result: data.content }
+                }
+                this.messages[aiMessageIndex] = {
+                  ...this.messages[aiMessageIndex],
+                  toolCalls,
+                  responseTime: this.currentResponseTime
+                }
+              } else if (data.type === 'content') {
                 this.messages[aiMessageIndex] = {
                   ...this.messages[aiMessageIndex],
                   content: this.messages[aiMessageIndex].content + data.content,
@@ -1444,12 +1706,51 @@ body {
   display: flex;
   flex-direction: column;
   background-color: var(--bg-primary);
+  position: relative;
 }
 
 .checkpoint-overlay {
   position: fixed;
   inset: 0;
   z-index: 99;
+}
+
+/* 中断状态栏 */
+.interrupted-bar {
+  position: absolute;
+  bottom: 80px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 20px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  z-index: 50;
+}
+
+.interrupted-text {
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
+.resume-btn {
+  padding: 6px 16px;
+  background: var(--button-bg);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.resume-btn:hover {
+  background: var(--button-hover);
 }
 
 .web-preview-overlay {

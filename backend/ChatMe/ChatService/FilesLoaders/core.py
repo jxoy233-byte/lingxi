@@ -23,7 +23,7 @@ from starlette.datastructures import Headers
 
 from ChatMe.ChatService.FilesLoaders.config import FILE_ALLOWED_TYPES
 from ChatMe.LoggingManager.logging_config import get_logger
-from ChatMe.ChatMeConfig.core import get_oss_config, get_oss_bucket, get_oss_endpoint
+from ChatMe.ChatMeConfig.core import get_oss_config
 
 
 def _upload_local_image_to_oss(local_path: str, original_filename: str = None) -> Optional[str]:
@@ -73,7 +73,7 @@ def _upload_local_image_to_oss(local_path: str, original_filename: str = None) -
         return None
     except Exception as e:
         logger = get_logger("FilesLoaders")
-        logger.error(f"上传图片到 OSS 失败: {local_path}, 错误: {e}")
+        logger.warning(f"上传图片到 OSS 失败: {local_path}, 错误: {e}")
         return None
 
 class UploadFileWithId(UploadFile):

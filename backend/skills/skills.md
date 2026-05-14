@@ -4,7 +4,7 @@
 这些技能以 Python 模块形式存在，AI 可以通过生成并执行 Python 代码来调用。
 
 提示: 
-    - python临时文件的生成执行位置与技能们的python文件和skills.md等同级目录下
+- python临时文件的执行位置在skills.md同级目录下，如:from xxx(脚本名称) import 模块名, 即可
 ---
 
 # 🧭 使用总则（非常重要）

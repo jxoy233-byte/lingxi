@@ -31,6 +31,7 @@
           :is-interrupted-session-id="isInterruptedSessionId"
           :current-session-id="currentSessionId"
           :has-received-init="hasReceivedInit"
+          :pending-interrupt-session-id="_pendingInterruptSessionId"
           @restore="restoreCheckpoint"
           @restream="handleRestream"
           @open-link="openWebPreview"
@@ -342,7 +343,9 @@ export default {
                   responseTime: this.currentResponseTime,
                   checkpointId: data.checkpoint_id || null
                 }
-                await this.updateTitleAndRefresh(this.currentSessionId, '')
+                // 获取最后一个用户消息来更新标题
+                const lastUserMessage = this.messages.filter(m => m.role === 'user').pop()?.content || ''
+                await this.updateTitleAndRefresh(this.currentSessionId, lastUserMessage)
               } else if (data.type === 'error') {
                 console.error('续接响应错误:', data.error)
                 this.messages[aiMessageIndex] = { ...this.messages[aiMessageIndex], content: `续接失败：${data.error}`, streaming: false }
@@ -350,7 +353,7 @@ export default {
                 this.stopResponseTimer()
                 this.messages[aiMessageIndex] = { ...this.messages[aiMessageIndex], streaming: false }
                 this.isInterrupted = true
-                this.isInterruptedSessionId = this.currentSessionId || this._pendingInterruptSessionId
+                this.isInterruptedSessionId = data.session_id || this.currentSessionId || this._pendingInterruptSessionId
               }
             } catch (e) {
               console.error('解析 SSE 消息失败:', e, '原始内容:', line)
@@ -407,7 +410,7 @@ export default {
               this.stopResponseTimer()
               this.messages[aiMessageIndex] = { ...this.messages[aiMessageIndex], streaming: false }
               this.isInterrupted = true
-              this.isInterruptedSessionId = this.currentSessionId
+              this.isInterruptedSessionId = data.session_id || this.currentSessionId || this._pendingInterruptSessionId
             }
           } catch (e) {
             console.error('解析缓冲区剩余数据失败:', e)
@@ -1269,7 +1272,7 @@ export default {
                   streaming: false
                 }
                 this.isInterrupted = true
-                this.isInterruptedSessionId = this.currentSessionId
+                this.isInterruptedSessionId = data.session_id || this.currentSessionId || this._pendingInterruptSessionId
               }
             } catch (e) {
               console.error('解析 SSE 消息失败:', e, '原始内容:', line)

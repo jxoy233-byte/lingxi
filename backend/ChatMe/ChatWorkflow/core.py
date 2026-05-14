@@ -250,18 +250,31 @@ class ChatWorkflow:
         return ai_message
 
     async def _get_validate_history_message(self, history_messages: List[BaseMessage])-> List[BaseMessage]:
-        """获取历史有效的聊天消息，包含文件缓存路径"""
+        """获取历史有效的聊天消息，包含文件缓存路径
+
+        注意：只返回上一轮及更早的历史消息，不包含当前轮的 HumanMessage。
+        通过排除 messages 列表末尾的 HumanMessage（当前轮输入）来实现。
+        """
         input_msg = []
-        if history_messages:
-            files_cached_message = SystemMessage(content=f"文件缓存路径：{self.files_cached_dir}")
-            input_msg.append(files_cached_message)
-            for msg in history_messages: # todo 逻辑有点问题
-                if isinstance(msg, HumanMessage):
-                    if not msg.additional_kwargs.get("is_file", False):
-                        input_msg.append(msg)
-                if isinstance(msg, AIMessage):
-                    if msg.additional_kwargs.get("type") == AIMessageType.SUMMARY.value:
-                        input_msg.append(msg)
+        if not history_messages:
+            return input_msg
+
+        files_cached_message = SystemMessage(content=f"文件缓存路径：{self.files_cached_dir}")
+        input_msg.append(files_cached_message)
+
+        # 排除当前轮的非文件用户输入 HumanMessage（位于 messages 末尾）
+        msgs_to_process = history_messages
+        last_msg = history_messages[-1]
+        if isinstance(last_msg, HumanMessage) and not last_msg.additional_kwargs.get("is_file", False):
+            msgs_to_process = history_messages[:-1]
+
+        for msg in msgs_to_process:
+            if isinstance(msg, HumanMessage):
+                if not msg.additional_kwargs.get("is_file", False):
+                    input_msg.append(msg)
+            elif isinstance(msg, AIMessage):
+                if msg.additional_kwargs.get("type") == AIMessageType.SUMMARY.value:
+                    input_msg.append(msg)
 
         return input_msg
 
@@ -273,15 +286,17 @@ class ChatWorkflow:
                 messages: langgraph状态消息
 
             Return:
-                本轮对话消息
+                本轮对话消息（按原始顺序）
         """
         input_msg = []
-        for msg in reversed(messages): # 首轮对话也兼容，无之前对话的summary就遍历完
+        for msg in reversed(messages):  # 首轮对话也兼容，无之前对话的summary就遍历完
             if isinstance(msg, AIMessage):
                 if "type" in msg.additional_kwargs and msg.additional_kwargs.get("type") == AIMessageType.SUMMARY.value:
                     break
             input_msg.append(msg)
 
+        # 反转回来，保持原始顺序
+        input_msg.reverse()
         return input_msg
 
     async def _get_current_round_conversation_except_files(self, messages: List[BaseMessage]):
@@ -292,15 +307,17 @@ class ChatWorkflow:
                 messages: langgraph状态消息
 
             Return:
-                本轮对话消息除了文件传入部分
+                本轮对话消息除了文件传入部分（按原始顺序）
         """
         input_msg = []
-        for msg in reversed(messages): # 首轮对话也兼容，无之前对话的summary就遍历完
+        for msg in reversed(messages):  # 首轮对话也兼容，无之前对话的summary就遍历完
             if isinstance(msg, HumanMessage):
                 if "is_file" in msg.additional_kwargs and msg.additional_kwargs.get("is_file"):
                     break
             input_msg.append(msg)
 
+        # 反转回来，保持原始顺序
+        input_msg.reverse()
         return input_msg
 
     async def _get_current_round_conversation_cycling(self, messages: List[BaseMessage]) -> List[BaseMessage]:
@@ -538,7 +555,7 @@ class ChatWorkflow:
             input_msg = state["context"]
 
             if tool_call_times >= TOOL_CALL_TIMES:
-                interrupt_msg = SystemMessage(content=f"已超过{TOOL_CALL_TIMES}次调用工具次数，请整理当前信息提前结束对话")
+                interrupt_msg = SystemMessage(content=f"已超过{TOOL_CALL_TIMES}次调用工具次数，请停止工具调用提前结束对话")
                 input_msg.append(interrupt_msg)
 
             response = await self.agent_llm.ainvoke({"messages": input_msg})

@@ -16,6 +16,7 @@
         :is-interrupted-session-id="isInterruptedSessionId"
         :current-session-id="currentSessionId"
         :has-received-init="hasReceivedInit"
+        :pending-interrupt-session-id="pendingInterruptSessionId"
         @restore="$emit('restore', $event)"
         @restream="$emit('restream', $event)"
         @open-link="$emit('open-link', $event)"
@@ -66,6 +67,10 @@ export default {
     hasReceivedInit: {
       type: Boolean,
       default: false
+    },
+    pendingInterruptSessionId: {
+      type: String,
+      default: null
     }
   },
   emits: ['restore', 'restream', 'open-link', 'preview-file', 'interrupt', 'resume'],

@@ -150,11 +150,11 @@
         </div>
 
         <!-- 思考过程区块 -->
-        <div v-if="message.role === 'ai' && hasThinking" class="thinking-section" :class="{ 'thinking-active': !message.thinkingDone, 'thinking-collapsed': thinkingCollapsed, 'thinking-interrupted': isInterrupted && isLatestAiMessage && (isInterruptedSessionId === currentSessionId || isInterruptedSessionId === _pendingInterruptSessionId) }">
+        <div v-if="message.role === 'ai' && hasThinking" class="thinking-section" :class="{ 'thinking-active': !message.thinkingDone, 'thinking-collapsed': thinkingCollapsed, 'thinking-interrupted': isInterrupted && isLatestAiMessage && (isInterruptedSessionId === currentSessionId || isInterruptedSessionId === pendingInterruptSessionId) }">
           <div class="thinking-header" @click="toggleThinking">
             <div class="thinking-header-left">
-              <span class="thinking-status-dot" :class="{ 'dot-active': !message.thinkingDone, 'dot-interrupted': isInterrupted && isLatestAiMessage && (isInterruptedSessionId === currentSessionId || isInterruptedSessionId === _pendingInterruptSessionId) }"></span>
-              <span class="thinking-label">{{ isInterrupted && isLatestAiMessage && (isInterruptedSessionId === currentSessionId || isInterruptedSessionId === _pendingInterruptSessionId) ? '思考已中断' : (message.thinkingDone ? '思考过程' : '正在思考...') }}</span>
+              <span class="thinking-status-dot" :class="{ 'dot-active': !message.thinkingDone, 'dot-interrupted': isInterrupted && isLatestAiMessage && (isInterruptedSessionId === currentSessionId || isInterruptedSessionId === pendingInterruptSessionId) }"></span>
+              <span class="thinking-label">{{ isInterrupted && isLatestAiMessage && (isInterruptedSessionId === currentSessionId || isInterruptedSessionId === pendingInterruptSessionId) ? '思考已中断' : (message.thinkingDone ? '思考过程' : '正在思考...') }}</span>
               <span v-if="message.toolCalls && message.toolCalls.length" class="tool-badge">
                 {{ message.toolCalls.length }} 个工具调用
               </span>
@@ -222,7 +222,7 @@
                 <polyline points="20 6 9 17 4 12"/>
               </svg>
             </button>
-            <button v-if="isInterrupted && isLatestAiMessage && (isInterruptedSessionId === currentSessionId || isInterruptedSessionId === _pendingInterruptSessionId)" class="action-button resume-action" @click="handleResume" title="续接对话">
+            <button v-if="isInterrupted && isLatestAiMessage && (isInterruptedSessionId === currentSessionId || isInterruptedSessionId === pendingInterruptSessionId)" class="action-button resume-action" @click="handleResume" title="续接对话">
               <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <polygon points="5 3 19 12 5 21 5 3"/>
               </svg>
@@ -359,6 +359,10 @@ export default {
     hasReceivedInit: {
       type: Boolean,
       default: false
+    },
+    pendingInterruptSessionId: {
+      type: String,
+      default: null
     }
   },
   emits: ['restore', 'restream', 'open-link', 'preview-file', 'interrupt', 'resume'],
@@ -370,7 +374,8 @@ export default {
       thinkingCollapsed: this.message.thinkingDone === true,
       expandedTools: {},
       activeFileIndex: 0,
-      isUserMessageCollapsed: false
+      isUserMessageCollapsed: false,
+      pendingInterruptSessionId: null  // 临时存储流式响应中的 session_id（从父组件传入）
     }
   },
   computed: {

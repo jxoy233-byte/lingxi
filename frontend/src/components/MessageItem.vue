@@ -193,7 +193,7 @@
 
         <!-- 操作按钮组：AI 消息下方，hover 显示 -->
         <div v-if="message.role === 'ai'" class="action-buttons">
-          <button v-if="message.streaming && hasReceivedInit && isLatestAiMessage" class="action-button interrupt-action" @click.stop="handleInterrupt" title="中断当前对话">
+          <button v-if="message.streaming && hasReceivedInit && isLatestAiMessage && !isInterrupted" class="action-button interrupt-action" @click.stop="handleInterrupt" title="中断当前对话">
             <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <rect x="3" y="3" width="18" height="18" rx="2"/>
             </svg>
@@ -205,7 +205,7 @@
                 <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
               </svg>
             </button>
-            <button v-if="!isFirstAiMessage" class="action-button" @click="handleRestream" title="重新生成">
+            <button v-if="isLatestAiMessage && !isFirstAiMessage" class="action-button" @click="handleRestream" title="重新生成">
               <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M21 2v6h-6"/>
                 <path d="M3 12a9 9 0 0 1 15-6.7L21 8"/>
@@ -374,8 +374,7 @@ export default {
       thinkingCollapsed: this.message.thinkingDone === true,
       expandedTools: {},
       activeFileIndex: 0,
-      isUserMessageCollapsed: false,
-      pendingInterruptSessionId: null  // 临时存储流式响应中的 session_id（从父组件传入）
+      isUserMessageCollapsed: false
     }
   },
   computed: {
@@ -628,24 +627,16 @@ export default {
     },
 
     handleRestream() {
-      if (this.message.checkpointId) {
-        this.$emit('restream', this.message.checkpointId)
-      }
+      // 直接传递整个消息对象，让 App.vue 处理 fallback 逻辑
+      this.$emit('restream', null, this.message)
     },
 
     handleInterrupt(e) {
-      console.log('[DEBUG MessageItem] handleInterrupt called')
-      console.log('[DEBUG MessageItem] message.streaming:', this.message.streaming)
-      console.log('[DEBUG MessageItem] currentSessionId:', this.currentSessionId)
-      console.log('[DEBUG MessageItem] isInterrupted:', this.isInterrupted)
-      console.log('[DEBUG MessageItem] isInterruptedSessionId:', this.isInterruptedSessionId)
       e.stopPropagation()
       this.$emit('interrupt')
-      console.log('[DEBUG MessageItem] emit interrupt done')
     },
 
     handleResume() {
-      console.log('[DEBUG MessageItem] handleResume called')
       this.$emit('resume')
     },
 
@@ -794,21 +785,6 @@ export default {
       // 记录当前选中的文件索引
       this.activeFileIndex = index
 
-      console.log('[DEBUG] handleFileCardClick called, file keys:', Object.keys(file))
-      console.log('[DEBUG] file full:', JSON.stringify({
-        name: file.name,
-        type: file.type,
-        file_type: file.file_type,
-        suffix: file.suffix,
-        hasTextContent: !!file.text_content,
-        hasContent: !!file.content,
-        textContentLength: file.text_content ? file.text_content.length : 0,
-        contentLength: file.content ? file.content.length : 0,
-        iframe_url: file.iframe_url,
-        preview_url: file.preview_url,
-        preview_method: file.preview_method
-      }).substring(0, 300))
-
       // 根据文件类型决定处理方式
       const isImage = this.isImageFileType(file)
       const isText = this.isTextFileType(file)
@@ -832,26 +808,7 @@ export default {
       // 文本文件：如果有内容则使用 FilePreviewPanel 渲染 markdown
       else if (isText) {
         const textContent = file.text_content || file.content
-        console.log('[DEBUG] Text file detected, textContent:', textContent ? `${textContent.substring(0, 80)}...` : null)
         if (typeof textContent === 'string' && textContent.trim().length > 0) {
-          console.log('[DEBUG] Emitting preview-file for text file:', file.name)
-          this.$emit('preview-file', {
-            name: file.name,
-            type: file.type,
-            file_type: file.file_type,
-            suffix: file.suffix,
-            text_content: textContent,
-            content: textContent
-          })
-        } else {
-          console.log('[DEBUG] Text content is empty or invalid:', textContent)
-        }
-      }
-      // PDF 或其他文件：优先使用 text_content 渲染 markdown
-      else {
-        const textContent = file.text_content || file.content
-        if (typeof textContent === 'string' && textContent.trim().length > 0) {
-          console.log('[DEBUG] Emitting preview-file for doc with text_content:', file.name)
           this.$emit('preview-file', {
             name: file.name,
             type: file.type,
@@ -863,7 +820,6 @@ export default {
         } else {
           const previewUrl = file.iframe_url || file.preview_url
           if (previewUrl) {
-            console.log('[DEBUG] Emitting preview-file for doc with iframe_url:', file.name)
             this.$emit('preview-file', {
               preview_url: previewUrl,
               url: previewUrl,

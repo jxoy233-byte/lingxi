@@ -228,20 +228,16 @@ export default {
     async handleInterrupt() {
       // 优先使用 currentSessionId，如果为空则使用流式响应中的 session_id
       let sessionId = this.currentSessionId || this._pendingInterruptSessionId
-      console.log('[DEBUG App] handleInterrupt called, currentSessionId:', this.currentSessionId, 'pending sessionId:', this._pendingInterruptSessionId, 'use sessionId:', sessionId)
       if (!sessionId) {
-        console.log('[DEBUG App] handleInterrupt early return - no sessionId')
         return
       }
       const url = `/chat/${sessionId}/interrupt`
-      console.log('[DEBUG App] About to fetch:', url)
       try {
         const response = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ interrupt_reason: 'user_initiated' })
         })
-        console.log('[DEBUG App] fetch completed, status:', response.status)
         if (!response.ok) {
           console.error('中断请求失败:', response.status)
         }
@@ -428,17 +424,6 @@ export default {
       this.showWebPreview = true
     },
     previewFile(file) {
-      console.log('[DEBUG] previewFile called, full file object:', JSON.stringify({
-        name: file.name,
-        type: file.type,
-        file_type: file.file_type,
-        suffix: file.suffix,
-        text_content: file.text_content,
-        content: file.content,
-        iframe_url: file.iframe_url,
-        preview_url: file.preview_url,
-        preview_method: file.preview_method
-      }).substring(0, 500))
       // 根据文件类型决定预览方式
       const fileType = (file.file_type || file.type || '').toUpperCase()
       const suffix = (file.suffix || (file.name ? '.' + file.name.split('.').pop().toLowerCase() : '')).toLowerCase()
@@ -492,34 +477,49 @@ export default {
       this.restoreTargetId = checkpointId
       this.showRestoreConfirm = true
     },
-    async handleRestream(checkpointId) {
+    async handleRestream(checkpointId, aiMessage) {
       // 防止重复点击
       if (this.isRestreaming) {
         return
       }
       this.isRestreaming = true
 
-      // 找到对应 checkpoint 的 AI 消息
-      const aiIndex = this.messages.findIndex(
-        msg => msg.role === 'ai' && msg.checkpointId === checkpointId
-      )
-      if (aiIndex === -1) {
-        console.error('未找到对应的 AI 消息')
+      // 清理中断状态（重新对话会发起新请求，不应继承之前的中断状态）
+      this.isInterrupted = false
+      this.isInterruptedSessionId = null
+
+      // 如果没有传入 aiMessage，直接返回
+      if (!aiMessage) {
         return
       }
 
-      const aiMessage = this.messages[aiIndex]
+      // 找到对应消息的索引
+      const aiIndex = this.messages.findIndex(
+        (msg, idx) => msg === aiMessage
+      )
+      if (aiIndex === -1) {
+        return
+      }
 
       // 获取当前标题
-      const currentTitle = aiMessage.additional_kwargs?.title ||
-                          this.conversations.find(c => c.session_id === this.currentSessionId)?.title ||
-                          '新对话'
+      const currentTitle = this.conversations.find(c => c.session_id === this.currentSessionId)?.title || '新对话'
 
-      // 从 AI 消息的 additional_kwargs.last_checkpoint_id 获取该轮对话开始前的 checkpoint
-      const restreamCheckpointId = aiMessage.additional_kwargs?.last_checkpoint_id
+      // 获取 checkpoint：
+      // 1. 优先使用 last_checkpoint_id
+      // 2. 如果没有，fallback 到上一轮 AI 消息的 checkpointId
+      let restreamCheckpointId = aiMessage.additional_kwargs?.last_checkpoint_id
       if (!restreamCheckpointId) {
-        console.error('第一轮对话无法重新对话')
-        this.isRestreaming = false
+        // 找上一轮 AI 消息
+        for (let i = aiIndex - 1; i >= 0; i--) {
+          if (this.messages[i].role === 'ai') {
+            restreamCheckpointId = this.messages[i].checkpointId || null
+            if (restreamCheckpointId) {
+              break
+            }
+          }
+        }
+      }
+      if (!restreamCheckpointId) {
         return
       }
 
@@ -542,67 +542,39 @@ export default {
       let restreamMessage = ''
       let restreamProcessedOutputs = []
 
-      console.log('[Restream] 开始查找用户消息，aiIndex:', aiIndex)
-      console.log('[Restream] this.messages 结构:', this.messages.map((m, i) => ({
-        index: i,
-        role: m.role,
-        hasFiles: !!(m.files && m.files.length),
-        filesCount: m.files?.length || 0,
-        contentLength: (m.content || '').length,
-        _isFilesOnly: m._isFilesOnly,
-        _isTextOnly: m._isTextOnly
-      })))
-
       // 向前查找用户消息
       while (userMessageIndex >= 0) {
         const msg = this.messages[userMessageIndex]
-        console.log('[Restream] 检查消息', userMessageIndex, {
-          role: msg.role,
-          hasFiles: !!(msg.files && msg.files.length),
-          hasContent: !!(msg.content && msg.content.trim()),
-          isFile: msg.additional_kwargs?.is_file,
-          content: msg.content?.substring(0, 50)
-        })
         if (msg.role === 'user') {
           // 优先找有文件的消息
           if (msg.files && msg.files.length > 0) {
             userMessage = msg
             restreamProcessedOutputs = msg.files || []
-            console.log('[Restream] 找到带文件的消息，restreamProcessedOutputs:', restreamProcessedOutputs.length, '个文件')
             // 尝试找相邻的文本消息（content 有内容且没有文件）
             if (userMessageIndex + 1 < this.messages.length &&
                 this.messages[userMessageIndex + 1].role === 'user' &&
                 !this.messages[userMessageIndex + 1].files?.length &&
                 this.messages[userMessageIndex + 1].content?.trim()) {
               restreamMessage = (this.messages[userMessageIndex + 1].content || '').trim()
-              console.log('[Restream] 从相邻消息获取文本:', restreamMessage.substring(0, 50))
             } else {
               restreamMessage = (msg.content || '').trim()
-              console.log('[Restream] 从当前消息获取文本:', restreamMessage.substring(0, 50))
             }
             break
           }
           // 如果消息没有文件但有内容（纯文本消息），继续往前找文件消息
           if (msg.content && msg.content.trim() && (!msg.files || msg.files.length === 0)) {
             restreamMessage = (msg.content || '').trim()
-            console.log('[Restream] 找到纯文本消息，继续往前找文件消息')
             // 往前找一个有 files 的消息
             let fileMsgIndex = userMessageIndex - 1
             while (fileMsgIndex >= 0) {
               const fileMsg = this.messages[fileMsgIndex]
-              console.log('[Restream] 往前查找文件消息', fileMsgIndex, {
-                hasFiles: !!(fileMsg.files && fileMsg.files.length),
-                content: fileMsg.content?.substring(0, 30)
-              })
               if (fileMsg.role === 'user' && fileMsg.files && fileMsg.files.length > 0) {
                 userMessage = fileMsg
                 restreamProcessedOutputs = fileMsg.files || []
-                console.log('[Restream] 从前面的消息找到文件:', restreamProcessedOutputs.length, '个文件')
                 break
               }
               if (fileMsg.role === 'user' && fileMsg.content && fileMsg.content.trim()) {
                 // 遇到有内容的用户消息停止
-                console.log('[Restream] 遇到有内容的用户消息，停止查找文件')
                 break
               }
               fileMsgIndex--
@@ -611,23 +583,13 @@ export default {
             // 如果没找到文件消息，使用当前的纯文本消息
             userMessage = msg
             restreamProcessedOutputs = []
-            console.log('[Restream] 没找到文件消息，使用纯文本消息')
             break
           }
         }
         userMessageIndex--
       }
 
-      console.log('[Restream] 最终结果 - restreamMessage:', restreamMessage?.substring(0, 100), 'restreamProcessedOutputs:', restreamProcessedOutputs.length, '个文件')
-        console.log('[Restream] restreamProcessedOutputs 详情:', restreamProcessedOutputs.map(f => ({
-          name: f.name,
-          type: f.type,
-          text_content: f.text_content ? f.text_content.substring(0, 50) : null,
-          image_content: f.image_content ? (typeof f.image_content === 'string' ? f.image_content.substring(0, 50) : f.image_content) : null
-        })))
-
       if (!userMessage) {
-        console.error('未找到对应的用户消息')
         return
       }
 
@@ -697,13 +659,6 @@ export default {
         this.$refs.messageList?.scrollToBottom(true)
 
         // 5. 调用 message_stream
-        console.log('[Restream] 准备调用 message_stream:', {
-          message: restreamMessage?.substring(0, 100),
-          session_id: requestSessionId,
-          processed_outputs_count: restreamProcessedOutputs.length,
-          processed_outputs: restreamProcessedOutputs
-        })
-
         const streamResponse = await fetch('/chat/', {
           method: 'POST',
           headers: {
@@ -715,8 +670,6 @@ export default {
             processed_outputs: restreamProcessedOutputs
           })
         })
-
-        console.log('[Restream] message_stream 响应状态:', streamResponse.status)
 
         if (!streamResponse.ok) {
           throw new Error(`请求失败: ${streamResponse.status}`)
@@ -797,6 +750,14 @@ export default {
 
                 // 4. 最后刷新会话
                 await this.refreshCurrentConversation()
+              } else if (data.type === 'interrupt') {
+                this.stopResponseTimer()
+                this.messages[aiMessageIndex] = {
+                  ...this.messages[aiMessageIndex],
+                  streaming: false
+                }
+                this.isInterrupted = true
+                this.isInterruptedSessionId = data.session_id || requestSessionId || this._pendingInterruptSessionId
               }
             } catch (e) {
               console.error('解析消息失败:', e)
@@ -1586,7 +1547,15 @@ export default {
                 if (reasoningText) {
                   aiTurn.reasoning += (aiTurn.reasoning ? '\n\n' : '') + reasoningText
                 }
-                // 2. tool_calls 放入 toolCalls 队列等待 ToolMessage 填入结果（对应流式的 tool_call_name 事件）
+                // 2. 提取 checkpoint_id
+                if (aiMsg.additional_kwargs?.checkpoint_id) {
+                  aiTurn.checkpointId = aiMsg.additional_kwargs.checkpoint_id
+                }
+                // 3. 保存完整的 additional_kwargs（包含 last_checkpoint_id）
+                if (aiMsg.additional_kwargs) {
+                  aiTurn.additional_kwargs = aiMsg.additional_kwargs
+                }
+                // 4. tool_calls 放入 toolCalls 队列等待 ToolMessage 填入结果（对应流式的 tool_call_name 事件）
                 const backendToolCalls = aiMsg.additional_kwargs?.tool_calls
                 if (backendToolCalls && backendToolCalls.length > 0) {
                   for (const tc of backendToolCalls) {

@@ -18,7 +18,7 @@
         :has-received-init="hasReceivedInit"
         :pending-interrupt-session-id="pendingInterruptSessionId"
         @restore="$emit('restore', $event)"
-        @restream="$emit('restream', $event)"
+        @restream="(...args) => $emit('restream', ...args)"
         @open-link="$emit('open-link', $event)"
         @preview-file="$emit('preview-file', $event)"
         @interrupt="$emit('interrupt', $event)"
@@ -89,10 +89,8 @@ export default {
       let keyIndex = 0
 
       for (const msg of this.messages) {
-        result.push({
-          ...msg,
-          _key: `msg_${keyIndex++}`
-        })
+        result.push(msg)
+        keyIndex++
       }
 
       return result

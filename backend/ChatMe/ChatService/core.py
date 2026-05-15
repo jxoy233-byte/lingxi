@@ -617,12 +617,12 @@ class ChatService:
                         ))
                         checkpoint_index += 1
                     elif msg.additional_kwargs.get("type") == AIMessageType.REASONING.value:
-                            messages_list.append(Message(
-                                role=role,
-                                content=msg.content,
-                                files=None,
-                                additional_kwargs=msg.additional_kwargs
-                            ))
+                        messages_list.append(Message(
+                            role=role,
+                            content=msg.content,
+                            files=None,
+                            additional_kwargs=msg.additional_kwargs
+                        ))
                     else:
                         continue
 

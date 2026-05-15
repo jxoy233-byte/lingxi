@@ -42,7 +42,7 @@ def get_graph_final_node_config():
         api_key = os.getenv("OPENAI_API_KEY")
         base_url = os.getenv("OPENAI_BASE_URL")
 
-    temperature = float(os.getenv("OPENAI_TEMPERATURE", "1.0"))
+    temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.9"))
     max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "8192"))
     top_p = float(os.getenv("OPENAI_TOP_P", "1.0"))
     frequency_penalty = float(os.getenv("OPENAI_FREQUENCY_PENALTY", "0.0"))

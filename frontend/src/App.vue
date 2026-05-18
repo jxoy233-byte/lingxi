@@ -321,11 +321,12 @@ export default {
                 }
               } else if (data.type === 'tool_call_name') {
                 const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
-                toolCalls.push({ name: data.content.name, args: data.content.args, result: null })
+                toolCalls.push({ name: data.content.name, args: data.content.args, id: data.id, result: null })
                 this.messages[aiMessageIndex] = { ...this.messages[aiMessageIndex], toolCalls, responseTime: this.currentResponseTime }
               } else if (data.type === 'tool_call_result') {
                 const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
-                if (toolCalls.length > 0) toolCalls[toolCalls.length - 1] = { ...toolCalls[toolCalls.length - 1], result: data.content }
+                const idx = toolCalls.findIndex(tc => tc.id === data.id)
+                if (idx !== -1) toolCalls[idx] = { ...toolCalls[idx], result: data.content }
                 this.messages[aiMessageIndex] = { ...this.messages[aiMessageIndex], toolCalls, responseTime: this.currentResponseTime }
               } else if (data.type === 'done') {
                 this.stopResponseTimer()
@@ -367,7 +368,7 @@ export default {
               }
             } else if (data.type === 'tool_call_name') {
               const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
-              toolCalls.push({ name: data.content.name, args: data.content.args, result: null })
+              toolCalls.push({ name: data.content.name, args: data.content.args, id: data.id, result: null })
               this.messages[aiMessageIndex] = {
                 ...this.messages[aiMessageIndex],
                 toolCalls,
@@ -375,9 +376,8 @@ export default {
               }
             } else if (data.type === 'tool_call_result') {
               const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
-              if (toolCalls.length > 0) {
-                toolCalls[toolCalls.length - 1] = { ...toolCalls[toolCalls.length - 1], result: data.content }
-              }
+              const idx = toolCalls.findIndex(tc => tc.id === data.id)
+              if (idx !== -1) toolCalls[idx] = { ...toolCalls[idx], result: data.content }
               this.messages[aiMessageIndex] = {
                 ...this.messages[aiMessageIndex],
                 toolCalls,
@@ -714,7 +714,7 @@ export default {
                 }
               } else if (data.type === 'tool_call_name') {
                 const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
-                toolCalls.push({ name: data.content.name, args: data.content.args, result: null })
+                toolCalls.push({ name: data.content.name, args: data.content.args, id: data.id, result: null })
                 this.messages[aiMessageIndex] = {
                   ...this.messages[aiMessageIndex],
                   toolCalls,
@@ -722,9 +722,8 @@ export default {
                 }
               } else if (data.type === 'tool_call_result') {
                 const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
-                if (toolCalls.length > 0) {
-                  toolCalls[toolCalls.length - 1] = { ...toolCalls[toolCalls.length - 1], result: data.content }
-                }
+                const idx = toolCalls.findIndex(tc => tc.id === data.id)
+                if (idx !== -1) toolCalls[idx] = { ...toolCalls[idx], result: data.content }
                 this.messages[aiMessageIndex] = {
                   ...this.messages[aiMessageIndex],
                   toolCalls,
@@ -1159,7 +1158,7 @@ export default {
                 }
               } else if (data.type === 'tool_call_name') {
                 const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
-                toolCalls.push({ name: data.content.name, args: data.content.args, result: null })
+                toolCalls.push({ name: data.content.name, args: data.content.args, id: data.id, result: null })
                 this.messages[aiMessageIndex] = {
                   ...this.messages[aiMessageIndex],
                   toolCalls,
@@ -1167,9 +1166,8 @@ export default {
                 }
               } else if (data.type === 'tool_call_result') {
                 const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
-                if (toolCalls.length > 0) {
-                  toolCalls[toolCalls.length - 1] = { ...toolCalls[toolCalls.length - 1], result: data.content }
-                }
+                const idx = toolCalls.findIndex(tc => tc.id === data.id)
+                if (idx !== -1) toolCalls[idx] = { ...toolCalls[idx], result: data.content }
                 this.messages[aiMessageIndex] = {
                   ...this.messages[aiMessageIndex],
                   toolCalls,
@@ -1260,7 +1258,7 @@ export default {
                 }
               } else if (data.type === 'tool_call_name') {
                 const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
-                toolCalls.push({ name: data.content.name, args: data.content.args, result: null })
+                toolCalls.push({ name: data.content.name, args: data.content.args, id: data.id, result: null })
                 this.messages[aiMessageIndex] = {
                   ...this.messages[aiMessageIndex],
                   toolCalls,
@@ -1268,9 +1266,8 @@ export default {
                 }
               } else if (data.type === 'tool_call_result') {
                 const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
-                if (toolCalls.length > 0) {
-                  toolCalls[toolCalls.length - 1] = { ...toolCalls[toolCalls.length - 1], result: data.content }
-                }
+                const idx = toolCalls.findIndex(tc => tc.id === data.id)
+                if (idx !== -1) toolCalls[idx] = { ...toolCalls[idx], result: data.content }
                 this.messages[aiMessageIndex] = {
                   ...this.messages[aiMessageIndex],
                   toolCalls,

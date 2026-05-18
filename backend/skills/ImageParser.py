@@ -56,6 +56,9 @@ def _fetch_local_image(file_path: str) -> Image.Image:
     if not os.path.exists(full_path):
         raise FileNotFoundError(f"文件不存在: {full_path} (解析路径: {full_path})")
 
+    # 刷新文件时间戳，防止被清理任务删除
+    os.utime(full_path, None)
+
     image = Image.open(full_path).convert("RGB")
     return _compress_image(image)
 

@@ -470,7 +470,7 @@ class ChatService:
                     tool_call_args = chunk['data'].get('input', {})
                     tool_call_name = chunk['name']
                     yield json.dumps(
-                        {"type": "tool_call_name", "content": {'args': tool_call_args, 'name': tool_call_name}},
+                        {"type": "tool_call_name", "id": chunk["run_id"], "content": {'args': tool_call_args, 'name': tool_call_name}},
                         ensure_ascii=False,
                         default=str
                     ) + "\n\n"
@@ -481,13 +481,13 @@ class ChatService:
                             for op in output_content:
                                 if op['type'] == "text":
                                     yield json.dumps(
-                                        {"type": "tool_call_result", "content": op['text']},
+                                        {"type": "tool_call_result", "id": chunk["run_id"], "content": op['text']},
                                         ensure_ascii=False,
                                         default=str
                                     ) + "\n\n"
                         elif isinstance(output_content, str):
                             yield json.dumps(
-                                {"type": "tool_call_result", "content": output_content},
+                                {"type": "tool_call_result", "id": chunk["run_id"], "content": output_content},
                                 ensure_ascii=False,
                                 default=str
                             ) + "\n\n"
@@ -534,6 +534,8 @@ class ChatService:
 
         checkpoint_id = await self._save_round_checkpoint(session_id)
 
+        self.logger.info(f"会话 {session_id} 对话完成 (checkpoint: {checkpoint_id})")
+
         # 返回最终完整结果
         yield json.dumps({
             "type": "done",
@@ -550,6 +552,8 @@ class ChatService:
         Returns:
             会话内容
         """
+        self.logger.info(f"获取会话: {session_id}")
+
         config = {"configurable": {"thread_id": session_id}}
 
         checkpoints = await self.state_saver.get_checkpoints(session_id)
@@ -557,7 +561,6 @@ class ChatService:
 
         try:
             state = await self.graph.aget_state(config=config)
-            print(state)
             interrupted_info = await self._get_interrupted_info(session_id)
         except HTTPException as e:
             self.logger.error(f"获取会话状态异常(session_id:{session_id})：{str(e)}")
@@ -598,7 +601,7 @@ class ChatService:
                     role = MessageRole.AI
                     if msg.additional_kwargs.get("type") == AIMessageType.SUMMARY.value:
                         # 添加边界检查，避免数组越界
-                        if checkpoint_index < len(checkpoints): # todo 中断后刷新会话中没有checkpoint_id由于没有summary字段
+                        if checkpoint_index < len(checkpoints):
                             msg.additional_kwargs["checkpoint_id"] = checkpoints[checkpoint_index]["checkpoint_id"]
                             # 第一个 SUMMARY 消息的 last_checkpoint_id 为空
                             if checkpoint_index > 0:
@@ -632,11 +635,13 @@ class ChatService:
                     for content in msg.content:
                         if content.get("type") == "text":
                             tool_resp = content.get("text",{})
+                        elif isinstance(content, str):
+                            tool_resp = content
                     messages_list.append(Message(
                         role=role,
                         content=f"name: {msg.name}\ncontent:{tool_resp}",
                         files=None,
-                        additional_kwargs={"type": AIMessageType.REASONING.value,"isTool": True} # 与调用工具的AIMessage进行区分
+                        additional_kwargs={"type": AIMessageType.REASONING.value,"isTool": True, "tool_call_id": msg.tool_call_id} # 与调用工具的AIMessage进行区分
                     ))
 
         created_at = state.created_at if hasattr(state, "created_at") and state.created_at else datetime.now()
@@ -672,6 +677,7 @@ class ChatService:
 
         :return: 按更新时间倒序的会话列表，自动过滤空会话
         """
+        self.logger.info("获取会话列表")
         try:
             session_ids = await self.aget_conversation_ids
             conversation_list = []
@@ -938,6 +944,7 @@ class ChatService:
         """
         中断当前session_id下的对话
         """
+        self.logger.info(f"中断会话: {session_id}")
         try:
             await self.redis_client.hset(
                 f"interrupt:{session_id}",
@@ -958,6 +965,7 @@ class ChatService:
         """
         重新进行中断了的对话，断点续接
         """
+        self.logger.info(f"续接会话: {session_id}")
         try:
             key = f"interrupt:{session_id}"
 
@@ -1069,6 +1077,8 @@ class ChatService:
                 return
 
         checkpoint_id = await self._save_round_checkpoint(session_id)
+
+        self.logger.info(f"会话 {session_id} 对话完成 (checkpoint: {checkpoint_id})")
 
         # 返回最终完整结果
         yield json.dumps({

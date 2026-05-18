@@ -47,14 +47,13 @@ async def create_chat_service() -> ChatService:
     return chat_service
 
 @asynccontextmanager
-async def lifespan(app :FastAPI):
-    # 启动时执行：初始化全局 chat_service
+async def chat_service_lifespan(app: FastAPI):
+    """ChatService 的 lifespan"""
     chat_service = await create_chat_service()
-    logger.info("ChatService启动成功")
-    # 分割启动与关闭逻辑
+    logger.info("ChatService 启动成功")
     yield
     chat_service = None
-    logger.info("ChatService关闭成功")
+    logger.info("ChatService 关闭成功")
 
 
 @ChatMe_app.post("/", summary="新建对话/继续对话-流式响应，无session_id则新建对话")

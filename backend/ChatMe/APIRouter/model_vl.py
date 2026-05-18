@@ -62,7 +62,6 @@ def compress_image_if_needed(image: Image.Image, max_size: int = 512) -> Image.I
 
 def fetch_and_process_image(image_url: str) -> Image.Image:
     """获取并处理图片"""
-    print(f"[DEBUG] fetch_and_process_image: {image_url}")
     if image_url.startswith("data:image/"):
         # Base64
         base64_data = image_url.split(",")[1]
@@ -84,20 +83,15 @@ def fetch_and_process_image(image_url: str) -> Image.Image:
 
 def process_messages(qwen_messages: List[dict]):
     """处理消息并返回 image_inputs, video_inputs"""
-    print(f"[DEBUG] process_messages: input messages={qwen_messages}")
     image_inputs, video_inputs = process_vision_info(qwen_messages)
-    print(f"[DEBUG] process_vision_info result: images={len(image_inputs) if image_inputs else 0}, videos={len(video_inputs) if video_inputs else 0}")
     return image_inputs, video_inputs
 
 
 def generate_result(qwen_messages: List[dict], image_inputs: list, video_inputs: list, max_tokens: int, temperature: float) -> str:
     """生成完整结果"""
-    print(f"[DEBUG] generate_result: messages={len(qwen_messages)}, images={len(image_inputs) if image_inputs else 0}, videos={len(video_inputs) if video_inputs else 0}")
-
     text = processor.apply_chat_template(
         qwen_messages, tokenize=False, add_generation_prompt=True
     )
-    print(f"[DEBUG] chat_template text (first 200): {text[:200]}...")
 
     inputs = processor(
         text=[text],
@@ -170,22 +164,9 @@ async def generate_streaming_response(
 # --------------------- OpenAI 标准接口 /v1/chat/completions ---------------------
 @model_vl_app.post("/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest):
-    print(f"[DEBUG] === New Request ===")
-    print(f"[DEBUG] model={request.model}, stream={request.stream}, messages count={len(request.messages)}")
-
     qwen_messages = []
-    for idx, msg in enumerate(request.messages):
+    for msg in request.messages:
         content = msg.content
-        print(f"[DEBUG] Message {idx}: role={msg.role}, content type={type(content).__name__}")
-        if isinstance(content, str):
-            print(f"[DEBUG]   text content (first 100): {content[:100]}")
-            qwen_messages.append({"role": msg.role, "content": content})
-        elif isinstance(content, list):
-            print(f"[DEBUG]   list content, items: {len(content)}")
-            for item_idx, item in enumerate(content):
-                print(f"[DEBUG]     item {item_idx}: type={item.get('type') if isinstance(item, dict) else type(item)}")
-                if isinstance(item, dict) and item.get("type") == "image_url":
-                    print(f"[DEBUG]       image_url data: {item.get('image_url')}")
         if isinstance(content, str):
             qwen_messages.append({"role": msg.role, "content": content})
         elif isinstance(content, list):
@@ -208,14 +189,12 @@ async def chat_completions(request: ChatCompletionRequest):
                             try:
                                 image = fetch_and_process_image(image_url)
                                 items.append({"type": "image", "image": image})
-                                print(f"[DEBUG]   Successfully added image to items")
-                            except Exception as e:
-                                print(f"[DEBUG]   Failed to process image: {e}")
+                            except Exception:
+                                pass
                 elif isinstance(item, str):
                     if item:
                         items.append({"type": "text", "text": item})
 
-            print(f"[DEBUG]   Built items: {len(items)} items")
             qwen_messages.append({"role": msg.role, "content": items})
 
     image_inputs, video_inputs = process_messages(qwen_messages)

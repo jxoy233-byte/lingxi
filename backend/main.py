@@ -1,12 +1,16 @@
+from datetime import datetime
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 import uvicorn
 
 from ChatMe.ChatMeConfig import config
-from ChatMe.APIRouter.main import ChatMe_app, lifespan
+from ChatMe.APIRouter.main import ChatMe_app, chat_service_lifespan
 from ChatMe.APIRouter.model_vl import model_vl_app
+from ChatMe.APIRouter.timed_clean import cleanup_lifespan, cleanup_router
 from ChatMe.LoggingManager.logging_config import set_logger
+
 
 app_config = config.get_app_config()
 version = app_config.get("version", "v1.0.0")
@@ -14,6 +18,15 @@ app_name = app_config.get("name", "ChatMe")
 app_description = app_config.get("description", "")
 app_host = app_config.get("host", "127.0.0.1")
 app_port = app_config.get("port", 8111)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """组合多个 lifespan"""
+    async with chat_service_lifespan(app):
+        async with cleanup_lifespan(app):
+            yield
+
+    logger.info(f"\n{'='*60}\n  {app_name} {version} 关闭\n{'='*60}")
 
 app = FastAPI(
     title=app_name,
@@ -24,30 +37,42 @@ app = FastAPI(
 
 logger = set_logger()
 
-logger.info(f"{app_name} 应用启动ing")
-logger.info(f"版本: {version}")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 在生产中允许进入访问的域名
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-app.include_router(ChatMe_app)
+logger.info(f"\n{'='*60}\n  {app_name} {version} 启动 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n{'='*60}")
 
-# 仅在 local=true 时加载本地 VL 模型并启用对应路由
+app.include_router(ChatMe_app)
+app.include_router(cleanup_router)
+
+# 仅在 local=true 时加载本地 VL 模型
 try:
     from ChatMe.ChatMeConfig import get_model_vl_config
     vl_config = get_model_vl_config()
     if vl_config.get("local"):
         app.include_router(model_vl_app)
-        logger.info("本地 VL 模型已启用（local=true）")
+        logger.info("本地 VL 模型已启用")
     else:
-        logger.info("本地 VL 模型未启用（local=false），将使用外部 VL 模型")
+        logger.info("使用外部 VL 模型")
 except Exception as e:
-    logger.warning(f"VL 模型配置获取失败: {e}")
+    logger.error(f"VL 模型配置检测失败: {e}")
+
+# OSS 配置检测
+try:
+    from ChatMe.ChatMeConfig import get_oss_config
+    oss_cfg = get_oss_config()
+    if oss_cfg.get("access_key_id") and oss_cfg.get("bucket"):
+        logger.info("OSS 已配置")
+    else:
+        logger.info("OSS 未配置")
+except Exception as e:
+    logger.error(f"OSS 配置检测失败: {e}")
 
 @app.get("/")
 async def root():

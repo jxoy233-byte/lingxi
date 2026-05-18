@@ -350,6 +350,39 @@ class ChatWorkflow:
 
         return [files[i] for i in sorted(files.keys())]
 
+    async def _filter_thinking_content(self, ai_response: AIMessage) -> AIMessage:
+        """
+        过滤掉 AI 回复中的思考过程内容
+        支持格式:
+        - <thinking>...</thinking>
+        - <thought>...</thought>
+        - 等等
+        """
+        content = ai_response.content
+        if not content:
+            return ai_response
+
+        # 过滤标签内的思考内容（通用格式）
+        patterns = [
+            r'<thinking>.*?</thinking>',
+            r'<thought>.*?</thought>',
+            r'<reasoning>.*?</reasoning>',
+            r'<think>.*?</think>',
+        ]
+
+        if isinstance(content, str):
+            for pattern in patterns:
+                content = re.sub(pattern, '', content, flags=re.DOTALL)
+
+        return AIMessage(
+            content=content,
+            additional_kwargs=ai_response.additional_kwargs,
+            response_metadata=ai_response.response_metadata,
+            id=ai_response.id,
+            usage_metadata=getattr(ai_response, "usage_metadata", None)
+        )
+
+
     async def check_and_trigger_interrupt(self, session_id):
         """
         检查当前session_id下的对话是否被中断
@@ -495,6 +528,8 @@ class ChatWorkflow:
 
             imp_ipt = await self.llm_imp_ipt.ainvoke({"messages": input_msg})
 
+            imp_ipt = await self._filter_thinking_content(imp_ipt)
+
             imp_ipt_content = imp_ipt.content
             imp_ipt_additional_kwargs = imp_ipt.additional_kwargs
             imp_ipt_id = imp_ipt.id
@@ -504,6 +539,7 @@ class ChatWorkflow:
 
             return {
                 "imp_ipt": imp_ipt,
+                "context": [],
                 "memory_user_message": imp_ipt_content,
                 "memory_tool_results": [],
                 "memory_tool_calls": [],
@@ -518,7 +554,7 @@ class ChatWorkflow:
             context = []
             tool_results = state["memory_tool_results"] if state["memory_tool_results"] else []
 
-            if "context" not in state or not state["context"]:
+            if not state["context"]:
                 memory_message :SystemMessage = self.memory_manager.get_relevant_memory(thread_id)
                 context.append(memory_message)
 
@@ -528,7 +564,7 @@ class ChatWorkflow:
                 context = state["context"]
 
                 cycle_msg = await self._get_current_round_conversation_cycling(state["messages"])
-                context.extend(cycle_msg)
+                context.extend(cycle_msg,)
 
                 for msg in cycle_msg:
                     if isinstance(msg, ToolMessage):
@@ -560,6 +596,8 @@ class ChatWorkflow:
 
             response = await self.agent_llm.ainvoke({"messages": input_msg})
 
+            response = await self._filter_thinking_content(response)
+
             # 符合ToolNode节点的AIMessage(REASONING)
             format_response = self._parse_content_to_tool_calls(response)
 
@@ -585,6 +623,9 @@ class ChatWorkflow:
             input_msg = state["context"]
 
             response = await self.llm_core.ainvoke({"messages": input_msg})
+
+            response = await self._filter_thinking_content( response)
+
             # AIMessage字段支持解包复制
             response_dict = dict(response)
             response_dict["additional_kwargs"] = {**response.additional_kwargs, "type": AIMessageType.SUMMARY.value}
@@ -610,8 +651,6 @@ class ChatWorkflow:
             last_message = state["messages"][-1]
             if isinstance(last_message, AIMessage) and hasattr(last_message, "tool_calls") and last_message.tool_calls:
                 return "tool_execution_node"
-            elif isinstance(last_message, SystemMessage):
-                return "context_assembly_node"
             return "final_node"
 
         workflow.set_entry_point("input_parse_node")
@@ -622,7 +661,6 @@ class ChatWorkflow:
         workflow.add_conditional_edges("agent_node",
             route_agent_output,
             {
-                "context_assembly_node": "context_assembly_node",
                 "tool_execution_node": "tool_execution_node",
                 "final_node": "final_node",
             }

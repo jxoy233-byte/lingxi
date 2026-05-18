@@ -16,9 +16,9 @@
   },
   "llm_providers": {
     "openai": {
-      "model_name": "grok-4-fast",
-      "api_key": "sk-u6aIc4nm6bQjPtdFGiEVS2R4jDCJ2m0peTw9ZLoVDtjElGEY",
-      "base_url": "https://ai.nengyongai.cn/v1"
+      "model_name": "MiniMax-M2.7",
+      "api_key": "sk-cp-j-kWKqmK5y-IxAkxVrsCBxkzBZSIJwZ2mhWV27ZemhidtqvFnROMSRCKwuNdc46NGuYFqn_XOoHLwyzYvd7qSUAy4INeCglPxk4flDduJCio8d1W1UVQRKw",
+      "base_url": "https://api.minimax.chat/v1"
     },
     "deepseek": {
       "model_name": "deepseek-chat",

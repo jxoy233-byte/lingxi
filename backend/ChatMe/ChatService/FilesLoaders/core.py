@@ -246,7 +246,7 @@ class FilesLoaders:
         处理传入的图片文件，优先用 OSS URL， fallback 到 base64
         """
         outputs: List[OutputFormat] = []
-        self.logger.info(f"开始处理{len(files)}个图片文件")
+        self.logger.debug(f"开始处理{len(files)}个图片文件")
 
         # 检测 OSS 配置
         oss_cfg = get_oss_config()
@@ -309,7 +309,7 @@ class FilesLoaders:
                 self.logger.error(f"处理图片文件失败({file.filename}): {e}")
                 outputs.append(output)
 
-        self.logger.info(f"图片处理完成，成功{sum(1 for o in outputs if o.image_content)}/{len(files)}个")
+        self.logger.debug(f"图片处理完成，成功{sum(1 for o in outputs if o.image_content)}/{len(files)}个")
         return outputs
 
     async def _process_texts(self, files: List[UploadFileWithId]) -> List[OutputFormat]:
@@ -319,7 +319,7 @@ class FilesLoaders:
         :return: text_list
         """
         outputs: List[OutputFormat] = []
-        self.logger.info(f"开始处理{len(files)}个文本文件")
+        self.logger.debug(f"开始处理{len(files)}个文本文件")
 
         for file in files:
             output = OutputFormat(
@@ -378,7 +378,7 @@ class FilesLoaders:
                 self.logger.error(f"处理文本文件失败({file.filename}): {e}")
                 outputs.append(output)
 
-        self.logger.info(f"文本文件处理完成，成功{sum(1 for o in outputs if o.text_content)}/{len(files)}个")
+        self.logger.debug(f"文本文件处理完成，成功{sum(1 for o in outputs if o.text_content)}/{len(files)}个")
         return outputs
 
     async def _process_documents(self, files: List[UploadFileWithId])->  List[OutputFormat]:
@@ -409,7 +409,7 @@ class FilesLoaders:
         )
 
         outputs: List[OutputFormat] = []
-        self.logger.info(f"开始处理{len(files)}个文档")
+        self.logger.debug(f"开始处理{len(files)}个文档")
 
         for file in files:
             output = OutputFormat(text_content="", image_content=[])
@@ -496,7 +496,7 @@ class FilesLoaders:
                 self.logger.error(f"文档处理失败({file.filename}): {e}")
                 outputs.append(output)
 
-        self.logger.info(f"文档处理完成，成功{sum(1 for o in outputs if o.text_content)}/{len(files)}个")
+        self.logger.debug(f"文档处理完成，成功{sum(1 for o in outputs if o.text_content)}/{len(files)}个")
         return outputs
 
     async def loading_files(self) -> Optional[List[OutputFormat]]:

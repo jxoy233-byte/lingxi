@@ -307,13 +307,13 @@ def get_current_datetime(session_id: str = "") -> str:
     获取当前的日期和时间
 
     Returns:
-        JSON 格式：timestamp（时间戳）、weekday（星期几，中英文）
+        JSON 格式：datetime（格式化时间）、weekday（星期几，中英文）
     """
     now = datetime.now()
 
     import json
     result = {
-        "timestamp": int(now.timestamp()),
+        "datetime": now.strftime("%Y-%m-%d %H:%M:%S"),
         "weekday_cn": "星期日 星期一 星期二 星期三 星期四 星期五 星期六".split()[now.weekday()],
         "weekday_en": ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][now.weekday()]
     }

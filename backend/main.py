@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import uvicorn
 
-from ChatMe.ChatMeConfig import config
+from ChatMe.ChatMeConfig import config, ensure_global_config
 from ChatMe.APIRouter.main import ChatMe_app, chat_service_lifespan
 from ChatMe.APIRouter.model_vl import model_vl_app
 from ChatMe.APIRouter.timed_clean import cleanup_lifespan, cleanup_router
@@ -82,11 +82,14 @@ async def root():
         "version": version,
     }
 
+def main():
+    # 确保全局配置存在
+    ensure_global_config()
+    uvicorn.run("main:app", host=app_host, port=app_port)
+    # uvicorn.run("main:app", host=app_host, port=app_port, reload=True)
 
 if __name__ == "__main__":
-    # uvicorn.run("main:app", host=app_host, port=app_port, reload=True)
-    uvicorn.run("main:app", host=app_host, port=app_port)
-
+    main()
 
 
 

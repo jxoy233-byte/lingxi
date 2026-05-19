@@ -238,6 +238,8 @@
 import { marked } from 'marked'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/atom-one-dark.css'
+import katex from 'katex'
+import 'katex/dist/katex.min.css'
 
 // 配置 marked
 const renderer = new marked.Renderer()
@@ -399,7 +401,10 @@ export default {
             }
           }
           // 渲染 Markdown（先预处理清理 URL，防止 marked 错误匹配）
-          return marked(this.preprocessContent(content))
+          let html = marked(this.preprocessContent(content))
+          // 再渲染 LaTeX 数学公式
+          html = this.renderLatex(html)
+          return html
         } catch (error) {
           console.error('Markdown 渲染失败:', error, '原始内容:', this.message.content)
           // 降级处理，直接返回纯文本
@@ -585,6 +590,102 @@ export default {
       const div = document.createElement('div')
       div.textContent = text
       return div.innerHTML
+    },
+
+    renderLatex(html) {
+      if (!html || typeof html !== 'string') return html
+
+      // 渲染块级公式 $$...$$ （displayMode）
+      html = html.replace(/\$\$([\s\S]+?)\$\$/g, (match, tex) => {
+        try {
+          return katex.renderToString(tex.trim(), {
+            displayMode: true,
+            throwOnError: false,
+            errorColor: '#cc0000'
+          })
+        } catch (e) {
+          console.warn('KaTeX block render failed:', e)
+          return `<span class="katex-error" title="${this.escapeHtml(e.message)}">$$${tex}$$</span>`
+        }
+      })
+
+      // 渲染行内公式 $...$ （非 displayMode）
+      // 排除已处理的块级公式区域，以及 HTML 标签和代码块内的 $
+      // 策略：找到所有 pre/code/span.katex 区域并保护起来，再处理剩余的 $
+      const protectedRanges = []
+      // 保护代码块
+      let i = 0
+      while (i < html.length) {
+        const preMatch = html.slice(i).match(/<pre>[\s\S]*?<\/pre>/i)
+        if (preMatch) {
+          protectedRanges.push({ start: i + preMatch.index, end: i + preMatch.index + preMatch[0].length })
+          i += preMatch.index + preMatch[0].length
+        } else break
+      }
+      // 保护已有的 katex 渲染结果
+      i = 0
+      while (i < html.length) {
+        const spanMatch = html.slice(i).match(/<span class="katex[^"]*"[^>]*>[\s\S]*?<\/span>/i)
+        if (spanMatch) {
+          protectedRanges.push({ start: i + spanMatch.index, end: i + spanMatch.index + spanMatch[0].length })
+          i += spanMatch.index + spanMatch[0].length
+        } else break
+      }
+      // 保护行内代码
+      i = 0
+      while (i < html.length) {
+        const codeMatch = html.slice(i).match(/<code[^>]*>[\s\S]*?<\/code>/i)
+        if (codeMatch) {
+          protectedRanges.push({ start: i + codeMatch.index, end: i + codeMatch.index + codeMatch[0].length })
+          i += codeMatch.index + codeMatch[0].length
+        } else break
+      }
+
+      // 对非保护区域替换行内 $
+      let result = ''
+      let lastEnd = 0
+      // 去重排序
+      protectedRanges.sort((a, b) => a.start - b.start)
+      // 简单检查重叠并合并
+      const merged = []
+      for (const r of protectedRanges) {
+        if (merged.length === 0 || r.start > merged[merged.length - 1].end) {
+          merged.push(r)
+        } else {
+          merged[merged.length - 1].end = Math.max(merged[merged.length - 1].end, r.end)
+        }
+      }
+
+      const inlineMathRegex = /\$([^$\n]+?)\$/g
+      let lastIndex = 0
+      inlineMathRegex.lastIndex = 0
+      let match
+
+      while ((match = inlineMathRegex.exec(html)) !== null) {
+        const matchStart = match.index
+        const matchEnd = match.index + match[0].length
+        // 检查是否在保护区域内
+        const protected_ = merged.some(r => matchStart >= r.start && matchStart < r.end)
+        if (protected_) continue
+        // 添加匹配前的文本
+        result += html.slice(lastIndex, matchStart)
+        // 渲染 LaTeX
+        const tex = match[1]
+        try {
+          result += katex.renderToString(tex.trim(), {
+            displayMode: false,
+            throwOnError: false,
+            errorColor: '#cc0000'
+          })
+        } catch (e) {
+          console.warn('KaTeX inline render failed:', e)
+          result += `<span class="katex-error" title="${this.escapeHtml(e.message)}">$${tex}$</span>`
+        }
+        lastIndex = matchEnd
+      }
+      result += html.slice(lastIndex)
+
+      return result
     },
 
     async copyMessage() {
@@ -1750,7 +1851,23 @@ export default {
   transform: rotate(90deg);
 }
 
-/* 推理文本 */
+/* KaTeX 错误样式 */
+.message-text :deep(.katex-error) {
+  color: #cc0000;
+  cursor: help;
+}
+
+/* KaTeX 块级公式样式 */
+.message-text :deep(.katex-display) {
+  margin: 16px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 4px;
+}
+
+.message-text :deep(.katex) {
+  font-size: 1.1em;
+}
 .reasoning-text {
   font-size: 12px;
   color: var(--text-secondary);

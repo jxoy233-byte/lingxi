@@ -321,6 +321,8 @@ def get_current_datetime(session_id: str = "") -> str:
     logger.info(f"会话{session_id}中获取当前时间成功")
     return json.dumps(result, ensure_ascii=False)
 
+def main():
+    server.run(host="127.0.0.1", port=18080, transport="streamable-http", path="/streamable")
 
 if __name__ == "__main__":
-    server.run(host="127.0.0.1", port=18080, transport="streamable-http", path="/streamable")
+    main()

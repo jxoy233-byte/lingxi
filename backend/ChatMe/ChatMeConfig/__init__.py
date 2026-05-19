@@ -12,7 +12,8 @@ from .core import (
     get_directory,
     get_app_config,
     get_model_vl_config,
-    get_oss_config
+    get_oss_config,
+    ensure_global_config
 )
 
 __all__ = [
@@ -26,5 +27,6 @@ __all__ = [
     "get_directory",
     "get_app_config",
     "get_model_vl_config",
-    "get_oss_config"
+    "get_oss_config",
+    "ensure_global_config"
 ]

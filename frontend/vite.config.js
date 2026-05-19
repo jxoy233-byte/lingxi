@@ -7,6 +7,7 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
 export const viteServerConfig = {
+  host:'0.0.0.0',
   port: 5173,
   strictPort: true,
   proxy: {
@@ -15,7 +16,8 @@ export const viteServerConfig = {
       changeOrigin: true,
       rewrite: (path) => path
     }
-  }
+  },
+  allowedHosts: true
 }
 
 export const viteBuildConfig = {
@@ -35,5 +37,5 @@ export default defineConfig({
   plugins: [vue()],
   resolve: viteResolveConfig,
   server: viteServerConfig,
-  build: viteBuildConfig
+  build: viteBuildConfig,
 })

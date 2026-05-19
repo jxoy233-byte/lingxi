@@ -20,16 +20,26 @@ class ChatMeConfig:
             cls._instance = super().__new__(cls)
         return cls._instance
 
+    def _get_global_config_dir(self) -> Path:
+        """获取全局配置目录"""
+        return Path.home() / ".chatme"
+
     def _find_config_file(self) -> Path:
-        """查找配置文件路径"""
-        search_paths = [
-            Path.cwd() / ".chatme" / "config.json",
-            Path(__file__).parent.parent / ".chatme" / "config.json",
-        ]
-        for path in search_paths:
-            if path.exists():
-                return path
-        return search_paths[0]
+        """查找配置文件路径
+        优先级：局部 .chatme/config.json > 全局 CHATME_CONFIG_DIR 或 ~/.chatme/config.json
+        """
+        # 局部配置路径
+        local_path = Path.cwd() / ".chatme" / "config.json"
+        if local_path.exists():
+            return local_path
+
+        # 全局配置路径
+        global_path = self._get_global_config_dir() / "config.json"
+        if global_path.exists():
+            return global_path
+
+        # 都不存在，返回全局路径（用于生成）
+        return global_path
 
     def _load(self) -> None:
         """加载配置"""
@@ -47,8 +57,58 @@ class ChatMeConfig:
             except Exception as e:
                 print(f"加载配置文件失败: {e}")
 
-        self._config = {}
+        # config.json 不存在，自动生成
+        self._generate_default_config(config_file)
         self._loaded = True
+
+    def _generate_default_config(self, config_file: Path) -> None:
+        """从环境变量生成默认配置文件"""
+        config_file.parent.mkdir(parents=True, exist_ok=True)
+
+        default_config = {
+            "app": {
+                "name": "ChatMe",
+                "version": "v1.0.0",
+                "description": "ChatMe LangGraph Workflow",
+                "host": "127.0.0.1",
+                "port": 8111,
+            },
+            "llm_providers": {
+                "openai": {
+                    "model_name": os.getenv("OPENAI_MODEL_NAME", ""),
+                    "api_key": os.getenv("OPENAI_API_KEY", ""),
+                    "base_url": os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+                }
+            },
+            "redis": {
+                "checkpointer_url": "redis://localhost:6388",
+                "state_saver_url": "redis://localhost:6388",
+            },
+            "mcp_server": {
+                "url": "http://127.0.0.1:18080/streamable",
+                "transport": "streamable_http",
+            },
+            "directories": {
+                "skills_dir": "./skills",
+                "cached_dir": "./cached"
+            },
+            "oss": {
+                "access_key_id": os.getenv("OSS_ACCESS_KEY_ID", ""),
+                "access_key_secret": os.getenv("OSS_ACCESS_KEY_SECRET", ""),
+                "bucket": os.getenv("OSS_BUCKET", ""),
+                "endpoint": os.getenv("OSS_ENDPOINT", ""),
+                "region": os.getenv("OSS_REGION", ""),
+            },
+        }
+
+        try:
+            with open(config_file, "w", encoding="utf-8") as f:
+                json.dump(default_config, f, indent=4, ensure_ascii=False)
+            print(f"已自动生成配置文件: {config_file}")
+        except Exception as e:
+            print(f"生成配置文件失败: {e}")
+
+        self._config = default_config
 
     def get(self, key: str, default: Any = None, fallback_env: str = None) -> Any:
         """
@@ -243,3 +303,19 @@ def get_app_config() -> dict:
 def get_model_vl_config() -> dict:
     """获取 VL 模型配置"""
     return config.get_model_vl_config()
+
+
+def ensure_global_config() -> None:
+    """确保全局配置目录和文件存在，优先使用局部配置"""
+    # 1. 如果局部配置存在，直接返回
+    local_path = Path.cwd() / ".chatme" / "config.json"
+    if local_path.exists():
+        return
+
+    # 2. 如果全局配置存在，也直接返回
+    global_path = Path.home() / ".chatme" / "config.json"
+    if global_path.exists():
+        return
+
+    # 3. 都不存在，在全局目录生成
+    config._generate_default_config(global_path)

@@ -1,6 +1,6 @@
 [project]
-name = "chatme"
-version = "0.1.0"
+name = "ChatMe"
+version = "1.0.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -10,7 +10,6 @@ dependencies = [
     "docling>=2.84.0",
     "fastapi>=0.135.1",
     "fastmcp>=3.1.1",
-    "frontend>=0.0.3",
     "langchain-community>=0.4.1",
     "langchain-core>=1.2.20",
     "langchain-mcp-adapters>=0.2.2",
@@ -24,3 +23,15 @@ dependencies = [
     "redis>=7.3.0",
     "redisvl>=0.16.0",
 ]
+
+[project.scripts]
+chatme_main = "main:main"
+chatme_mcp = "ChatMe.ChatWorkflow.mcps.mcp_server:main"
+
+[tool.setuptools]
+py-modules = ["main"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ChatMe*", "skills*"]
+exclude = ["ChatMe.test*", "*.test*"]

@@ -140,7 +140,7 @@ def _start_scheduler():
     _scheduler = AsyncIOScheduler()
     _scheduler.add_job(
         _cleanup_task,
-        trigger=CronTrigger(hour=3, minute=0),
+        trigger=CronTrigger(hour=0, minute=0),
         id="daily_cleanup",
         name="每日缓存和日志清理",
         replace_existing=True,

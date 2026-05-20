@@ -44,15 +44,6 @@ wheels = [
 ]
 
 [[package]]
-name = "aiofiles"
-version = "25.1.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/41/c3/534eac40372d8ee36ef40df62ec129bee4fdb5ad9706e58a29be53b2c970/aiofiles-25.1.0.tar.gz", hash = "sha256:a8d728f0a29de45dc521f18f07297428d56992a742f0cd2701ba86e44d23d5b2", size = 46354, upload-time = "2025-10-09T20:51:04.358Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/bc/8a/340a1555ae33d7354dbca4faa54948d76d89a27ceef032c8c3bc661d003e/aiofiles-25.1.0-py3-none-any.whl", hash = "sha256:abe311e527c862958650f9438e859c1fa7568a141b22abcd015e120e86a85695", size = 14668, upload-time = "2025-10-09T20:51:03.174Z" },
-]
-
-[[package]]
 name = "aiohappyeyeballs"
 version = "2.6.1"
 source = { registry = "https://pypi.org/simple" }
@@ -477,7 +468,7 @@ wheels = [
 
 [[package]]
 name = "chatme"
-version = "0.1.0"
+version = "1.0.0"
 source = { virtual = "." }
 dependencies = [
     { name = "apscheduler" },
@@ -485,7 +476,6 @@ dependencies = [
     { name = "docling" },
     { name = "fastapi" },
     { name = "fastmcp" },
-    { name = "frontend" },
     { name = "langchain-community" },
     { name = "langchain-core" },
     { name = "langchain-mcp-adapters" },
@@ -507,7 +497,6 @@ requires-dist = [
     { name = "docling", specifier = ">=2.84.0" },
     { name = "fastapi", specifier = ">=0.135.1" },
     { name = "fastmcp", specifier = ">=3.1.1" },
-    { name = "frontend", specifier = ">=0.0.3" },
     { name = "langchain-community", specifier = ">=0.4.1" },
     { name = "langchain-core", specifier = ">=1.2.20" },
     { name = "langchain-mcp-adapters", specifier = ">=0.2.2" },
@@ -1004,21 +993,6 @@ wheels = [
 ]
 
 [[package]]
-name = "frontend"
-version = "0.0.3"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "aiofiles" },
-    { name = "itsdangerous" },
-    { name = "starlette" },
-    { name = "uvicorn" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/05/8d/0caf67efc5ab7caa2f1e90f8fcadd6cf84c25f16826f55f1a0d3eee997c0/frontend-0.0.3.tar.gz", hash = "sha256:cdb5e76a0082b9cd3fa8331dbe44c86f007ab6d07c540551078f60318cd2e019", size = 15649, upload-time = "2020-04-15T12:21:37.993Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/98/02/a9c4713b26ae11464ac334b59504ef6fe66e2c323ee44520ca1cd6dc4929/frontend-0.0.3-py3-none-any.whl", hash = "sha256:9b36d7092892271431cd693eaca14767acbdbb67f6f6f38dc3e0ff15618c7109", size = 32633, upload-time = "2020-04-15T12:21:36.242Z" },
-]
-
-[[package]]
 name = "frozenlist"
 version = "1.8.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1272,15 +1246,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/f3/49/3b30cad09e7771a4982d9975a8cbf64f00d4a1ececb53297f1d9a7be1b10/importlib_metadata-8.7.1.tar.gz", hash = "sha256:49fef1ae6440c182052f407c8d34a68f72efc36db9ca90dc0113398f2fdde8bb", size = 57107, upload-time = "2025-12-21T10:00:19.278Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/fa/5e/f8e9a1d23b9c20a551a8a02ea3637b4642e22c2626e3a13a9a29cdea99eb/importlib_metadata-8.7.1-py3-none-any.whl", hash = "sha256:5a1f80bf1daa489495071efbb095d75a634cf28a8bc299581244063b53176151", size = 27865, upload-time = "2025-12-21T10:00:18.329Z" },
-]
-
-[[package]]
-name = "itsdangerous"
-version = "2.2.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/9c/cb/8ac0172223afbccb63986cc25049b154ecfb5e85932587206f42317be31d/itsdangerous-2.2.0.tar.gz", hash = "sha256:e0050c0b7da1eea53ffaf149c0cfbb5c6e2e2b69c4bef22c81fa6eb73e5f6173", size = 54410, upload-time = "2024-04-16T21:28:15.614Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/04/96/92447566d16df59b2a776c0fb82dbc4d9e07cd95062562af01e408583fc4/itsdangerous-2.2.0-py3-none-any.whl", hash = "sha256:c6242fc49e35958c8b15141343aa660db5fc54d4f13a1db01a3f5891b98700ef", size = 16234, upload-time = "2024-04-16T21:28:14.499Z" },
 ]
 
 [[package]]

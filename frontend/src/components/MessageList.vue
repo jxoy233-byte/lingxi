@@ -248,6 +248,16 @@ export default {
   margin: 0 auto;
   padding: 32px 16px 16px;
   min-width: 0;
+  width: 100%;
+}
+
+@media (max-width: 600px) {
+  .messages-column {
+    padding: 16px 12px 12px;
+  }
+  .welcome-message {
+    margin-top: 60px;
+  }
 }
 
 .welcome-message {

@@ -65,7 +65,7 @@ def get_graph_final_node_config():
     prompt = """# Final Node — Response Generation
 
 ## Your Task
-Answer the user's most recent message based on the information provided.
+Answer the user's most recent message based on the information provided (preferred choice) or your own experience (if not information is provided).
 
 **Input**: Most recent human message + tool execution results or context from agent_node
 
@@ -221,7 +221,7 @@ def get_agent_node_config():
         api_key = os.getenv("OPENAI_API_KEY")
         base_url = os.getenv("OPENAI_BASE_URL")
 
-    temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.3"))
+    temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.2"))
     max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "8192"))
     top_p = float(os.getenv("OPENAI_TOP_P", "1.0"))
     frequency_penalty = float(os.getenv("OPENAI_FREQUENCY_PENALTY", "0.0"))
@@ -242,7 +242,7 @@ def get_agent_node_config():
     prompt = """# Agent Node — Task Execution Agent
 
 ## Your Role
-1. Understand the user's task
+1. Understand, design and break down the user's task to solve with your tools
 2. Call tools to gather information / execute actions
 3. When done calling tools, pass results to final_node
 
@@ -259,24 +259,24 @@ When you stop outputting <tool_calls>, workflow moves to final_node.
 4. Explore when uncertain — Use ls/cat to understand the environment
 5. Switch strategy on failure — Don't repeat failed approaches
 
-## Tools
+## Tool
 
 ### interrupt — Emergency Stop
 Use when: User asks to stop, sensitive/dangerous operations, cannot proceed without confirmation.
-interrupt(message: "reason")
+Parameters: message (required, string) <- interrupted reason
 
 ### execute_command — Environment & File Operations
-Use when: Exploring skills (ls skills/), reading files (cat skills/skills.md), system tools (ps, df, curl).
+Use when: Exploring skills (ls skills/), reading files (cat skills/skills.md), system tools (ps, df, ⚠️curl(Unless there is no useful skills, you mustn't use 'curl')) 
+Parameters: command (required, string)
 
-### execute_code — Computation & Data Processing
-Use when: Data needs calculation, pure math, complex data structures.
-Prefer existing skills:
-from skills.ImageParser import parse_image
-result = parse_image("image_url_or_path")
+### execute_code — Code Execution & Skill Usage
+Use when: Writing or running code to solve problems, invoke skills, process data, or perform actions that require code execution.
+Parameters: code (required, string), language (default: "python")
 
 ### get_current_datetime — Time Reference
 Use when: Task involves "today", "tomorrow", "this week".
 Must call FIRST before other time operations.
+Parameters: none
 
 ## Decision Flow
 Task arrives → Is there a skill for this?
@@ -329,7 +329,7 @@ execute_code("python", "From ImageParser import ...") → Done
 | Search no results | Change keywords or search direction |
 | Command error | Check syntax, find alternative |
 | Tool call failed | Try different parameters or alternative tool, don't give up immediately |
-| Cannot solve with one approach | Try another approach before interrupting |
+| Cannot solve with one approach | Try another approach before interrupting or termination |
 
 ## Error Recovery — Be Persistent
 When a tool call fails or returns unexpected results:
@@ -338,13 +338,13 @@ When a tool call fails or returns unexpected results:
 3. If all approaches fail, THEN interrupt or go to final_node with partial results
 4. Never stop at the first error — explore alternatives first
 
-## Termination
+## Termination (**don't summary or answer anything about the user's task**)
 When you output without <tool_calls>, workflow goes to final_node.
 - Solved the problem, OR
 - Tried multiple approaches and confirmed not solvable, OR
 - Hit loop limit
 
-## Output Format
+## Output Format 
 
 Tool call:
 <tool_calls>[{{"name": "tool_name", "args": {{"param": "value"}}}}]</tool_calls>
@@ -352,11 +352,13 @@ Tool call:
 Parallel (independent tools):
 <tool_calls>[{{"name": "execute_command", "args": {{"command": "ls skills/"}}}}, {{"name": "get_current_datetime", "args": {{}}}}]</tool_calls>
 
+Note: Use double braces to output single brace.
+
 Direct output (no tools needed): Plain text only.
 
 Do NOT output any thinking/reasoning content in your response.
 
-When task is done, go to final_node."""
+When it is time to terminate, go to final_node with no summary to answer the user's task."""
 
     return llm_config, prompt
 

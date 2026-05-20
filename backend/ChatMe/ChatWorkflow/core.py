@@ -171,79 +171,79 @@ class ChatWorkflow:
         某些模型（如 Grok）将 tool_calls 以 JSON 字符串形式放在 content 中，
         需要手动解析并转换为标准格式
         """
-        if not ai_message.content:
+        # 保护 None 值
+        raw_content = ai_message.content
+        if raw_content is None:
+            return ai_message
+        if not raw_content:
             return ai_message
 
-        content = str(ai_message.content)
+        content = str(raw_content)
         tool_calls = []
 
-        # 找到所有 <tool_calls>...</tool_calls> 块
-        tag_pattern = r'<tool_calls>'
-        end_tag = '</tool_calls>'
-        start_idx = 0
-
-        while True:
-            tag_start = content.find(tag_pattern, start_idx)
-            if tag_start == -1:
-                break
-
-            # 找到 <tool_calls> 后的第一个 { 或 [
-            json_start = tag_start + len(tag_pattern)
-            while json_start < len(content) and content[json_start] in ' \t\n\r':
-                json_start += 1
-
-            if json_start >= len(content) or content[json_start] not in '{[':
-                start_idx = json_start + 1
+        # 找到所有 <tool_calls>...</tool_calls> 块并解析
+        tag_pattern = r'<tool_calls>(.*?)</tool_calls>'
+        for match in re.finditer(tag_pattern, content, re.DOTALL):
+            json_str = match.group(1).strip()
+            if not json_str:
                 continue
 
-            # 尝试逐步扩展 JSON 范围来解析（处理嵌套结构）
-            bracket_count = 0
-            json_end = json_start
-            json_chars = []
+            tool_call_data = None
+            try:
+                tool_call_data = json.loads(json_str)
+            except json.JSONDecodeError:
+                # 修复 \& 这种非法转义后重试
+                fixed = json_str.replace('\\&', '\\\\&')
+                try:
+                    tool_call_data = json.loads(fixed)
+                except json.JSONDecodeError:
+                    # 还是失败，正则提取
+                    name_match = re.search(r'"name"\s*:\s*"([^"]*)"', json_str)
+                    if not name_match:
+                        continue
+                    name = name_match.group(1)
 
-            for idx in range(json_start, len(content)):
-                ch = content[idx]
-                json_chars.append(ch)
-
-                if ch in '{[':
-                    bracket_count += 1
-                elif ch in '}]':
-                    bracket_count -= 1
-                    if bracket_count == 0:
-                        json_end = idx + 1
-                        json_str = ''.join(json_chars)
+                    args = {}
+                    args_match = re.search(r'"args"\s*:\s*(\{.*?\})', json_str, re.DOTALL)
+                    if args_match:
                         try:
-                            tool_call_data = json.loads(json_str)
-                            if isinstance(tool_call_data, list):
-                                for j, item in enumerate(tool_call_data):
-                                    tc = {
-                                        "name": item.get("name"),
-                                        "args": item.get("args", {}),
-                                        "id": item.get("id", "") or f"call_{len(tool_calls)+j+1}",
-                                    }
-                                    if tc["name"]:
-                                        tool_calls.append(tc)
-                            else:
-                                tc = {
-                                    "name": tool_call_data.get("name"),
-                                    "args": tool_call_data.get("args", {}),
-                                    "id": tool_call_data.get("id", "") or f"call_{len(tool_calls)+1}",
-                                }
-                                if tc["name"]:
-                                    tool_calls.append(tc)
-                        except json.JSONDecodeError as e:
-                            self.logger.error(f"解析工具调用JSON失败: {e}")
+                            args = json.loads(args_match.group(1).strip())
+                        except:
+                            pass
 
-                        start_idx = json_end
-                        break
+                    tool_call_data = {"name": name, "args": args}
+
+            if isinstance(tool_call_data, list):
+                for j, item in enumerate(tool_call_data):
+                    args = item.get("args", {})
+                    # 删除 args 中的无效参数，避免传入工具时报错
+                    args.pop("id", None)
+                    args.pop("name", None)
+                    args.pop("Language", None)
+                    tc = {
+                        "name": item.get("name"),
+                        "args": args,
+                        "id": item.get("id", "") or f"call_{len(tool_calls)+j+1}",
+                    }
+                    if tc["name"]:
+                        tool_calls.append(tc)
             else:
-                # 没找到匹配的结束括号
-                start_idx = json_start + 1
+                args = tool_call_data.get("args", {})
+                args.pop("id", None)
+                args.pop("name", None)
+                args.pop("Language", None)
+                tc = {
+                    "name": tool_call_data.get("name"),
+                    "args": args,
+                    "id": tool_call_data.get("id", "") or f"call_{len(tool_calls)+1}",
+                }
+                if tc["name"]:
+                    tool_calls.append(tc)
 
         if tool_calls:
             ai_message.tool_calls = tool_calls
-            # 清理 content 中的工具调用标记
-            clean_content = re.sub(r'\n*<tool_calls>.*?</tool_calls>\n*', '', content, flags=re.DOTALL).strip()
+            # 清理 content 中的工具调用标记（非贪心匹配）
+            clean_content = re.sub(r'<tool_calls>.*?</tool_calls>', '', content).strip()
             ai_message.content = clean_content if clean_content else ""
 
         ai_message.additional_kwargs = {"type": AIMessageType.REASONING.value}

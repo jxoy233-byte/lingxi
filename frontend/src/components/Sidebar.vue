@@ -1,5 +1,5 @@
 <template>
-  <aside :class="['sidebar', { 'collapsed': collapsed }]">
+  <aside :class="['sidebar', { 'collapsed': collapsed, 'mobile-open': mobileOpen }]">
     <div class="sidebar-header">
       <button @click="$emit('toggle')" class="toggle-btn">
         <span v-if="!collapsed">☰</span>
@@ -38,6 +38,10 @@ export default {
   },
   props: {
     collapsed: {
+      type: Boolean,
+      default: false
+    },
+    mobileOpen: {
       type: Boolean,
       default: false
     },
@@ -141,5 +145,27 @@ export default {
   color: var(--text-secondary);
   padding: 20px;
   font-size: 14px;
+}
+
+@media (max-width: 600px) {
+  .sidebar {
+    position: fixed;
+    left: -260px;
+    top: 0;
+    height: 100vh;
+    z-index: 100;
+    width: 260px;
+    transition: left 0.3s ease;
+    box-shadow: 2px 0 8px rgba(0, 0, 0, 0.15);
+  }
+  .sidebar.mobile-open {
+    left: 0;
+  }
+  .sidebar.collapsed {
+    width: 260px;
+  }
+  .sidebar-header {
+    padding: 16px 12px;
+  }
 }
 </style>

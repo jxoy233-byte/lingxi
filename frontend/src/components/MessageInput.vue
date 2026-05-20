@@ -652,6 +652,13 @@ export default {
   overflow: hidden;
 }
 
+@media (max-width: 600px) {
+  .file-list-container {
+    max-width: 100%;
+    margin-bottom: 8px;
+  }
+}
+
 .file-list-scroll {
   display: flex;
   gap: 8px;
@@ -815,6 +822,17 @@ export default {
   display: flex;
   gap: 12px;
   align-items: flex-end;
+}
+
+@media (max-width: 600px) {
+  .input-wrapper {
+    max-width: 100%;
+    padding: 0;
+    gap: 8px;
+  }
+  .input-area {
+    padding: 12px;
+  }
 }
 
 .upload-button {

@@ -6,6 +6,7 @@
         :conversations="conversations"
         :active-session-id="currentSessionId"
         :display-count="displayCount"
+        :mobile-open="sidebarMobileOpen"
         @toggle="toggleSidebar"
         @new-chat="createNewChat"
         @select-conversation="loadConversation"
@@ -15,12 +16,20 @@
         @refresh-conversation="refreshConversation"
       />
 
+      <!-- 移动端侧边栏遮罩 -->
+      <div
+        v-if="sidebarMobileOpen"
+        class="sidebar-overlay"
+        @click="closeMobileSidebar"
+      />
+
       <main class="chat-area">
         <ChatHeader
           :is-dark-theme="isDarkTheme"
           :has-session="!!currentSessionId"
           @toggle-theme="toggleTheme"
           @toggle-checkpoints="toggleCheckpoints"
+          @toggle-sidebar="toggleMobileSidebar"
         />
 
         <MessageList
@@ -182,7 +191,9 @@ export default {
       isInterrupted: false,  // 当前会话是否处于中断状态
       isInterruptedSessionId: null,  // 最近一次中断的会话ID
       hasReceivedInit: false,  // 流式响应是否已收到 init 消息
-      _pendingInterruptSessionId: null  // 临时存储流式响应中的 session_id
+      _pendingInterruptSessionId: null,  // 临时存储流式响应中的 session_id
+      isMobile: false,
+      sidebarMobileOpen: false
     }
   },
   mounted() {
@@ -190,6 +201,10 @@ export default {
     if (savedTheme) {
       this.isDarkTheme = savedTheme === 'dark'
     }
+
+    // 检测移动端
+    this.isMobile = window.innerWidth <= 600
+    window.addEventListener('resize', this.handleResize)
 
     this.loadConversations()
 
@@ -221,6 +236,18 @@ export default {
     },
     toggleSidebar() {
       this.sidebarCollapsed = !this.sidebarCollapsed
+    },
+    handleResize() {
+      this.isMobile = window.innerWidth <= 600
+      if (!this.isMobile) {
+        this.sidebarMobileOpen = false
+      }
+    },
+    toggleMobileSidebar() {
+      this.sidebarMobileOpen = !this.sidebarMobileOpen
+    },
+    closeMobileSidebar() {
+      this.sidebarMobileOpen = false
     },
     toggleCheckpoints() {
       this.showCheckpoints = !this.showCheckpoints
@@ -861,6 +888,11 @@ export default {
       // 防止加载无效的 sessionId
       if (!sessionId || sessionId.trim() === '') {
         return
+      }
+
+      // 移动端选择会话后关闭侧边栏
+      if (this.isMobile) {
+        this.closeMobileSidebar()
       }
 
       // 防止重复加载同一个会话
@@ -1641,6 +1673,21 @@ export default {
   --code-lang-bg: rgba(0, 0, 0, 0.3);
   --code-lang-border: rgba(255, 255, 255, 0.08);
   --code-lang-color: #9ca3af;
+}
+
+/* 移动端侧边栏遮罩 */
+.sidebar-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 99;
+}
+
+@media (max-width: 600px) {
+  .sidebar-overlay {
+    display: block;
+  }
 }
 
 * {

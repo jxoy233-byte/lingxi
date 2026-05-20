@@ -633,7 +633,7 @@ class ChatService:
                     role = MessageRole.AI
                     tool_resp = Any
                     for content in msg.content:
-                        if content.get("type") == "text":
+                        if isinstance (content, dict) and content.get("type") == "text":
                             tool_resp = content.get("text",{})
                         elif isinstance(content, str):
                             tool_resp = content

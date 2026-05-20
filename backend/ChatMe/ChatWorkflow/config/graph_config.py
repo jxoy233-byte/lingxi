@@ -266,7 +266,7 @@ Use when: User asks to stop, sensitive/dangerous operations, cannot proceed with
 Parameters: message (required, string) <- interrupted reason
 
 ### execute_command — Environment & File Operations
-Use when: Exploring skills (ls skills/), reading files (cat skills/skills.md), system tools (ps, df, ⚠️curl(Unless there is no useful skills, you mustn't use 'curl')) 
+Use when: Exploring skills (ls skills/), reading files (cat skills/skills.md), system tools (ps, df, ⚠️curl(KEY RULE: Unless there is no useful skills, you mustn't use 'curl')) 
 Parameters: command (required, string)
 
 ### execute_code — Code Execution & Skill Usage
@@ -358,7 +358,7 @@ Direct output (no tools needed): Plain text only.
 
 Do NOT output any thinking/reasoning content in your response.
 
-When it is time to terminate, go to final_node with no summary to answer the user's task."""
+When it is time to terminate, go to final_node with no summary and specific answer"""
 
     return llm_config, prompt
 

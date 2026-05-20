@@ -136,6 +136,24 @@
       @confirm="confirmRestore"
       @cancel="cancelRestore"
     />
+
+    <!-- 续接输入弹窗 -->
+    <div v-if="showResumeInput" class="resume-input-overlay" @click="cancelResume">
+      <div class="resume-input-dialog" @click.stop>
+        <div class="resume-input-title">继续对话</div>
+        <div class="resume-input-desc">添加续接消息，或留空直接继续</div>
+        <textarea
+          v-model="resumeInputText"
+          class="resume-input-textarea"
+          placeholder="输入续接内容（可选）..."
+          rows="3"
+        ></textarea>
+        <div class="resume-input-buttons">
+          <button class="resume-input-cancel" @click="cancelResume">取消</button>
+          <button class="resume-input-confirm" @click="confirmResume">继续</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -193,7 +211,10 @@ export default {
       hasReceivedInit: false,  // 流式响应是否已收到 init 消息
       _pendingInterruptSessionId: null,  // 临时存储流式响应中的 session_id
       isMobile: false,
-      sidebarMobileOpen: false
+      sidebarMobileOpen: false,
+      interruptReason: '',  // 中断原因
+      showResumeInput: false,  // 显示续接输入框
+      resumeInputText: ''  // 续接输入文本
     }
   },
   mounted() {
@@ -272,12 +293,25 @@ export default {
         console.error('中断请求异常:', error)
       }
     },
-    async handleResume() {
+    async handleResume(message = null) {
       if (!this.currentSessionId || this.isLoading) return
+
+      // 如果没有传入消息，显示续接输入弹窗
+      if (message === null) {
+        this.showResumeInput = true
+        this.resumeInputText = ''
+        return
+      }
+
+      // 有消息则直接执行续接
       this.isInterrupted = false
       this.isLoading = true
+
+      // 构建续接消息
+      let resumeMessage = message && message.trim() ? message : 'CONTINUE'
+
       try {
-        const response = await fetch(`/chat/${this.currentSessionId}/invoke_interrupted/CONTINUE`, {
+        const response = await fetch(`/chat/${this.currentSessionId}/invoke_interrupted/${encodeURIComponent(resumeMessage)}`, {
           method: 'POST'
         })
         if (!response.ok) {
@@ -375,9 +409,11 @@ export default {
                 this.messages[aiMessageIndex] = { ...this.messages[aiMessageIndex], content: `续接失败：${data.error}`, streaming: false }
               } else if (data.type === 'interrupt') {
                 this.stopResponseTimer()
-                this.messages[aiMessageIndex] = { ...this.messages[aiMessageIndex], streaming: false }
+                const reason = data.reason || '用户主动中断'
+                this.messages[aiMessageIndex] = { ...this.messages[aiMessageIndex], streaming: false, interruptReason: reason }
                 this.isInterrupted = true
                 this.isInterruptedSessionId = data.session_id || this.currentSessionId || this._pendingInterruptSessionId
+                this.interruptReason = reason
               }
             } catch (e) {
               console.error('解析 SSE 消息失败:', e, '原始内容:', line)
@@ -431,9 +467,11 @@ export default {
               }
             } else if (data.type === 'interrupt') {
               this.stopResponseTimer()
-              this.messages[aiMessageIndex] = { ...this.messages[aiMessageIndex], streaming: false }
+              const reason = data.reason || '用户主动中断'
+              this.messages[aiMessageIndex] = { ...this.messages[aiMessageIndex], streaming: false, interruptReason: reason }
               this.isInterrupted = true
               this.isInterruptedSessionId = data.session_id || this.currentSessionId || this._pendingInterruptSessionId
+              this.interruptReason = reason
             }
           } catch (e) {
             console.error('解析缓冲区剩余数据失败:', e)
@@ -445,6 +483,17 @@ export default {
         this.isLoading = false
         this.stopResponseTimer()
       }
+    },
+    cancelResume() {
+      this.showResumeInput = false
+      this.resumeInputText = ''
+    },
+    confirmResume() {
+      const message = this.resumeInputText.trim()
+      this.showResumeInput = false
+      this.resumeInputText = ''
+      // 直接调用 handleResume 并传入消息
+      this.handleResume(message)
     },
     openWebPreview(url) {
       this.webPreviewUrl = url
@@ -777,14 +826,13 @@ export default {
                 // 4. 最后刷新会话
                 await this.refreshCurrentConversation()
               } else if (data.type === 'interrupt') {
-                this.stopResponseTimer()
-                this.messages[aiMessageIndex] = {
-                  ...this.messages[aiMessageIndex],
-                  streaming: false
-                }
-                this.isInterrupted = true
-                this.isInterruptedSessionId = data.session_id || requestSessionId || this._pendingInterruptSessionId
-              }
+              this.stopResponseTimer()
+              const reason = data.reason || '用户主动中断'
+              this.messages[aiMessageIndex] = { ...this.messages[aiMessageIndex], streaming: false, interruptReason: reason }
+              this.isInterrupted = true
+              this.isInterruptedSessionId = data.session_id || requestSessionId || this._pendingInterruptSessionId
+              this.interruptReason = reason
+            }
             } catch (e) {
               console.error('解析消息失败:', e)
             }
@@ -922,9 +970,16 @@ export default {
           if (interruptedReason) {
             this.isInterrupted = true
             this.isInterruptedSessionId = sessionId
+            this.interruptReason = interruptedReason
+            // 将中断原因写入最后一条 AI 消息
+            const lastAiMsg = this.messages.filter(m => m.role === 'ai').pop()
+            if (lastAiMsg) {
+              lastAiMsg.interruptReason = interruptedReason
+            }
           } else {
             this.isInterrupted = false
             this.isInterruptedSessionId = null
+            this.interruptReason = ''
           }
         }
       } catch (error) {
@@ -941,6 +996,19 @@ export default {
           const conversation = await response.json()
           this.$refs.messageList?.suppressNextScroll()
           this.messages = this.processConversationMessages(conversation.messages)
+          // 同步中断状态
+          const reason = conversation.interrupted_info?.reason
+          if (reason) {
+            this.isInterrupted = true
+            this.isInterruptedSessionId = this.currentSessionId
+            this.interruptReason = reason
+            const lastAiMsg = this.messages.filter(m => m.role === 'ai').pop()
+            if (lastAiMsg) lastAiMsg.interruptReason = reason
+          } else {
+            this.isInterrupted = false
+            this.isInterruptedSessionId = null
+            this.interruptReason = ''
+          }
         }
       } catch (error) {
         console.error('刷新消息失败:', error)
@@ -956,6 +1024,19 @@ export default {
             // 如果是当前会话，静默刷新
             this.$refs.messageList?.suppressNextScroll()
             this.messages = this.processConversationMessages(conversation.messages)
+            // 同步中断状态
+            const reason = conversation.interrupted_info?.reason
+            if (reason) {
+              this.isInterrupted = true
+              this.isInterruptedSessionId = this.currentSessionId
+              this.interruptReason = reason
+              const lastAiMsg = this.messages.filter(m => m.role === 'ai').pop()
+              if (lastAiMsg) lastAiMsg.interruptReason = reason
+            } else {
+              this.isInterrupted = false
+              this.isInterruptedSessionId = null
+              this.interruptReason = ''
+            }
           }
           // 更新侧边栏的标题和时间
           const conv = this.conversations.find(c => c.session_id === sessionId)
@@ -1258,12 +1339,15 @@ export default {
                 }
               } else if (data.type === 'interrupt') {
                 this.stopResponseTimer()
+                const reason = data.reason || '用户主动中断'
                 this.messages[aiMessageIndex] = {
                   ...this.messages[aiMessageIndex],
-                  streaming: false
+                  streaming: false,
+                  interruptReason: reason
                 }
                 this.isInterrupted = true
                 this.isInterruptedSessionId = data.session_id || this.currentSessionId || this._pendingInterruptSessionId
+                this.interruptReason = reason
               }
             } catch (e) {
               console.error('解析 SSE 消息失败:', e, '原始内容:', line)
@@ -1766,6 +1850,99 @@ body {
 }
 
 .resume-btn:hover {
+  background: var(--button-hover);
+}
+
+/* 续接输入弹窗 */
+.resume-input-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.resume-input-dialog {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 16px;
+  padding: 24px;
+  width: 100%;
+  max-width: 400px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+}
+
+.resume-input-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+
+.resume-input-desc {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin-bottom: 16px;
+}
+
+.resume-input-textarea {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 14px;
+  resize: none;
+  font-family: inherit;
+  margin-bottom: 16px;
+}
+
+.resume-input-textarea:focus {
+  outline: none;
+  border-color: var(--button-bg);
+}
+
+.resume-input-textarea::placeholder {
+  color: var(--text-secondary);
+}
+
+.resume-input-buttons {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+}
+
+.resume-input-cancel {
+  padding: 8px 16px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.resume-input-cancel:hover {
+  background: var(--bg-hover);
+}
+
+.resume-input-confirm {
+  padding: 8px 16px;
+  background: var(--button-bg);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.resume-input-confirm:hover {
   background: var(--button-hover);
 }
 

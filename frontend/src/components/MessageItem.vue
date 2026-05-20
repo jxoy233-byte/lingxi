@@ -155,6 +155,9 @@
             <div class="thinking-header-left">
               <span class="thinking-status-dot" :class="{ 'dot-active': !message.thinkingDone, 'dot-interrupted': isInterrupted && isLatestAiMessage && (isInterruptedSessionId === currentSessionId || isInterruptedSessionId === pendingInterruptSessionId) }"></span>
               <span class="thinking-label">{{ isInterrupted && isLatestAiMessage && (isInterruptedSessionId === currentSessionId || isInterruptedSessionId === pendingInterruptSessionId) ? '思考已中断' : (message.thinkingDone ? '思考过程' : '正在思考...') }}</span>
+              <span v-if="isInterrupted && isLatestAiMessage && (isInterruptedSessionId === currentSessionId || isInterruptedSessionId === pendingInterruptSessionId)" class="interrupt-reason-hint" @click.stop="toggleInterruptReason">
+                {{ interruptReasonExpanded ? '隐藏原因' : '查看原因' }}
+              </span>
               <span v-if="message.toolCalls && message.toolCalls.length" class="tool-badge">
                 {{ message.toolCalls.length }} 个工具调用
               </span>
@@ -164,6 +167,10 @@
             </svg>
           </div>
           <div class="thinking-body" v-show="!thinkingCollapsed">
+            <!-- 中断原因显示 -->
+            <div v-if="isInterrupted && isLatestAiMessage && (isInterruptedSessionId === currentSessionId || isInterruptedSessionId === pendingInterruptSessionId) && interruptReasonExpanded" class="interrupt-reason-inline">
+              <span class="interrupt-reason-text">{{ displayInterruptReason }}</span>
+            </div>
             <div v-if="message.toolCalls && message.toolCalls.length" class="tool-calls">
               <div v-for="(tool, i) in message.toolCalls" :key="i" class="tool-call-item" :class="{ 'tool-done': tool.result !== null }">
                 <div class="tool-call-header" @click="toggleTool(i)" :style="tool.result !== null ? 'cursor:pointer' : ''">
@@ -222,7 +229,7 @@
                 <polyline points="20 6 9 17 4 12"/>
               </svg>
             </button>
-            <button v-if="isInterrupted && isLatestAiMessage && (isInterruptedSessionId === currentSessionId || isInterruptedSessionId === pendingInterruptSessionId)" class="action-button resume-action" @click="handleResume" title="续接对话">
+            <button v-if="isInterrupted && isLatestAiMessage && (isInterruptedSessionId === currentSessionId || isInterruptedSessionId === pendingInterruptSessionId)" class="action-button resume-action" @click="$emit('resume')" title="续接对话">
               <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <polygon points="5 3 19 12 5 21 5 3"/>
               </svg>
@@ -376,7 +383,8 @@ export default {
       thinkingCollapsed: this.message.thinkingDone === true,
       expandedTools: {},
       activeFileIndex: 0,
-      isUserMessageCollapsed: false
+      isUserMessageCollapsed: false,
+      interruptReasonExpanded: false
     }
   },
   computed: {
@@ -417,6 +425,18 @@ export default {
       return (this.message.reasoning && this.message.reasoning.length > 0) ||
              (this.message.toolCalls && this.message.toolCalls.length > 0) ||
              (this.message.additional_kwargs?.type === 'REASONING')
+    },
+    displayInterruptReason() {
+      const reason = this.message.interruptReason
+      if (!reason) return '用户主动中断'
+      // 映射技术 reason 字符串为友好中文
+      const reasonMap = {
+        'user_initiated_interrupt': '用户主动中断',
+        'user_initiated': '用户主动中断',
+        'max_tool_calls_exceeded': '工具调用次数超限',
+        'timeout': '响应超时',
+      }
+      return reasonMap[reason] || reason
     },
     parsedFiles() {
       // 文件数据可能在 message.files 或 message.additional_kwargs.files 中
@@ -782,6 +802,9 @@ export default {
     },
     toggleThinking() {
       this.thinkingCollapsed = !this.thinkingCollapsed
+    },
+    toggleInterruptReason() {
+      this.interruptReasonExpanded = !this.interruptReasonExpanded
     },
     toggleTool(index) {
       this.expandedTools = {
@@ -1745,8 +1768,10 @@ export default {
   font-size: 11px;
   color: var(--button-bg);
   background: color-mix(in srgb, var(--button-bg) 12%, transparent);
-  padding: 1px 6px;
+  padding: 1px 8px;
   border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--button-bg) 20%, transparent);
+  font-weight: 500;
 }
 
 .thinking-chevron {
@@ -1878,5 +1903,39 @@ export default {
   overflow-y: auto;
   opacity: 0.8;
   padding: 2px 0;
+}
+
+/* 中断原因提示 */
+.interrupt-reason-hint {
+  font-size: 11px;
+  color: #ef4444;
+  cursor: pointer;
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: rgba(239, 68, 68, 0.1);
+  transition: background 0.15s;
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  font-weight: 500;
+}
+
+.interrupt-reason-hint:hover {
+  background: rgba(239, 68, 68, 0.2);
+}
+
+/* 中断原因内联显示 */
+.interrupt-reason-inline {
+  padding: 6px 10px;
+  background: var(--bg-primary);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 6px;
+  margin-bottom: 8px;
+}
+
+.interrupt-reason-text {
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 </style>

@@ -168,7 +168,7 @@ async def cleanup_lifespan(app: FastAPI):
     logger = get_logger("CleanupScheduler")
 
     _start_scheduler()
-    logger.info("清理调度器已启动（每天 22 点 30 点执行）")
+    logger.info("清理调度器已启动（每天 23 点 30 点执行）")
 
     yield
 

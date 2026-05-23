@@ -14,6 +14,7 @@
 
     app = FastAPI(lifespan=combined_lifespan)
 """
+import asyncio
 import os
 import time
 from contextlib import asynccontextmanager
@@ -69,7 +70,7 @@ def clean_cache(days: int = 30) -> tuple[int, float]:
     for file in cache_dir.iterdir():
         if not file.is_file():
             continue
-        if file.stat().st_mtime < cutoff:
+        if file.stat().st_mtime <= cutoff:
             size = file.stat().st_size
             file.unlink()
             removed += 1
@@ -78,7 +79,7 @@ def clean_cache(days: int = 30) -> tuple[int, float]:
     return removed, freed_size
 
 
-def clean_logs(days: int = 3) -> tuple[int, float]:
+def clean_logs(days: int = 2) -> tuple[int, float]:
     """清理日志目录中过期的日志文件"""
     log_dir = get_log_dir()
     if not log_dir.exists():
@@ -96,7 +97,7 @@ def clean_logs(days: int = 3) -> tuple[int, float]:
             file_date = datetime.strptime(file.stem, "%Y-%m-%d").date()
         except ValueError:
             continue
-        if file_date < cutoff:
+        if file_date <= cutoff:
             size = file.stat().st_size
             file.unlink()
             removed += 1
@@ -137,10 +138,10 @@ def _start_scheduler():
     if _scheduler is not None:
         return _scheduler
 
-    _scheduler = AsyncIOScheduler()
+    _scheduler = AsyncIOScheduler(event_loop=asyncio.get_running_loop())
     _scheduler.add_job(
         _cleanup_task,
-        trigger=CronTrigger(hour=0, minute=0),
+        trigger=CronTrigger(hour=23, minute=30, timezone='Asia/Shanghai'),
         id="daily_cleanup",
         name="每日缓存和日志清理",
         replace_existing=True,
@@ -167,7 +168,7 @@ async def cleanup_lifespan(app: FastAPI):
     logger = get_logger("CleanupScheduler")
 
     _start_scheduler()
-    logger.info("清理调度器已启动（每天凌晨 3 点执行）")
+    logger.info("清理调度器已启动（每天 22 点 30 点执行）")
 
     yield
 

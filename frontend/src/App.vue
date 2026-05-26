@@ -1210,6 +1210,13 @@ export default {
       this.responseStartTime = Date.now()
       this.currentResponseTime = 0
 
+      // 如果当前没有 sessionId，先创建并跳转到新会话页面，再发送请求
+      if (!this.currentSessionId && !this.$route.params.sessionId) {
+        const newSid = crypto.randomUUID().replace(/-/g, '')
+        this.currentSessionId = newSid
+        await this.$router.push(`/${newSid}`)
+      }
+
       // 保存发起请求时的会话 ID，用于跟踪请求属于哪个会话
       // 优先使用 currentSessionId，回退到 URL path
       const requestSessionId = this.currentSessionId || this.$route.params.sessionId || ''

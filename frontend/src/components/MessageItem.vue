@@ -1331,9 +1331,9 @@ export default {
 }
 
 .message-text :deep(pre.copied)::after {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='20 6 9 17 4 12'/%3E%3C/svg%3E");
-  background-color: var(--button-bg);
-  border-color: var(--button-bg);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='20 6 9 17 4 12'/%3E%3C/svg%3E");
+  background-color: var(--code-lang-bg);
+  border-color: var(--code-lang-border);
 }
 
 .message-text :deep(ul),
@@ -1478,8 +1478,8 @@ export default {
 
 .action-button.copy-success,
 .action-button.copy-success:hover {
-  background: var(--button-bg);
-  color: white;
+  background: transparent;
+  color: var(--text-secondary);
 }
 
 .interrupt-action {
@@ -1539,8 +1539,8 @@ export default {
 
 .user-copy-button.copy-success,
 .user-copy-button.copy-success:hover {
-  background: var(--button-bg);
-  color: white;
+  background: transparent;
+  color: var(--text-secondary);
 }
 
 /* 用户文件消息显示区域 */

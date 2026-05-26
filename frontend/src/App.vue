@@ -52,7 +52,9 @@
         <MessageInput
           ref="messageInput"
           :is-loading="isLoading"
+          :session-id="currentSessionId"
           @send="sendMessage"
+          @files-selected-need-session="handleFilesSelectedNeedSession"
         />
       </main>
 
@@ -269,6 +271,37 @@ export default {
     },
     closeMobileSidebar() {
       this.sidebarMobileOpen = false
+    },
+    async handleFilesSelectedNeedSession(files) {
+      // MessageInput 已经存储了文件内容和 sessionId 到 sessionStorage
+      // 这里只需要导航到对应的 sessionId，并等待导航完成
+      const pendingSid = localStorage.getItem('pendingSessionId')
+      const targetSid = pendingSid || crypto.randomUUID().replace(/-/g, '')
+
+      console.log('[handleFilesSelectedNeedSession] files count:', files.length, 'pendingSid:', pendingSid, 'targetSid:', targetSid)
+
+      if (!pendingSid) {
+        localStorage.setItem('pendingSessionId', targetSid)
+        console.log('[handleFilesSelectedNeedSession] Stored new pendingSid:', targetSid)
+      }
+
+      // 使用 await 确保路由导航完成
+      try {
+        await this.$router.push(`/${targetSid}`)
+        console.log('[handleFilesSelectedNeedSession] Navigation complete to /', targetSid)
+        // 设置 currentSessionId，这样后续 sendMessage 的 sessionChanged 检查才能通过
+        this.currentSessionId = targetSid
+        // 等待足够长时间，确保：
+        // 1. Vue 组件完全更新
+        // 2. MessageInput 的 sessionId prop 更新
+        // 3. watch 触发 checkAndUploadPendingFiles
+        await new Promise(resolve => setTimeout(resolve, 1000))
+        console.log('[handleFilesSelectedNeedSession] Done waiting, triggering file upload')
+        // 直接调用 MessageInput 的 checkAndUploadPendingFiles 方法
+        this.$refs.messageInput?.checkAndUploadPendingFiles()
+      } catch (e) {
+        console.error('[handleFilesSelectedNeedSession] Navigation failed:', e)
+      }
     },
     toggleCheckpoints() {
       this.showCheckpoints = !this.showCheckpoints
@@ -536,8 +569,8 @@ export default {
         return
       }
 
-      // Office 文档（docx, pptx, xlsx）：提示下载
-      if (['.docx', '.pptx', '.xlsx'].includes(suffix)) {
+      // Office 文档（docx, doc, pptx, ppt, xlsx, xls）：提示下载
+      if (['.docx', '.doc', '.pptx', '.ppt', '.xlsx', '.xls'].includes(suffix)) {
         alert('Office 文档暂不支持在线预览，请下载后查看。\n文件名: ' + file.name)
         return
       }
@@ -981,6 +1014,13 @@ export default {
             this.isInterruptedSessionId = null
             this.interruptReason = ''
           }
+        } else if (response.status === 404) {
+          // 会话不存在（可能是新会话通过 URL 进入），当作新会话处理
+          this.currentSessionId = sessionId
+          this.messages = []
+          if (this.$route.params.sessionId !== sessionId) {
+            this.$router.push(`/${sessionId}`)
+          }
         }
       } catch (error) {
         console.error('加载对话失败:', error)
@@ -1171,12 +1211,13 @@ export default {
       this.currentResponseTime = 0
 
       // 保存发起请求时的会话 ID，用于跟踪请求属于哪个会话
-      const requestSessionId = this.currentSessionId
+      // 优先使用 currentSessionId，回退到 URL path
+      const requestSessionId = this.currentSessionId || this.$route.params.sessionId || ''
 
       try {
         const requestBody = {
           message: message,
-          session_id: requestSessionId || '',
+          session_id: requestSessionId,
           processed_outputs: processedOutputs
         }
 
@@ -1234,9 +1275,11 @@ export default {
 
             try {
               const data = JSON.parse(line)
+              console.log('[SSE Received] type:', data.type, 'currentSessionId:', this.currentSessionId, 'requestSessionId:', requestSessionId)
 
               // 检查用户是否已切换会话
               const sessionChanged = this.currentSessionId !== requestSessionId
+              console.log('[SSE] sessionChanged:', sessionChanged)
 
               if (sessionChanged) {
                 // 会话已切换，继续消费流但不更新本地消息
@@ -1321,6 +1364,10 @@ export default {
                   if (this.currentSessionId) {
                     await this.updateTitleAndRefresh(this.currentSessionId, message)
                   }
+                  // 清理本地存储的待上传文件信息
+                  localStorage.removeItem('pendingSessionId')
+                  sessionStorage.removeItem('pendingUploadFiles')
+                  localStorage.removeItem('currentSessionId')
                 } else if (!sessionChanged && this.currentSessionId) {
                   // 会话未切换，正常更新
                   await this.updateTitleAndRefresh(this.currentSessionId, message)

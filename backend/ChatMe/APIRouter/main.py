@@ -195,14 +195,17 @@ async def backtrack_checkpoint(
     return {"code": 200, "msg": "回溯成功", "session_id": session_id, "backtrack_id": backtrack_id}
 
 
-@ChatMe_app.post("/upload_file", summary="上传文件")
+@ChatMe_app.post("/{session_id}/upload_file", summary="上传文件")
 async def upload_file(
+    session_id: str = Path(..., description="会话ID"),
     files: Optional[list[UploadFile]] = File(default=None, max_length=FILE_MAX_LENGTH),
-    processed_outputs: str = Form(default="[]", description="已处理好的文件信息(JSON字符串)")):
+    processed_outputs: str = Form(default="[]", description="已处理好的文件信息(JSON字符串)"),
+):
     """
         对文件进行预处理，提前处理要发给ai的文件信息
 
         Args:
+            session_id: 会话id
             files: Upload文件
             processed_outputs: 已处理好的文件输出
         Returns:
@@ -232,7 +235,7 @@ async def upload_file(
         ) for f in files
     ]
 
-    outputs = await chat_service.process_files(upload_files_with_id)
+    outputs = await chat_service.process_files(upload_files_with_id, session_id)
     processed_outputs_list.extend(outputs)
 
     return {

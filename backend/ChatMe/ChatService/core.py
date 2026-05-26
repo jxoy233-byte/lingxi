@@ -95,12 +95,13 @@ class ChatService:
             return []
 
     @staticmethod
-    async def process_files(files: List[UploadFileWithId]) -> List[OutputFormat]:
+    async def process_files(files: List[UploadFileWithId], session_id: str) -> List[OutputFormat]:
         """
         处理上传的文件，返回处理后的文件内容和额外参数
 
         Args:
             files: 上传的文件列表
+            session_id: 上传的会话id
 
         Returns:
             处理后的文件
@@ -108,7 +109,7 @@ class ChatService:
         if not files:
             return []
 
-        fl = FilesLoaders(files)
+        fl = FilesLoaders(files,session_id=session_id)
         try:
             outputs = await fl.loading_files()
 
@@ -144,12 +145,15 @@ class ChatService:
             ".jpg": "image/jpeg",
             ".jpeg": "image/jpeg",
             ".gif": "image/gif",
-            '.pptx': 'PPTX 演示文稿',
-            '.docx': 'DOCX 文档',
-            '.pdf': 'PDF 文档',
-            '.xlsx': 'Excel 表格',
+            ".pdf": "application/pdf",
+            ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ".doc": "application/msword",
+            ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            ".ppt": "application/vnd.ms-powerpoint",
+            ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ".xls": "application/vnd.ms-excel",
         }
-        return mime_type_map.get(suffix, "image/jpeg")
+        return mime_type_map.get(suffix, "application/octet-stream")
 
     async def build_files_content(
             self,
@@ -388,17 +392,12 @@ class ChatService:
         """
         session_ids = await self.aget_conversation_ids
 
-        # 会话ID处理：无则新建，有则校验是否存在
+        # 会话ID处理：无则新建，有则直接使用（不论是否已存在于Redis，graph.invoke会自动处理）
         if session_id == "" or session_id is None:
             session_id = str(uuid.uuid4().hex)
             self.logger.info(f"创建新会话(session_id={session_id})")
-        elif session_id not in session_ids:
-            self.logger.warning(f"会话不存在(session_id={session_id})")
-            yield json.dumps(
-                {"type": "error", "error": f"会话ID {session_id} 不存在，请检查后重试"},
-                ensure_ascii=False
-            ) + "\n\n"
-            return
+        else:
+            self.logger.debug(f"使用已有会话或创建新会话(session_id={session_id})")
 
         input_config = {
             "configurable" :{

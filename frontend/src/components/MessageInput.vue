@@ -144,14 +144,18 @@
 <script>
 export default {
   name: 'MessageInput',
-  expose: ['clearInput'],
+  expose: ['clearInput', 'getSessionId', 'setSessionId', 'checkAndUploadPendingFiles'],
   props: {
     isLoading: {
       type: Boolean,
       default: false
+    },
+    sessionId: {
+      type: String,
+      default: null
     }
   },
-  emits: ['send'],
+  emits: ['send', 'files-selected-need-session'],
   data() {
     return {
       inputText: '',
@@ -163,7 +167,9 @@ export default {
       processedOutputs: [],
       // 上传队列控制
       uploadQueue: [],      // 待处理的文件队列
-      isUploadQueueProcessing: false  // 队列是否正在处理中
+      isUploadQueueProcessing: false,  // 队列是否正在处理中
+      // 会话 ID（优先使用 prop，其次使用 localStorage）
+      currentSessionId: null
     }
   },
   computed: {
@@ -180,7 +186,7 @@ export default {
     },
     allowedDocumentTypes() {
       const types = this.fileConfig?.documentTypes?.suffixes
-      return types && types.length > 0 ? types : ['.pdf', '.docx', '.pptx', '.xlsx']
+      return types && types.length > 0 ? types : ['.pdf', '.docx', '.doc', '.pptx', '.ppt', '.xlsx', '.xls']
     },
     acceptedTypes() {
       return [...this.allowedImageTypes, ...this.allowedTextTypes, ...this.allowedDocumentTypes].join(',')
@@ -191,6 +197,20 @@ export default {
     // 检查是否有文件正在上传
     hasUploadingFiles() {
       return this.selectedFiles.some(f => f.uploading) || this.uploadQueue.length > 0 || this.isUploadQueueProcessing
+    }
+  },
+  watch: {
+    sessionId: {
+      handler(newVal) {
+        this.currentSessionId = newVal
+        // 如果有 sessionId 且有待上传文件，自动触发上传
+        if (newVal) {
+          this.$nextTick(() => {
+            this.checkAndUploadPendingFiles()
+          })
+        }
+      },
+      immediate: true
     }
   },
   mounted() {
@@ -214,6 +234,80 @@ export default {
     })
   },
   methods: {
+    getSessionId() {
+      return this.currentSessionId
+    },
+    setSessionId(sessionId) {
+      this.currentSessionId = sessionId
+    },
+    checkAndUploadPendingFiles() {
+      // 检查是否有待上传的文件（从 sessionStorage 恢复）
+      this.$nextTick(() => {
+        const pendingFiles = sessionStorage.getItem('pendingUploadFiles')
+        const pendingSid = localStorage.getItem('pendingSessionId')
+
+        console.log('[checkAndUploadPendingFiles] checking - pendingFiles:', !!pendingFiles, 'pendingSid:', pendingSid)
+
+        // 如果有待上传的文件和 sessionId，则触发上传
+        if (pendingFiles && pendingSid) {
+          console.log('[checkAndUploadPendingFiles] Found pending files, processing...')
+          try {
+            const files = JSON.parse(pendingFiles)
+            if (files && files.length > 0) {
+              // 重建 File 对象
+              const fileObjs = []
+              for (const fileData of files) {
+                if (fileData.needsReselect) {
+                  // 文件太大无法存储，标记需要重新选择
+                  fileObjs.push({
+                    name: fileData.name,
+                    size: fileData.size,
+                    type: fileData.type,
+                    file: null,
+                    error: '文件较大，请在当前页面重新选择',
+                    preview: null,
+                    fileId: null,
+                    uploading: false
+                  })
+                } else if (fileData.buffer) {
+                  // 从 buffer 重建 File 对象
+                  const buffer = new Uint8Array(fileData.buffer).buffer
+                  const blob = new Blob([buffer], { type: fileData.type })
+                  const file = new File([blob], fileData.name, { type: fileData.type })
+                  const fileObj = {
+                    name: file.name,
+                    size: file.size,
+                    type: file.type,
+                    file: file,
+                    error: null,
+                    preview: URL.createObjectURL(file),
+                    fileId: null,
+                    uploading: false
+                  }
+                  fileObjs.push(fileObj)
+                }
+              }
+              console.log('[checkAndUploadPendingFiles] Reconstructed', fileObjs.length, 'files, adding to uploadQueue')
+              // 添加到队列并触发上传
+              this.uploadQueue.push(...fileObjs)
+              if (!this.isUploadQueueProcessing) {
+                this.processUploadQueue()
+              }
+              // 清理（不管成功失败，pending 文件只使用一次）
+              sessionStorage.removeItem('pendingUploadFiles')
+              localStorage.removeItem('pendingSessionId')
+            }
+          } catch (e) {
+            console.error('恢复待上传文件失败:', e)
+            // 清理避免残留
+            sessionStorage.removeItem('pendingUploadFiles')
+            localStorage.removeItem('pendingSessionId')
+          }
+        } else {
+          console.log('[checkAndUploadPendingFiles] No pending files or sid found')
+        }
+      })
+    },
     async fetchFileConfig() {
       if (this.loadingConfig) return
       this.loadingConfig = true
@@ -392,6 +486,76 @@ export default {
     async addFiles(newFiles) {
       if (!newFiles || newFiles.length === 0) return
 
+      // 先验证文件是否合法（复用现有的验证逻辑）
+      const validationResults = newFiles.map(file => {
+        const validation = this.validateFile(file)
+        return {
+          file,
+          valid: validation.valid,
+          error: validation.error
+        }
+      })
+
+      // 收集无效文件并显示错误
+      const invalidCount = validationResults.filter(r => !r.valid).length
+      if (invalidCount > 0) {
+        // 显示错误提示
+        console.warn('以下文件不符合要求:', validationResults.filter(r => !r.valid).map(f => `${f.file.name}: ${f.error}`))
+        // 如果所有文件都无效，直接返回
+        const validOnly = validationResults.filter(r => r.valid)
+        if (validOnly.length === 0) {
+          return
+        }
+      }
+
+      // 检查是否需要创建新会话
+      // 如果当前 URL 没有 sessionId（即在新会话页面），则创建新会话
+      const urlPath = window.location.pathname
+      const urlHasSessionId = urlPath && urlPath !== '/' && urlPath !== ''
+
+      console.log('[addFiles] urlPath:', urlPath, 'urlHasSessionId:', urlHasSessionId)
+
+      if (!urlHasSessionId) {
+        // 生成新的 session_id
+        const sessionId = crypto.randomUUID().replace(/-/g, '')
+        localStorage.setItem('currentSessionId', sessionId)
+        localStorage.setItem('pendingSessionId', sessionId)
+
+        // 尝试读取文件内容并存入 sessionStorage（用于页面跳转后恢复）
+        try {
+          const pendingFiles = []
+          for (const file of newFiles) {
+            // 只存储通过验证的文件
+            const validation = this.validateFile(file)
+            if (!validation.valid) continue
+
+            const buffer = await file.arrayBuffer()
+            pendingFiles.push({
+              name: file.name,
+              size: file.size,
+              type: file.type,
+              buffer: Array.from(new Uint8Array(buffer)) // 转为普通数组以便 JSON 序列化
+            })
+          }
+          sessionStorage.setItem('pendingUploadFiles', JSON.stringify(pendingFiles))
+        } catch (e) {
+          console.warn('存储文件内容失败（文件可能较大），将在新页面提示重新选择:', e)
+          // 只存储通过验证的文件（无效文件不需要重新选择）
+          const validOnly = newFiles.filter(file => this.validateFile(file).valid)
+          sessionStorage.setItem('pendingUploadFiles', JSON.stringify(validOnly.map(f => ({
+            name: f.name,
+            size: f.size,
+            type: f.type,
+            needsReselect: true
+          }))))
+        }
+
+        // 跳转到新会话页面
+        console.log('[addFiles] Created new session:', sessionId, 'navigating to /', sessionId)
+        this.$emit('files-selected-need-session', newFiles)
+        return
+      }
+
       const validatedFiles = newFiles.map(file => {
         const fileObj = {
           name: file.name,
@@ -467,14 +631,27 @@ export default {
       // 携带当前已处理的文件列表
       formData.append('processed_outputs', JSON.stringify(this.processedOutputs))
 
+      // 构建上传 URL（确保有 sessionId）
+      // 优先从 URL 直接获取 sessionId，这是最可靠的（路由已完成导航）
+      const pathParts = window.location.pathname.split('/')
+      const urlSessionId = pathParts.length > 2 ? pathParts[2] : pathParts[1]
+      // 尝试多种方式获取 sessionId：prop > URL > localStorage
+      const currentSid = this.currentSessionId || urlSessionId || localStorage.getItem('pendingSessionId') || localStorage.getItem('currentSessionId')
+      const uploadUrl = currentSid
+        ? `/chat/${currentSid}/upload_file`
+        : '/chat/upload_file'  // 兜底
+
+      console.log('[uploadFilesBatch] pathname:', window.location.pathname, 'pathParts:', pathParts, 'urlSessionId:', urlSessionId, 'currentSid:', currentSid, 'this.currentSessionId:', this.currentSessionId)
+
       console.log('上传文件批次:', {
         fileCount: fileObjs.length,
         fileNames: fileObjs.map(f => f.name),
-        processedOutputsLength: this.processedOutputs.length
+        processedOutputsLength: this.processedOutputs.length,
+        sessionId: currentSid
       })
 
       try {
-        const response = await fetch('/chat/upload_file', {
+        const response = await fetch(uploadUrl, {
           method: 'POST',
           body: formData
         })

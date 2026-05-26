@@ -22,6 +22,7 @@ from langchain_community.document_loaders import UnstructuredMarkdownLoader, Uns
 from starlette.datastructures import Headers
 
 from ChatMe.ChatService.FilesLoaders.config import FILE_ALLOWED_TYPES
+from ChatMe.ChatService.FilesLoaders.SofficeConverter import get_converter, LibreOfficeNotFoundError
 from ChatMe.LoggingManager.logging_config import get_logger
 from ChatMe.ChatMeConfig.core import get_oss_config
 
@@ -54,7 +55,7 @@ def _upload_local_image_to_oss(local_path: str, original_filename: str = None) -
         # 生成 OSS key：chatme/{年份月份}/{uuid}_{原文件名}
         date_prefix = datetime.now().strftime("%Y-%m")
         filename = original_filename or os.path.basename(local_path)
-        oss_key = f"chatme/{date_prefix}/{uuid.uuid4().hex[:8]}_{filename}"
+        oss_key = f"chatme/{date_prefix}/{uuid.uuid4().hex[:4]}_{filename}"
 
         # 上传到 OSS
         auth = oss2.Auth(access_key_id, access_key_secret)
@@ -98,7 +99,7 @@ class UploadFileWithId(UploadFile):
         headers: Headers | None = None,
     ) -> None:
         super().__init__(file=file, size=size, filename=filename, headers=headers)
-        self.file_id = str(f"file_{uuid.uuid4().hex[:8]}")
+        self.file_id = str(f"file_{uuid.uuid4().hex[:4]}")
 
     async def read(self, size: int = -1) -> bytes:
         """重写 read 方法，保持父类功能"""
@@ -151,10 +152,12 @@ class OutputFormat:
 
 class FilesLoaders:
 
-    def __init__(self, processing_files: Optional[list[UploadFileWithId]]):
+    def __init__(self, processing_files: Optional[list[UploadFileWithId]], session_id: str):
+        # todo 添加session_id字段
+        self.session_id = session_id
         self.logger = get_logger("FilesLoader")
         self.processing_files = processing_files
-        self.processing_dir = Path.cwd() / "cached"
+        self.processing_dir = Path.cwd() / "cached" / session_id
 
         os.makedirs(self.processing_dir, exist_ok=True)
 
@@ -418,13 +421,28 @@ class FilesLoaders:
                 suffix = await self._get_file_suffix(file.filename)
                 file_path = await self._create_temp_file_path(file, suffix)
 
+                # 转换旧版 Office 格式 (.doc/.ppt/.xls → .docx/.pptx/.xlsx)
+                soffice_converter = get_converter()
+                if soffice_converter.can_convert(suffix):
+                    try:
+                        file_path = soffice_converter.convert(file_path)
+                        suffix = soffice_converter.get_target_suffix(suffix)
+                    except LibreOfficeNotFoundError:
+                        self.logger.warning(f"LibreOffice 未安装，跳过文件: {file.filename}")
+                        outputs.append(output)
+                        continue
+                    except Exception as e:
+                        self.logger.warning(f"soffice 转换失败，跳过文件 {file.filename}: {e}")
+                        outputs.append(output)
+                        continue
+
                 # 获取文件基础信息
                 file_kwargs = await self.create_file_additional_kwargs(file, suffix, file_path)
 
                 result = converter.convert(file_path)
                 doc = result.document
 
-                output_dir = Path(file_path).parent / f"{Path(file_path).stem}_output"
+                output_dir = Path(file_path).parent / f"{file.file_id}_output"
                 output_dir.mkdir(exist_ok=True)
                 output_path = output_dir / "document.md"
                 doc.save_as_markdown(output_path, image_mode=ImageRefMode.REFERENCED)
@@ -599,7 +617,7 @@ class FilesLoaders:
         elif file_type == "DOCUMENT":
             if suffix == ".pdf":
                 return f"data:{content_type};base64,{base64_content}"
-            elif suffix in [".docx", ".pptx", ".xlsx"]:
+            elif suffix in [".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls"]:
                 return f"data:{content_type};base64,{base64_content}"
             else:
                 return ""
@@ -639,7 +657,7 @@ class FilesLoaders:
                     "preview_method": "iframe",
                     "preview_hint": "可在 iframe 中直接预览 PDF（浏览器原生支持）"
                 }
-            elif suffix in [".docx", ".pptx", ".xlsx"]:
+            elif suffix in [".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls"]:
                 return {
                     "is_previewable": True,
                     "preview_method": "iframe_office",

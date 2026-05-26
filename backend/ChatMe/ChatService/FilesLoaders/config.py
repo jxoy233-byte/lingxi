@@ -15,13 +15,16 @@ FILE_ALLOWED_TYPES = {
     },
 
     "DOCUMENT": {  # 文档类型 + 文档后缀白名单 + 对应 MIME 类型
-        "DOCUMENT_TYPE": {"pdf", "docx", "pptx", "xlsx"},
-        "DOCUMENT_SUFFIX": {".pdf", ".docx", ".pptx", ".xlsx"},
+        "DOCUMENT_TYPE": {"pdf", "docx", "doc", "pptx", "ppt", "xlsx", "xls"},
+        "DOCUMENT_SUFFIX": {".pdf", ".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls"},
         "DOCUMENT_MIME": {
             "application/pdf",
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/msword",
             "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            "application/vnd.ms-powerpoint",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.ms-excel",
         },
     },
 }

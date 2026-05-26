@@ -956,6 +956,36 @@ export default {
           }
         }
       }
+      // PDF 文件
+      else if (isPdf) {
+        const previewUrl = file.preview_url || file.iframe_url
+        if (previewUrl) {
+          this.$emit('preview-file', {
+            preview_url: previewUrl,
+            url: previewUrl,
+            name: file.name,
+            type: file.type,
+            file_type: file.file_type,
+            suffix: file.suffix,
+            preview_method: file.preview_method
+          })
+        }
+      }
+      // Office 文档（.doc/.ppt/.xls 转换后的 .docx/.pptx/.xlsx 或原始上传）
+      else {
+        const previewUrl = file.preview_url || file.iframe_url
+        if (previewUrl) {
+          this.$emit('preview-file', {
+            preview_url: previewUrl,
+            url: previewUrl,
+            name: file.name,
+            type: file.type,
+            file_type: file.file_type,
+            suffix: file.suffix,
+            preview_method: file.preview_method
+          })
+        }
+      }
     }
   }
 }

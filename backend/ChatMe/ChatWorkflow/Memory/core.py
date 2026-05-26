@@ -120,7 +120,7 @@ class MemoryManager:
         path_with_thread = self._get_memory_path_with_thread(thread_id)
         memory_file_with_checkpoint = os.path.join(
             path_with_thread,
-            f"{checkpoint_id}_{timestamp}.md"
+            f"{timestamp}_{checkpoint_id}.md"
         )
 
         memory_file_path = self._get_memory_file_path(thread_id)
@@ -297,14 +297,14 @@ class MemoryManager:
                 if filename == 'current.md':
                     continue
 
-                # 文件名格式：{checkpoint_id}_{timestamp}.md
+                # 文件名格式：{time_stamp}_{checkpoint_id}.md
                 # checkpoint_id 只包含 - 和字母数字，timestamp 格式为 YYYY-MM-DD HH:MM:SS
-                # 所以从右边倒数第二个 _ 分割：左边是 checkpoint_id，右边是 timestamp
+                # 左边是 timestamp，右边是 checkpoint_id 和 .md
                 if '_' in filename and filename.endswith('.md'):
                     parts = filename.rsplit('_', 1)  # 从右边分割最后一个下划线
                     if len(parts) == 2:
-                        checkpoint_part = parts[0]
-                        timestamp_part = parts[1][:-3]  # 去掉 ".md"
+                        checkpoint_part = parts[1][:-3] # 去掉 ".md"
+                        timestamp_part = parts[0]
 
                         if checkpoint_part == checkpoint_id:
                             target_file = filename

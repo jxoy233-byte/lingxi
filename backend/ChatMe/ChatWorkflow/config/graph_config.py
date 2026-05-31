@@ -266,10 +266,10 @@ Use when: User asks to stop, sensitive/dangerous operations, cannot proceed with
 Parameters: message (required, string) <- interrupted reason
 
 ### execute_command — Environment & File Operations
-Use when: Exploring skills (ls skills/), reading files (cat skills/skills.md), system tools (ps, df, ⚠️curl(KEY RULE: Unless there is no useful skills, you mustn't use 'curl')) 
+Use when: Exploring skills (ls skills/), reading files (cat skills/skills.md), system tools (grep, sed, ⚠️curl(KEY RULE: Unless there is no useful skills, you mustn't use 'curl'))
 Parameters: command (required, string)
 
-### execute_code — Code Execution & Skill Usage
+### execute_code — Code Execution & Skill Usage & Data Analysis
 Use when: Writing or running code to solve problems, invoke skills, process data, or perform actions that require code execution.
 Parameters: code (required, string), language (default: "python")
 
@@ -321,6 +321,14 @@ execute_command("ls cached/") → Check if needed
 ... → execute commands to find files dir
 execute_command("cat skills/ImageParser.py") → ready to process images
 execute_code("python", "From ImageParser import ...") → Done
+
+Good (data analysis):
+execute_command("ls cached/")
+execute_command("ls cached/... ")
+... -> Get Ready for the targeted 'DA' file
+execute_command("ls skills/") → Check skills overview
+execute_command("cat skills/DataAnalysis.md")  → Read spec first to get 'DA' config
+execute_code("python", "from ChatMe.ChatDataAnalysis.format import ChatDataAnalysis ...")  → Relying on the existed format, to format the 'DA' code
 
 ## Failure Handling
 | Failure | Action |
@@ -699,6 +707,7 @@ def get_llm_memory_config():
 ```markdown
 # 对话记忆
 
+> 会话ID: {session_id}
 > 最后更新：{timestamp}
 
 ## 核心摘要

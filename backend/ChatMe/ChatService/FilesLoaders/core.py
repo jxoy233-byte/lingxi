@@ -65,7 +65,7 @@ def _upload_local_image_to_oss(local_path: str, original_filename: str = None) -
         # 返回 OSS URL
         oss_url = f"https://{bucket_name}.{endpoint.replace('https://', '')}/{oss_key}"
         logger = get_logger("FilesLoaders")
-        logger.info(f"图片上传 OSS 成功: {local_path} -> {oss_url}")
+        logger.info(f"文件上传 OSS 成功: {local_path} -> {oss_url}")
         return oss_url
 
     except ImportError:
@@ -153,7 +153,6 @@ class OutputFormat:
 class FilesLoaders:
 
     def __init__(self, processing_files: Optional[list[UploadFileWithId]], session_id: str):
-        # todo 添加session_id字段
         self.session_id = session_id
         self.logger = get_logger("FilesLoader")
         self.processing_files = processing_files

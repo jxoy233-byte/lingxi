@@ -92,17 +92,17 @@ class MemoryManager:
         """
         memory_file_path = self._get_memory_file_path(thread_id)
         if not os.path.exists(memory_file_path):
-            return self._get_empty_memory_template()
+            return self._get_empty_memory_template(thread_id)
 
         try:
             with open(memory_file_path, "r", encoding="utf-8") as f:
                 content = f.read()
                 if not content.strip():
-                    return self._get_empty_memory_template()
+                    return self._get_empty_memory_template(thread_id)
                 return content.strip()
         except Exception as e:
             self.logger.error(f"读取记忆文件失败: {e}")
-            return self._get_empty_memory_template()
+            return self._get_empty_memory_template(thread_id)
 
     def write_memory(self, thread_id: str, checkpoint_id: str, content: str, timestamp: str) -> bool:
         """
@@ -164,7 +164,8 @@ class MemoryManager:
             ai_response=memory_data.ai_response,
             tool_calls_str=self._format_tool_calls(memory_data.tool_calls),
             tool_results_str=self._format_tool_results(memory_data.tool_results),
-            timestamp=timestamp
+            timestamp=timestamp,
+            session_id=thread_id
         )
 
         try:
@@ -209,7 +210,7 @@ class MemoryManager:
             清空是否成功
         """
 
-        return self.write_memory(thread_id, self._get_empty_memory_template())
+        return self.write_memory(thread_id, self._get_empty_memory_template(thread_id))
 
     def list_threads(self) -> List[str]:
         """
@@ -386,10 +387,11 @@ class MemoryManager:
             for result in tool_results
         ])
 
-    def _get_empty_memory_template(self) -> str:
+    def _get_empty_memory_template(self, thread_id: str = "") -> str:
         """获取空记忆模板"""
-        return """# 对话记忆
+        return f"""# 对话记忆
 
+> 会话ID: {thread_id}
 > 最后更新：暂无
 
 ## 核心摘要

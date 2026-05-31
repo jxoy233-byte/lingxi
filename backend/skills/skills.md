@@ -129,6 +129,14 @@ ImageParser 是一个**图片解析**技能，使用 VL 模型（Qwen3-VL）来�
 
 ---
 
+# 📊 Skill: DataAnalysis
+
+数据分析技能。进行数据分析前先查阅 `DataAnalysis.md` 规范获取配置。
+
+**文件名称**: `DataAnalysis.md`
+
+---
+
 ## 🔀 混合使用
 
 当单一引擎结果不够时，可以**组合使用**：

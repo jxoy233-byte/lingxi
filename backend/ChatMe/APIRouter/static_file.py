@@ -9,7 +9,7 @@
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 
 from ChatMe.LoggingManager.logging_config import get_logger
@@ -26,7 +26,7 @@ static_file_router = APIRouter(prefix="/static", tags=["静态文件"])
 
 def _get_safe_path(path: str) -> Optional[Path]:
     """
-    将相对路径转换为安全的安全绝对路径
+    将相对路径转换为安全的绝对路径
     防止路径穿越攻击
     """
     # 移除开头的 /
@@ -45,13 +45,17 @@ def _get_safe_path(path: str) -> Optional[Path]:
 
 
 @static_file_router.get("/cached/{file_path:path}", summary="访问 cached 目录下的文件")
-async def serve_cached_file(file_path: str):
+async def serve_cached_file(
+    file_path: str,
+    download: bool = Query(False, description="是否下载而非预览")
+):
     """
     访问 cached 目录下的文件
 
     Args:
         file_path: 相对于 cached/ 的路径
                    例如: abc123/data_analysis_output/gen_001/charts/sales.png
+        download: True=下载, False=预览(默认inline显示)
 
     Returns:
         文件内容
@@ -67,38 +71,36 @@ async def serve_cached_file(file_path: str):
     if not safe_path.is_file():
         raise HTTPException(status_code=400, detail="该路径不是文件")
 
-    logger.info(f"静态文件访问: {safe_path}")
+    logger.info(f"静态文件访问: {safe_path}, download={download}")
 
-    return FileResponse(
-        path=str(safe_path),
-        filename=safe_path.name,
-        media_type=_get_media_type(safe_path)
-    )
+    # 缓存头：1小时
+    cache_headers = {
+        "Cache-Control": "public, max-age=3600",
+        "ETag": f'"{safe_path.stat().st_mtime:.0f}"'
+    }
 
-
-@static_file_router.get("/preview/markdown", summary="预览 Markdown 文件")
-async def preview_markdown(path: str):
-    """
-    预览 Markdown 文件内容（直接读取，不渲染）
-
-    Args:
-        path: 相对于 cached/ 的路径
-    """
-    safe_path = _get_safe_path(path)
-
-    if safe_path is None:
-        raise HTTPException(status_code=403, detail="禁止访问该路径")
-
-    if not safe_path.exists():
-        raise HTTPException(status_code=404, detail=f"文件不存在: {path}")
-
-    if safe_path.suffix not in ['.md', '.markdown']:
-        raise HTTPException(status_code=400, detail="只支持 .md 文件")
-
-    with open(safe_path, 'r', encoding='utf-8') as f:
-        content = f.read()
-
-    return {"content": content, "path": path}
+    if download:
+        # 下载模式：attachment
+        return FileResponse(
+            path=str(safe_path),
+            filename=safe_path.name,
+            media_type=_get_media_type(safe_path),
+            headers={
+                "Content-Disposition": f'attachment; filename="{safe_path.name}"',
+                **cache_headers
+            }
+        )
+    else:
+        # 预览模式：inline
+        return FileResponse(
+            path=str(safe_path),
+            filename=safe_path.name,
+            media_type=_get_media_type(safe_path),
+            headers={
+                "Content-Disposition": "inline",
+                **cache_headers
+            }
+        )
 
 
 def _get_media_type(path: Path) -> str:

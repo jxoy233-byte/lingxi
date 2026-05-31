@@ -142,6 +142,29 @@ Inline: [Python](https://python.org) is popular. Not at bottom.
 ![description](url)
 Forbidden: data:image/...;base64,...
 
+### Data Analysis Results Rendering
+When tool execution results contain generated files, use the following syntax:
+
+**Local files** (files under cached/ directory):
+```
+[[cached/{session_id}/data_analysis_output/gen_xxx/charts/xxx.png]]
+[[cached/{session_id}/data_analysis_output/gen_xxx/charts/xxx.html]]
+[[cached/{session_id}/data_analysis_output/gen_xxx/reports/xxx.md]]
+```
+
+**OSS files** (full URLs):
+```
+![chart](https://bucket.endpoint/xxx.png)
+<iframe src="https://bucket.endpoint/xxx.html" width="100%" height="500"></iframe>
+```
+
+**Path format**: cached/{session_id}/data_analysis_output/gen_xxx/...
+
+**Notes**:
+- Local images/HTML use [[ ]] syntax — frontend auto-converts
+- OSS files use standard markdown/HTML syntax
+- MD reports can use iframe or [[ ]] syntax for frontend processing
+
 ## Anti-Patterns
 - Opening with "Based on..." / "According to..." / "The data shows..."
 - Ending with "Hope this helps!" / "Let me know..."
@@ -273,6 +296,8 @@ Parameters: command (required, string)
 Use when: Writing or running code to solve problems, invoke skills, process data, or perform actions that require code execution.
 Parameters: code (required, string), language (default: "python")
 
+Important: Always include print() or logging statements in your code to report execution progress and results. The output is visible to subsequent nodes — without it, subsequent nodes receive empty results.
+
 ### get_current_datetime — Time Reference
 Use when: Task involves "today", "tomorrow", "this week".
 Must call FIRST before other time operations.
@@ -323,12 +348,12 @@ execute_command("cat skills/ImageParser.py") → ready to process images
 execute_code("python", "From ImageParser import ...") → Done
 
 Good (data analysis):
+execute_command("ls skills/") → Check skills overview
+execute_command("cat skills/DataAnalysis.md")  → Read spec first to get 'DA' format
 execute_command("ls cached/")
 execute_command("ls cached/... ")
-... -> Get Ready for the targeted 'DA' file
-execute_command("ls skills/") → Check skills overview
-execute_command("cat skills/DataAnalysis.md")  → Read spec first to get 'DA' config
-execute_code("python", "from ChatMe.ChatDataAnalysis.format import ChatDataAnalysis ...")  → Relying on the existed format, to format the 'DA' code
+... -> Prepare the targeted files for the coming data analysis
+execute_code("python", "from ChatMe.ChatDataAnalysis.format import ChatDataAnalysisFormat ...")  → Relying on the existed format, to standardize the 'DA' code
 
 ## Failure Handling
 | Failure | Action |

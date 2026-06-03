@@ -20,6 +20,13 @@
               <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
             </svg>
           </button>
+          <button @click="downloadFile" class="tool-btn" title="下载">
+            <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+          </button>
           <button @click="$emit('close')" class="tool-btn" title="关闭">
             <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <line x1="18" y1="6" x2="6" y2="18"/>
@@ -57,7 +64,8 @@ export default {
   props: {
     visible: { type: Boolean, default: false },
     fileName: { type: String, default: '' },
-    content: { type: String, default: '' }
+    content: { type: String, default: '' },
+    fileUrl: { type: String, default: '' }
   },
   emits: ['close'],
   data() {
@@ -88,6 +96,25 @@ export default {
     reload() {
       // 强制重新渲染
       this.$forceUpdate()
+    },
+    downloadFile() {
+      console.log('[FilePreviewPanel] fileUrl:', this.fileUrl)
+      console.log('[FilePreviewPanel] fileName:', this.fileName)
+      console.log('[FilePreviewPanel] content length:', this.content ? this.content.length : 0)
+      if (!this.fileUrl) {
+        console.warn('[FilePreviewPanel] 无下载URL')
+        // 如果有 content 但没有 fileUrl，尝试用 content 作为 data URL 下载
+        if (this.content && this.content.length > 0) {
+          console.log('[FilePreviewPanel] 使用 content 作为下载数据')
+        }
+        return
+      }
+      const a = document.createElement('a')
+      a.href = this.fileUrl
+      a.download = this.fileName || 'download'
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
     },
     startResize(e) {
       e.preventDefault()

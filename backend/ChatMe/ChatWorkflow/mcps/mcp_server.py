@@ -172,6 +172,12 @@ def execute_code(code: str, language: Literal["python", "nodejs", "javascript", 
         if not current_path.startswith(venv_bin):
             env['PATH'] = f"{venv_bin}:{current_path}"
 
+        # 添加 backend 目录到 PYTHONPATH，使 ChatMe 包可以正确导入
+        backend_dir = str(project_root)
+        current_pythonpath = env.get('PYTHONPATH', '')
+        if backend_dir not in current_pythonpath:
+            env['PYTHONPATH'] = f"{backend_dir}{os.pathsep}{current_pythonpath}" if current_pythonpath else backend_dir
+
         if language == "python":
             with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False,dir=skills_dir) as f:
                 f.write(code)
@@ -254,6 +260,12 @@ def execute_command(command: Annotated[ str, "系统执行命令"], timeout: int
     # 确保虚拟环境路径在最前面
     if venv_path and not current_path.startswith(venv_path):
         env['PATH'] = f"{venv_path}:{current_path}"
+
+    # 添加 backend 目录到 PYTHONPATH，使 ChatMe 包可以正确导入
+    backend_dir = str(project_root)
+    current_pythonpath = env.get('PYTHONPATH', '')
+    if backend_dir not in current_pythonpath:
+        env['PYTHONPATH'] = f"{backend_dir}{os.pathsep}{current_pythonpath}" if current_pythonpath else backend_dir
 
     try:
         result = subprocess.run(

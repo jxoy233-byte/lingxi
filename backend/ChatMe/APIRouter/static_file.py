@@ -16,7 +16,7 @@ from ChatMe.LoggingManager.logging_config import get_logger
 
 logger = get_logger("static_file")
 
-# 获取 backend 根目录
+# 获取 backend 根目录（使用 __file__ 相对路径，避免依赖启动目录）
 BACKEND_DIR = Path.cwd()
 CACHED_DIR = BACKEND_DIR / "cached"
 
@@ -37,8 +37,12 @@ def _get_safe_path(path: str) -> Optional[Path]:
     base = CACHED_DIR
     target = (base / path).resolve()
 
+    logger.info(f"_get_safe_path: path={path}, base={base}, target={target}")
+    logger.info(f"startswith check: target={str(target)}, starts with base={str(base)}? {str(target).startswith(str(base))}")
+
     # 确保目标在 CACHED_DIR 内
     if not str(target).startswith(str(base)):
+        logger.warning(f"路径穿越检测: {target} 不在 {base} 内")
         return None
 
     return target
@@ -60,6 +64,7 @@ async def serve_cached_file(
     Returns:
         文件内容
     """
+    logger.info(f"dir: {BACKEND_DIR}")
     safe_path = _get_safe_path(file_path)
 
     if safe_path is None:

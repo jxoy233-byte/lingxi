@@ -44,6 +44,12 @@ class ChatWorkflow:
         self.memory_manager = None
         self.files_cached_dir = None
 
+    def _generate_tool_param_warning(self, tool_name: str, missing_params: List[str]) -> str:
+        """生成工具参数缺失的警告信息"""
+        param_list = ", ".join(missing_params)
+        self.logger.warning(f"工具 {tool_name} 缺少参数: {missing_params}")
+        return f"[工具参数错误] {tool_name} 缺少必需参数: {param_list}，请检查格式后重试"
+
     async def init_mcps(self):
         try:
             from ChatMe.ChatMeConfig import get_mcp_config
@@ -197,21 +203,44 @@ class ChatWorkflow:
                 try:
                     tool_call_data = json.loads(fixed)
                 except json.JSONDecodeError:
-                    # 还是失败，正则提取
-                    name_match = re.search(r'"name"\s*:\s*"([^"]*)"', json_str)
-                    if not name_match:
-                        continue
-                    name = name_match.group(1)
+                    # 还是失败，尝试修复 JSON 格式后用 json.loads 解析
+                    # 常见问题：多余逗号、引号转义等
+                    try:
+                        # 尝试修复常见的 JSON 格式问题
+                        fixed_json = json_str
+                        # 移除尾部多余逗号
+                        fixed_json = re.sub(r',(\s*[}\]])', r'\1', fixed_json)
+                        tool_call_data = json.loads(fixed_json)
+                    except json.JSONDecodeError:
+                        # 还是失败，正则提取
+                        name_match = re.search(r'"name"\s*:\s*"([^"]*)"', json_str)
+                        if not name_match:
+                            continue
+                        name = name_match.group(1)
 
-                    args = {}
-                    args_match = re.search(r'"args"\s*:\s*(\{.*?\})', json_str, re.DOTALL)
-                    if args_match:
-                        try:
-                            args = json.loads(args_match.group(1).strip())
-                        except:
-                            pass
+                        # 使用递归方式提取嵌套的 args 对象
+                        args = {}
+                        args_start = json_str.find('"args"')
+                        if args_start != -1:
+                            brace_start = json_str.find('{', args_start)
+                            if brace_start != -1:
+                                # 找对应的结束括号（处理嵌套）
+                                depth = 1
+                                i = brace_start + 1
+                                while i < len(json_str) and depth > 0:
+                                    if json_str[i] == '{':
+                                        depth += 1
+                                    elif json_str[i] == '}':
+                                        depth -= 1
+                                    i += 1
+                                if depth == 0:
+                                    args_str = json_str[brace_start:i]
+                                    try:
+                                        args = json.loads(args_str)
+                                    except:
+                                        pass
 
-                    tool_call_data = {"name": name, "args": args}
+                        tool_call_data = {"name": name, "args": args}
 
             if isinstance(tool_call_data, list):
                 for j, item in enumerate(tool_call_data):
@@ -603,12 +632,21 @@ class ChatWorkflow:
             # 符合ToolNode节点的AIMessage(REASONING)
             format_response = self._parse_content_to_tool_calls(response)
 
+            # 验证工具调用
             for tool_call in format_response.tool_calls:
+                tool_name = tool_call.get("name", "")
+                args = tool_call.get("args", {})
+
+                # execute_code 必须有 code 参数
+                if tool_name == "execute_code" and "code" not in args:
+                    warning_results = self._generate_tool_param_warning("execute_code", ["code"])
+                    tool_call["args"]["code"] = warning_results
+                    self.logger.warning(f"execute_code 缺少 code 参数: {args}")
+
                 tool_call["args"]["session_id"] = thread_id
+                tool_calls.append(tool_call)
 
             tool_call_times += 1
-
-            tool_calls.extend(format_response.tool_calls)
 
             return {
                 "messages": [format_response],

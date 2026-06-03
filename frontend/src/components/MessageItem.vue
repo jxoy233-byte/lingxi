@@ -387,6 +387,11 @@ export default {
       interruptReasonExpanded: false
     }
   },
+  mounted() {
+    // 暴露方法到 window，供 [[ ]] 语法中的 onclick 调用
+    window.handleFileDownload = this.handleFileDownload.bind(this)
+    window.previewMdFile = this.previewMdFile.bind(this)
+  },
   computed: {
     renderedContent() {
       if (!this.message.content) return ''
@@ -478,6 +483,7 @@ export default {
       handler() {
         this.$nextTick(() => {
           this.highlightCode()
+          this.processMarkdownFiles()
         })
       },
       immediate: true
@@ -496,10 +502,17 @@ export default {
     }
   },
   methods: {
-    // 预处理原始文本 - 只处理裸 URL，让 marked 原样处理 markdown 图片和链接
+    // 预处理原始文本 - 处理 [[ ]] 本地文件引用语法、MD 链接渲染和裸 URL
     preprocessContent(content) {
       if (typeof content !== 'string') return content
 
+      // Step 1: 处理 [[ ]] 本地文件引用语法（先于裸 URL 处理）
+      content = this._processDoubleBracketSyntax(content)
+
+      // Step 2: 处理 markdown 链接中的 .md/.markdown 文件（转为可渲染的格式）
+      content = this._processMarkdownLinks(content)
+
+      // Step 3: 处理裸 URL（排除 markdown 图片和链接内的 URL）
       // 策略：找到所有 markdown 图片和链接语法的位置，
       // 只处理不在这些语法内的裸 URL，避免破坏 markdown 语法
 
@@ -568,6 +581,187 @@ export default {
       return result
     },
 
+    // 处理 [[ ]] 本地文件引用语法
+    _processDoubleBracketSyntax(content) {
+      // 匹配 [[cached/...]] 或 [[http://...]] 格式
+      const doubleBracketRegex = /\[\[([^\]]+)\]\]/g
+
+      return content.replace(doubleBracketRegex, (match, path) => {
+        // 清理路径
+        const cleanPath = path.trim()
+        const ext = cleanPath.split('.').pop().toLowerCase()
+        const filename = cleanPath.split('/').pop() || 'file'
+
+        // 判断是否为 OSS URL
+        const isOssUrl = cleanPath.startsWith('http')
+
+        // 图片类型
+        if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp'].includes(ext)) {
+          const src = isOssUrl ? cleanPath : `/static/${cleanPath}`
+          return `<div class="file-render-block" data-path="${cleanPath}" data-oss-url="${isOssUrl ? cleanPath : ''}" data-type="image" data-name="${filename}">
+            <img src="${src}" class="markdown-image" onclick="window.markdownImageClick && window.markdownImageClick(this)" />
+            <button class="download-btn" onclick="window.handleFileDownload(event, this)" title="下载"></button>
+          </div>`
+        }
+
+        // HTML 类型
+        if (['html', 'htm'].includes(ext)) {
+          const src = isOssUrl ? cleanPath : `/static/${cleanPath}`
+          return `<div class="file-render-block" data-path="${cleanPath}" data-oss-url="${isOssUrl ? cleanPath : ''}" data-type="html" data-name="${filename}">
+            <iframe src="${src}" class="file-render-iframe"></iframe>
+            <button class="download-btn" onclick="window.handleFileDownload(event, this)" title="下载"></button>
+          </div>`
+        }
+
+        // Markdown 类型 - 点击后通过 preview-file 事件预览
+        if (['md', 'markdown'].includes(ext)) {
+          return `<a class="md-file-link" data-path="${isOssUrl ? '' : cleanPath}" data-oss-url="${isOssUrl ? cleanPath : ''}" data-name="${filename}">${filename}</a>`
+        }
+
+        // 数据文件（csv, json, txt 等）- 点击后预览纯文本
+        if (['csv', 'json', 'txt', 'log', 'xml', 'yml', 'yaml'].includes(ext)) {
+          return `<a class="data-file-link" data-path="${isOssUrl ? '' : cleanPath}" data-oss-url="${isOssUrl ? cleanPath : ''}" data-name="${filename}">${filename}</a>`
+        }
+
+        // 其他类型，返回原文本
+        return match
+      })
+    },
+
+    // 处理 markdown 链接中的 .md 文件，将其转换为可渲染的格式
+    _processMarkdownLinks(content) {
+      // 匹配 markdown 链接 [text](url)，但排除图片链接 ![alt](url)
+      // 使用括号计数找到正确的结束位置
+      const result = []
+      let i = 0
+
+      while (i < content.length) {
+        // 检查是否是图片链接开头
+        if (content.slice(i).startsWith('![')) {
+          // 图片链接，跳过
+          const nextBracket = content.indexOf(']', i)
+          if (nextBracket === -1) {
+            result.push(content.slice(i))
+            break
+          }
+          const nextParen = content.indexOf('(', nextBracket)
+          if (nextParen === -1) {
+            result.push(content.slice(i))
+            break
+          }
+          // 找到匹配的 )
+          let depth = 1
+          let j = nextParen + 1
+          while (j < content.length && depth > 0) {
+            if (content[j] === '(') depth++
+            else if (content[j] === ')') depth--
+            j++
+          }
+          result.push(content.slice(i, j))
+          i = j
+          continue
+        }
+
+        // 检查是否是普通链接 [
+        if (content[i] === '[') {
+          const nextBracket = content.indexOf(']', i)
+          if (nextBracket !== -1) {
+            const nextParen = content.indexOf('(', nextBracket)
+            if (nextParen !== -1 && nextParen === nextBracket + 1) {
+              // 找到匹配的 )
+              let depth = 1
+              let j = nextParen + 1
+              while (j < content.length && depth > 0) {
+                if (content[j] === '(') depth++
+                else if (content[j] === ')') depth--
+                j++
+              }
+              const url = content.slice(nextParen + 1, j - 1)
+              const ext = url.split('.').pop().toLowerCase()
+
+              // 如果是 .md 或 .markdown 文件，转换为可渲染格式
+              if (['md', 'markdown'].includes(ext)) {
+                const filename = url.split('/').pop() || 'file.md'
+                // 不push原始链接，只push可点击的文件名链接
+                result.push(`<a class="md-file-link" data-oss-url="${url}" data-name="${filename}">${filename}</a>`)
+                i = j
+                continue
+              }
+
+              // 数据文件（csv, json, txt 等）- 点击后预览纯文本
+              if (['csv', 'json', 'txt', 'log', 'xml', 'yml', 'yaml'].includes(ext)) {
+                const filename = url.split('/').pop() || 'file'
+                result.push(`<a class="data-file-link" data-oss-url="${url}" data-name="${filename}">${filename}</a>`)
+                i = j
+                continue
+              }
+            }
+          }
+        }
+        result.push(content[i])
+        i++
+      }
+
+      return result.join('')
+    },
+
+    // 处理 Markdown 文件的异步加载和渲染
+    async processMarkdownFiles() {
+      const mdBlocks = this.$el.querySelectorAll('.file-render-block[data-type="md"]')
+      for (const block of mdBlocks) {
+        const path = block.dataset.path
+        const ossUrl = block.dataset.ossUrl
+        const loadingEl = block.querySelector('.md-content-loading')
+        const fileName = block.dataset.name || 'file'
+
+        try {
+          // 优先使用 OSS URL，否则使用本地路径
+          const url = ossUrl || (path ? `/static/${path}` : null)
+          if (!url) {
+            if (loadingEl) loadingEl.textContent = '无效路径'
+            continue
+          }
+
+          // 加上时间戳防止缓存
+          const fetchUrl = url + (url.includes('?') ? '&' : '?') + '_t=' + Date.now()
+
+          console.log(`[MD渲染] 开始加载: ${fileName}, URL: ${fetchUrl}`)
+          const response = await fetch(fetchUrl)
+          console.log(`[MD渲染] 响应状态: ${response.status} for ${url}`)
+
+          if (response.ok) {
+            const text = await response.text()
+            console.log(`[MD渲染] 原始内容(${text.length}字符):`, text.substring(0, 300))
+            const html = marked.parse(text)
+            console.log(`[MD渲染] HTML长度: ${html.length}`)
+
+            // 移除加载提示元素
+            if (loadingEl) {
+              loadingEl.remove()
+            }
+
+            // 创建类似代码块的渲染结构
+            const preEl = document.createElement('pre')
+            preEl.className = 'md-file-block collapsed'
+            preEl.dataset.language = fileName
+            preEl.innerHTML = `
+              <div class="md-content">${html}</div>
+              <button class="md-block-toggle" onclick="window.toggleMdBlock(this)">展开</button>
+            `
+
+            block.appendChild(preEl)
+            console.log(`[MD渲染] 成功: ${fileName}, block子元素: ${block.children.length}`)
+          } else {
+            console.error(`[MD渲染] HTTP错误: ${response.status} for ${url}`)
+            if (loadingEl) loadingEl.textContent = `加载失败(${response.status})`
+          }
+        } catch (e) {
+          console.error(`[MD渲染] 异常:`, e, `URL: ${url || ossUrl || path}`)
+          if (loadingEl) loadingEl.textContent = '加载异常'
+        }
+      }
+    },
+
     highlightCode() {
       const codeBlocks = this.$el.querySelectorAll('pre code')
       codeBlocks.forEach(block => {
@@ -610,6 +804,88 @@ export default {
       const div = document.createElement('div')
       div.textContent = text
       return div.innerHTML
+    },
+
+    // 文件下载处理（供 window.handleFileDownload 调用）
+    handleFileDownload(event, btn) {
+      event.stopPropagation()
+      event.preventDefault()
+
+      const container = btn.closest('.file-render-block')
+      if (!container) return
+
+      const path = container.dataset.path
+      const ossUrl = container.dataset.ossUrl
+      const name = container.dataset.name || 'download'
+
+      let url
+      if (ossUrl) {
+        // OSS 文件：直接使用 OSS URL
+        url = ossUrl
+      } else if (path) {
+        // 本地文件：/static/{path}?download=true
+        url = `/static/${path}?download=true`
+      } else {
+        return
+      }
+
+      const a = document.createElement('a')
+      a.href = url
+      a.download = name
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+    },
+
+    previewMdFile(linkEl) {
+      const path = linkEl.dataset.path
+      const ossUrl = linkEl.dataset.ossUrl
+      const name = linkEl.dataset.name || 'file.md'
+
+      // 构建 fetch URL
+      const url = ossUrl || (path ? `/static/${path}` : null)
+      if (!url) {
+        console.error('[预览MD] 无效路径:', { path, ossUrl })
+        return
+      }
+
+      // 异步获取 MD 文件内容，然后发送到预览面板
+      fetch(url + (url.includes('?') ? '&' : '?') + '_t=' + Date.now())
+        .then(response => {
+          if (!response.ok) throw new Error('加载失败')
+          return response.text()
+        })
+        .then(content => {
+          this.$emit('preview-file', {
+            name: name,
+            text_content: content,
+            url: url + '?download=true'
+          })
+        })
+        .catch(err => {
+          console.error('[预览MD] 获取失败:', err)
+          this.$emit('preview-file', {
+            name: name,
+            text_content: '加载失败: ' + err.message,
+            url: url + '?download=true'
+          })
+        })
+    },
+
+    toggleMdReport(btn) {
+      const reportBlock = btn.closest('.md-report-block')
+      if (!reportBlock) return
+      reportBlock.classList.toggle('collapsed')
+      btn.textContent = reportBlock.classList.contains('collapsed') ? '展开' : '折叠'
+    },
+
+    toggleMdBlock(btn) {
+      const preEl = btn.closest('pre.md-file-block')
+      if (!preEl) return
+      const isCollapsed = preEl.classList.contains('collapsed')
+      preEl.classList.toggle('collapsed')
+      preEl.classList.toggle('expanded')
+      btn.textContent = isCollapsed ? '折叠' : '展开'
     },
 
     renderLatex(html) {
@@ -735,6 +1011,14 @@ export default {
     handleLinkClick(e) {
       const anchor = e.target.closest('a')
       if (!anchor) return
+
+      // 检查是否是 MD 或数据文件链接
+      if (anchor.classList.contains('md-file-link') || anchor.classList.contains('data-file-link')) {
+        e.preventDefault()
+        this.previewMdFile(anchor)
+        return
+      }
+
       const href = anchor.getAttribute('href')
       if (!href || !href.startsWith('http')) return
       e.preventDefault()
@@ -939,7 +1223,9 @@ export default {
             file_type: file.file_type,
             suffix: file.suffix,
             text_content: textContent,
-            content: textContent
+            content: textContent,
+            preview: file.preview,
+            url: file.url
           })
         } else {
           const previewUrl = file.iframe_url || file.preview_url
@@ -973,17 +1259,33 @@ export default {
       }
       // Office 文档（.doc/.ppt/.xls 转换后的 .docx/.pptx/.xlsx 或原始上传）
       else {
-        const previewUrl = file.preview_url || file.iframe_url
-        if (previewUrl) {
+        // 优先使用 text_content（markdown 格式）进行渲染
+        const textContent = file.text_content || file.content || ''
+        if (typeof textContent === 'string' && textContent.trim().length > 0) {
           this.$emit('preview-file', {
-            preview_url: previewUrl,
-            url: previewUrl,
             name: file.name,
             type: file.type,
             file_type: file.file_type,
             suffix: file.suffix,
-            preview_method: file.preview_method
+            text_content: textContent,
+            content: textContent,
+            preview: file.preview,
+            url: file.url
           })
+        } else {
+          const previewUrl = file.preview_url || file.iframe_url
+          if (previewUrl) {
+            this.$emit('preview-file', {
+              preview_url: previewUrl,
+              url: previewUrl,
+              name: file.name,
+              type: file.type,
+              file_type: file.file_type,
+              suffix: file.suffix,
+              preview_method: file.preview_method,
+              preview: file.preview
+            })
+          }
         }
       }
     }
@@ -1227,9 +1529,9 @@ export default {
 }
 
 .message-text :deep(h1) { font-size: 1.7em; font-weight: 1000; color: #16a34a; }
-.message-text :deep(h2) { font-size: 1.45em; font-weight: 900; color: #16a34a; }
-.message-text :deep(h3) { font-size: 1.25em; font-weight: 900; color: #16a34a; }
-.message-text :deep(h4) { font-size: 1.1em; color: var(--text-primary); }
+.message-text :deep(h2) { font-size: 1.45em; font-weight: 900; color: #22c55e; }
+.message-text :deep(h3) { font-size: 1.25em; font-weight: 900; color: #4ade80; }
+.message-text :deep(h4) { font-size: 1.1em; font-weight: 700; color: #86efac; }
 .message-text :deep(h5) { font-size: 1em; color: var(--text-primary); }
 .message-text :deep(h6) { font-size: 0.9em; color: var(--text-secondary); }
 
@@ -1967,5 +2269,180 @@ export default {
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* MD 和数据文件链接样式 */
+.message-text :deep(.md-file-link),
+.message-text :deep(.data-file-link) {
+  color: var(--button-bg);
+  text-decoration: none;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: background 0.15s;
+}
+
+.message-text :deep(.md-file-link:hover),
+.message-text :deep(.data-file-link:hover) {
+  background: var(--bg-hover);
+  text-decoration: underline;
+}
+
+.file-render-block .markdown-image {
+  max-height: 150px;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+}
+
+.file-render-iframe {
+  width: 100%;
+  height: 400px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+}
+
+.md-content-loading {
+  color: var(--text-secondary);
+  font-size: 13px;
+  padding: 16px;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+}
+
+.md-content {
+  padding: 16px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.md-content p {
+  margin: 0 0 12px 0;
+}
+
+/* MD 文件代码块样式 */
+.message-text :deep(pre.md-file-block) {
+  background: var(--code-block-bg);
+  padding: 16px 20px;
+  padding-bottom: 40px;
+  border-radius: 12px;
+  overflow: hidden;
+  margin: 16px 0;
+  border: 1px solid var(--code-block-border);
+  position: relative;
+  line-height: 1.6;
+  box-shadow: var(--code-block-shadow);
+  max-height: 200px;
+  transition: max-height 0.3s ease;
+}
+
+.message-text :deep(pre.md-file-block.collapsed) {
+  max-height: 200px;
+}
+
+.message-text :deep(pre.md-file-block.expanded) {
+  max-height: none;
+}
+
+.message-text :deep(pre.md-file-block.collapsed::after) {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 60px;
+  background: linear-gradient(transparent, var(--code-block-bg));
+  pointer-events: none;
+}
+
+.message-text :deep(pre.md-file-block::before) {
+  content: attr(data-language);
+  position: absolute;
+  top: 8px;
+  right: 50px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--code-lang-color);
+  letter-spacing: 0.03em;
+  pointer-events: none;
+  background: var(--code-lang-bg);
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--code-lang-border);
+}
+
+.message-text :deep(.md-block-toggle) {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  padding: 4px 12px;
+  font-size: 12px;
+  background: var(--button-bg);
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  z-index: 5;
+}
+
+.message-text :deep(.md-block-toggle:hover) {
+  background: var(--button-hover);
+}
+
+.message-text :deep(pre.md-file-block) .md-content {
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--code-block-text);
+  font-size: 13.5px;
+  line-height: 1.65;
+}
+
+.message-text :deep(pre.md-file-block) .md-content p {
+  margin: 8px 0;
+}
+
+.message-text :deep(pre.md-file-block) .md-content h1,
+.message-text :deep(pre.md-file-block) .md-content h2,
+.message-text :deep(pre.md-file-block) .md-content h3 {
+  color: var(--code-block-text);
+  margin: 12px 0 8px;
+}
+
+.message-text :deep(pre.md-file-block) .md-content table {
+  color: var(--code-block-text);
+}
+
+/* 下载按钮 */
+.file-render-block .download-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.5);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'/%3E%3Cpolyline points='7 10 12 15 17 10'/%3E%3Cline x1='12' y1='15' x2='12' y2='3'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 14px 14px;
+  border: none;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.2s;
+  z-index: 10;
+}
+
+.file-render-block:hover .download-btn {
+  opacity: 1;
+}
+
+.file-render-block .download-btn:hover {
+  background: rgba(0, 0, 0, 0.7);
 }
 </style>

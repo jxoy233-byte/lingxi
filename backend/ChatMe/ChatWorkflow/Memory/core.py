@@ -222,8 +222,9 @@ class MemoryManager:
         if not os.path.exists(self._memory_dir):
             return []
         try:
-            files = os.listdir(self._memory_dir)
-            return [f.replace(".md", "") for f in files if f.endswith(".md")]
+            entries = os.listdir(self._memory_dir)
+            # 返回目录名（即 thread_id），而非 .md 文件
+            return [f for f in entries if os.path.isdir(os.path.join(self._memory_dir, f))]
         except Exception as e:
             self.logger.error(f"列出记忆线程失败: {e}")
             return []
@@ -298,9 +299,8 @@ class MemoryManager:
                 if filename == 'current.md':
                     continue
 
-                # 文件名格式：{time_stamp}_{checkpoint_id}.md
-                # checkpoint_id 只包含 - 和字母数字，timestamp 格式为 YYYY-MM-DD HH:MM:SS
-                # 左边是 timestamp，右边是 checkpoint_id 和 .md
+                # 文件名格式：{timestamp}_{checkpoint_id}.md
+                # timestamp 格式为 YYYY-MM-DD HH:MM:SS，左边是 timestamp，右边是 checkpoint_id
                 if '_' in filename and filename.endswith('.md'):
                     parts = filename.rsplit('_', 1)  # 从右边分割最后一个下划线
                     if len(parts) == 2:
@@ -330,11 +330,11 @@ class MemoryManager:
                     continue
 
                 # 解析文件名中的时间戳
-                # 文件名格式：{checkpoint_id}_{timestamp}.md
+                # 文件名格式：{timestamp}_{checkpoint_id}.md
                 if '_' in filename and filename.endswith('.md'):
-                    parts = filename.rsplit('_', 1)  # 从右边分割最后一个下划线
+                    parts = filename.split('_', 1)  # 从左边分割第一个下划线
                     if len(parts) == 2:
-                        file_timestamp = parts[1][:-3]  # 去掉 ".md"
+                        file_timestamp = parts[0]  # 时间戳在左边
 
                         # 比较时间戳（字符串比较即可，因为格式是 YYYY-MM-DD HH:MM:SS）
                         if file_timestamp > target_timestamp:
@@ -350,7 +350,7 @@ class MemoryManager:
                     self.logger.error(f"删除文件失败 {filename}: {e}")
 
             # 将备份文件名重命名为新 checkpoint id（保留原时间戳）
-            new_target_filename = f"{new_checkpoint_id}_{target_timestamp}.md"
+            new_target_filename = f"{target_timestamp}_{new_checkpoint_id}.md"
             new_target_path = os.path.join(path_with_thread, new_target_filename)
             os.rename(target_file_path, new_target_path)
 
@@ -428,10 +428,10 @@ class MemoryManager:
             backup_files = []
             for filename in all_files:
                 if '_' in filename:
-                    parts = filename.rsplit('_', 1)
+                    parts = filename.split('_', 1)  # 格式：{timestamp}_{checkpoint_id}.md
                     if len(parts) == 2:
                         try:
-                            timestamp = datetime.strptime(parts[1][:-3], "%Y-%m-%d %H:%M:%S")
+                            timestamp = datetime.strptime(parts[0], "%Y-%m-%d %H:%M:%S")
                             backup_files.append({"filename": filename, "timestamp": timestamp})
                         except ValueError:
                             continue

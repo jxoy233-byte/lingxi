@@ -147,9 +147,9 @@ When tool execution results contain generated files, use the following syntax:
 
 **Local files** (files under cached/ directory):
 ```
-[[cached/{session_id}/data_analysis_output/gen_xxx/charts/xxx.png]]
-[[cached/{session_id}/data_analysis_output/gen_xxx/charts/xxx.html]]
-[[cached/{session_id}/data_analysis_output/gen_xxx/reports/xxx.md]]
+[[cached/'session_id'/data_analysis_output/gen_xxx/charts/xxx.png]]
+[[cached/'session_id'/data_analysis_output/gen_xxx/charts/xxx.html]]
+[[cached/'session_id'/data_analysis_output/gen_xxx/reports/xxx.md]]
 ```
 
 **OSS files** (full URLs):
@@ -158,7 +158,7 @@ When tool execution results contain generated files, use the following syntax:
 <iframe src="https://bucket.endpoint/xxx.html" width="100%" height="500"></iframe>
 ```
 
-**Path format**: cached/{session_id}/data_analysis_output/gen_xxx/...
+**Path format**: cached/'session_id'/data_analysis_output/gen_xxx/...
 
 **Notes**:
 - Local images/HTML use [[ ]] syntax — frontend auto-converts

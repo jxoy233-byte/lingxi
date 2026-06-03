@@ -15,6 +15,11 @@ export const viteServerConfig = {
       target: 'http://127.0.0.1:8211',
       changeOrigin: true,
       rewrite: (path) => path
+    },
+    '/static': {
+      target: 'http://127.0.0.1:8211',
+      changeOrigin: true,
+      rewrite: (path) => path
     }
   },
   allowedHosts: true

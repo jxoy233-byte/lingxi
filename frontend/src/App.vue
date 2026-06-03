@@ -101,6 +101,7 @@
         :visible="showFilePreview"
         :file-name="filePreviewName"
         :content="filePreviewContent"
+        :file-url="filePreviewUrl"
         @close="showFilePreview = false"
       />
 
@@ -202,6 +203,7 @@ export default {
       showFilePreview: false,
       filePreviewName: '',
       filePreviewContent: '',
+      filePreviewUrl: '',
       responseStartTime: null,
       responseTimerInterval: null,
       currentResponseTime: 0,
@@ -533,6 +535,9 @@ export default {
       this.showWebPreview = true
     },
     previewFile(file) {
+      console.log('[previewFile] 收到文件:', file)
+      console.log('[previewFile] preview字段:', file.preview)
+      console.log('[previewFile] url字段:', file.url)
       // 根据文件类型决定预览方式
       const fileType = (file.file_type || file.type || '').toUpperCase()
       const suffix = (file.suffix || (file.name ? '.' + file.name.split('.').pop().toLowerCase() : '')).toLowerCase()
@@ -565,21 +570,32 @@ export default {
       if (typeof textContent === 'string' && textContent.length > 0) {
         this.filePreviewName = file.name || '文件预览'
         this.filePreviewContent = textContent
+        // preview 字段是 base64 data URL，可用于下载
+        this.filePreviewUrl = file.preview || file.url || ''
         this.showFilePreview = true
         return
       }
 
-      // Office 文档（docx, doc, pptx, ppt, xlsx, xls）：提示下载
+      // Office 文档（docx, doc, pptx, ppt, xlsx, xls）：显示下载提示面板
       if (['.docx', '.doc', '.pptx', '.ppt', '.xlsx', '.xls'].includes(suffix)) {
-        alert('Office 文档暂不支持在线预览，请下载后查看。\n文件名: ' + file.name)
+        this.filePreviewName = file.name || '文件预览'
+        this.filePreviewContent = '此文件类型暂不支持在线预览。\n\n文件名：' + (file.name || '未知') + '\n文件大小：' + (file.size_human || '未知') + '\n\n请下载后使用本地应用程序查看。'
+        this.filePreviewUrl = file.url || file.preview || ''
+        this.showFilePreview = true
         return
       }
 
-      // 其他文件：使用 iframe 预览
+      // 其他文件：有 preview_url 则使用 iframe 预览
       const otherPreviewUrl = file.preview_url || file.iframe_url
       if (otherPreviewUrl) {
         this.webPreviewUrl = otherPreviewUrl
         this.showWebPreview = true
+      } else {
+        // 没有 preview_url，显示友好提示
+        this.filePreviewName = file.name || '文件预览'
+        this.filePreviewContent = '无法预览此文件。\n\n文件名：' + (file.name || '未知') + '\n文件类型：' + (suffix ? suffix.replace('.', '') : '未知') + '\n\n请下载后查看。'
+        this.filePreviewUrl = file.url || file.preview || ''
+        this.showFilePreview = true
       }
     },
     async restoreCheckpoint(checkpointId) {
@@ -1768,8 +1784,8 @@ export default {
   --text-primary: #1a1a1a;
   --text-secondary: #6b7280;
   --border-color: #e5e5e5;
-  --user-msg-bg: #ececec;
-  --user-msg-border: #e0e0e0;
+  --user-msg-bg: #dcdcdc;
+  --user-msg-border: #c0c0c0;
   --ai-msg-bg: transparent;
   --button-bg: #10a37f;
   --button-hover: #0d8c6d;

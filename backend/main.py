@@ -8,6 +8,7 @@ import uvicorn
 from ChatMe.ChatMeConfig import config, ensure_global_config
 from ChatMe.APIRouter.main import ChatMe_app, chat_service_lifespan
 from ChatMe.APIRouter.model_vl import model_vl_app
+from ChatMe.APIRouter.static_file import static_file_router
 from ChatMe.APIRouter.timed_clean import cleanup_lifespan, cleanup_router
 from ChatMe.LoggingManager.logging_config import set_logger
 
@@ -50,6 +51,7 @@ logger.info(f"\n{'='*60}\n  {app_name} {version} 启动 - {datetime.now().strfti
 
 app.include_router(ChatMe_app)
 app.include_router(cleanup_router)
+app.include_router(static_file_router)
 
 # 仅在 local=true 时加载本地 VL 模型
 try:

@@ -319,10 +319,11 @@ class ChatWorkflow:
         """
         input_msg = []
         for msg in reversed(messages):  # 首轮对话也兼容，无之前对话的summary就遍历完
-            if isinstance(msg, AIMessage):
-                if "type" in msg.additional_kwargs and msg.additional_kwargs.get("type") == AIMessageType.SUMMARY.value:
-                    break
-            input_msg.append(msg)
+            if isinstance(msg, HumanMessage):
+                if "is_file" in msg.additional_kwargs:
+                    input_msg.append(msg)
+            else:
+                break
 
         # 反转回来，保持原始顺序
         input_msg.reverse()
@@ -343,10 +344,10 @@ class ChatWorkflow:
             if isinstance(msg, HumanMessage):
                 if "is_file" in msg.additional_kwargs and msg.additional_kwargs.get("is_file"):
                     break
+            else:
+                break
             input_msg.append(msg)
 
-        # 反转回来，保持原始顺序
-        input_msg.reverse()
         return input_msg
 
     async def _get_current_round_conversation_cycling(self, messages: List[BaseMessage]) -> List[BaseMessage]:

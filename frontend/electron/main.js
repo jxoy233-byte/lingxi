@@ -153,7 +153,7 @@ function createMenu(envConfig) {
               type: 'info',
               title: config.app.title,
               message: config.app.title,
-              detail: `版本：${config.app.version}\n模式：${envConfig.mode}\n© 2026 ChatMe`,
+              detail: `版本：${config.app.version}\n模式：${envConfig.mode}\n© 2026 灵析`,
               buttons: ['确定']
             })
           }

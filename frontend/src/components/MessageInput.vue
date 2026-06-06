@@ -1,5 +1,31 @@
 <template>
   <div class="input-area">
+    <!-- 引用块（用户从历史消息中引用内容时显示） -->
+    <div v-if="quote" class="quote-block">
+      <div class="quote-block-bar"></div>
+      <div class="quote-block-content">
+        <div class="quote-block-label">
+          <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 21c3 0 7-1 7-8V5c0-1.25-.756-2.017-2-2H4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2 1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V20c0 1 0 1 1 1z"/>
+            <path d="M15 21c3 0 7-1 7-8V5c0-1.25-.757-2.017-2-2h-4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2h.75c0 2.25.25 4-2.75 4v3c0 1 0 1 1 1z"/>
+          </svg>
+          <span>引用</span>
+        </div>
+        <div class="quote-block-text" v-html="renderedQuote"></div>
+      </div>
+      <button
+        type="button"
+        class="quote-block-close"
+        @click="onCloseQuote"
+        title="移除引用"
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18"/>
+          <line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    </div>
+
     <!-- 文件列表显示区域 - 横向紧凑布局 -->
     <div v-if="selectedFiles.length > 0" class="file-list-container">
       <div class="file-list-scroll">
@@ -142,6 +168,8 @@
 </template>
 
 <script>
+import { marked } from 'marked'
+
 export default {
   name: 'MessageInput',
   expose: ['clearInput', 'getSessionId', 'setSessionId', 'checkAndUploadPendingFiles'],
@@ -153,9 +181,13 @@ export default {
     sessionId: {
       type: String,
       default: null
+    },
+    quote: {
+      type: Object,
+      default: null
     }
   },
-  emits: ['send', 'files-selected-need-session'],
+  emits: ['send', 'files-selected-need-session', 'update:quote'],
   data() {
     return {
       inputText: '',
@@ -197,6 +229,27 @@ export default {
     // 检查是否有文件正在上传
     hasUploadingFiles() {
       return this.selectedFiles.some(f => f.uploading) || this.uploadQueue.length > 0 || this.isUploadQueueProcessing
+    },
+    // 引用块内容渲染成 markdown HTML（链接、代码、加粗、公式等都能正确显示）
+    renderedQuote() {
+      if (!this.quote || !this.quote.content) return ''
+      try {
+        return marked.parse(this.quote.content, { breaks: true, gfm: true })
+      } catch (e) {
+        console.error('引用块 Markdown 渲染失败:', e)
+        return this.escapeHtml(this.quote.content)
+      }
+    }
+  },
+  methods: {
+    escapeHtml(text) {
+      if (!text) return ''
+      return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;')
     }
   },
   watch: {
@@ -389,8 +442,14 @@ export default {
         return
       }
 
+      // 如果有引用，把引用内容拼到 message 前面（<quote>...</quote> 标记）
+      let finalMessage = this.inputText.trim()
+      if (this.quote && this.quote.content) {
+        finalMessage = `<quote>\n${this.quote.content}\n</quote>\n\n${finalMessage}`
+      }
+
       this.$emit('send', {
-        message: this.inputText.trim(),
+        message: finalMessage,
         files: validFiles,
         processedOutputs: [...this.processedOutputs]
       })
@@ -399,6 +458,8 @@ export default {
 
       this.inputText = ''
       this.clearFiles()
+      // 发送后清空引用
+      this.$emit('update:quote', null)
 
       this.$nextTick(() => {
         const textarea = this.$refs.textarea
@@ -783,6 +844,13 @@ export default {
     clearInput() {
       this.inputText = ''
       this.clearFiles()
+      // 清理引用状态
+      this.$emit('update:quote', null)
+    },
+
+    // 关闭引用块（用户点击 × 按钮）
+    onCloseQuote() {
+      this.$emit('update:quote', null)
     },
 
     getFileExtension(filename) {
@@ -820,6 +888,200 @@ export default {
   padding: 16px;
   background-color: var(--bg-primary);
   border-top: 1px solid var(--border-color);
+}
+
+/* 引用块（ChatGPT 风格） */
+.quote-block {
+  max-width: 900px;
+  margin: 0 auto 10px;
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.quote-block-bar {
+  flex-shrink: 0;
+  width: 3px;
+  background: var(--button-bg);
+}
+
+.quote-block-content {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 4px 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.quote-block-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--button-bg);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.quote-block-text {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  word-wrap: break-word;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 5;
+  line-clamp: 5;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.quote-block-text :deep(p) {
+  margin: 0 0 4px 0;
+  white-space: pre-wrap;
+}
+
+.quote-block-text :deep(p:last-child) {
+  margin-bottom: 0;
+}
+
+.quote-block-text :deep(a) {
+  color: var(--button-bg);
+  text-decoration: none;
+  word-break: break-all;
+}
+
+.quote-block-text :deep(a:hover) {
+  text-decoration: underline;
+}
+
+.quote-block-text :deep(code) {
+  background: var(--hover-bg);
+  color: var(--text-primary);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+}
+
+.quote-block-text :deep(pre) {
+  background: var(--hover-bg);
+  color: var(--text-primary);
+  padding: 6px 8px;
+  border-radius: 4px;
+  overflow-x: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  margin: 0 0 4px 0;
+  white-space: pre-wrap;
+}
+
+.quote-block-text :deep(pre:last-child) {
+  margin-bottom: 0;
+}
+
+.quote-block-text :deep(strong) {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.quote-block-text :deep(em) {
+  font-style: italic;
+}
+
+.quote-block-text :deep(ul),
+.quote-block-text :deep(ol) {
+  margin: 0 0 4px 0;
+  padding-left: 20px;
+}
+
+.quote-block-text :deep(ul:last-child),
+.quote-block-text :deep(ol:last-child) {
+  margin-bottom: 0;
+}
+
+.quote-block-text :deep(li) {
+  margin: 0;
+}
+
+.quote-block-text :deep(blockquote) {
+  border-left: 3px solid var(--border-color);
+  padding-left: 8px;
+  margin: 0 0 4px 0;
+  color: var(--text-secondary);
+}
+
+.quote-block-text :deep(h1),
+.quote-block-text :deep(h2),
+.quote-block-text :deep(h3),
+.quote-block-text :deep(h4),
+.quote-block-text :deep(h5),
+.quote-block-text :deep(h6) {
+  margin: 0 0 4px 0;
+  font-weight: 600;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.quote-block-text :deep(h1:last-child),
+.quote-block-text :deep(h2:last-child),
+.quote-block-text :deep(h3:last-child),
+.quote-block-text :deep(h4:last-child),
+.quote-block-text :deep(h5:last-child),
+.quote-block-text :deep(h6:last-child) {
+  margin-bottom: 0;
+}
+
+.quote-block-text :deep(img) {
+  max-width: 100%;
+  height: auto;
+  border-radius: 4px;
+}
+
+.quote-block-text :deep(table) {
+  border-collapse: collapse;
+  font-size: 12px;
+  margin: 0 0 4px 0;
+}
+
+.quote-block-text :deep(th),
+.quote-block-text :deep(td) {
+  border: 1px solid var(--border-color);
+  padding: 2px 6px;
+}
+
+.quote-block-text :deep(hr) {
+  border: none;
+  border-top: 1px solid var(--border-color);
+  margin: 4px 0;
+}
+
+.quote-block-close {
+  flex-shrink: 0;
+  align-self: flex-start;
+  margin: 6px 8px 0 0;
+  width: 22px;
+  height: 22px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s;
+}
+
+.quote-block-close:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
 /* 文件列表容器 - 横向紧凑布局 */

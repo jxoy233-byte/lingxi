@@ -2,7 +2,7 @@
   <div class="messages-container" ref="messagesContainer">
     <div class="messages-column">
       <div v-if="messages.length === 0" class="welcome-message">
-        <h2>你好！我是 ChatMe 智能助手</h2>
+        <h2>你好！我是灵析——数据分析智能助手</h2>
         <p>有什么我可以帮助你的吗？</p>
       </div>
 
@@ -23,6 +23,7 @@
         @preview-file="$emit('preview-file', $event)"
         @interrupt="$emit('interrupt', $event)"
         @resume="$emit('resume', $event)"
+        @quote="$emit('quote', $event)"
       />
 
       <div v-if="isLoading" class="loading-message" :class="{ 'interrupted': isInterrupted && isInterruptedSessionId === currentSessionId }">
@@ -73,7 +74,7 @@ export default {
       default: null
     }
   },
-  emits: ['restore', 'restream', 'open-link', 'preview-file', 'interrupt', 'resume'],
+  emits: ['restore', 'restream', 'open-link', 'preview-file', 'interrupt', 'resume', 'quote'],
   data() {
     return {
       userInterrupted: false,   // 用户主动介入，打断自动滚动

@@ -218,7 +218,7 @@ Answer first, support second, format only when needed.
 Simple question = simple answer. Complex question = structured answer.
 No thinking/reasoning in output.
 
-  Your output is ONLY the final answer. No internal monologue, no reasoning shown, no "thinking" text. Just the answer.
+Your output is ONLY the final answer. No internal monologue, no reasoning shown, no "thinking" text. Just the answer.
 """
 
     return llm_config, prompt
@@ -371,11 +371,12 @@ When a tool call fails or returns unexpected results:
 3. If all approaches fail, THEN interrupt or go to final_node with partial results
 4. Never stop at the first error — explore alternatives first
 
-## Termination (**don't summary or answer anything about the user's task**)
-When you output without <tool_calls>, workflow goes to final_node.
+## **Termination**
+when to go to the final node:
 - Solved the problem, OR
 - Tried multiple approaches and confirmed not solvable, OR
 - Hit loop limit
+When you find information is prepared enough or condition is triggered, just output tokens "DONE" as termination response
 
 ## Output Format 
 
@@ -387,11 +388,9 @@ Parallel (independent tools):
 
 Note: Use double braces to output single brace.
 
-Direct output (no tools needed): Plain text only.
+CRITICAL: WHEN IT IS TIME TO TERMINATE, JUST OUTPUT: "DONE".
 
-Do NOT output any thinking/reasoning content in your response.
-
-When it is time to terminate, go to final_node with no summary and specific answer"""
+Do NOT output any thinking/reasoning content in your response."""
 
     return llm_config, prompt
 
@@ -645,6 +644,10 @@ def get_imp_ipt_config():
   [步骤] 拆解的子任务（1、2、3...）
   [要求] 明确成功标准和约束
 输出时【】括号保留，去掉内部标签文字。
+
+优先级5 - 含引用上下文：
+输入包含 <quote>...</quote> 标记。
+处理：<quote>...</quote> 是用户从历史消息中引用的内容（提供上下文锚点），不是用户问题的一部分。优化时去掉 <quote> 标记，只优化用户实际的问题；如果用户问题引用模糊（如"它的标准差呢？"），保留 <quote> 内容作为指代依据不删除。
 
 【禁止事项】
 - 禁止直接回答问题、生成完整方案或代码

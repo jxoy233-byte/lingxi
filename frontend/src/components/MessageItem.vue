@@ -192,11 +192,35 @@
           </div>
         </div>
 
-        <!-- 消息文本（文件消息不显示content） -->
-        <div v-if="message.content && !message.additional_kwargs?.is_file" class="message-text" :class="{ 'collapsed': isUserMessageCollapsed }" v-html="isUserMessageCollapsed ? collapsedContent : renderedContent" @click.capture="handleLinkClick"></div>
-        <button v-if="message.role === 'user' && message.content && isContentCollapsed" class="collapse-toggle" @click="toggleUserContent">
-          {{ isUserMessageCollapsed ? '展开' : '收起' }}
-        </button>
+        <!-- 用户消息：可能包含引用块 + 正文 -->
+        <div v-if="message.role === 'user' && message.content && !message.additional_kwargs?.is_file" class="user-message-body">
+          <div v-if="parsedUserContent.quote" class="user-quote-block">
+            <div class="quote-block-bar"></div>
+            <div class="quote-block-content">
+              <div class="quote-block-label">
+                <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M3 21c3 0 7-1 7-8V5c0-1.25-.756-2.017-2-2H4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2 1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V20c0 1 0 1 1 1z"/>
+                  <path d="M15 21c3 0 7-1 7-8V5c0-1.25-.757-2.017-2-2h-4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2h.75c0 2.25.25 4-2.75 4v3c0 1 0 1 1 1z"/>
+                </svg>
+                <span>引用</span>
+              </div>
+              <div class="quote-block-text" v-html="renderedQuote"></div>
+            </div>
+          </div>
+          <div
+            v-if="renderedUserText"
+            class="message-text"
+            :class="{ 'collapsed': isUserMessageCollapsed }"
+            v-html="isUserMessageCollapsed ? collapsedUserText : renderedUserText"
+            @click.capture="handleLinkClick"
+          ></div>
+          <button v-if="isContentCollapsed" class="collapse-toggle" @click="toggleUserContent">
+            {{ isUserMessageCollapsed ? '展开' : '收起' }}
+          </button>
+        </div>
+
+        <!-- AI 消息文本（文件消息不显示content） -->
+        <div v-else-if="message.content && !message.additional_kwargs?.is_file" class="message-text" :class="{ 'collapsed': isUserMessageCollapsed }" v-html="isUserMessageCollapsed ? collapsedContent : renderedContent" @click.capture="handleLinkClick"></div>
 
         <!-- 操作按钮组：AI 消息下方，hover 显示 -->
         <div v-if="message.role === 'ai'" class="action-buttons">
@@ -238,6 +262,27 @@
         </div>
       </div>
     </div>
+
+    <!-- 文件预览弹窗 -->
+    <FilePreviewModal
+      :visible="previewVisible"
+      :file="previewFile"
+      @close="closePreview"
+    />
+
+    <!-- 浮动引用按钮（用户选中文本后出现） -->
+    <div
+      v-if="quoteButtonVisible"
+      class="quote-floating-btn"
+      :style="{ top: quoteButtonPos.top + 'px', left: quoteButtonPos.left + 'px' }"
+      @mousedown.prevent
+      @click="handleQuoteClick"
+    >
+      <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M9.983 3v7.391c0 5.704-3.731 9.57-8.983 10.609l-.995-2.151c2.432-.917 3.995-3.638 3.995-5.849h-4v-10h9.983zm14.017 0v7.391c0 5.704-3.748 9.571-9 10.609l-.996-2.151c2.433-.917 3.996-3.638 3.996-5.849h-3.983v-10h9.983z"/>
+      </svg>
+      <span>引用</span>
+    </div>
   </div>
 </template>
 
@@ -247,6 +292,7 @@ import hljs from 'highlight.js'
 import 'highlight.js/styles/atom-one-dark.css'
 import katex from 'katex'
 import 'katex/dist/katex.min.css'
+import FilePreviewModal from './FilePreviewModal.vue'
 
 // 配置 marked
 const renderer = new marked.Renderer()
@@ -374,7 +420,10 @@ export default {
       default: null
     }
   },
-  emits: ['restore', 'restream', 'open-link', 'preview-file', 'interrupt', 'resume'],
+  emits: ['restore', 'restream', 'open-link', 'preview-file', 'interrupt', 'resume', 'quote'],
+  components: {
+    FilePreviewModal
+  },
   data() {
     return {
       copied: false,
@@ -384,13 +433,28 @@ export default {
       expandedTools: {},
       activeFileIndex: 0,
       isUserMessageCollapsed: false,
-      interruptReasonExpanded: false
+      interruptReasonExpanded: false,
+      // 文件预览弹窗
+      previewVisible: false,
+      previewFile: {},
+      // 引用按钮浮动状态
+      quoteButtonVisible: false,
+      quoteButtonPos: { top: 0, left: 0 }
     }
   },
   mounted() {
     // 暴露方法到 window，供 [[ ]] 语法中的 onclick 调用
     window.handleFileDownload = this.handleFileDownload.bind(this)
     window.previewMdFile = this.previewMdFile.bind(this)
+    window.markdownImageClick = this.handleImagePreview.bind(this)
+    window.handleIframeFullscreen = this.handleIframePreview.bind(this)
+    // 监听全局 mouseup，用于检测 AI 消息内的文本选区
+    document.addEventListener('mouseup', this.handleTextSelection)
+    document.addEventListener('selectionchange', this.handleSelectionChange)
+  },
+  beforeUnmount() {
+    document.removeEventListener('mouseup', this.handleTextSelection)
+    document.removeEventListener('selectionchange', this.handleSelectionChange)
   },
   computed: {
     renderedContent() {
@@ -425,6 +489,34 @@ export default {
         }
       }
       return this.escapeHtml(this.message.content)
+    },
+    // 拆分用户消息：把开头的 <quote>...</quote> 块单独抽出来
+    parsedUserContent() {
+      const content = this.message.content || ''
+      if (this.message.role !== 'user') return { quote: null, text: content }
+      const match = content.match(/^<quote>\n([\s\S]*?)\n<\/quote>\s*\n?([\s\S]*)$/)
+      if (!match) return { quote: null, text: content }
+      return { quote: match[1], text: match[2] }
+    },
+    // 引用块内容（按 markdown 渲染）
+    renderedQuote() {
+      const { quote } = this.parsedUserContent
+      if (!quote) return ''
+      try {
+        let html = marked(this.preprocessContent(quote))
+        html = this.renderLatex(html)
+        return html
+      } catch (error) {
+        console.error('引用块 Markdown 渲染失败:', error)
+        return this.escapeHtml(quote)
+      }
+    },
+    // 用户正文（去除 <quote> 后剩余的部分）
+    renderedUserText() {
+      const { text } = this.parsedUserContent
+      if (!text) return ''
+      // 保留原文以支持换行、空白；转义 HTML 防止注入
+      return this.escapeHtml(text)
     },
     hasThinking() {
       return (this.message.reasoning && this.message.reasoning.length > 0) ||
@@ -467,15 +559,26 @@ export default {
       return files[idx] || null
     },
     isContentCollapsed() {
-      // 用户消息超过8行则折叠
+      // 用户消息超过8行则折叠（按"去掉引用块后的正文"算行数）
       if (this.message.role !== 'user') return false
-      const lines = (this.message.content || '').split('\n').length
+      const text = this.parsedUserContent.text
+      const lines = (text || '').split('\n').length
       return lines > 8
     },
     collapsedContent() {
       if (!this.isContentCollapsed) return this.message.content
       const lines = (this.message.content || '').split('\n')
       return lines.slice(0, 8).join('\n') + '\n...'
+    },
+    // 用户正文（去掉引用块）超过8行时折叠后的内容
+    collapsedUserText() {
+      if (!this.isContentCollapsed) return this.renderedUserText
+      const text = this.parsedUserContent.text
+      const lines = (text || '').split('\n')
+      return this.escapeHtml(lines.slice(0, 8).join('\n') + '\n...')
+    },
+    componentUid() {
+      return this._uid
     }
   },
   watch: {
@@ -595,13 +698,10 @@ export default {
         // 判断是否为 OSS URL
         const isOssUrl = cleanPath.startsWith('http')
 
-        // 图片类型
+        // 图片类型 - 转换为 markdown 图片语法，让渲染器直接处理
         if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp'].includes(ext)) {
           const src = isOssUrl ? cleanPath : `/static/${cleanPath}`
-          return `<div class="file-render-block" data-path="${cleanPath}" data-oss-url="${isOssUrl ? cleanPath : ''}" data-type="image" data-name="${filename}">
-            <img src="${src}" class="markdown-image" onclick="window.markdownImageClick && window.markdownImageClick(this)" />
-            <button class="download-btn" onclick="window.handleFileDownload(event, this)" title="下载"></button>
-          </div>`
+          return `![${filename}](${src})`
         }
 
         // HTML 类型
@@ -609,6 +709,7 @@ export default {
           const src = isOssUrl ? cleanPath : `/static/${cleanPath}`
           return `<div class="file-render-block" data-path="${cleanPath}" data-oss-url="${isOssUrl ? cleanPath : ''}" data-type="html" data-name="${filename}">
             <iframe src="${src}" class="file-render-iframe"></iframe>
+            <button class="fullscreen-btn" onclick="window.handleIframeFullscreen && window.handleIframeFullscreen(this)" title="查看预览"></button>
             <button class="download-btn" onclick="window.handleFileDownload(event, this)" title="下载"></button>
           </div>`
         }
@@ -835,6 +936,499 @@ export default {
       document.body.appendChild(a)
       a.click()
       document.body.removeChild(a)
+    },
+
+    // 图片预览（使用 FilePreviewModal）
+    handleImagePreview(img) {
+      const src = img.src
+      const alt = img.alt || 'image.png'
+      const ext = (alt.split('.').pop() || 'png').toLowerCase()
+      const mimeType = `image/${ext === 'svg' ? 'svg+xml' : ext}`
+
+      this.previewFile = {
+        name: alt,
+        preview_url: src,
+        iframe_url: src,
+        file_type: 'IMAGE',
+        type: mimeType,
+        suffix: '.' + ext,
+        preview_method: 'iframe'
+      }
+      this.previewVisible = true
+    },
+
+    // iframe 预览（使用 FilePreviewModal）
+    handleIframePreview(btn) {
+      event.stopPropagation()
+      const container = btn.closest('.file-render-block')
+      if (!container) return
+
+      const iframe = container.querySelector('iframe')
+      if (!iframe) return
+
+      const src = iframe.src
+      const name = container.dataset.name || 'file.html'
+      const ext = (name.split('.').pop() || 'html').toLowerCase()
+      const mimeType = ext === 'html' || ext === 'htm'
+        ? 'text/html'
+        : (container.dataset.type || 'text/html')
+
+      this.previewFile = {
+        name: name,
+        preview_url: src,
+        iframe_url: src,
+        file_type: 'HTML',
+        type: mimeType,
+        suffix: '.' + ext,
+        preview_method: 'iframe'
+      }
+      this.previewVisible = true
+    },
+
+    // 兼容旧的方法名（避免被其他地方引用时崩溃）
+    handleImageFullscreen(img) {
+      this.handleImagePreview(img)
+    },
+    handleIframeFullscreen(btn) {
+      this.handleIframePreview(btn)
+    },
+
+    // 关闭文件预览弹窗
+    closePreview() {
+      this.previewVisible = false
+      this.previewFile = {}
+    },
+
+    // 全局 selectionchange 监听：选区变化时关闭引用按钮
+    handleSelectionChange() {
+      const selection = window.getSelection()
+      if (!selection || selection.isCollapsed) {
+        // 选区为空（仅为光标）→ 延迟关闭，给点击引用按钮留出时间
+        setTimeout(() => {
+          const s = window.getSelection()
+          if (!s || s.isCollapsed) {
+            this.quoteButtonVisible = false
+          }
+        }, 100)
+      }
+    },
+
+    // 监听 mouseup：判断选区是否在同一块级元素内，是则显示引用按钮
+    handleTextSelection(e) {
+      // 仅 AI 消息支持引用
+      if (this.message.role !== 'ai') return
+
+      // 如果点击的就是引用按钮本身，不重新计算
+      if (e && e.target && e.target.closest && e.target.closest('.quote-floating-btn')) {
+        return
+      }
+
+      const selection = window.getSelection()
+      if (!selection || selection.rangeCount === 0) {
+        this.quoteButtonVisible = false
+        return
+      }
+
+      const range = selection.getRangeAt(0)
+      if (range.collapsed) {
+        this.quoteButtonVisible = false
+        return
+      }
+
+      const selectedText = selection.toString().trim()
+      // 允许图片选区（图片本身没有文本内容）
+      const hasImage = !!this._findImageInSelection(selection)
+      // 只要有非空文本或包含图片，就显示按钮（不限制最小字符数）
+      if (!selectedText && !hasImage) {
+        this.quoteButtonVisible = false
+        return
+      }
+
+      // 必须都在当前 MessageItem 的 .message-text 区域内
+      const startInMessage = this.$el.contains(range.startContainer)
+      const endInMessage = this.$el.contains(range.endContainer)
+      if (!startInMessage || !endInMessage) {
+        this.quoteButtonVisible = false
+        return
+      }
+
+      // 必须在 .message-text 区域或 file-render-block 内
+      const messageText = this.$el.querySelector('.message-text')
+      const fileRenderBlock = this.$el.querySelector('.file-render-block')
+      const inMessageText = messageText && (messageText.contains(range.startContainer) || messageText.contains(range.endContainer))
+      const inFileBlock = fileRenderBlock && (fileRenderBlock.contains(range.startContainer) || fileRenderBlock.contains(range.endContainer))
+      if (!inMessageText && !inFileBlock) {
+        this.quoteButtonVisible = false
+        return
+      }
+
+      // 计算按钮位置（选区上方居中）
+      const rect = range.getBoundingClientRect()
+      this.quoteButtonPos = {
+        top: rect.top + window.scrollY - 38,
+        left: rect.left + window.scrollX + rect.width / 2
+      }
+      this.quoteButtonVisible = true
+    },
+
+    // 点击引用按钮：智能提取引用内容并抛出
+    handleQuoteClick() {
+      const selection = window.getSelection()
+      if (!selection || selection.rangeCount === 0) return
+
+      const range = selection.getRangeAt(0)
+      const selectedText = selection.toString().trim()
+      if (!selectedText) return
+
+      // 智能提取：把选中的 DOM 文本反推为原始 markdown
+      const quoteContent = this._extractQuoteContent(selection, range)
+
+      // 抛出引用事件
+      this.$emit('quote', {
+        content: quoteContent
+      })
+
+      this.quoteButtonVisible = false
+      // 清除选区视觉
+      selection.removeAllRanges()
+    },
+
+    // 向上查找最近的链接 <a> 祖先（支持普通链接、md/data 文件链接）
+    _findLinkAncestor(node) {
+      let cur = node.nodeType === 1 ? node : node.parentElement
+      while (cur && cur !== document.body) {
+        if (cur.tagName === 'A') {
+          // 特殊链接：md-file-link、data-file-link（无 href，靠 class 识别）
+          if (cur.classList && (cur.classList.contains('md-file-link') || cur.classList.contains('data-file-link'))) {
+            return cur
+          }
+          // 普通链接（必须有 href）
+          if (cur.href) {
+            const text = (cur.textContent || '').trim()
+            const href = cur.getAttribute('href') || ''
+            // 排除裸 URL 链接（href 和 textContent 相同）
+            if (text && href && text !== href) return cur
+          }
+        }
+        cur = cur.parentElement
+      }
+      return null
+    },
+
+    // 向上查找最近的 [[ ]] 文件块祖先
+    _findFileBlockAncestor(node) {
+      let cur = node.nodeType === 1 ? node : node.parentElement
+      while (cur && cur !== document.body) {
+        if (cur.classList && cur.classList.contains('file-render-block')) return cur
+        cur = cur.parentElement
+      }
+      return null
+    },
+
+    // 检测选区中是否包含 <img> 元素
+    _findImageInSelection(selection) {
+      if (!selection || selection.rangeCount === 0) return null
+      const range = selection.getRangeAt(0)
+
+      // 1. 选区起点本身是 <img>
+      let cur = range.startContainer
+      if (cur.nodeType === 1 && cur.tagName === 'IMG') return cur
+
+      // 2. 向上查找 <img> 祖先
+      while (cur && cur !== document.body) {
+        if (cur.nodeType === 1 && cur.tagName === 'IMG') return cur
+        cur = cur.parentElement
+      }
+
+      // 3. 选区内容中是否包含 <img.markdown-image>
+      const ancestor = range.commonAncestorContainer
+      if (ancestor.nodeType === 1 && ancestor.querySelectorAll) {
+        const imgs = ancestor.querySelectorAll('img.markdown-image')
+        for (const img of imgs) {
+          if (range.intersectsNode(img)) return img
+        }
+      }
+
+      return null
+    },
+
+    // 智能提取引用内容：把选区反推为原始 markdown
+    // 智能提取引用内容：把选区反推为原始 markdown
+    _extractQuoteContent(selection, range) {
+      const content = this.message.content || ''
+
+      // 0. 图片：选区包含 <img> → 返回 ![alt](src)
+      const imgNode = this._findImageInSelection(selection)
+      if (imgNode) {
+        const src = imgNode.getAttribute('src') || ''
+        const alt = imgNode.getAttribute('alt') || ''
+        if (src) return `![${alt}](${src})`
+      }
+
+      // 1. 选区起点在链接 <a> 内 → 返回完整 [text](url)
+      const linkNode = this._findLinkAncestor(range.startContainer)
+      if (linkNode) {
+        // 特殊链接：MD/data 文件（无 href，靠 data-oss-url 构造）
+        if (linkNode.classList && (linkNode.classList.contains('md-file-link') || linkNode.classList.contains('data-file-link'))) {
+          const ossUrl = linkNode.dataset.ossUrl || linkNode.getAttribute('href') || ''
+          const name = linkNode.dataset.name || (linkNode.textContent || '').trim()
+          if (ossUrl) return `[${name}](${ossUrl})`
+        }
+        // 普通链接
+        const linkText = (linkNode.textContent || '').trim()
+        const href = linkNode.getAttribute('href') || ''
+        if (linkText && href) {
+          // 尝试在原始 markdown 中找这个链接
+          const escaped = linkText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+          const linkRegex = new RegExp(`\\[${escaped}\\]\\([^)]+\\)`)
+          const match = content.match(linkRegex)
+          if (match) return match[0]
+          // 找不到就手动构造
+          return `[${linkText}](${href})`
+        }
+      }
+
+      // 2. 选区起点在 [[ ]] 文件块内 → 返回完整 [[...]]
+      const fileNode = this._findFileBlockAncestor(range.startContainer)
+      if (fileNode) {
+        const ossUrl = fileNode.dataset.ossUrl
+        const path = fileNode.dataset.path
+        if (ossUrl) return `[[${ossUrl}]]`
+        if (path) return `[[${path}]]`
+      }
+
+      // 3. 普通文字：walk DOM 反推为原始 markdown
+      const selectedText = selection.toString().trim()
+      if (selectedText) {
+        return this._domToMarkdown(selection, range)
+      }
+
+      // 4. 选区为空
+      return ''
+    },
+
+    // 把 DOM 选区反推为原始 markdown
+    // 直接遍历真实 DOM（不依赖 cloneContents），用 range.intersectsNode() 判定包含
+    // 避免部分包含 Element 在 cloneContents 下被丢弃属性的问题
+    _domToMarkdown(selection, range) {
+      // 先看选区是否完全在某个格式元素内（如 <strong>bold</strong>）
+      const wrapper = this._detectFormattingWrapper(range)
+      if (wrapper) {
+        const text = selection.toString()
+        if (text) {
+          // 选区完全在格式元素（含 <a>）内 → 直接用包装器
+          return wrapper.open + text + wrapper.close
+        }
+      }
+
+      // 直接遍历选区公共祖先下的真实节点
+      const root = range.commonAncestorContainer.nodeType === 1
+        ? range.commonAncestorContainer
+        : range.commonAncestorContainer.parentElement
+
+      let result = ''
+      for (const child of root.childNodes) {
+        result += this._processRangeNode(child, range)
+      }
+
+      return result.replace(/^\s+|\s+$/g, '')
+    },
+
+    // 处理范围内的单个真实 DOM 节点
+    _processRangeNode(node, range) {
+      // 文本节点：取出落在 range 内的那一段
+      if (node.nodeType === 3) {
+        return this._getRangeText(node, range)
+      }
+
+      // 非元素节点忽略
+      if (node.nodeType !== 1) return ''
+
+      // 不在范围内的元素直接跳过
+      if (!range.intersectsNode(node)) return ''
+
+      const tag = node.tagName.toLowerCase()
+
+      // 递归处理子节点
+      let childrenMd = ''
+      for (const child of node.childNodes) {
+        childrenMd += this._processRangeNode(child, range)
+      }
+
+      // 用统一的规则包装 markdown
+      return this._wrapMarkdownTag(tag, node, childrenMd, range)
+    },
+
+    // 取一个文本节点里落在 range 内的部分
+    _getRangeText(textNode, range) {
+      const text = textNode.textContent
+      if (textNode === range.startContainer && textNode === range.endContainer) {
+        return text.substring(range.startOffset, range.endOffset)
+      }
+      if (textNode === range.startContainer) {
+        return text.substring(range.startOffset)
+      }
+      if (textNode === range.endContainer) {
+        return text.substring(0, range.endOffset)
+      }
+      return text
+    },
+
+    // 把节点 + 子内容包成 markdown
+    _wrapMarkdownTag(tag, node, content, range) {
+      if (tag === 'p') return content + '\n\n'
+      if (tag === 'br') return '\n'
+      if (tag === 'h1') return '# ' + content + '\n\n'
+      if (tag === 'h2') return '## ' + content + '\n\n'
+      if (tag === 'h3') return '### ' + content + '\n\n'
+      if (tag === 'h4') return '#### ' + content + '\n\n'
+      if (tag === 'h5') return '##### ' + content + '\n\n'
+      if (tag === 'h6') return '###### ' + content + '\n\n'
+
+      if (tag === 'strong' || tag === 'b') return '**' + content + '**'
+      if (tag === 'em' || tag === 'i') return '*' + content + '*'
+      if (tag === 'del' || tag === 's' || tag === 'strike') return '~~' + content + '~~'
+
+      if (tag === 'code') {
+        if (node.parentElement && node.parentElement.tagName.toLowerCase() === 'pre') {
+          return content
+        }
+        return '`' + content + '`'
+      }
+      if (tag === 'pre') {
+        const codeEl = node.querySelector('code')
+        const code = codeEl ? (codeEl.textContent || '') : content
+        const langMatch = codeEl ? (codeEl.className.match(/language-(\S+)/) || [])[1] : ''
+        const lang = langMatch || node.getAttribute('data-language') || ''
+        return '```' + lang + '\n' + code.trim() + '\n```\n\n'
+      }
+
+      if (tag === 'a') {
+        const href = node.getAttribute('href') || ''
+        if (node.classList && (node.classList.contains('md-file-link') || node.classList.contains('data-file-link'))) {
+          const ossUrl = node.dataset.ossUrl || href
+          const name = node.dataset.name || content.trim()
+          if (ossUrl) return `[${name}](${ossUrl})`
+        }
+        return '[' + content + '](' + href + ')'
+      }
+
+      if (tag === 'img') {
+        const src = node.getAttribute('src') || ''
+        const alt = node.getAttribute('alt') || ''
+        return `![${alt}](${src})`
+      }
+
+      if (tag === 'blockquote') {
+        return content.trim().split('\n').map(l => '> ' + l).join('\n') + '\n\n'
+      }
+
+      if (tag === 'ul') {
+        const items = Array.from(node.children)
+          .filter(c => c.tagName.toLowerCase() === 'li')
+          .map(li => '- ' + this._processRangeNode(li, range).trim())
+        return items.join('\n') + '\n\n'
+      }
+      if (tag === 'ol') {
+        const items = Array.from(node.children)
+          .filter(c => c.tagName.toLowerCase() === 'li')
+          .map((li, i) => `${i + 1}. ` + this._processRangeNode(li, range).trim())
+        return items.join('\n') + '\n\n'
+      }
+      if (tag === 'li') return content
+      if (tag === 'hr') return '\n---\n\n'
+
+      if (tag === 'div' && node.classList && node.classList.contains('file-render-block')) {
+        const ossUrl = node.dataset.ossUrl
+        const path = node.dataset.path
+        if (ossUrl) return `[[${ossUrl}]]`
+        if (path) return `[[${path}]]`
+      }
+
+      // 默认：直接返回子内容（无包装）
+      return content
+    },
+
+    // 检测选区是否完全在某个格式元素内
+    // 返回 { kind, open, close, node } 用于包装
+    _detectFormattingWrapper(range) {
+      // 起点和终点必须在同一个格式元素内（且不是同祖先的更外层元素）
+      const startContainer = range.startContainer
+      const endContainer = range.endContainer
+
+      // 共同的最近格式祖先
+      const findCommonFormatAncestor = (a, b) => {
+        const ancestorsA = []
+        let cur = a.nodeType === 1 ? a : a.parentElement
+        while (cur && cur !== document.body) {
+          ancestorsA.push(cur)
+          cur = cur.parentElement
+        }
+        cur = b.nodeType === 1 ? b : b.parentElement
+        while (cur && cur !== document.body) {
+          if (ancestorsA.includes(cur)) {
+            // 看 cur 是不是格式元素
+            const tag = cur.tagName.toLowerCase()
+            if (tag === 'strong' || tag === 'b') return { tag: 'strong', node: cur }
+            if (tag === 'em' || tag === 'i') return { tag: 'em', node: cur }
+            if (tag === 'code') return { tag: 'code', node: cur }
+            if (tag === 'del' || tag === 's' || tag === 'strike') return { tag: 'del', node: cur }
+            if (tag === 'a') return { tag: 'a', node: cur }
+            // 找到共同祖先但不是格式元素，继续
+            return null
+          }
+          cur = cur.parentElement
+        }
+        return null
+      }
+
+      const common = findCommonFormatAncestor(startContainer, endContainer)
+      if (!common) return null
+
+      // 检查选区是否完全在这个格式元素内
+      // 即选区起点和终点都在这个元素内，且选区不超出这个元素
+      const formatNode = common.node
+      if (!formatNode.contains(startContainer) || !formatNode.contains(endContainer)) {
+        return null
+      }
+
+      // 必须覆盖整个元素的内容（否则是部分选择，部分选择不应该包裹标记）
+      // 简化：检查选区文本是否等于 formatNode 的 textContent
+      // 但这样太严格了。改成：检查选区是否覆盖了 formatNode 的全部内容
+      // 实际上对于 "bold" 选择，我们只检查 selection.toString() == formatNode.textContent
+      // 但有空白差异，所以用 trim 比较
+      const fullText = formatNode.textContent
+      const selectedText = range.toString()
+      if (selectedText.trim() !== fullText.trim()) {
+        return null  // 部分选择，不包裹
+      }
+
+      const tag = common.tag
+      if (tag === 'strong') return { kind: 'bold', open: '**', close: '**', node: formatNode }
+      if (tag === 'em') return { kind: 'italic', open: '*', close: '*', node: formatNode }
+      if (tag === 'code') {
+        // 判断行内还是块级
+        if (formatNode.parentElement && formatNode.parentElement.tagName.toLowerCase() === 'pre') {
+          // 代码块：返回带语言标识的 ``` ``` 块
+          const pre = formatNode.parentElement
+          const langMatch = formatNode.className.match(/language-(\S+)/)
+          const lang = langMatch ? langMatch[1] : ''
+          return { kind: 'codeblock', open: '```' + lang + '\n', close: '\n```', node: pre }
+        }
+        return { kind: 'code', open: '`', close: '`', node: formatNode }
+      }
+      if (tag === 'del') return { kind: 'strike', open: '~~', close: '~~', node: formatNode }
+      if (tag === 'a') {
+        const href = formatNode.getAttribute('href') || ''
+        // 特殊链接
+        if (formatNode.classList && (formatNode.classList.contains('md-file-link') || formatNode.classList.contains('data-file-link'))) {
+          const ossUrl = formatNode.dataset.ossUrl || href
+          return { kind: 'link', open: `[${formatNode.dataset.name || formatNode.textContent}](`, close: ossUrl + ')', node: formatNode }
+        }
+        return { kind: 'link', open: '[' + formatNode.textContent + '](', close: href + ')', node: formatNode }
+      }
+
+      return null
     },
 
     previewMdFile(linkEl) {
@@ -1811,6 +2405,89 @@ export default {
   transition: opacity 0.15s ease;
 }
 
+/* 用户消息中含 <quote> 块时的样式 — 与 MessageInput 引用块保持一致 */
+.user-message-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.user-quote-block {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.user-quote-block .quote-block-bar {
+  flex-shrink: 0;
+  width: 3px;
+  background: var(--button-bg);
+}
+
+.user-quote-block .quote-block-content {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.user-quote-block .quote-block-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--button-bg);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.user-quote-block .quote-block-text {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  word-wrap: break-word;
+  word-break: break-word;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+/* 引用块内 markdown 渲染的元素样式 — 与 .message-text 一致 */
+.user-quote-block .quote-block-text :deep(p) {
+  margin: 0 0 6px 0;
+}
+.user-quote-block .quote-block-text :deep(p:last-child) {
+  margin-bottom: 0;
+}
+.user-quote-block .quote-block-text :deep(a) {
+  color: var(--button-bg);
+  text-decoration: none;
+}
+.user-quote-block .quote-block-text :deep(a:hover) {
+  text-decoration: underline;
+}
+.user-quote-block .quote-block-text :deep(code) {
+  background: var(--code-inline-bg);
+  color: var(--code-inline-color);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+}
+.user-quote-block .quote-block-text :deep(strong) {
+  font-weight: 600;
+}
+.user-quote-block .quote-block-text :deep(em) {
+  font-style: italic;
+}
+
+
 .user-message-copy > * {
   pointer-events: auto;
 }
@@ -2444,5 +3121,75 @@ export default {
 
 .file-render-block .download-btn:hover {
   background: rgba(0, 0, 0, 0.7);
+}
+
+/* 全屏按钮 */
+.file-render-block .fullscreen-btn {
+  position: absolute;
+  top: 8px;
+  right: 44px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.5);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 3H5a2 2 0 0 0-2 2v3'/%3E%3Cpath d='M21 8V5a2 2 0 0 0-2-2h-3'/%3E%3Cpath d='M3 16v3a2 2 0 0 0 2 2h3'/%3E%3Cpath d='M16 21h3a2 2 0 0 0 2-2v-3'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 14px 14px;
+  border: none;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.2s;
+  z-index: 10;
+}
+
+.file-render-block:hover .fullscreen-btn {
+  opacity: 1;
+}
+
+.file-render-block .fullscreen-btn:hover {
+  background: rgba(0, 0, 0, 0.7);
+}
+
+/* 浮动引用按钮 */
+.quote-floating-btn {
+  position: absolute;
+  z-index: 1000;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 6px;
+  border: 1px solid var(--border-color);
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+  user-select: none;
+  transition: background 0.15s, border-color 0.15s, color 0.15s, transform 0.1s;
+}
+
+.quote-floating-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--button-bg);
+  color: var(--button-bg);
+  transform: translateX(-50%) translateY(-1px);
+}
+
+.quote-floating-btn:active {
+  transform: translateX(-50%) translateY(0);
+}
+
+.quote-floating-btn svg {
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+.quote-floating-btn:hover svg {
+  opacity: 1;
 }
 </style>

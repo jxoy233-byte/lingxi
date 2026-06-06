@@ -11,12 +11,12 @@
     "transport": "streamable_http"
   },
   "redis": {
-    "checkpointer_url": "redis://:123456@localhost:6379/0",
-    "state_saver_url": "redis://:123456@localhost:6379/1"
+    "checkpointer_url": "redis://:123456@localhost:6024/0",
+    "state_saver_url": "redis://:123456@localhost:6024/1"
   },
   "llm_providers": {
     "openai": {
-      "model_name": "MiniMax-M2.7",
+      "model_name": "MiniMax-M3",
       "api_key": "sk-cp-j-kWKqmK5y-IxAkxVrsCBxkzBZSIJwZ2mhWV27ZemhidtqvFnROMSRCKwuNdc46NGuYFqn_XOoHLwyzYvd7qSUAy4INeCglPxk4flDduJCio8d1W1UVQRKw",
       "base_url": "https://api.minimax.chat/v1"
     },

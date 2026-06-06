@@ -47,12 +47,14 @@
           @preview-file="previewFile"
           @interrupt="handleInterrupt"
           @resume="handleResume"
+          @quote="handleQuote"
         />
 
         <MessageInput
           ref="messageInput"
           :is-loading="isLoading"
           :session-id="currentSessionId"
+          v-model:quote="currentQuote"
           @send="sendMessage"
           @files-selected-need-session="handleFilesSelectedNeedSession"
         />
@@ -122,7 +124,7 @@
 
     <ConfirmDialog
       :visible="showDeleteConfirm"
-      title="ChatMe 显示"
+      title="灵析——数据分析智能助手"
       message="确定要删除这个对话吗？"
       confirm-text="确定"
       cancel-text="取消"
@@ -218,7 +220,8 @@ export default {
       sidebarMobileOpen: false,
       interruptReason: '',  // 中断原因
       showResumeInput: false,  // 显示续接输入框
-      resumeInputText: ''  // 续接输入文本
+      resumeInputText: '',  // 续接输入文本
+      currentQuote: null  // 当前引用内容：{ content: string }
     }
   },
   mounted() {
@@ -533,6 +536,12 @@ export default {
     openWebPreview(url) {
       this.webPreviewUrl = url
       this.showWebPreview = true
+    },
+    // 处理引用事件：把用户从历史消息选中的内容存到 currentQuote
+    handleQuote(quoteData) {
+      if (quoteData && quoteData.content) {
+        this.currentQuote = { content: quoteData.content }
+      }
     },
     previewFile(file) {
       console.log('[previewFile] 收到文件:', file)
@@ -957,6 +966,8 @@ export default {
 
       this.currentSessionId = null
       this.messages = []
+      // 清理引用状态
+      this.currentQuote = null
       // 清理中断状态
       this.isInterrupted = false
       this.isInterruptedSessionId = null
@@ -1001,6 +1012,8 @@ export default {
       this.cleanupLoadingState()
       // 清理输入框和文件
       this.$refs.messageInput?.clearInput()
+      // 清理引用状态
+      this.currentQuote = null
 
       try {
         const response = await fetch(`/chat/${sessionId}/conversation`)

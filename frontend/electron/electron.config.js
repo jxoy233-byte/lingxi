@@ -10,8 +10,8 @@ const { viteServerConfig, viteBuildConfig } = viteConfig
 export default {
   // 应用基本信息
   app: {
-    name: 'ChatMe',
-    title: 'ChatMe - AI 助手',
+    name: '灵析',
+    title: '灵析——数据分析智能助手',
     identifier: 'com.chatme.app',
     version: '1.0.0'
   },
@@ -42,7 +42,7 @@ export default {
   paths: {
     indexHtml: path.join(__dirname, '../index.html'),
     preload: path.join(__dirname, 'preload.js'),
-    icon: path.join(__dirname, 'public/icon.png')
+    icon: path.join(__dirname, 'public/favicon.ico')
   },
 
   // 安全策略配置

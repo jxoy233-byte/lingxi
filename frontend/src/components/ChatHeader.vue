@@ -12,7 +12,7 @@
           <line x1="3" y1="18" x2="21" y2="18"/>
         </svg>
       </button>
-      <h1>ChatMe</h1>
+      <h1>灵析</h1>
     </div>
     <div class="header-actions">
       <button

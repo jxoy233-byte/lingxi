@@ -20,9 +20,11 @@ import os
 import platform
 import re
 import sys
+import signal
 
 from ChatMe.LoggingManager.logging_config import get_logger
 from ChatMe.ChatMeConfig import get_redis_checkpointer_url
+from ChatMe.ChatWorkflow.mcps.CodeSandboxPool import SandboxPool
 
 server = FastMCP(name="ChatMe Agent Core Skills")
 
@@ -30,6 +32,61 @@ logger = get_logger("mcp_server")
 
 redis_url = get_redis_checkpointer_url()
 _redis_client = redis.from_url(redis_url)
+
+# 沙盒容器池
+_sandbox_pool = None
+
+def _cleanup_existing_containers():
+    """清理残留的沙盒容器（不删除 redis）"""
+    try:
+        # 获取所有 chatme 相关的容器
+        result = subprocess.run(
+            ["docker", "ps", "-a", "-q", "--filter", "name=chatme"],
+            capture_output=True, text=True
+        )
+        all_containers = [cid for cid in result.stdout.strip().split("\n") if cid]
+
+        # 获取 redis 容器 ID
+        result = subprocess.run(
+            ["docker", "ps", "-a", "-q", "--filter", "name=chatme-redis"],
+            capture_output=True, text=True
+        )
+        redis_containers = [cid for cid in result.stdout.strip().split("\n") if cid]
+
+        # 排除 redis 容器
+        container_ids = [cid for cid in all_containers if cid not in redis_containers]
+
+        for cid in container_ids:
+            subprocess.run(["docker", "rm", "-f", cid], capture_output=True)
+        if container_ids:
+            logger.info(f"已清理残留沙盒容器")
+    except Exception as e:
+        logger.warning(f"清理残留容器失败: {e}")
+
+def _ensure_redis_running():
+    """确保 redis 运行（使用 docker-compose）"""
+    try:
+        # 切换到项目根目录执行 docker-compose
+        project_root = Path(__file__).parent.parent.parent.parent
+        subprocess.run(
+            ["docker-compose", "up", "-d", "redis"],
+            cwd=str(project_root),
+            capture_output=True
+        )
+        logger.info("Redis 服务已就绪")
+    except Exception as e:
+        logger.warning(f"Redis 启动检查失败: {e}")
+
+def _init_sandbox_pool():
+    """初始化沙盒容器池"""
+    global _sandbox_pool
+    try:
+        from ChatMe.ChatWorkflow.mcps.CodeSandboxPool import SandboxPool
+        _sandbox_pool = SandboxPool(size=2)
+        logger.info("沙盒容器池初始化成功")
+    except Exception as e:
+        logger.warning(f"沙盒容器池初始化失败: {e}，将使用本地虚拟环境")
+        _sandbox_pool = None
 
 def is_dangerous_command(command: Annotated[ str, "系统执行命令"]) -> tuple[bool, str]:
     """
@@ -136,96 +193,96 @@ def is_dangerous_command(command: Annotated[ str, "系统执行命令"]) -> tupl
 
     return False, ""
 
-@server.tool
-def execute_code(code: str, language: Literal["python", "nodejs", "javascript", "js"] = "python", session_id: str="") -> Optional[str]:
-    """在沙盒中执行代码"""
+def _execute_code_in_local(code: str, language: str) -> str:
+    """本地虚拟环境执行"""
+    project_root = Path.cwd()
+    skills_dir = project_root / "skills"
+
+    venv_candidates = [
+        project_root / ".venv",
+        project_root / "venv",
+        project_root.parent / ".venv",
+        project_root.parent / "venv",
+    ]
+
+    venv_python = None
+    for venv in venv_candidates:
+        if (venv / "bin" / "python").exists():
+            venv_python = str(venv / "bin" / "python")
+            break
+        elif (venv / "Scripts" / "python.exe").exists():
+            venv_python = str(venv / "Scripts" / "python.exe")
+            break
+
+    if not venv_python:
+        venv_python = sys.executable
+
+    env = os.environ.copy()
+    current_path = env.get('PATH', '')
+    venv_bin = str(Path(venv_python).parent)
+    if not current_path.startswith(venv_bin):
+        env['PATH'] = f"{venv_bin}:{current_path}"
+
+    backend_dir = str(project_root)
+    current_pythonpath = env.get('PYTHONPATH', '')
+    if backend_dir not in current_pythonpath:
+        env['PYTHONPATH'] = f"{backend_dir}{os.pathsep}{current_pythonpath}" if current_pythonpath else backend_dir
+
+    suffix = ".py" if language == "python" else ".js"
+
+    with tempfile.NamedTemporaryFile(mode='w', suffix=suffix, delete=False, dir=skills_dir) as f:
+        f.write(code)
+        temp_file = f.name
+
     try:
-        # 向上查找项目根目录
-        project_root = Path.cwd()  # backend 目录
-        skills_dir = project_root / "skills"
-
-        # 查找虚拟环境
-        venv_candidates = [
-            project_root / ".venv",
-            project_root / "venv",
-            project_root.parent / ".venv",
-            project_root.parent / "venv",
-        ]
-
-        venv_python = None
-        for venv in venv_candidates:
-            if (venv / "bin" / "python").exists():
-                venv_python = str(venv / "bin" / "python")
-                break
-            elif (venv / "Scripts" / "python.exe").exists():
-                venv_python = str(venv / "Scripts" / "python.exe")
-                break
-
-        if not venv_python:
-            venv_python = sys.executable  # fallback
-
-        env = os.environ.copy()
-        current_path = env.get('PATH', '')
-
-        # 确保虚拟环境路径在最前面
-        venv_bin = str(Path(venv_python).parent)
-        if not current_path.startswith(venv_bin):
-            env['PATH'] = f"{venv_bin}:{current_path}"
-
-        # 添加 backend 目录到 PYTHONPATH，使 ChatMe 包可以正确导入
-        backend_dir = str(project_root)
-        current_pythonpath = env.get('PYTHONPATH', '')
-        if backend_dir not in current_pythonpath:
-            env['PYTHONPATH'] = f"{backend_dir}{os.pathsep}{current_pythonpath}" if current_pythonpath else backend_dir
-
         if language == "python":
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False,dir=skills_dir) as f:
-                f.write(code)
-                temp_file = f.name
+            result = subprocess.run(
+                [venv_python, temp_file],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+        else:
+            node_cmd = which("node")
+            if not node_cmd:
+                return "Error: Node.js 未找到"
+            result = subprocess.run(
+                [node_cmd, temp_file],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
 
-            try:
-                result = subprocess.run(
-                    [venv_python, temp_file],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                    env=env,
-                )
+        return f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n\nReturn code: {result.returncode}"
+    finally:
+        os.unlink(temp_file)
 
-                output = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n\nReturn code: {result.returncode}"
-                logger.info(f"会话{session_id}中执行代码成功")
-                return  output
-            finally:
-                os.unlink(temp_file)
 
-        elif language in ["nodejs", "javascript", "js"]:
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.js', delete=False, dir=skills_dir) as f:
-                f.write(code)
-                temp_file = f.name
+@server.tool
+def execute_code(code: str, language: Literal["python", "nodejs", "javascript", "js"] = "python", use_sandbox: bool = True, session_id: str = "") -> Optional[str]:
+    """
+    在沙盒中执行代码
 
-            try:
-                node_cmd = which("node")
-                if not node_cmd:
-                    logger.error(f"会话{session_id}中错误: Node.js 未找到")
-                    return "Error: Node.js 未找到"
+    Args:
+        code: 要执行的代码
+        language: 语言类型
+        use_sandbox: 是否使用沙盒环境（默认 True）
+        session_id: 会话 ID
+    """
+    # 如果明确不使用沙盒，或者沙盒池未初始化，使用本地执行
+    if not use_sandbox or _sandbox_pool is None:
+        logger.debug(f"会话{session_id}使用本地虚拟环境执行代码")
+        return _execute_code_in_local(code, language)
 
-                result = subprocess.run(
-                    [node_cmd, temp_file],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                    env=env,
-                )
-
-                output = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n\nReturn code: {result.returncode}"
-                logger.info(f"会话{session_id}中执行代码成功")
-                return output
-            finally:
-                os.unlink(temp_file)
-
+    # 使用沙盒容器池执行
+    try:
+        logger.debug(f"会话{session_id}使用沙盒容器池执行代码")
+        return _sandbox_pool.execute(code, language)
     except Exception as e:
-        logger.error(f"会话{session_id}中错误执行代码")
-        return f"Error: {str(e)} "
+        logger.warning(f"会话{session_id}沙盒执行失败，回退到本地: {e}")
+        return _execute_code_in_local(code, language)
 
 
 @server.tool
@@ -306,7 +363,7 @@ def interrupt(message: str, session_id: str = ""):
               "reason": message,
           })
 
-          logger.info(f"会话 {session_id} 触发中断: {message}")
+          logger.debug(f"会话 {session_id} 触发中断: {message}")
           return f"已触发中断，等待用户输入: {message}"
       except Exception as e:
           logger.error(f"会话 {session_id} 中断操作失败")
@@ -330,10 +387,45 @@ def get_current_datetime(session_id: str = "") -> str:
         "weekday_en": ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][now.weekday()]
     }
 
-    logger.info(f"会话{session_id}中获取当前时间成功")
+    logger.debug(f"会话{session_id}中获取当前时间成功")
     return json.dumps(result, ensure_ascii=False)
 
+def _stop_redis():
+    """停止 redis 容器（使用 docker-compose）"""
+    try:
+        project_root = Path(__file__).parent.parent.parent.parent
+        subprocess.run(
+            ["docker-compose", "stop", "redis"],
+            cwd=str(project_root),
+            capture_output=True
+        )
+        logger.info("Redis 服务已停止")
+    except Exception as e:
+        logger.warning(f"Redis 停止失败: {e}")
+
+def _signal_handler(signum, frame):
+    """捕获 Ctrl+C 信号，清理容器后退出"""
+    print("\n收到中断信号，正在关闭沙盒容器...")
+    if _sandbox_pool:
+        _sandbox_pool.shutdown()
+    _stop_redis()
+    sys.exit(0)
+
 def main():
+    # 注册信号处理
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+
+    # 1. 清理残留沙盒容器
+    _cleanup_existing_containers()
+
+    # 2. 确保 redis 运行
+    _ensure_redis_running()
+
+    # 3. 初始化沙盒池
+    _init_sandbox_pool()
+
+    # 4. 启动 MCP 服务
     server.run(host="127.0.0.1", port=18080, transport="streamable-http", path="/streamable")
 
 if __name__ == "__main__":

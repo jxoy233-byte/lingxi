@@ -34,9 +34,9 @@ class ChatDataAnalysisFormat:
 
     @property
     def generation(self) -> str:
-        """获取当前 generation，懒加载初始化"""
+        """获取当前 generation，懒加载（首次访问时获取或创建 gen_001，不自增计数器）"""
         if self._generation is None:
-            self._generation = self.new_generation()
+            self._generation = self._get_or_create_first_generation()
         return self._generation
 
     @generation.setter
@@ -52,7 +52,7 @@ class ChatDataAnalysisFormat:
         """获取输出根目录"""
         if self._base_dir is None:
             backend_dir = Path.cwd() / "cached"
-            self._base_dir = os.path.join(backend_dir, self.session_id, "data_analysis_output")
+            self._base_dir = os.path.join(backend_dir, self.session_id, "data_analysis")
         return self._base_dir
 
     @property
@@ -88,6 +88,43 @@ class ChatDataAnalysisFormat:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
         return f"gen_{gen:03d}"
+
+    def _get_or_create_first_generation(self) -> str:
+        """
+        获取当前 session 已有的最新 generation，
+        如果完全不存在任何 generation记录，则创建 gen_001。
+        此方法不会自增计数器。
+        """
+        os.makedirs(self.base_dir, exist_ok=True)
+
+        with open(self.meta_path, "a+") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                f.seek(0)
+                content = f.read()
+                if content:
+                    meta = json.loads(content)
+                    gen = meta.get("generation", 0)
+                    if gen > 0:
+                        return f"gen_{gen:03d}"
+                    # generation 为 0 或无效，初始化为 gen_001
+                    gen = 1
+                else:
+                    gen = 1
+
+                f.seek(0)
+                f.truncate()
+                json.dump({"generation": gen}, f)
+                return f"gen_{gen:03d}"
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+    def get_current_generation(self) -> str:
+        """
+        获取当前 generation（如果还没有则创建 gen_001）。
+        不自增计数器，不会创建新的 generation目录。
+        """
+        return self.generation
 
     def get_current_generation_dir(self) -> str:
         return os.path.join(self.base_dir, self.generation)
@@ -168,11 +205,11 @@ class ChatDataAnalysisFormat:
                 return None
 
             # 解析 path 提取 generation
-            # path 格式: cached/{session_id}/data_analysis_output/{generation}/charts/xxx.png
+            # path 格式: cached/{session_id}/data_analysis/{generation}/charts/xxx.png
             parts = Path(path).parts
             generation = "unknown"
-            if "data_analysis_output" in parts:
-                idx = parts.index("data_analysis_output")
+            if "data_analysis" in parts:
+                idx = parts.index("data_analysis")
                 if idx + 1 < len(parts):
                     generation = parts[idx + 1]
 
@@ -198,6 +235,112 @@ class ChatDataAnalysisFormat:
             self.logger.warning(f"上传文件到 OSS 失败: {path}, 错误: {e}")
             return None
 
+    def save_script(self, code: str, filename: str = None) -> str:
+        """
+        保存分析脚本到 scripts/ 目录
+
+        Args:
+            code: Python 代码
+            filename: 文件名，默认用时间戳生成
+        """
+        import time
+        scripts_dir = Path(self._base_dir) / self._generation / "scripts"
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+
+        if filename is None:
+            filename = f"script_{int(time.time())}.py"
+
+        script_path = scripts_dir / filename
+        with open(script_path, "w", encoding="utf-8") as f:
+            f.write(code)
+
+        self.logger.debug(f"脚本已保存: {script_path}")
+        return str(script_path)
+
+    # --------------------------------------------------------
+    # Mermaid 语法校验与保存
+    # --------------------------------------------------------
+
+    @staticmethod
+    def validate_mermaid(code: str) -> tuple[bool, str]:
+        """
+        校验 mermaid 语法，返回 (是否合法, 错误信息)
+
+        Args:
+            code: mermaid 语法字符串
+
+        Returns:
+            (是否合法, 错误信息)
+        """
+        import re
+
+        if not code or not code.strip():
+            return False, "Mermaid 代码为空"
+
+        # 去除代码块包裹符号
+        code = code.strip()
+        code = re.sub(r'^```(?:mermaid)?\s*', '', code, flags=re.IGNORECASE)
+        code = re.sub(r'\s*```$', '', code)
+
+        # 检查图类型声明
+        graph_types = [
+            'graph', 'flowchart', 'flowchart-v2',
+            'stateDiagram', 'stateDiagram-v2',
+            'erDiagram', 'sequenceDiagram', 'classDiagram', 'pie',
+            'gantt', 'gitGraph', 'requirementDiagram'
+        ]
+        has_graph_type = any(
+            f"{gt} " in code or f"{gt}\n" in code
+            for gt in graph_types
+        )
+        if not has_graph_type:
+            return False, "缺少图类型声明（如 graph, flowchart, erDiagram...）"
+
+        # erDiagram 的 { } 是实体属性定义语法，不需要校验括号配对
+        # 其他图类型的 { } 才需要校验
+        is_erdiagram = any(f"{gt} " in code or f"{gt}\n" in code for gt in ['erDiagram'])
+        bracket_pairs = [('{', '}'), ('[', ']'), ('(', ')')] if not is_erdiagram else [('[', ']'), ('(', ')')]
+        for open_, close in bracket_pairs:
+            if code.count(open_) != code.count(close):
+                return False, f"{open_}{close} 括号不匹配"
+
+        # 检查节点ID重复定义（简单校验）
+        nodes = re.findall(r'\b([A-Za-z0-9_]+)\[', code)
+        if len(nodes) != len(set(nodes)):
+            return False, "节点ID重复定义"
+
+        return True, "语法合格"
+
+    def save_mermaid(self, code: str, filename: str) -> str:
+        """
+        保存 mermaid 语法文件到 charts/ 目录
+
+        Args:
+            code: mermaid 语法字符串
+            filename: 文件名（应含 .mmd 后缀）
+
+        Returns:
+            保存后的文件绝对路径
+
+        Raises:
+            ValueError: 语法校验失败时抛出
+        """
+        ok, msg = self.validate_mermaid(code)
+        if not ok:
+            raise ValueError(f"Mermaid 语法错误: {msg}")
+
+        charts_dir = Path(self.get_current_generation_dir()) / "charts"
+        charts_dir.mkdir(parents=True, exist_ok=True)
+
+        # 确保文件名含 .mmd 后缀
+        if not filename.endswith('.mmd'):
+            filename += '.mmd'
+
+        mermaid_path = charts_dir / filename
+        mermaid_path.write_text(code, encoding="utf-8")
+        self.logger.debug(f"Mermaid 文件已保存: {mermaid_path}")
+        return str(mermaid_path)
+
     # --------------------------------------------------------
     # 全局配置汇总
     # --------------------------------------------------------
@@ -205,6 +348,9 @@ class ChatDataAnalysisFormat:
     def get_config(self) -> dict:
         """
         获取完整的配置字典
+
+        注意：此方法复用当前已有的 generation（如果还没有则自动创建 gen_001）。
+        不会自增计数器，AI 在同一次分析中多次调用不会创建新目录。
 
         Returns:
             包含所有路径和默认配置的字典

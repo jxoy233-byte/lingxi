@@ -72,7 +72,6 @@ class ChatWorkflow:
 
     async def init_memory_manager(self):
         llm_memory_config, llm_memory_prompt = get_llm_memory_config()
-
         self.memory_manager = MemoryManager(llm_config=llm_memory_config, memory_prompt=llm_memory_prompt)
 
     async def init_llms(self):
@@ -271,9 +270,7 @@ class ChatWorkflow:
 
         if tool_calls:
             ai_message.tool_calls = tool_calls
-            # 清理 content 中的工具调用标记（非贪心匹配）
-            clean_content = re.sub(r'<tool_calls>.*?</tool_calls>', '', content).strip()
-            ai_message.content = clean_content if clean_content else ""
+            ai_message.content = content
 
         ai_message.additional_kwargs = {"type": AIMessageType.REASONING.value}
         return ai_message
@@ -288,7 +285,9 @@ class ChatWorkflow:
         if not history_messages:
             return input_msg
 
-        files_cached_message = SystemMessage(content=f"文件缓存路径：{self.files_cached_dir}")
+        # 缓存目录是 agent_node 用来定位代码/数据的内部信息，
+        # final_node 只需要看到引用语法，无需看到绝对路径（避免模型复述）
+        files_cached_message = SystemMessage(content="文件缓存根目录：cached/（绝对路径对用户无意义，不要复述）")
         input_msg.append(files_cached_message)
 
         # 排除当前轮的非文件用户输入 HumanMessage（位于 messages 末尾）

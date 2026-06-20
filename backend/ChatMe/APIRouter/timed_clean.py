@@ -18,7 +18,7 @@ import asyncio
 import os
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -87,7 +87,7 @@ def clean_logs(days: int = 2) -> tuple[int, float]:
 
     removed = 0
     freed_size = 0
-    today = datetime.now().date()
+    today = datetime.now().astimezone().date()
     cutoff = today - timedelta(days=days)
 
     for file in log_dir.iterdir():
@@ -104,6 +104,42 @@ def clean_logs(days: int = 2) -> tuple[int, float]:
             freed_size += size
 
     return removed, freed_size
+
+
+async def clean_orphaned_sessions() -> tuple[int, list[str]]:
+    """
+    清理 cached 目录下已无对应会话记录的 session 目录。
+    直接扫描 Redis 中的 checkpoint key，提取所有 session_id，
+    删除 cached/{session_id} 目录中不在活跃列表中的目录。
+    """
+    import redis
+    import shutil
+    from ChatMe.ChatMeConfig import get_redis_checkpointer_url
+
+    cache_dir = get_cache_dir()
+    if not cache_dir.exists():
+        return 0, []
+
+    redis_url = get_redis_checkpointer_url()
+    r = redis.from_url(redis_url)
+
+    # 从 Redis 中扫描所有 checkpoint 相关的 key，提取 session_id
+    # key 格式: checkpoint:{thread_id}:{ns}:{id}
+    active_ids: set[str] = set()
+    for key in r.scan_iter(match="checkpoint:*", count=1000):
+        parts = key.decode().split(":")
+        if len(parts) >= 2:
+            active_ids.add(parts[1])
+
+    # 排除非 session 目录（如 data_analysis）
+    excluded_dirs = {"data_analysis"}
+    removed_names = []
+    for sid_dir in cache_dir.iterdir():
+        if sid_dir.is_dir() and sid_dir.name not in active_ids and sid_dir.name not in excluded_dirs:
+            shutil.rmtree(sid_dir)
+            removed_names.append(sid_dir.name)
+
+    return len(removed_names), removed_names
 
 
 # ============================================================
@@ -128,7 +164,13 @@ async def _cleanup_task():
             f"释放 {log_freed / 1024 / 1024:.2f} MB"
         )
 
-    if cache_removed == 0 and log_removed == 0:
+    orphaned_removed, orphaned_names = await clean_orphaned_sessions()
+    if orphaned_removed > 0:
+        logger.info(f"孤立会话清理完成: 删除 {orphaned_removed} 个目录 {orphaned_names}")
+    else:
+        logger.debug("无孤立会话目录需要清理")
+
+    if cache_removed == 0 and log_removed == 0 and orphaned_removed == 0:
         logger.debug("无文件需要清理")
 
 
@@ -201,10 +243,14 @@ async def get_cleanup_status():
     cache_count = sum(1 for f in cache_dir.iterdir() if f.is_file()) if cache_dir.exists() else 0
     log_count = sum(1 for f in log_dir.iterdir() if f.is_file() and f.suffix == ".log") if log_dir.exists() else 0
 
+    # 统计 session 目录数量
+    session_count = sum(1 for d in cache_dir.iterdir() if d.is_dir()) if cache_dir.exists() else 0
+
     return {
         "cache_dir": str(cache_dir),
         "cache_files": cache_count,
         "log_dir": str(log_dir),
         "log_files": log_count,
+        "cached_session_dirs": session_count,
         "scheduler_running": _scheduler is not None and _scheduler.running,
     }

@@ -53,6 +53,24 @@
           <pre>{{ file.content }}</pre>
         </div>
 
+        <!-- Mermaid 图表预览：原文 / 渲染切换 -->
+        <div v-else-if="file.preview_method === 'mermaid'" class="mermaid-preview">
+          <div class="mermaid-tabs">
+            <button
+              :class="['tab-btn', { active: mermaidTab === 'raw' }]"
+              @click="mermaidTab = 'raw'"
+            >原文</button>
+            <button
+              :class="['tab-btn', { active: mermaidTab === 'rendered' }]"
+              @click="mermaidTab = 'rendered'"
+            >渲染效果</button>
+          </div>
+          <div v-if="mermaidTab === 'raw'" class="preview-text">
+            <pre>{{ file.raw_content }}</pre>
+          </div>
+          <div v-else class="mermaid-rendered" v-html="file.rendered_svg"></div>
+        </div>
+
         <!-- 不支持预览的文件 -->
         <div v-else class="preview-placeholder">
           <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -64,11 +82,10 @@
         </div>
       </div>
 
-      <div v-if="file.preview_method === 'download' || file.preview_method === 'iframe_office'" class="modal-footer">
+      <div v-if="canDownload" class="modal-footer">
         <a
-          v-if="file.preview_url"
-          :href="file.preview_url"
-          :download="file.name"
+          href="javascript:void(0)"
+          @click.stop="downloadFile"
           class="download-button"
         >
           <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -97,6 +114,16 @@ export default {
     }
   },
   emits: ['close'],
+  data() {
+    return {
+      mermaidTab: 'rendered' // 'raw' | 'rendered'
+    }
+  },
+  watch: {
+    visible(val) {
+      if (val) this.mermaidTab = 'rendered'
+    }
+  },
   methods: {
     close() {
       this.$emit('close')
@@ -138,6 +165,70 @@ export default {
       if (upperMimeType === 'application/json') return 'JSON 文件'
 
       return fileType || '文件'
+    },
+
+    // 点击下载：和渲染走不同的 URL
+    //  - http(s)：后端 /static/ 接口需 ?download=true 才会返回 attachment 头
+    //  - data:  ：浏览器对超长 data URL 的 download 兼容性差，转成 blob
+    //  - 其他   ：原样打开
+    downloadFile() {
+      const url = this.file && this.file.preview_url
+      if (!url) return
+      const name = this.file.name || 'download'
+
+      if (url.startsWith('http://') || url.startsWith('https://')) {
+        // 本地静态资源走 /static/... → 加 ?download=true；OSS 已是签名 URL，加参数会失效，但 OSS 服务器默认支持下载
+        const sep = url.includes('?') ? '&' : '?'
+        const downloadUrl = url.includes('/static/') ? `${url}${sep}download=true` : url
+        const a = document.createElement('a')
+        a.href = downloadUrl
+        a.download = name
+        a.target = '_blank'
+        a.rel = 'noopener noreferrer'
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        return
+      }
+
+      if (url.startsWith('data:')) {
+        try {
+          const [meta, b64] = url.split(',')
+          const mimeMatch = meta.match(/data:([^;]+)/)
+          const mime = mimeMatch ? mimeMatch[1] : 'application/octet-stream'
+          const bin = atob(b64)
+          const len = bin.length
+          const buf = new Uint8Array(len)
+          for (let i = 0; i < len; i++) buf[i] = bin.charCodeAt(i)
+          const blob = new Blob([buf], { type: mime })
+          const blobUrl = URL.createObjectURL(blob)
+          const a = document.createElement('a')
+          a.href = blobUrl
+          a.download = name
+          document.body.appendChild(a)
+          a.click()
+          document.body.removeChild(a)
+          // 异步释放，浏览器需要时间读取 blob
+          setTimeout(() => URL.revokeObjectURL(blobUrl), 1000)
+          return
+        } catch (e) {
+          console.warn('data URL 下载失败:', e)
+        }
+      }
+
+      // 兜底：原样打开
+      window.open(url, '_blank')
+    }
+  },
+  computed: {
+    // 是否显示下载按钮：覆盖所有有 preview_url 的文件类型（含图片）
+    canDownload() {
+      if (!this.file) return false
+      const method = this.file.preview_method
+      if (method === 'download' || method === 'iframe_office') return !!this.file.preview_url
+      if (method === 'mermaid') return !!this.file.preview_url
+      if (this.isImageFile(this.file)) return !!this.file.preview_url
+      return false
     }
   }
 }
@@ -354,5 +445,59 @@ export default {
 .preview-placeholder p {
   margin: 0;
   font-size: 16px;
+}
+
+/* Mermaid 图表预览 */
+.mermaid-preview {
+  width: 100%;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.mermaid-tabs {
+  display: flex;
+  gap: 4px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-color);
+  margin-bottom: 12px;
+  flex-shrink: 0;
+}
+
+.tab-btn {
+  padding: 6px 16px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.2s;
+}
+
+.tab-btn:hover {
+  background: var(--bg-hover);
+}
+
+.tab-btn.active {
+  background: var(--button-bg);
+  color: white;
+  border-color: var(--button-bg);
+}
+
+.mermaid-rendered {
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 8px 0;
+}
+
+.mermaid-rendered svg {
+  max-width: 100%;
+  height: auto;
+  cursor: grab;
 }
 </style>

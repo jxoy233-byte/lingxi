@@ -1,14 +1,48 @@
 import os
+import json
+import re
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import SystemMessage, AIMessage
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 
 from ChatMe.LoggingManager.logging_config import get_logger
 from ChatMe.ChatWorkflow.config.models import MemoryUpdateFormat
 
+async def _filter_thinking_content(ai_response: AIMessage) -> AIMessage:
+    """
+    过滤掉 AI 回复中的思考过程内容
+    支持格式:
+    - <thinking>...</thinking>
+    - <thought>...</thought>
+    - 等等
+    """
+    content = ai_response.content
+    if not content:
+        return ai_response
+
+    # 过滤标签内的思考内容（通用格式）
+    patterns = [
+        r'<thinking>.*?</thinking>',
+        r'<thought>.*?</thought>',
+        r'<reasoning>.*?</reasoning>',
+        r'<think>.*?</think>',
+    ]
+
+    if isinstance(content, str):
+        for pattern in patterns:
+            content = re.sub(pattern, '', content, flags=re.DOTALL)
+
+    return AIMessage(
+        content=content,
+        additional_kwargs=ai_response.additional_kwargs,
+        response_metadata=ai_response.response_metadata,
+        id=ai_response.id,
+        usage_metadata=getattr(ai_response, "usage_metadata", None)
+    )
 
 class MemoryManager:
     """
@@ -171,6 +205,9 @@ class MemoryManager:
         try:
             # 调用 LLM 生成更新后的记忆
             response = await self.llm.ainvoke(prompt)
+
+            response = await _filter_thinking_content(response)
+
             new_memory = response.content.strip()
 
             # 检查是否有实际更新

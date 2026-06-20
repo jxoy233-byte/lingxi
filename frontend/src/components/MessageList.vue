@@ -223,6 +223,22 @@ export default {
       container.addEventListener('scroll', this.handleScroll, { passive: true })
       container.addEventListener('wheel', this.handleUserScroll, { passive: true })
       container.addEventListener('touchstart', this.handleUserScroll, { passive: true })
+
+      // 监听容器尺寸变化（图片/异步内容加载会让容器变高），
+      // 如果用户没有主动滚，就直接跟到新底部，避免卡在"图片还没加载时算出的旧底部"。
+      this.resizeObserver = new ResizeObserver(() => {
+        if (this.userInterrupted) return
+        const c = this.$refs.messagesContainer
+        if (!c) return
+        // 取消正在进行的平滑动画，直接跳到新底部
+        if (this.rafId) {
+          cancelAnimationFrame(this.rafId)
+          this.rafId = null
+        }
+        this.isAutoScrolling = false
+        c.scrollTop = c.scrollHeight
+      })
+      this.resizeObserver.observe(container)
     }
   },
   beforeUnmount() {
@@ -233,6 +249,10 @@ export default {
       container.removeEventListener('touchstart', this.handleUserScroll)
     }
     if (this.rafId) cancelAnimationFrame(this.rafId)
+    if (this.resizeObserver) {
+      this.resizeObserver.disconnect()
+      this.resizeObserver = null
+    }
   }
 }
 </script>

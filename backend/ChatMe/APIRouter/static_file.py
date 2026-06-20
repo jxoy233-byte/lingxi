@@ -9,7 +9,7 @@
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Body
 from fastapi.responses import FileResponse
 
 from ChatMe.LoggingManager.logging_config import get_logger
@@ -22,6 +22,37 @@ CACHED_DIR = BACKEND_DIR / "cached"
 
 
 static_file_router = APIRouter(prefix="/static", tags=["静态文件"])
+
+
+@static_file_router.put("/cached/{file_path:path}", summary="写入文件内容")
+async def write_cached_file(
+    file_path: str,
+    content: str = Body(..., description="文件内容")
+):
+    """
+    写入文件内容到 cached 目录
+
+    Args:
+        file_path: 相对于 cached/ 的路径
+        content: 文件内容
+    """
+    safe_path = _get_safe_path(file_path)
+
+    if safe_path is None:
+        raise HTTPException(status_code=403, detail="禁止访问该路径")
+
+    # 确保父目录存在
+    safe_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # 写入内容
+    try:
+        safe_path.write_text(content, encoding="utf-8")
+    except Exception as e:
+        logger.error(f"写入文件失败: {safe_path}, error: {e}")
+        raise HTTPException(status_code=500, detail=f"写入文件失败: {e}")
+
+    logger.info(f"文件写入成功: {safe_path}")
+    return {"message": "文件保存成功", "path": file_path}
 
 
 def _get_safe_path(path: str) -> Optional[Path]:

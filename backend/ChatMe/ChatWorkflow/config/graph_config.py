@@ -2,23 +2,46 @@ from dotenv import load_dotenv
 import os
 
 try:
-    from ChatMe.ChatMeConfig import get_llm_config, get_app_config
-
+    from ChatMe.ChatMeConfig import (
+        get_active_llm_config,
+        get_backup_llm_config,
+        get_app_config,
+    )
     _use_config_loader = True
 except ImportError:
     _use_config_loader = False
 
 
-def _get_llm_config_primary(provider: str):
-    """从 ChatMeConfig 获取配置，获取不到时返回 None"""
+def _resolve_llm_config():
+    """
+    解析当前可用的 LLM 配置：
+    1) ChatMeConfig 主用 provider（llm_providers 第一个有效项）
+    2) 主用不可用 → 备用 provider（第二个有效项）
+    3) 全部不可用 → OPENAI_* 环境变量
+
+    返回 dict：{model_name, api_key, base_url, source}
+    """
     if _use_config_loader:
         try:
-            config = get_llm_config(provider)
-            if config.get("api_key"):
-                return config
+            active = get_active_llm_config()
+            if active and active.get("model_name"):
+                active["source"] = "primary"
+                return active
+
+            backup = get_backup_llm_config()
+            if backup and backup.get("model_name"):
+                backup["source"] = "backup"
+                return backup
         except Exception:
             pass
-    return None
+
+    # 最后兜底：环境变量
+    return {
+        "model_name": os.getenv("OPENAI_MODEL_NAME"),
+        "api_key":    os.getenv("OPENAI_API_KEY"),
+        "base_url":   os.getenv("OPENAI_BASE_URL"),
+        "source":     "env",
+    }
 
 
 def get_graph_final_node_config():
@@ -30,23 +53,16 @@ def get_graph_final_node_config():
     """
     load_dotenv()
 
-    # 优先从 ChatMeConfig 获取，失败则用环境变量
-    config_primary = _get_llm_config_primary("openai")
-
-    if config_primary and config_primary.get("model_name"):
-        model_name = config_primary.get("model_name")
-        api_key = config_primary.get("api_key")
-        base_url = config_primary.get("base_url")
-    else:
-        model_name = os.getenv("OPENAI_MODEL_NAME")
-        api_key = os.getenv("OPENAI_API_KEY")
-        base_url = os.getenv("OPENAI_BASE_URL")
+    active = _resolve_llm_config()
+    model_name = active.get("model_name")
+    api_key = active.get("api_key")
+    base_url = active.get("base_url")
 
     temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.9"))
     max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "8192"))
     top_p = float(os.getenv("OPENAI_TOP_P", "1.0"))
-    frequency_penalty = float(os.getenv("OPENAI_FREQUENCY_PENALTY", "0.0"))
-    presence_penalty = float(os.getenv("OPENAI_PRESENCE_PENALTY", "0.0"))
+    timeout = 30
+    max_retries = 3
 
     # 大模型配置：
     llm_config = {
@@ -56,9 +72,8 @@ def get_graph_final_node_config():
         "temperature": temperature,
         "max_tokens": max_tokens,
         "top_p": top_p,
-        "frequency_penalty": frequency_penalty,
-        "presence_penalty": presence_penalty,
-        "timeout": 300,  # 5分钟超时，处理图片可能需要更长时间
+        "timeout": timeout,
+        "max_retries": max_retries,
     }
 
     # Final Node prompt
@@ -69,10 +84,10 @@ Answer the user's most recent message based on the information provided (preferr
 
 **Input**: Most recent human message + tool execution results or context from agent_node
 
-**Your job**:
-1. Identify what the user is asking
-2. Use the provided information to answer that specific question
-3. Do not add unrelated information or deviate from the question
+**How to handle different cases**:
+- Tool results available → Answer based on results
+- Tool failed / confirmed not solvable → Present partial results honestly, explain what was tried
+- No tool calls (agent solved from common knowledge) → Answer directly from your own knowledge
 
 **Do not**:
 - Repeat or rephrase the user's question
@@ -143,27 +158,19 @@ Inline: [Python](https://python.org) is popular. Not at bottom.
 Forbidden: data:image/...;base64,...
 
 ### Data Analysis Results Rendering
-When tool execution results contain generated files, use the following syntax:
+When a tool result references a generated file, embed it in the reply '[[<exact path or URL>]]'. Copy the path or URL from the tool output works for both local paths and full URLs
 
-**Local files** (files under cached/ directory):
+Render files with '[[]]' —— custom MD rendering syntax:
 ```
-[[cached/'session_id'/data_analysis_output/gen_xxx/charts/xxx.png]]
-[[cached/'session_id'/data_analysis_output/gen_xxx/charts/xxx.html]]
-[[cached/'session_id'/data_analysis_output/gen_xxx/reports/xxx.md]]
+[[cached/'session_id'/data_analysis_output/gen_xxx/charts/xxx.png]] ->**Path format**: cached/'session_id'/data_analysis_output/gen_xxx/...
+[[cached/.../charts/xxx.html]]
+[[cached/.../charts/xxx.mmd]]
+[[cached/.../reports/xxx.md]]
+[[https://chatmebucket.oss-cn-beijing.aliyuncs.com/chatme/.../xxx.png]]
+[[https://.../chatme/.../xxx.html]]
+[[https://.../chatme/.../xxx.mmd]]
+[[https://.../chatme/.../xxx.md]]
 ```
-
-**OSS files** (full URLs):
-```
-![chart](https://bucket.endpoint/xxx.png)
-<iframe src="https://bucket.endpoint/xxx.html" width="100%" height="500"></iframe>
-```
-
-**Path format**: cached/'session_id'/data_analysis_output/gen_xxx/...
-
-**Notes**:
-- Local images/HTML use [[ ]] syntax — frontend auto-converts
-- OSS files use standard markdown/HTML syntax
-- MD reports can use iframe or [[ ]] syntax for frontend processing
 
 ## Anti-Patterns
 - Opening with "Based on..." / "According to..." / "The data shows..."
@@ -233,22 +240,16 @@ def get_agent_node_config():
     """
     load_dotenv()
 
-    config_primary = _get_llm_config_primary("openai")
-
-    if config_primary and config_primary.get("model_name"):
-        model_name = config_primary.get("model_name")
-        api_key = config_primary.get("api_key")
-        base_url = config_primary.get("base_url")
-    else:
-        model_name = os.getenv("OPENAI_MODEL_NAME")
-        api_key = os.getenv("OPENAI_API_KEY")
-        base_url = os.getenv("OPENAI_BASE_URL")
+    active = _resolve_llm_config()
+    model_name = active.get("model_name")
+    api_key = active.get("api_key")
+    base_url = active.get("base_url")
 
     temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.2"))
     max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "8192"))
     top_p = float(os.getenv("OPENAI_TOP_P", "1.0"))
-    frequency_penalty = float(os.getenv("OPENAI_FREQUENCY_PENALTY", "0.0"))
-    presence_penalty = float(os.getenv("OPENAI_PRESENCE_PENALTY", "0.0"))
+    timeout = 30
+    max_retries = 3
 
     llm_config = {
         "model": model_name,
@@ -257,8 +258,8 @@ def get_agent_node_config():
         "temperature": temperature,
         "max_tokens": max_tokens,
         "top_p": top_p,
-        "frequency_penalty": frequency_penalty,
-        "presence_penalty": presence_penalty
+        "timeout": timeout,
+        "max_retries": max_retries,
     }
 
     # Agent Node prompt
@@ -279,7 +280,7 @@ When you stop outputting <tool_calls>, workflow moves to final_node.
 1. Understand before acting — Don't call tools blindly
 2. Simple first — Use one tool if possible, not three
 3. Progress check — If a call doesn't bring you closer, you're looping
-4. Explore when uncertain — Use ls/cat to understand the environment
+4. Explore when uncertain — Explore with ls/cat only when uncertain but don't explore for the sake of it
 5. Switch strategy on failure — Don't repeat failed approaches
 
 ## Tool
@@ -288,15 +289,27 @@ When you stop outputting <tool_calls>, workflow moves to final_node.
 Use when: User asks to stop, sensitive/dangerous operations, cannot proceed without confirmation.
 Parameters: message (required, string) <- interrupted reason
 
-### execute_command — Environment & File Operations
-Use when: Exploring skills (ls skills/), reading files (cat skills/skills.md), system tools (grep, sed, ⚠️curl(KEY RULE: Unless there is no useful skills, you mustn't use 'curl'))
-Parameters: command (required, string)
+### execute_command — Environment Exploring & File Operations
+**Allowed Commands**:
+| Scenario | Commands |
+|----------|----------|
+| Browse directories | `ls`, `cd`, `pwd`, `which` |
+| Read files | `cat`, `head`, `tail`, `grep`, `wc` |
+| File operations | `cp`, `mv`, `mkdir`, `rm`, `find` |
+| Network probe | `curl` (only as last resort when no suitable skills available) |
 
-### execute_code — Code Execution & Skill Usage & Data Analysis
+Note: On other OS, commands may differ — adjust accordingly.
+⚠️ Scripts must use `execute_code`, not `execute_command`
+
+### execute_code — Code Execution & Skill Usage & Data Analysis & other codes required scenes
 Use when: Writing or running code to solve problems, invoke skills, process data, or perform actions that require code execution.
-Parameters: code (required, string), language (default: "python")
+Parameters: code (required, string), language (default: "python"), use_sandbox(default, False)
 
-Important: Always include print() or logging statements in your code to report execution progress and results. The output is visible to subsequent nodes — without it, subsequent nodes receive empty results.
+Important:
+- Always remember to print final key results you need to pass to the next step.
+- Default use_sandbox=False (local venv, has full host access for cached dir and skills dir). Set use_sandbox=True only when the code is unsafe to run locally.
+- Don't add comments in your codes
+- If you want to write some scripts files, you must write in 'cached/' dir
 
 ### get_current_datetime — Time Reference
 Use when: Task involves "today", "tomorrow", "this week".
@@ -305,27 +318,33 @@ Parameters: none
 
 ## Decision Flow
 Task arrives → Is there a skill for this?
-  YES → **First**: cat skills/ (check if skills.md exists)
+
+**YES** examples (→ go to skills.md first):
+- "analyze this sales data" / "look at this CSV" → DataAnalysis skill
+- "generate a chart" / "visualize this" / "draw a plot" → DataAnalysis skill
+- "ER diagram" / "flowchart" / "mermaid" / "structure diagram" → DataAnalysis skill
+- "search for latest price" / "search XXX" → Tavily/Exa skill
+- "parse this image" / "what's in this screenshot" → ImageParser skill
+
+UNCERTAIN → ls skills/ to explore
+  YES → **First**: cat skills/... (check if skills.md exists)
     - If skills.md exists → **Read it FIRST** for overview of all skills
     - Then find the relevant skill file and read it
     - Don't read individual skill files without reading skills.md first if it exists
-  UNCERTAIN → ls skills/ to explore → check skills.md
   NO → Need environment/file info?
     YES → execute_command (ls/cat/grep)
     NO → Pure computation?
       YES → execute_code
-      NO → interrupt (need human)
+      NO → interrupt (need human) or termination
 
 ## Parallel Calls
-Independent tools can be called together:
+Independent tools can be called together(no more than 3 calls):
 <tool_calls>[{{"name": "execute_command", "args": {{"command": "ls skills/"}}}}, {{"name": "get_current_datetime", "args": {{}}}}]</tool_calls>
 Dependency: Tool B needs Tool A's result → sequential. Independent → parallel.
 
 ## Project Structure
 skills/ — Skill library (check here first)
-cached/ — Cache (only when input doesn't provide file info)
-
-Info already provided = don't re-fetch.
+cached/ — Cached files operation dir
 
 ## Time-Based Tasks
 "today", "tomorrow", "this week" → Must call get_current_datetime FIRST.
@@ -337,7 +356,7 @@ Wrong: assume dates → proceed without confirmation
 Good (skill found):
 execute_command("ls skills/") → Found Sum skill
 execute_command("cat skills/skills.md") → Read Sum MD File
-execute_command("cat skills/Exa.py") 
+execute_command("cat skills/Exa.py")
 execute_code("python","from Exa import ..."))
 
 Good (environment exploration):
@@ -348,12 +367,29 @@ execute_command("cat skills/ImageParser.py") → ready to process images
 execute_code("python", "From ImageParser import ...") → Done
 
 Good (data analysis):
-execute_command("ls skills/") → Check skills overview
-execute_command("cat skills/DataAnalysis.md")  → Read spec first to get 'DA' format
+---
+*execute when user inputs data analysis files*:
 execute_command("ls cached/")
-execute_command("ls cached/... ")
-... -> Prepare the targeted files for the coming data analysis
-execute_code("python", "from ChatMe.ChatDataAnalysis.format import ChatDataAnalysisFormat ...")  → Relying on the existed format, to standardize the 'DA' code
+execute_command("ls cached/'input_file_name'/... ") → ensure files exist and prepare data dirs for the coming data analysis
+---
+*if based on the last data analysis*:
+execute_code(python, "...with open(xx.py)as f:code = f.read()")
+---
+*core*:
+execute_command("ls skills/") → Check skills overview
+execute_command("cat skills/DataAnalysis.md")  → Read spec first to know about how to input file dirs, output results and so on
+execute_code("python", "from ChatMe.ChatDataAnalysis.format import ChatDataAnalysisFormat;import pandas as pd,
+numpy as np; ...")  →
+- libs available in local venv: pandas, numpy, matplotlib...
+- generate + analyze + save (charts/data/reports/scripts) to 'OUTPUT_DIR'/ in one pass when possible
+
+*complex tasks (multi-step / multi-file / ML / large data)*:
+execute_code(...) → split into multiple calls, each building on previous
+- read prior output to decide next step (don't blindly retry)
+---
+final:
+execute_code("python", "from ... import ChatDataAnalysisFormat,...,da.save_script(...)")
+
 
 ## Failure Handling
 | Failure | Action |
@@ -368,25 +404,27 @@ execute_code("python", "from ChatMe.ChatDataAnalysis.format import ChatDataAnaly
 When a tool call fails or returns unexpected results:
 1. Try alternative parameters
 2. Try a different tool that achieves the same goal
-3. If all approaches fail, THEN interrupt or go to final_node with partial results
+3. If all approaches fail, interrupt or go to final_node with partial results
 4. Never stop at the first error — explore alternatives first
 
 ## **Termination**
 when to go to the final node:
+- Can solve directly from common knowledge (no tools needed) OR,
 - Solved the problem, OR
 - Tried multiple approaches and confirmed not solvable, OR
 - Hit loop limit
-When you find information is prepared enough or condition is triggered, just output tokens "DONE" as termination response
+When you find information is prepared enough or these conditions is triggered, just output tokens "DONE" as termination response
 
-## Output Format 
+## Output Format
 
-Tool call:
+**Tool call format**:
 <tool_calls>[{{"name": "tool_name", "args": {{"param": "value"}}}}]</tool_calls>
 
 Parallel (independent tools):
 <tool_calls>[{{"name": "execute_command", "args": {{"command": "ls skills/"}}}}, {{"name": "get_current_datetime", "args": {{}}}}]</tool_calls>
 
-Note: Use double braces to output single brace.
+Note: Double braces {{}} are escape sequences — AI should output single braces instead
+---
 
 CRITICAL: WHEN IT IS TIME TO TERMINATE, JUST OUTPUT: "DONE".
 
@@ -404,22 +442,16 @@ def get_history_summary_node_config():
     """
     load_dotenv()
 
-    config_primary = _get_llm_config_primary("deepseek")
-
-    if config_primary and config_primary.get("model_name"):
-        model_name = config_primary.get("model_name")
-        api_key = config_primary.get("api_key")
-        base_url = config_primary.get("base_url")
-    else:
-        model_name = os.getenv("DEEPSEEK_MODEL_NAME")
-        api_key = os.getenv("DEEPSEEK_API_KEY")
-        base_url = os.getenv("DEEPSEEK_BASE_URL")
+    active = _resolve_llm_config()
+    model_name = active.get("model_name")
+    api_key = active.get("api_key")
+    base_url = active.get("base_url")
 
     temperature = float(os.getenv("DEEPSEEK_TEMPERATURE", "0.5"))
     max_tokens = int(os.getenv("DEEPSEEK_MAX_TOKENS", "8192"))
     top_p = float(os.getenv("DEEPSEEK_TOP_P", "1.0"))
-    frequency_penalty = float(os.getenv("DEEPSEEK_FREQUENCY_PENALTY", "0.0"))
-    presence_penalty = float(os.getenv("DEEPSEEK_PRESENCE_PENALTY", "0.0"))
+    timeout = 30
+    max_retries = 3
 
     llm_config = {
         "model": model_name,
@@ -428,8 +460,8 @@ def get_history_summary_node_config():
         "temperature": temperature,
         "max_tokens": max_tokens,
         "top_p": top_p,
-        "frequency_penalty": frequency_penalty,
-        "presence_penalty": presence_penalty
+        "timeout": timeout,
+        "max_retries": max_retries,
     }
 
     # system_prompt 配置
@@ -585,22 +617,16 @@ def get_imp_ipt_config():
     """
     load_dotenv()
 
-    config_primary = _get_llm_config_primary("deepseek")
-
-    if config_primary and config_primary.get("model_name"):
-        model_name = config_primary.get("model_name")
-        api_key = config_primary.get("api_key")
-        base_url = config_primary.get("base_url")
-    else:
-        model_name = os.getenv("DEEPSEEK_MODEL_NAME")
-        api_key = os.getenv("DEEPSEEK_API_KEY")
-        base_url = os.getenv("DEEPSEEK_BASE_URL")
+    active = _resolve_llm_config()
+    model_name = active.get("model_name")
+    api_key = active.get("api_key")
+    base_url = active.get("base_url")
 
     temperature = float(os.getenv("DEEPSEEK_TEMPERATURE", "0.5"))
     max_tokens = int(os.getenv("DEEPSEEK_MAX_TOKENS", "8192"))
     top_p = float(os.getenv("DEEPSEEK_TOP_P", "1.0"))
-    frequency_penalty = float(os.getenv("DEEPSEEK_FREQUENCY_PENALTY", "0.0"))
-    presence_penalty = float(os.getenv("DEEPSEEK_PRESENCE_PENALTY", "0.0"))
+    timeout = 30
+    max_retries = 3
 
     imp_ipt_llm_config = {
         "model": model_name,
@@ -609,8 +635,8 @@ def get_imp_ipt_config():
         "temperature": temperature,
         "max_tokens": max_tokens,
         "top_p": top_p,
-        "frequency_penalty": frequency_penalty,
-        "presence_penalty": presence_penalty
+        "timeout": timeout,
+        "max_retries": max_retries,
     }
 
     imp_ipt_llm_prompt = """
@@ -676,22 +702,16 @@ def get_llm_memory_config():
     """
     load_dotenv()
 
-    config_primary = _get_llm_config_primary("deepseek")
-
-    if config_primary and config_primary.get("model_name"):
-        model_name = config_primary.get("model_name")
-        api_key = config_primary.get("api_key")
-        base_url = config_primary.get("base_url")
-    else:
-        model_name = os.getenv("DEEPSEEK_MODEL_NAME")
-        api_key = os.getenv("DEEPSEEK_API_KEY")
-        base_url = os.getenv("DEEPSEEK_BASE_URL")
+    active = _resolve_llm_config()
+    model_name = active.get("model_name")
+    api_key = active.get("api_key")
+    base_url = active.get("base_url")
 
     temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.15"))
     max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "8192"))
     top_p = float(os.getenv("OPENAI_TOP_P", "1.0"))
-    frequency_penalty = float(os.getenv("OPENAI_FREQUENCY_PENALTY", "0.0"))
-    presence_penalty = float(os.getenv("OPENAI_PRESENCE_PENALTY", "0.0"))
+    timeout = 30
+    max_retries = 3
 
     llm_config = {
         "model": model_name,
@@ -700,8 +720,8 @@ def get_llm_memory_config():
         "temperature": temperature,
         "max_tokens": max_tokens,
         "top_p": top_p,
-        "frequency_penalty": frequency_penalty,
-        "presence_penalty": presence_penalty
+        "timeout": timeout,
+        "max_retries": max_retries,
     }
 
     prompt = """你是记忆管理助手。请根据新对话更新记忆文件。
@@ -774,8 +794,8 @@ def get_model_vl_config():
     temperature = float(os.getenv("VL_TEMPERATURE", "0.5"))
     max_tokens = int(os.getenv("VL_MAX_TOKENS", "8192"))
     top_p = float(os.getenv("VL_TOP_P", "1.0"))
-    frequency_penalty = float(os.getenv("VL_FREQUENCY_PENALTY", "0.0"))
-    presence_penalty = float(os.getenv("VL_PRESENCE_PENALTY", "0.0"))
+    timeout = 30
+    max_retries = 3
 
     llm_config = {
         "model": model_name,
@@ -784,9 +804,9 @@ def get_model_vl_config():
         "temperature": temperature,
         "max_tokens": max_tokens,
         "top_p": top_p,
-        "frequency_penalty": frequency_penalty,
-        "presence_penalty": presence_penalty,
         "local": local,
+        "timeout": timeout,
+        "max_retries": max_retries,
     }
 
     prompt = """你是文件解析助手。根据输入的图片进行解析，输出对应格式的结果。

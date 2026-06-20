@@ -5,7 +5,14 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import uvicorn
 
-from ChatMe.ChatMeConfig import config, ensure_global_config
+from ChatMe.ChatMeConfig import (
+    config,
+    ensure_global_config,
+    get_active_llm_config,
+    get_backup_llm_config,
+    get_llm_providers_chain,
+    self_check_llm,
+)
 from ChatMe.APIRouter.main import ChatMe_app, chat_service_lifespan
 from ChatMe.APIRouter.model_vl import model_vl_app
 from ChatMe.APIRouter.static_file import static_file_router
@@ -18,7 +25,7 @@ version = app_config.get("version", "v1.0.0")
 app_name = app_config.get("name", "ChatMe")
 app_description = app_config.get("description", "")
 app_host = app_config.get("host", "127.0.0.1")
-app_port = app_config.get("port", 8111)
+app_port = app_config.get("port", 8211)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -48,6 +55,43 @@ app.add_middleware(
 )
 
 logger.info(f"\n{'='*60}\n  {app_name} {version} 启动 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n{'='*60}")
+
+# ========== LLM 端到端自检（核心依赖，必须通过）==========
+try:
+    check = self_check_llm(timeout=10)
+    p, b, active = check["primary"], check["backup"], check["active"]
+
+    if not p and not b:
+        raise RuntimeError(
+            "llm_providers 中没有任何可用的 LLM 配置，请检查 config.json"
+        )
+
+    if p:
+        tag = "✅ 主用 LLM 自检通过" if p["ok"] else "❌ 主用 LLM 自检失败"
+        logger.info(f"{tag}: {p['name']} | {p['msg']}")
+
+    if b:
+        tag = "🔁 备用 LLM 自检通过" if b["ok"] else "❌ 备用 LLM 自检失败"
+        logger.info(f"{tag}: {b['name']} | {b['msg']}")
+
+    if not active:
+        raise RuntimeError(
+            "主用与备用 LLM 端到端自检均失败：\n"
+            f"  - 主用 {p['name'] if p else '?'}: {p['msg'] if p else '未配置'}\n"
+            f"  - 备用 {b['name'] if b else '?'}: {b['msg'] if b else '未配置'}\n"
+            "请检查 config.json 中的 llm_providers 或网络连通性"
+        )
+
+    if active == (p and p["name"]):
+        logger.info(f"🚀 当前生效: 主用 LLM ({active})")
+    else:
+        logger.warning(f"⚠️  主用不可用，已降级到备用 LLM ({active})")
+except RuntimeError:
+    raise
+except Exception as e:
+    # 自检过程本身崩了（导入失败、代码异常等）也视为核心依赖不可用
+    raise RuntimeError(f"LLM 自检过程异常: {e}") from e
+# =================================================
 
 app.include_router(ChatMe_app)
 app.include_router(cleanup_router)

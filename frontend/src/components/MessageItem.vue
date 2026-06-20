@@ -162,11 +162,11 @@
                 {{ message.toolCalls.length }} 个工具调用
               </span>
             </div>
-            <svg class="thinking-chevron" :class="{ rotated: !thinkingCollapsed }" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <svg class="thinking-chevron" :class="{ rotated: !effectiveThinkingCollapsed }" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <polyline points="9 18 15 12 9 6"/>
             </svg>
           </div>
-          <div class="thinking-body" v-show="!thinkingCollapsed">
+          <div class="thinking-body" v-show="!effectiveThinkingCollapsed">
             <!-- 中断原因显示 -->
             <div v-if="isInterrupted && isLatestAiMessage && (isInterruptedSessionId === currentSessionId || isInterruptedSessionId === pendingInterruptSessionId) && interruptReasonExpanded" class="interrupt-reason-inline">
               <span class="interrupt-reason-text">{{ displayInterruptReason }}</span>
@@ -210,17 +210,18 @@
           <div
             v-if="renderedUserText"
             class="message-text"
-            :class="{ 'collapsed': isUserMessageCollapsed }"
-            v-html="isUserMessageCollapsed ? collapsedUserText : renderedUserText"
+            :class="{ 'collapsed': effectiveUserCollapsed }"
+            v-html="effectiveUserCollapsed ? collapsedUserText : renderedUserText"
             @click.capture="handleLinkClick"
+            @click="handleMarkdownImageClick"
           ></div>
           <button v-if="isContentCollapsed" class="collapse-toggle" @click="toggleUserContent">
-            {{ isUserMessageCollapsed ? '展开' : '收起' }}
+            {{ isUserMessageCollapsed ? '收起' : '展开' }}
           </button>
         </div>
 
         <!-- AI 消息文本（文件消息不显示content） -->
-        <div v-else-if="message.content && !message.additional_kwargs?.is_file" class="message-text" :class="{ 'collapsed': isUserMessageCollapsed }" v-html="isUserMessageCollapsed ? collapsedContent : renderedContent" @click.capture="handleLinkClick"></div>
+        <div v-else-if="message.content && !message.additional_kwargs?.is_file" class="message-text" :class="{ 'collapsed': isUserMessageCollapsed }" v-html="isUserMessageCollapsed ? collapsedContent : renderedContent" @click.capture="handleLinkClick" @click="handleMarkdownImageClick"></div>
 
         <!-- 操作按钮组：AI 消息下方，hover 显示 -->
         <div v-if="message.role === 'ai'" class="action-buttons">
@@ -292,7 +293,34 @@ import hljs from 'highlight.js'
 import 'highlight.js/styles/atom-one-dark.css'
 import katex from 'katex'
 import 'katex/dist/katex.min.css'
+import mermaid from 'mermaid'
 import FilePreviewModal from './FilePreviewModal.vue'
+
+// 初始化 mermaid（可拖拽交互）
+mermaid.initialize({
+  startOnLoad: false,
+  theme: 'default',
+  flowchart: { htmlLabels: true, curve: 'basis', useMaxWidth: false },
+  securityLevel: 'loose',
+})
+
+// 文本/代码类扩展名：双中括号 [[...]] 和 markdown 链接走「纯文本预览」分支
+// 不含 .md/.markdown（走 Markdown 渲染）、不含 .html/.htm（走 iframe）
+// 不含图片/pdf/office（走各自预览分支）
+const TEXT_FILE_EXTS = new Set([
+  // 数据 / 配置
+  'csv', 'tsv', 'json', 'jsonl', 'xml', 'yml', 'yaml', 'toml', 'ini', 'env', 'conf', 'cfg', 'properties', 'log',
+  // Python
+  'py', 'pyw',
+  // JavaScript / TypeScript / 前端
+  'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'vue', 'css', 'scss', 'less',
+  // Shell / 脚本
+  'sh', 'bash', 'zsh', 'ps1', 'bat',
+  // 其他常见语言
+  'java', 'kt', 'go', 'rs', 'rb', 'php', 'swift', 'c', 'cpp', 'cc', 'h', 'hpp', 'cs',
+  // 其他
+  'sql', 'r', 'lua', 'dart', 'scala', 'pl', 'diff', 'dockerfile', 'makefile', 'txt',
+])
 
 // 配置 marked
 const renderer = new marked.Renderer()
@@ -345,8 +373,8 @@ renderer.image = function(token) {
   }
 
   const titleAttr = title ? ` title="${title}"` : ''
-  // 添加 loading="lazy" 实现懒加载
-  return `<img src="${src}" alt="${alt}"${titleAttr} loading="lazy" class="markdown-image" onclick="window.markdownImageClick && window.markdownImageClick(this)" />`
+  // 不再注入 inline onclick，改用 .message-text 上的事件委托（更稳定，刷新/复用组件时不会失效）
+  return `<img src="${src}" alt="${alt}"${titleAttr} loading="lazy" class="markdown-image" data-markdown-image="true" />`
 }
 
 renderer.code = function(token) {
@@ -431,6 +459,8 @@ export default {
       // 如果消息已完成（thinkingDone: true），默认折叠思考区块
       thinkingCollapsed: this.message.thinkingDone === true,
       expandedTools: {},
+      // 工具调用 > 6 时记录"用户主动展开过"，避免被持续覆盖回折叠
+      thinkingOverflowExpanded: false,
       activeFileIndex: 0,
       isUserMessageCollapsed: false,
       interruptReasonExpanded: false,
@@ -446,8 +476,9 @@ export default {
     // 暴露方法到 window，供 [[ ]] 语法中的 onclick 调用
     window.handleFileDownload = this.handleFileDownload.bind(this)
     window.previewMdFile = this.previewMdFile.bind(this)
-    window.markdownImageClick = this.handleImagePreview.bind(this)
     window.handleIframeFullscreen = this.handleIframePreview.bind(this)
+    window.handleMermaidFullscreen = this.handleMermaidPreview.bind(this)
+    window.handleMermaidPreview = this.handleMermaidPreview.bind(this)
     // 监听全局 mouseup，用于检测 AI 消息内的文本选区
     document.addEventListener('mouseup', this.handleTextSelection)
     document.addEventListener('selectionchange', this.handleSelectionChange)
@@ -559,26 +590,39 @@ export default {
       return files[idx] || null
     },
     isContentCollapsed() {
-      // 用户消息超过8行则折叠（按"去掉引用块后的正文"算行数）
+      // 用户消息超过5行则折叠（按"去掉引用块后的正文"算行数）
       if (this.message.role !== 'user') return false
       const text = this.parsedUserContent.text
       const lines = (text || '').split('\n').length
-      return lines > 8
+      return lines > 5
     },
     collapsedContent() {
       if (!this.isContentCollapsed) return this.message.content
       const lines = (this.message.content || '').split('\n')
-      return lines.slice(0, 8).join('\n') + '\n...'
+      return lines.slice(0, 5).join('\n') + '\n...'
     },
-    // 用户正文（去掉引用块）超过8行时折叠后的内容
+    // 用户正文（去掉引用块）超过5行时折叠后的内容
     collapsedUserText() {
       if (!this.isContentCollapsed) return this.renderedUserText
       const text = this.parsedUserContent.text
       const lines = (text || '').split('\n')
-      return this.escapeHtml(lines.slice(0, 8).join('\n') + '\n...')
+      return this.escapeHtml(lines.slice(0, 5).join('\n') + '\n...')
     },
     componentUid() {
       return this._uid
+    },
+    // 工具调用超过 6 个时，强制折叠整个思考过程
+    // 但用户主动展开后不再强制覆盖回折叠状态
+    effectiveThinkingCollapsed() {
+      const tcLen = this.message.toolCalls && this.message.toolCalls.length
+      if (tcLen > 6 && !this.thinkingOverflowExpanded) return true
+      return this.thinkingCollapsed
+    },
+    // 用户消息实际是否处于折叠态：
+    // 内容超长（isContentCollapsed）且用户没主动展开过（isUserMessageCollapsed=false）→ 折叠
+    // 折叠时显示前 5 行 + ...
+    effectiveUserCollapsed() {
+      return this.isContentCollapsed && !this.isUserMessageCollapsed
     }
   },
   watch: {
@@ -587,6 +631,7 @@ export default {
         this.$nextTick(() => {
           this.highlightCode()
           this.processMarkdownFiles()
+          this.processMermaidFiles()
         })
       },
       immediate: true
@@ -714,13 +759,20 @@ export default {
           </div>`
         }
 
+        // Mermaid 语法类型（.mmd）- 流程图/ER图等
+        if (ext === 'mmd') {
+          return `<div class="file-render-block" data-path="${cleanPath}" data-oss-url="${isOssUrl ? cleanPath : ''}" data-type="mmd" data-name="${filename}" onclick="window.handleMermaidPreview && window.handleMermaidPreview(this)" style="cursor:pointer;">
+            <div class="mermaid-loading">加载中...</div>
+          </div>`
+        }
+
         // Markdown 类型 - 点击后通过 preview-file 事件预览
         if (['md', 'markdown'].includes(ext)) {
           return `<a class="md-file-link" data-path="${isOssUrl ? '' : cleanPath}" data-oss-url="${isOssUrl ? cleanPath : ''}" data-name="${filename}">${filename}</a>`
         }
 
-        // 数据文件（csv, json, txt 等）- 点击后预览纯文本
-        if (['csv', 'json', 'txt', 'log', 'xml', 'yml', 'yaml'].includes(ext)) {
+        // 文本/代码文件（csv, json, txt, py, js ...）- 点击后预览纯文本
+        if (TEXT_FILE_EXTS.has(ext)) {
           return `<a class="data-file-link" data-path="${isOssUrl ? '' : cleanPath}" data-oss-url="${isOssUrl ? cleanPath : ''}" data-name="${filename}">${filename}</a>`
         }
 
@@ -789,8 +841,8 @@ export default {
                 continue
               }
 
-              // 数据文件（csv, json, txt 等）- 点击后预览纯文本
-              if (['csv', 'json', 'txt', 'log', 'xml', 'yml', 'yaml'].includes(ext)) {
+              // 文本/代码文件（csv, json, txt, py, js ...）- 点击后预览纯文本
+              if (TEXT_FILE_EXTS.has(ext)) {
                 const filename = url.split('/').pop() || 'file'
                 result.push(`<a class="data-file-link" data-oss-url="${url}" data-name="${filename}">${filename}</a>`)
                 i = j
@@ -859,6 +911,69 @@ export default {
         } catch (e) {
           console.error(`[MD渲染] 异常:`, e, `URL: ${url || ossUrl || path}`)
           if (loadingEl) loadingEl.textContent = '加载异常'
+        }
+      }
+    },
+
+    // 处理 Mermaid 文件的异步加载和渲染
+    async processMermaidFiles() {
+      const mmdBlocks = this.$el.querySelectorAll('.file-render-block[data-type="mmd"]')
+      for (const block of mmdBlocks) {
+        const path = block.dataset.path
+        const ossUrl = block.dataset.ossUrl
+        const loadingEl = block.querySelector('.mermaid-loading')
+        const fileName = block.dataset.name || 'file'
+
+        try {
+          const url = ossUrl || (path ? `/static/${path}` : null)
+          if (!url) {
+            if (loadingEl) loadingEl.textContent = '无效路径'
+            continue
+          }
+
+          const fetchUrl = url + (url.includes('?') ? '&' : '?') + '_t=' + Date.now()
+          const response = await fetch(fetchUrl)
+
+          if (response.ok) {
+            let mermaidCode = await response.text()
+            // 去除代码块包裹符号（双重保障）
+            mermaidCode = mermaidCode.trim().replace(/^```(?:mermaid)?\s*/i, '').replace(/\s*```$/, '')
+
+            const id = 'mermaid-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8)
+            const { svg } = await mermaid.render(id, mermaidCode)
+
+            if (loadingEl) loadingEl.remove()
+            const container = document.createElement('div')
+            container.className = 'mermaid-rendered'
+            container.innerHTML = svg
+            block.insertBefore(container, block.firstChild)
+            if (loadingEl) loadingEl.remove()
+
+            // 渲染完成后注入 style 确保覆盖所有 CSS
+            this.$nextTick(() => {
+              const renderedSvg = block.querySelector('.mermaid-rendered svg')
+              if (renderedSvg) {
+                renderedSvg.removeAttribute('width')
+                renderedSvg.removeAttribute('height')
+                renderedSvg.style.width = '900px'
+                renderedSvg.style.maxWidth = 'none'
+                renderedSvg.style.maxHeight = '500px'
+              }
+              // 给外层 block 也加 overflow 确保滚动
+              block.style.maxHeight = '600px'
+              block.style.overflow = 'auto'
+              const mermaidRendered = block.querySelector('.mermaid-rendered')
+              if (mermaidRendered) {
+                mermaidRendered.style.maxHeight = '600px'
+                mermaidRendered.style.overflow = 'auto'
+              }
+            })
+          } else {
+            if (loadingEl) loadingEl.textContent = `加载失败(${response.status})`
+          }
+        } catch (e) {
+          console.error(`[Mermaid渲染] 异常:`, e, `URL: ${url || ossUrl || path}`)
+          if (loadingEl) loadingEl.textContent = '渲染异常'
         }
       }
     },
@@ -991,6 +1106,44 @@ export default {
     },
     handleIframeFullscreen(btn) {
       this.handleIframePreview(btn)
+    },
+
+    // Mermaid 文件点击：发送 preview-file 事件，打开 FilePreviewPanel
+    handleMermaidPreview(el) {
+      event.stopPropagation()
+      const container = el.closest('.file-render-block')
+      if (!container) return
+
+      const path = container.dataset.path
+      const ossUrl = container.dataset.ossUrl
+      const name = container.dataset.name || 'diagram.mmd'
+
+      const url = ossUrl || (path ? `/static/${path}` : null)
+      if (!url) return
+
+      fetch(url + (url.includes('?') ? '&' : '?') + '_t=' + Date.now())
+        .then(r => r.ok ? r.text() : Promise.reject(r.status))
+        .then(content => {
+          content = content.trim().replace(/^```(?:mermaid)?\s*/i, '').replace(/\s*```$/, '')
+          this.$emit('preview-file', {
+            name: name,
+            text_content: content,
+            url: url + '?download=true',
+            suffix: '.mmd',
+            type: 'text/vnd.mermaid'
+          })
+        })
+        .catch(err => {
+          this.$emit('preview-file', {
+            name: name,
+            text_content: '加载失败: ' + err,
+            url: url + '?download=true'
+          })
+        })
+    },
+
+    handleMermaidFullscreen(btn) {
+      this.handleMermaidPreview(btn)
     },
 
     // 关闭文件预览弹窗
@@ -1619,6 +1772,14 @@ export default {
       this.$emit('open-link', href)
     },
 
+    // 事件委托：捕获 .message-text 内 <img class="markdown-image"> 的点击
+    // 替代原先 window.markdownImageClick 内联 onclick（刷新会话/复用组件时不可靠）
+    handleMarkdownImageClick(e) {
+      const img = e.target.closest && e.target.closest('img.markdown-image, img[data-markdown-image="true"]')
+      if (!img) return
+      this.handleImagePreview(img)
+    },
+
     handleRestore() {
       if (this.message.checkpointId) {
         this.$emit('restore', this.message.checkpointId)
@@ -1680,6 +1841,11 @@ export default {
     },
     toggleThinking() {
       this.thinkingCollapsed = !this.thinkingCollapsed
+      // 工具调用 > 6 时一旦用户主动展开过，就不再被强制覆盖回折叠
+      const tcLen = this.message.toolCalls && this.message.toolCalls.length
+      if (!this.thinkingCollapsed && tcLen > 6) {
+        this.thinkingOverflowExpanded = true
+      }
     },
     toggleInterruptReason() {
       this.interruptReasonExpanded = !this.interruptReasonExpanded
@@ -3191,5 +3357,36 @@ export default {
 
 .quote-floating-btn:hover svg {
   opacity: 1;
+}
+
+.file-render-block[data-type="mmd"] .download-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+}
+</style>
+
+<!-- v-html 动态生成的内容不在 scoped 管辖范围内，需要单独的非 scoped 样式 -->
+<style>
+.file-render-block[data-type="mmd"] {
+  max-height: 900px !important;
+  overflow: auto !important;
+}
+
+.file-render-block[data-type="mmd"] .mermaid-rendered {
+  display: block !important;
+  padding: 12px;
+  overflow: auto !important;
+  max-height: 900px !important;
+  text-align: center;
+}
+
+.file-render-block[data-type="mmd"] .mermaid-rendered svg {
+  max-height: none !important;
+  cursor: grab;
+}
+
+.file-render-block[data-type="mmd"] .mermaid-rendered svg:active {
+  cursor: grabbing;
 }
 </style>

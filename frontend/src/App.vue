@@ -104,7 +104,9 @@
         :file-name="filePreviewName"
         :content="filePreviewContent"
         :file-url="filePreviewUrl"
+        :rendered-svg="filePreviewRenderedSvg"
         @close="showFilePreview = false"
+        @reload="reloadPreview"
       />
 
       <!-- 点击空白区域关闭文件预览面板 -->
@@ -171,6 +173,7 @@ import ConfirmDialog from './components/ConfirmDialog.vue'
 import CheckpointPanel from './components/CheckpointPanel.vue'
 import WebPreviewPanel from './components/WebPreviewPanel.vue'
 import FilePreviewPanel from './components/FilePreviewPanel.vue'
+import mermaid from 'mermaid'
 
 export default {
   name: 'App',
@@ -206,6 +209,8 @@ export default {
       filePreviewName: '',
       filePreviewContent: '',
       filePreviewUrl: '',
+      filePreviewRenderedSvg: '',
+      currentPreviewFile: null,
       responseStartTime: null,
       responseTimerInterval: null,
       currentResponseTime: 0,
@@ -543,10 +548,11 @@ export default {
         this.currentQuote = { content: quoteData.content }
       }
     },
-    previewFile(file) {
+    async previewFile(file) {
       console.log('[previewFile] 收到文件:', file)
       console.log('[previewFile] preview字段:', file.preview)
       console.log('[previewFile] url字段:', file.url)
+      this.currentPreviewFile = file
       // 根据文件类型决定预览方式
       const fileType = (file.file_type || file.type || '').toUpperCase()
       const suffix = (file.suffix || (file.name ? '.' + file.name.split('.').pop().toLowerCase() : '')).toLowerCase()
@@ -571,6 +577,28 @@ export default {
           this.imagePreviewUrl = imageUrl
           this.showImagePreview = true
         }
+        return
+      }
+
+      // Mermaid 文件（.mmd）：传入原文 + 渲染 SVG，FilePreviewPanel 内切换
+      if ((file.suffix || '').toLowerCase() === '.mmd' || (file.type || '').includes('mermaid')) {
+        const textContent = file.text_content || ''
+        this.filePreviewName = file.name || 'diagram.mmd'
+        this.filePreviewContent = textContent
+        this.filePreviewUrl = file.url || file.preview || ''
+        // 异步渲染 SVG
+        if (textContent) {
+          try {
+            const id = 'panel-' + Date.now()
+            const { svg } = await mermaid.render(id, textContent)
+            this.filePreviewRenderedSvg = svg
+          } catch (e) {
+            this.filePreviewRenderedSvg = '<p style="color:red;">渲染失败: ' + e.message + '</p>'
+          }
+        } else {
+          this.filePreviewRenderedSvg = ''
+        }
+        this.showFilePreview = true
         return
       }
 
@@ -606,6 +634,31 @@ export default {
         this.filePreviewUrl = file.url || file.preview || ''
         this.showFilePreview = true
       }
+    },
+    reloadPreview() {
+      if (!this.currentPreviewFile) return
+      const url = this.currentPreviewFile.url || this.currentPreviewFile.preview
+      if (!url) return
+      // 重新从后端获取文件内容
+      fetch(url)
+        .then(res => res.text())
+        .then(text => {
+          this.filePreviewContent = text
+          // 如果是 mermaid 文件，重新渲染 SVG
+          const suffix = (this.currentPreviewFile.suffix || '').toLowerCase()
+          if (suffix === '.mmd' && text) {
+            this.$nextTick(async () => {
+              try {
+                const id = 'panel-' + Date.now()
+                const { svg } = await mermaid.render(id, text)
+                this.filePreviewRenderedSvg = svg
+              } catch (e) {
+                this.filePreviewRenderedSvg = '<p style="color:red;">渲染失败</p>'
+              }
+            })
+          }
+        })
+        .catch(e => console.error('[reloadPreview] 获取文件内容失败:', e))
     },
     async restoreCheckpoint(checkpointId) {
       this.restoreTargetId = checkpointId

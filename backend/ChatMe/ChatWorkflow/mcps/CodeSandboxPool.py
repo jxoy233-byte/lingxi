@@ -40,7 +40,6 @@ class SandboxPool:
 
         container_id = self.containers.pop()
         suffix = ".py" if language == "python" else ".js"
-        print(f"[SandboxPool] 使用容器: {container_id}")
 
         # 调试：检查容器状态
         result = subprocess.run(
@@ -48,16 +47,13 @@ class SandboxPool:
             capture_output=True, text=True
         )
         is_running = result.stdout.strip() == "true"
-        print(f"[SandboxPool] 容器运行状态: {is_running}")
 
         if not is_running:
-            print(f"[SandboxPool] 容器未运行，尝试重启...")
             # 删除并重新创建
             subprocess.run(["docker", "rm", "-f", container_id], capture_output=True)
             container_id = self._create_container()
             if not container_id:
                 raise RuntimeError("无法创建新容器")
-            print(f"[SandboxPool] 新容器已创建: {container_id}")
 
         # 写入临时文件
         with tempfile.NamedTemporaryFile(mode='w', suffix=suffix, delete=False) as f:
@@ -71,16 +67,13 @@ class SandboxPool:
                     "docker", "cp", temp_file, f"{container_id}:/sandbox/code{suffix}"
                 ], capture_output=True, text=True)
                 if cp_result.returncode != 0:
-                    print(f"[SandboxPool] docker cp 失败: {cp_result.stderr}")
                     raise Exception(f"docker cp failed: {cp_result.stderr}")
-                print(f"[SandboxPool] 代码已复制到容器")
 
                 # 执行代码
                 result = subprocess.run([
                     "docker", "exec", container_id,
                     "python", f"/sandbox/code{suffix}"
                 ], capture_output=True, text=True, timeout=30)
-                print(f"[SandboxPool] 代码执行完成，返回码: {result.returncode}")
 
                 # 清空 /sandbox 目录
                 subprocess.run([
@@ -97,14 +90,12 @@ class SandboxPool:
             except Exception:
                 pass
             self.containers.append(container_id)
-            print(f"[SandboxPool] 容器已归还: {container_id}")
 
     def shutdown(self):
         """关闭所有容器"""
         for cid in self.containers:
             try:
                 subprocess.run(["docker", "rm", "-f", cid], capture_output=True, timeout=5)
-                print(f"[SandboxPool] 关闭容器: {cid}")
             except Exception:
                 pass
         self.containers.clear()

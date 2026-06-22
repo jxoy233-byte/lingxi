@@ -205,7 +205,7 @@ OPENAI_FREQUENCY_PENALTY=0.0
 OPENAI_PRESENCE_PENALTY=0.0
 ```
 
-### 配置文件示例
+### 配置文件示例(重命名为config.json)
 
 ```json
 {
@@ -240,8 +240,6 @@ OPENAI_PRESENCE_PENALTY=0.0
   }
 }
 ```
-
-> 提交代码前请脱敏 `backend/.chatme/config.json` 中的真实 API key。
 
 ## 项目结构
 

@@ -79,3 +79,5 @@ memory/
 *.memory.*
 
 docker_data/
+
+config.json

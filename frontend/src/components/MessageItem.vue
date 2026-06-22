@@ -322,94 +322,79 @@ const TEXT_FILE_EXTS = new Set([
   'sql', 'r', 'lua', 'dart', 'scala', 'pl', 'diff', 'dockerfile', 'makefile', 'txt',
 ])
 
-// 配置 marked
-const renderer = new marked.Renderer()
+// 配置 marked v17+：使用 extensions.renderers API（推荐写法）
+marked.use({
+  renderer: {
+    // marked v17 把整个 token 对象作为参数传入
+    link(token) {
+      const href = token.href || ''
+      const title = token.title || ''
+      const text = token.text || ''
 
-// 自定义链接渲染器，修复 URL 识别问题
-// marked v5+ 接收 token 对象
-renderer.link = function(token) {
-  const href = token.href || ''
-  const title = token.title || ''
-  const text = token.text || ''
+      // 清理 URL 末尾的非法字符（中文标点、括号等）
+      let cleanHref = href.replace(/[，。、；：？！""''（）【】《》…——]+$/, '')
+      // 移除末尾不匹配的右括号
+      cleanHref = cleanHref.replace(/\)+$/, (match) => {
+        const openCount = (cleanHref.match(/\(/g) || []).length
+        const closeCount = match.length
+        if (closeCount > openCount) {
+          return ')'.repeat(openCount)
+        }
+        return match
+      })
 
-  // 清理 URL 末尾的非法字符（中文标点、括号等）
-  let cleanHref = href.replace(/[，。、；：？！""''（）【】《》…——]+$/, '')
-  // 移除末尾不匹配的右括号
-  cleanHref = cleanHref.replace(/\)+$/, (match) => {
-    const openCount = (cleanHref.match(/\(/g) || []).length
-    const closeCount = match.length
-    if (closeCount > openCount) {
-      return ')'.repeat(openCount)
+      const titleAttr = title ? ` title="${title}"` : ''
+      return `<a href="${cleanHref}"${titleAttr} target="_blank" rel="noopener noreferrer">${text}</a>`
+    },
+    image(token) {
+      let src = token.href || ''
+      const alt = token.text || ''
+      const title = token.title || ''
+
+      if (!src) return alt || ''
+
+      // 处理相对路径，拼接服务器基础 URL
+      if (src.startsWith('./')) {
+        src = `${window.location.origin}/chat/static/${src.slice(2)}`
+      } else if (src.startsWith('/Users/jx')) {
+        src = src.replace('/Users/jx/coding/projects/ChatMe/backend', '/chat/static')
+        src = `${window.location.origin}${src}`
+      } else if (src.startsWith('/')) {
+        src = `${window.location.origin}${src}`
+      }
+
+      const titleAttr = title ? ` title="${title}"` : ''
+      return `<img src="${src}" alt="${alt}"${titleAttr} loading="lazy" class="markdown-image" data-markdown-image="true" />`
+    },
+    code(token) {
+      // marked v17 接收整个 token 对象
+      const code = token.text || ''
+      const lang = token.lang || ''
+
+      // 去除 infostring 中可能包含的元数据（如 {meta}）
+      const langParts = lang.split(/\s+/)
+      const cleanLang = langParts[0]
+
+      // 检测并获取有效的高亮语言
+      const language = cleanLang && hljs.getLanguage(cleanLang) ? cleanLang : 'plaintext'
+
+      try {
+        const highlighted = hljs.highlight(code, { language }).value
+        return `<pre><code class="hljs ${language}">${highlighted}</code></pre>`
+      } catch (error) {
+        console.warn('代码高亮失败:', error, '语言:', lang)
+        const escapedCode = code
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#039;')
+        return `<pre><code class="hljs">${escapedCode}</code></pre>`
+      }
     }
-    return match
-  })
-
-  const titleAttr = title ? ` title="${title}"` : ''
-  return `<a href="${cleanHref}"${titleAttr} target="_blank" rel="noopener noreferrer">${text}</a>`
-}
-
-// 自定义图片渲染器，支持懒加载和路径处理
-renderer.image = function(token) {
-  let src = token.href || ''
-  const alt = token.text || ''
-  const title = token.title || ''
-
-  if (!src) return alt || ''
-
-  // 处理相对路径，拼接服务器基础 URL
-  if (src.startsWith('./')) {
-    // 相对路径：拼接当前域名 + /chat/static/ 前缀
-    src = `${window.location.origin}/chat/static/${src.slice(2)}`
-  } else if (src.startsWith('/Users/jx')) {
-    // macOS 本地路径：/Users/jx/coding/projects/ChatMe/backend/cached/...
-    // 转换成 /chat/static/cached/...
-    src = src.replace('/Users/jx/coding/projects/ChatMe/backend', '/chat/static')
-    src = `${window.location.origin}${src}`
-  } else if (src.startsWith('/')) {
-    // 其他以 / 开头的绝对路径
-    src = `${window.location.origin}${src}`
-  } else if (src.startsWith('http')) {
-    // 已经是完整 URL（OSS 等），直接使用
-  }
-
-  const titleAttr = title ? ` title="${title}"` : ''
-  // 不再注入 inline onclick，改用 .message-text 上的事件委托（更稳定，刷新/复用组件时不会失效）
-  return `<img src="${src}" alt="${alt}"${titleAttr} loading="lazy" class="markdown-image" data-markdown-image="true" />`
-}
-
-renderer.code = function(token) {
-  // marked v5+ 接收 token 对象
-  const code = token.text || ''
-  const lang = token.lang || ''
-
-  // 去除 infostring 中可能包含的元数据（如 {meta}）
-  const langParts = lang.split(/\s+/)
-  const cleanLang = langParts[0]
-
-  // 检测并获取有效的高亮语言
-  const language = cleanLang && hljs.getLanguage(cleanLang) ? cleanLang : 'plaintext'
-
-  try {
-    // 使用 highlight 方法，传入语言和配置
-    const highlighted = hljs.highlight(code, { language }).value
-    return `<pre><code class="hljs ${language}">${highlighted}</code></pre>`
-  } catch (error) {
-    // 高亮失败时返回纯文本
-    console.warn('代码高亮失败:', error, '语言:', language)
-    const escapedCode = code
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#039;')
-    return `<pre><code class="hljs">${escapedCode}</code></pre>`
-  }
-}
-
-marked.setOptions({
+  },
   breaks: true,
-  gfm: true,
-  renderer: renderer
+  gfm: true
 })
 
 export default {
@@ -675,7 +660,11 @@ export default {
           const match = content.slice(i).match(regex)
           if (!match || match.index === undefined) break
 
-          const start = i + match.index
+          let start = i + match.index
+          // 图片语法 ![...](...) 中，! 在 [ 前面一个位置，需要把 ! 也纳入 skip 范围
+          if (content[start - 1] === '!') {
+            start -= 1
+          }
           const firstParen = content.indexOf('(', start)
           if (firstParen === -1) break
 
@@ -737,6 +726,12 @@ export default {
       return content.replace(doubleBracketRegex, (match, path) => {
         // 清理路径
         const cleanPath = path.trim()
+
+        // 容错：路径看起来不正常（有换行、空格、连续标点等）时原样输出，防止 AI 生成异常时输出乱码
+        if (!cleanPath || /\s|[\n\r]/.test(cleanPath) || /[,，;；:：""''（）【】]/.test(cleanPath)) {
+          return match
+        }
+
         const ext = cleanPath.split('.').pop().toLowerCase()
         const filename = cleanPath.split('/').pop() || 'file'
 

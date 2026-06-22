@@ -48,40 +48,49 @@ gen = da.new_generation()  # 显式自增，返回新的 gen_xxx
 OUTPUT_DIR = da.base_dir / gen
 ```
 
-### Step 5: 在 AI 回复中引用生成的文件
+### Step 5: 保存分析文件（强制 da.save_*）
 
-**本地文件** (文件在 cached/ 目录下):
+**Core：保存文件必须使用 ChatDataAnalysisFormat 提供的方法**
+
+```python
+# 保存数据文件（如 CSV、JSON、TXT 等文本格式）
+data_path = da.save_data("id,name,value\n1,foo,100\n2,bar,200", "result.csv")
+# 保存报告文件（Markdown 或纯文本）
+report_path = da.save_report("# 分析报告\n\n结论：...", "report.md")
+# 保存分析脚本（可追溯脚本执行）
+script_path = da.save_script("print('hello world')")
+# 保存 Mermaid 图表（.mmd 文件，前端可渲染）
+mmd_path = da.save_mermaid("graph TD\n    A --> B", "flow.mmd")
+```
+
+### Step 6: 在 AI 回复中引用生成的文件（自定义语法）
+
 ```
 [[cached/{session_id}/data_analysis/gen_xxx/charts/xxx.png]]
 [[cached/{session_id}/data_analysis/gen_xxx/charts/xxx.html]]
 [[cached/{session_id}/data_analysis/gen_xxx/charts/xxx.mmd]]  # Mermaid 语法文件
-[[cached/{session_id}/data_analysis/gen_xxx/reports/xxx.md]]
+[[cached/{session_id}/data_analysis/gen_xxx/data/xxx.csv]]    # 数据文件
+[[cached/{session_id}/data_analysis/gen_xxx/reports/xxx.md]]   # 报告文件
 ```
 
 **路径格式**: cached/{session_id}/data_analysis/gen_xxx/...
 
-### Step 6: (可选) 上传分析结果到 OSS
+### Step 7: (可选) 上传分析结果到 OSS
 
 ```python
 # 上传单个文件到 OSS，返回 markdown 可用的 URL 格式
 oss_url = da.upload_result_to_oss(f"{OUTPUT_DIR}/charts/sales.png")
 ```
 
-### Step 7: (可选) 删除不满意的结果
+### Step 8: (可选) 删除不满意的结果
 
 ```python
 da.remove_dir("gen_001")  # 删除指定批次
 ```
 
-### Step 8: 结束时保存数据分析脚本
+### Step 9: 保存分析结果后下一轮分析复用（看需选择）
 
-分析完成后，把本次最终执行的脚本整合保存到 `scripts/` 目录，便于后续追溯和复用：
-
-```python
-script_path = da.save_script("整合后的最终分析代码")
-```
-
-下一轮分析时，先读旧脚本再继续：
+分析完成后，确保所有结果都已通过 Step 5 的方法保存。若需复用上一轮脚本：
 
 ```python
 # 读取上一轮的脚本
@@ -89,19 +98,6 @@ with open("cached/{session_id}/data_analysis/gen_001/scripts/script_xxx.py") as 
     old_code = f.read()
 # 基于旧脚本继续分析
 ```
-
-### Step 9: （可选）生成 mermaid 结构图
-
-当需要可视化数据处理流程或 ER 关系图时，使用 mermaid 语法生成，并**必须保存为 .mmd 文件**（不保存则无法在前端渲染）：
-
-```python
-# 生成 mermaid 语法后，直接调用 save_mermaid 保存（内部自动校验语法）
-mmd_path = da.save_mermaid("graph TD\\n    A --> B", "flow.mmd")
-# 保存路径示例: cached/{session_id}/data_analysis/gen_xxx/charts/flow.mmd
-# 在回复中引用: [[mmd_path]]
-```
-
-支持的图类型：流程图（graph）、ER 图（erDiagram）、状态图（stateDiagram-v2）、序列图（sequenceDiagram）、甘特图（gantt）等。
 
 ```
 cached/
@@ -124,4 +120,4 @@ cached/
 - 删除操作通过 `da.remove_dir("gen_xxx")` 进行
 - AI 根据场景自行决定输出格式（png/svg/html/pdf）和图表参数
 - 上传 OSS 后建议使用 OSS URL 便于分享和长期访问
-- 对于流程图/ER图可以先使用`ChatDataAnalysisFormat.validate_mermaid(code)`来校验mermaid字符串是否合格
+- 对于流程图/ER图要使用`da.save_mermaid(code)`来保存mmd文件来后续调用

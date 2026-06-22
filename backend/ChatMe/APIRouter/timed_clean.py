@@ -108,9 +108,11 @@ def clean_logs(days: int = 2) -> tuple[int, float]:
 
 async def clean_orphaned_sessions() -> tuple[int, list[str]]:
     """
-    清理 cached 目录下已无对应会话记录的 session 目录。
+    清理 cached 目录下已无对应会话记录的 session 目录，
+    以及直接位于 cached/ 下的孤立文件。
     直接扫描 Redis 中的 checkpoint key，提取所有 session_id，
-    删除 cached/{session_id} 目录中不在活跃列表中的目录。
+    删除 cached/{session_id} 目录中不在活跃列表中的目录，
+    同时删除 cached/ 根目录下不在任何活跃 session 中的孤立文件。
     """
     import redis
     import shutil
@@ -131,13 +133,15 @@ async def clean_orphaned_sessions() -> tuple[int, list[str]]:
         if len(parts) >= 2:
             active_ids.add(parts[1])
 
-    # 排除非 session 目录（如 data_analysis）
-    excluded_dirs = {"data_analysis"}
+    white_id = {}
     removed_names = []
-    for sid_dir in cache_dir.iterdir():
-        if sid_dir.is_dir() and sid_dir.name not in active_ids and sid_dir.name not in excluded_dirs:
-            shutil.rmtree(sid_dir)
-            removed_names.append(sid_dir.name)
+    for item in cache_dir.iterdir():
+        if item.is_dir() and item.name not in active_ids:
+            shutil.rmtree(item)
+            removed_names.append(item.name)
+        elif item.is_file() and item.name not in white_id:
+            item.unlink()
+            removed_names.append(item.name)
 
     return len(removed_names), removed_names
 

@@ -232,14 +232,16 @@ def _is_script_command(command: str) -> tuple[bool, str]:
 _ALLOWED_COMMANDS_UNIX = {
     "ls", "cd", "pwd", "which",
     "cat", "head", "tail", "grep", "wc",
-    "cp", "mv", "mkdir", "rm", "find",
+    "cp", "mv", "mkdir", "rm", "find", "sed",
+    "awk", "sort", "echo", "touch", "diff", "tar", "gzip",
     "curl",
 }
 
 _ALLOWED_COMMANDS_WIN = {
     "dir", "cd",
-    "type", "more", "findstr",
+    "type", "more", "findstr", "fc",
     "copy", "move", "mkdir", "del", "rmdir", "dir",
+    "sort",
     "curl",
 }
 

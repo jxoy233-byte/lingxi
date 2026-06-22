@@ -1,6 +1,9 @@
 
 FILE_MAX_LENGTH = 25*1024*1024  # 25MB
 
+# 文本/文档内容超过此字符数则按行截断（仅保留完整行），避免大文件全量塞进 LLM prompt
+TEXT_TRUNCATE_LENGTH = 3000
+
 FILE_ALLOWED_TYPES = {
     "IMAGE": { # 图片类型 + 图片后缀白名单 + 对应MIME类型
         "IMAGE_TYPE": {"png", "jpg", "jpeg", "gif"},

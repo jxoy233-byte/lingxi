@@ -8,7 +8,7 @@ from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, System
 from langchain_core.runnables import RunnableConfig
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.redis import AsyncRedisSaver
 from langgraph.prebuilt import ToolNode
@@ -19,7 +19,6 @@ from .config.graph_config import get_agent_node_config, get_graph_final_node_con
 from .config.models import ChatStateCore2, AIMessageType, FileParseState
 from .Memory.core import MemoryManager
 from ..LoggingManager.logging_config import get_logger
-
 
 class ChatWorkflow:
     """
@@ -79,28 +78,28 @@ class ChatWorkflow:
         llm_config, system_prompt = get_graph_final_node_config()
 
         self.llm_core = ChatOpenAI(**llm_config)
-        prompt = ChatPromptTemplate.from_messages([("system", system_prompt),("human", "{messages}")])
+        prompt = ChatPromptTemplate.from_messages([("system", system_prompt), MessagesPlaceholder("messages")])
         self.llm_core = prompt | self.llm_core
 
         # agent_node配置
         agent_node_config ,agent_prompt = get_agent_node_config()
 
         self.agent_llm = ChatOpenAI(**agent_node_config)
-        prompt = ChatPromptTemplate.from_messages([("system", agent_prompt), ("human", "{messages}")])
+        prompt = ChatPromptTemplate.from_messages([("system", agent_prompt), MessagesPlaceholder("messages")])
         self.agent_llm = prompt | self.agent_llm
 
         # 历史对话总结节点配置
         summary_llm_config, summary_llm_prompt = get_history_summary_node_config()
 
         self.summary_llm = ChatOpenAI(**summary_llm_config)
-        prompt = ChatPromptTemplate.from_messages([("system", summary_llm_prompt), ("human", "{messages}")])
+        prompt = ChatPromptTemplate.from_messages([("system", summary_llm_prompt), MessagesPlaceholder("messages")])
         self.summary_llm = prompt | self.summary_llm
 
         # 输入优化大模型配置
         imp_ipt_llm_config, imp_ipt_llm_prompt = get_imp_ipt_config()
 
         self.llm_imp_ipt = ChatOpenAI(**imp_ipt_llm_config)
-        prompt = ChatPromptTemplate.from_messages([("system", imp_ipt_llm_prompt), ("human", "{messages}")])
+        prompt = ChatPromptTemplate.from_messages([("system", imp_ipt_llm_prompt), MessagesPlaceholder("messages")])
         self.llm_imp_ipt = prompt | self.llm_imp_ipt
 
         # 输入优化视觉模型配置
@@ -452,22 +451,36 @@ class ChatWorkflow:
         async def file_process_node(state: FileParseState):
             """文件处理节点"""
 
-            prompt = """你是文件解析助手。根据输入的图片进行解析，输出对应格式的结果。
+            prompt = """你是图片内容解析助手。请解析输入的图片，输出文字描述。
 
-【文件解析规则】
-- 解析文档（如PDF、Word等）：返回文本内容 + 图片解析（如有）
-- 解析图片（如照片、截图等）：只返回图片内容描述
-- 解析文本（如TXT等）：返回解析好的文本内容
-- 无文件传入时输出"无文件内容"
+【解析要求】
+- 详细描述图中关键信息：物体、场景、文字内容、图表数据等
+- 数据图表（柱状图/折线图/表格截图）：尽量提取具体数值、轴标签、趋势
+- 文字截图（聊天记录/文档截图）：尽量识别并输出原文
+- 描述简洁精准，避免冗余
 
-【有文件时输出格式】
-【文件：文件名】
-文件解析结果内容
+【输出格式】
+【文件：filename】
+【图片描述】ß
 
-注意：必须保留【文件：文件名】标记作为前缀。"""
+其中 filename 用输入中"-- xxx --"形式提供的文件名，不要改写。
+"""
 
             file = state["single_file"]
 
+            # 纯文本/文档：跳过 VL，避免小参数视觉模型处理得慢
+            has_image = any(
+                isinstance(item, dict) and item.get("type") == "image_url"
+                for item in file
+            )
+            if not has_image:
+                text_content = ""
+                for item in file:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        text_content += item.get("text", "")
+                return {"parsed_results": [text_content]}
+
+            # 含图片：调 VL 解析
             file_msg = HumanMessage(content=[
                 {"type": "text", "text": prompt},
                 *file,
@@ -501,7 +514,6 @@ class ChatWorkflow:
             files = state.get("files", [])
             if not files or all(not f for f in files):
                 return "aggregator_node"
-            # 用Send传参别的字段会被舍弃掉，除非用state_schema
             return [Send("file_process_node", {"single_file": f}) for f in files]
 
         workflow.set_entry_point("split_files_node")
@@ -526,7 +538,7 @@ class ChatWorkflow:
         -> agent_node -> tool_node --↗
                    ↘--> final_node
         """
-        TOOL_CALL_TIMES = 20
+        TOOL_CALL_TIMES = 50
 
         tools = await self.mcp_client.get_tools()
 

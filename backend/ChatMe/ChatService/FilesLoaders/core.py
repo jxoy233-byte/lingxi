@@ -21,7 +21,7 @@ from langchain_community.document_loaders import UnstructuredMarkdownLoader, Uns
     TextLoader, UnstructuredXMLLoader, JSONLoader
 from starlette.datastructures import Headers
 
-from ChatMe.ChatService.FilesLoaders.config import FILE_ALLOWED_TYPES
+from ChatMe.ChatService.FilesLoaders.config import FILE_ALLOWED_TYPES, TEXT_TRUNCATE_LENGTH
 from ChatMe.ChatService.FilesLoaders.SofficeConverter import get_converter, LibreOfficeNotFoundError
 from ChatMe.LoggingManager.logging_config import get_logger
 from ChatMe.ChatMeConfig.core import get_oss_config
@@ -191,6 +191,52 @@ class FilesLoaders:
         """
         return suffix.replace(".", "")
 
+    @staticmethod
+    def _maybe_truncate(file_text: str, file_path: Optional[str], max_chars: int) -> str:
+        """
+        大文件按行截断，仅保留完整行
+
+        - 未超过 max_chars：原样返回
+        - 超过：按行累加，截断到 max_chars 以内，并在顶部加截断提示
+        - 提示里附带 file_path，便于 AI 在分析时直接使用，或通过环境探索读全量
+
+        Args:
+            file_text: 已加载好的文本内容
+            file_path: 文件缓存路径（用于提示）
+            max_chars: 字符数上限
+
+        Returns:
+            截断后的文本
+        """
+        if not file_text or len(file_text) <= max_chars:
+            return file_text
+
+        lines = file_text.split('\n')
+        total_lines = len(lines)
+
+        kept_lines: list[str] = []
+        current_chars = 0
+        for line in lines:
+            # +1 是把分隔符 \n 算回去，最后一行不加
+            line_len = len(line) + (1 if len(kept_lines) < total_lines - 1 else 0)
+            if current_chars + line_len > max_chars:
+                break
+            kept_lines.append(line)
+            current_chars += line_len
+
+        # 边缘情况：单行就超限 → 硬截到 max_chars
+        if not kept_lines and lines:
+            kept_lines = [lines[0][:max_chars]]
+            total_lines = 1
+
+        kept_count = len(kept_lines)
+        hint = (
+            f"[文件过大已截断] \n"
+            f"[完整文件路径] {file_path or '未知'}\n"
+            f"[提示] 如需分析完整文件内容，请进行文件所在环境探索\n\n"
+        )
+        return hint + '\n'.join(kept_lines)
+
     async def _classifying_files(self):
         files = self.processing_files
         images, texts, documents = [], [], []
@@ -355,6 +401,11 @@ class FilesLoaders:
                 documents = await loader.aload()
                 file_text = documents[0].page_content if documents else ""
 
+                # 大文件按行截断，避免全量塞进 LLM prompt
+                file_text = self._maybe_truncate(
+                    file_text, file_path, TEXT_TRUNCATE_LENGTH
+                )
+
                 # 直接设置 OutputFormat 字段
                 output.file_id = file_kwargs.file_id
                 output.file_path = file_kwargs.file_path
@@ -488,6 +539,11 @@ class FilesLoaders:
                     temp_path.replace(output_path)
 
                 file_content = output_path.read_text(encoding=detected_encoding)
+
+                # 大文件按行截断，避免全量塞进 LLM prompt
+                file_content = self._maybe_truncate(
+                    file_content, file_path, TEXT_TRUNCATE_LENGTH
+                )
 
                 # 直接设置 OutputFormat 字段
                 output.file_id = file_kwargs.file_id

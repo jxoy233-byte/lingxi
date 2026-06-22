@@ -153,24 +153,22 @@ Don't replace words with emoji.
 ### Links
 Inline: [Python](https://python.org) is popular. Not at bottom.
 
-### Images
+### Images (externally sourced only)
 ![description](url)
-Forbidden: data:image/...;base64,...
 
-### Data Analysis Results Rendering
-When a tool result references a generated file, embed it in the reply '[[<exact path or URL>]]'. Copy the path or URL from the tool output works for both local paths and full URLs
+### Data Analysis Results (AI-generated files)
+⚠️ All AI-generated files — charts, mermaid, reports, data — MUST use `[[path]]` syntax. NEVER use markdown links like `[text](url)` for these files.
+Correct: `[[cached/session_id/data_analysis/gen_xxx/charts/xxx.png]]`
+Wrong: `报告：[xxx.md](cached/.../xxx.md)` ← forbidden
 
-Render files with '[[]]' —— custom MD rendering syntax:
+Render with `[[]]` custom syntax:
 ```
-[[cached/'session_id'/data_analysis_output/gen_xxx/charts/xxx.png]] ->**Path format**: cached/'session_id'/data_analysis_output/gen_xxx/...
-[[cached/.../charts/xxx.html]]
-[[cached/.../charts/xxx.mmd]]
-[[cached/.../reports/xxx.md]]
-[[https://chatmebucket.oss-cn-beijing.aliyuncs.com/chatme/.../xxx.png]]
-[[https://.../chatme/.../xxx.html]]
-[[https://.../chatme/.../xxx.mmd]]
-[[https://.../chatme/.../xxx.md]]
+[[cached/session_id/.../charts/xxx.png]]
+[[cached/session_id/.../charts/xxx.mmd]]
+[[cached/session_id/.../reports/xxx.md]]
+[[https://.../chatme/.../xxx.png]]
 ```
+Place files after the paragraph/conclusion they support.
 
 ## Anti-Patterns
 - Opening with "Based on..." / "According to..." / "The data shows..."
@@ -294,12 +292,12 @@ Parameters: message (required, string) <- interrupted reason
 | Scenario | Commands |
 |----------|----------|
 | Browse directories | `ls`, `cd`, `pwd`, `which` |
-| Read files | `cat`, `head`, `tail`, `grep`, `wc` |
-| File operations | `cp`, `mv`, `mkdir`, `rm`, `find` |
+| Read files | `cat`, `head`, `tail`, `grep`, `wc`, `awk` |
+| File operations | `cp`, `mv`, `mkdir`, `rm`, `find`, `sed`, `sort`, `echo`, `touch`, `diff` |
 | Network probe | `curl` (only as last resort when no suitable skills available) |
 
 Note: On other OS, commands may differ — adjust accordingly.
-⚠️ Scripts must use `execute_code`, not `execute_command`
+⚠️ Scripts Execution must use `execute_code`, not `execute_command`
 
 ### execute_code — Code Execution & Skill Usage & Data Analysis & other codes required scenes
 Use when: Writing or running code to solve problems, invoke skills, process data, or perform actions that require code execution.
@@ -309,7 +307,7 @@ Important:
 - Always remember to print final key results you need to pass to the next step.
 - Default use_sandbox=False (local venv, has full host access for cached dir and skills dir). Set use_sandbox=True only when the code is unsafe to run locally.
 - Don't add comments in your codes
-- If you want to write some scripts files, you must write in 'cached/' dir
+- If you want to write some scripts files, you must write under 'cached/' dir
 
 ### get_current_datetime — Time Reference
 Use when: Task involves "today", "tomorrow", "this week".
@@ -363,6 +361,12 @@ Good (environment exploration):
 execute_command("ls skills/") → No relevant skill
 execute_command("ls cached/") → Check if needed
 ... → execute commands to find files dir
+---
+*when file content is truncated and need to know more about it*:
+execute_command("ls cached/...") → Check if needed
+execute_command("cat cached/.../filename")
+---
+*when files need to know about images*:
 execute_command("cat skills/ImageParser.py") → ready to process images
 execute_code("python", "From ImageParser import ...") → Done
 
@@ -381,14 +385,11 @@ execute_command("cat skills/DataAnalysis.md")  → Read spec first to know about
 execute_code("python", "from ChatMe.ChatDataAnalysis.format import ChatDataAnalysisFormat;import pandas as pd,
 numpy as np; ...")  →
 - libs available in local venv: pandas, numpy, matplotlib...
-- generate + analyze + save (charts/data/reports/scripts) to 'OUTPUT_DIR'/ in one pass when possible
+- generate + analyze + save (charts/data/reports/scripts) to 'OUTPUT_DIR' with prepared functions in one pass when possible
 
 *complex tasks (multi-step / multi-file / ML / large data)*:
 execute_code(...) → split into multiple calls, each building on previous
 - read prior output to decide next step (don't blindly retry)
----
-final:
-execute_code("python", "from ... import ChatDataAnalysisFormat,...,da.save_script(...)")
 
 
 ## Failure Handling
@@ -428,7 +429,7 @@ Note: Double braces {{}} are escape sequences — AI should output single braces
 
 CRITICAL: WHEN IT IS TIME TO TERMINATE, JUST OUTPUT: "DONE".
 
-Do NOT output any thinking/reasoning content in your response."""
+Remember you own identity and do NOT output any thinking/response content in your response."""
 
     return llm_config, prompt
 

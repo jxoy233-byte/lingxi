@@ -257,6 +257,55 @@ class ChatDataAnalysisFormat:
         self.logger.debug(f"脚本已保存: {script_path}")
         return str(script_path)
 
+    def save_data(self, content: str, filename: str) -> str:
+        """
+        保存数据文件到 data/ 目录
+
+        Args:
+            content: 文件内容（文本格式，如 CSV、JSON、TXT 等）
+            filename: 文件名（需含后缀，如 data.csv、result.json）
+
+        Returns:
+            保存后的文件绝对路径
+        """
+        data_dir = Path(self.get_current_generation_dir()) / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+
+        data_path = data_dir / filename
+        with open(data_path, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        self.logger.debug(f"数据文件已保存: {data_path}")
+        return str(data_path)
+
+    def save_report(self, content: str, filename: str) -> str:
+        """
+        保存报告文件到 reports/ 目录
+
+        Args:
+            content: 报告内容（Markdown 或纯文本）
+            filename: 文件名（需含后缀，如 report.md、summary.txt）
+
+        Returns:
+            保存后的文件绝对路径
+        """
+        # 容错：清洗 AI 混用 markdown 图片语法和 [[...]] 语法的异常输出
+        # ![alt]([[cached/...]]) → [[cached/...]]
+        import re
+        content = re.sub(r'!\[([^\]]*)\]\(\[\[([^\]]+)\]\]\)', r'[[\2]]', content)
+        # ![alt]([[cached/...]]) 带多余右括号 → [[cached/...]]
+        content = re.sub(r'!\[([^\]]*)\]\(\[\[([^\]]+)\]\]\)\)', r'[[\2]]', content)
+
+        reports_dir = Path(self.get_current_generation_dir()) / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+
+        report_path = reports_dir / filename
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        self.logger.debug(f"报告已保存: {report_path}")
+        return str(report_path)
+
     # --------------------------------------------------------
     # Mermaid 语法校验与保存
     # --------------------------------------------------------

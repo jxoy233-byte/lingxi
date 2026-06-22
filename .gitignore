@@ -77,4 +77,4 @@ memory/
 
 docker_data/
 
-config.json
+backend/.chatme/config.json

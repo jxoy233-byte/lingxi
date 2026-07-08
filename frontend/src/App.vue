@@ -807,7 +807,20 @@ export default {
         this.$refs.messageList?.suppressNextScroll()
         this.messages = this.processConversationMessages(conversation.messages)
 
-        // 3. 将用户消息添加回 messages（backtrack 后的对话不包含当前输入）
+        // 3. 清除中断状态（backtrack 后后端已清除，前端保持同步）
+        if (conversation.interrupted_info?.reason) {
+          this.isInterrupted = true
+          this.isInterruptedSessionId = requestSessionId
+          this.interruptReason = conversation.interrupted_info.reason
+          const lastAiMsg = this.messages.filter(m => m.role === 'ai').pop()
+          if (lastAiMsg) lastAiMsg.interruptReason = conversation.interrupted_info.reason
+        } else {
+          this.isInterrupted = false
+          this.isInterruptedSessionId = null
+          this.interruptReason = ''
+        }
+
+        // 4. 将用户消息添加回 messages（backtrack 后的对话不包含当前输入）
         // 注意：文件消息和文本消息分开推送，与 sendMessage 保持一致
         if (restreamProcessedOutputs.length > 0) {
           this.messages.push({
@@ -826,7 +839,7 @@ export default {
           })
         }
 
-        // 4. 添加 AI 消息占位
+        // 5. 添加 AI 消息占位
         this.isLoading = true
         this.currentResponseTime = 0
 
@@ -979,6 +992,19 @@ export default {
             const conversation = await convResponse.json()
             this.$refs.messageList?.suppressNextScroll()
             this.messages = this.processConversationMessages(conversation.messages)
+
+            // 清除中断状态（后端已清除，前端保持同步）
+            if (conversation.interrupted_info?.reason) {
+              this.isInterrupted = true
+              this.isInterruptedSessionId = this.currentSessionId
+              this.interruptReason = conversation.interrupted_info.reason
+              const lastAiMsg = this.messages.filter(m => m.role === 'ai').pop()
+              if (lastAiMsg) lastAiMsg.interruptReason = conversation.interrupted_info.reason
+            } else {
+              this.isInterrupted = false
+              this.isInterruptedSessionId = null
+              this.interruptReason = ''
+            }
           }
           this.showCheckpoints = false
         } else {
@@ -1012,6 +1038,11 @@ export default {
       this.displayCount += 10
     },
     createNewChat() {
+      // 关闭 SSE 连接，停止接收任何流式事件
+      if (this.eventSource) {
+        this.eventSource.close()
+        this.eventSource = null
+      }
       // 清理正在加载的状态
       this.cleanupLoadingState()
       // 清理输入框和文件
@@ -1178,8 +1209,17 @@ export default {
     async confirmDelete() {
       if (!this.deleteTargetId) return
 
-      // 清理正在加载的状态
-      this.cleanupLoadingState()
+      const isDeletingCurrent = this.currentSessionId === this.deleteTargetId
+
+      // 只有删除当前会话时才关闭 SSE 和清理加载状态
+      if (isDeletingCurrent) {
+        if (this.eventSource) {
+          this.eventSource.close()
+          this.eventSource = null
+        }
+        this.cleanupLoadingState()
+        this.createNewChat()
+      }
 
       try {
         const response = await fetch(`/chat/${this.deleteTargetId}/clear`, {
@@ -1187,9 +1227,6 @@ export default {
         })
         if (response.ok) {
           this.conversations = this.conversations.filter(c => c.session_id !== this.deleteTargetId)
-          if (this.currentSessionId === this.deleteTargetId) {
-            this.createNewChat()
-          }
         }
       } catch (error) {
         console.error('删除对话失败:', error)
@@ -1509,12 +1546,12 @@ export default {
                   responseTime: this.currentResponseTime
                 }
               } else if (data.type === 'tool_call_name') {
-                const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
-                toolCalls.push({ name: data.content.name, args: data.content.args, id: data.id, result: null })
-                this.messages[aiMessageIndex] = {
-                  ...this.messages[aiMessageIndex],
-                  toolCalls,
-                  responseTime: this.currentResponseTime
+                const toolCall = { name: data.content.name, args: data.content.args, id: data.id, result: null }
+                // 如果是 sub_agent 工具，特殊处理
+                if (data.content.name === 'sub_agent') {
+                  this._handleSubAgentStart(aiMessageIndex, toolCall)
+                } else {
+                  this._addToolCallToMessage(aiMessageIndex, toolCall)
                 }
               } else if (data.type === 'tool_call_result') {
                 const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]

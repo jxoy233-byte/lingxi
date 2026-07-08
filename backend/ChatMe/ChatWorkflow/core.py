@@ -15,9 +15,11 @@ from langgraph.prebuilt import ToolNode
 from langgraph.types import Send, interrupt
 
 from .config.graph_config import get_agent_node_config, get_graph_final_node_config, \
-    get_imp_ipt_config, get_history_summary_node_config, get_llm_memory_config, get_model_vl_config
+    get_imp_ipt_config, get_history_summary_node_config, get_llm_memory_config, get_model_vl_config, \
+    get_should_end_node_config
 from .config.models import ChatStateCore2, AIMessageType, FileParseState
 from .Memory.core import MemoryManager
+from .mcps.tools import sub_agent
 from ..LoggingManager.logging_config import get_logger
 
 class ChatWorkflow:
@@ -42,6 +44,7 @@ class ChatWorkflow:
         self.mcp_client = None
         self.memory_manager = None
         self.files_cached_dir = None
+        self.should_end_llm = None
 
     def _generate_tool_param_warning(self, tool_name: str, missing_params: List[str]) -> str:
         """生成工具参数缺失的警告信息"""
@@ -101,6 +104,12 @@ class ChatWorkflow:
         self.llm_imp_ipt = ChatOpenAI(**imp_ipt_llm_config)
         prompt = ChatPromptTemplate.from_messages([("system", imp_ipt_llm_prompt), MessagesPlaceholder("messages")])
         self.llm_imp_ipt = prompt | self.llm_imp_ipt
+
+        # should_end_node 配置
+        should_end_llm_config, should_end_prompt_content = get_should_end_node_config()
+        self.should_end_llm = ChatOpenAI(**should_end_llm_config)
+        should_end_prompt = ChatPromptTemplate.from_messages([("system", should_end_prompt_content), MessagesPlaceholder("messages")])
+        self.should_end_llm = should_end_prompt | self.should_end_llm
 
         # 输入优化视觉模型配置
         imp_ipt_vl_llm_config, imp_ipt_vl_llm_prompt = get_model_vl_config()
@@ -268,14 +277,16 @@ class ChatWorkflow:
                     tool_calls.append(tc)
 
         if tool_calls:
-            ai_message.tool_calls = tool_calls
+            # 限制单次并发 tool_calls 数量，取前 3 个
+            MAX_PARALLEL_TOOL_CALLS = 3
+            ai_message.tool_calls = tool_calls[:MAX_PARALLEL_TOOL_CALLS]
             ai_message.content = content
 
         ai_message.additional_kwargs = {"type": AIMessageType.REASONING.value}
         return ai_message
 
-    async def _get_validate_history_message(self, history_messages: List[BaseMessage])-> List[BaseMessage]:
-        """获取历史有效的聊天消息，包含文件缓存路径
+    async def _get_validate_history_message(self, history_messages: List[BaseMessage],limit: int)-> List[BaseMessage]:
+        """获取历史有效的聊天消息
 
         注意：只返回上一轮及更早的历史消息，不包含当前轮的 HumanMessage。
         通过排除 messages 列表末尾的 HumanMessage（当前轮输入）来实现。
@@ -283,11 +294,6 @@ class ChatWorkflow:
         input_msg = []
         if not history_messages:
             return input_msg
-
-        # 缓存目录是 agent_node 用来定位代码/数据的内部信息，
-        # final_node 只需要看到引用语法，无需看到绝对路径（避免模型复述）
-        files_cached_message = SystemMessage(content="文件缓存根目录：cached/（绝对路径对用户无意义，不要复述）")
-        input_msg.append(files_cached_message)
 
         # 排除当前轮的非文件用户输入 HumanMessage（位于 messages 末尾）
         msgs_to_process = history_messages
@@ -303,7 +309,7 @@ class ChatWorkflow:
                 if msg.additional_kwargs.get("type") == AIMessageType.SUMMARY.value:
                     input_msg.append(msg)
 
-        return input_msg
+        return input_msg[-limit:] if len(input_msg) >= limit else input_msg
 
     async def _get_current_round_conversation(self, messages: List[BaseMessage]) -> List[BaseMessage]:
         """
@@ -396,6 +402,12 @@ class ChatWorkflow:
             r'<thought>.*?</thought>',
             r'<reasoning>.*?</reasoning>',
             r'<think>.*?</think>',
+            # 清除 MiniMax-M3 生成的 expanded 格式工具调用标签
+            r'<tool_call>.*?</tool_call>',
+            r'\]<]minimax\[[>]',
+            r'\[<invoke \w+>\]\[<(\w+)>(.*?)</\1>\]',
+            # M3 在 </tool_calls> 之后多余的左括号，不破坏合法的 <tool_calls> 块本身
+            r'(?<=</tool_calls>)\s*\[+',
         ]
 
         if isinstance(content, str):
@@ -531,7 +543,7 @@ class ChatWorkflow:
 
         return workflow.compile()
 
-    async def _create_graph_core2(self):
+    async def _create_graph_core(self):
         """
         工程化图工作流对象:
         usr_input -> input_parse -> context_assembly
@@ -541,6 +553,7 @@ class ChatWorkflow:
         TOOL_CALL_TIMES = 50
 
         tools = await self.mcp_client.get_tools()
+        tools.append(sub_agent)
 
         workflow = StateGraph(ChatStateCore2)
 
@@ -558,14 +571,15 @@ class ChatWorkflow:
             files_input: HumanMessage = processed_files["combined_result"]
 
             user_input: List[HumanMessage] = await self._get_current_round_conversation_except_files( messages)
-            history_messages = await self._get_validate_history_message(messages)
+            history_messages = await self._get_validate_history_message(messages, 4)
 
-            if history_messages and len(history_messages) >= 8: # 四轮对话
-                history_invoke = history_messages[-8:]
-            else:
-                history_invoke = history_messages
+            # 续接时注入的中断原因 SystemMessage 需要加到 input_msg 最前面，否则 LLM 看不到
+            for msg in messages:
+                if isinstance(msg, SystemMessage) and ("中断原因" in msg.content or "中断续接" in msg.content):
+                    input_msg.insert(0, msg)
+                    break
 
-            input_msg.extend(history_invoke)
+            input_msg.extend(history_messages)
             input_msg.append(files_input)
             input_msg.extend(user_input)
 
@@ -592,7 +606,6 @@ class ChatWorkflow:
 
         async def context_assembly_node(state: ChatStateCore2, config: RunnableConfig):
             thread_id = config["configurable"]["thread_id"]
-            await self.check_and_trigger_interrupt(thread_id)
 
             context = []
             tool_results = state["memory_tool_results"] if state["memory_tool_results"] else []
@@ -624,14 +637,18 @@ class ChatWorkflow:
             thread_id = config["configurable"]["thread_id"]
             await self.check_and_trigger_interrupt(thread_id)
 
+            input_msg = state["context"]
+
+            if isinstance(state["messages"][-1], SystemMessage):
+                if "中断" in state["messages"][-1].content:
+                    input_msg.append(state["messages"][-1])
+
             if state["memory_tool_calls"]:
                 tool_calls = state["memory_tool_calls"]
             else:
                 tool_calls = []
 
             tool_call_times = state["tool_call_times"]
-
-            input_msg = state["context"]
 
             if tool_call_times >= TOOL_CALL_TIMES:
                 interrupt_msg = SystemMessage(content=f"已超过{TOOL_CALL_TIMES}次调用工具次数，请停止工具调用提前结束对话")
@@ -649,11 +666,21 @@ class ChatWorkflow:
                 tool_name = tool_call.get("name", "")
                 args = tool_call.get("args", {})
 
-                # execute_code 必须有 code 参数
-                if tool_name == "execute_code" and "code" not in args:
-                    warning_results = self._generate_tool_param_warning("execute_code", ["code"])
+                # todo
+                # if tool_call not in tools:
+                #     self.logger.warning(f"没有工具: {tool_call}")
+
+                # code 必须有 code 参数
+                if tool_name == "code" and "code" not in args:
+                    warning_results = self._generate_tool_param_warning("code", ["code"])
                     tool_call["args"]["code"] = warning_results
-                    self.logger.warning(f"execute_code 缺少 code 参数: {args}")
+                    self.logger.warning(f"code 缺少 code 参数: {args}")
+
+                # cmd 必须有 command 参数
+                if tool_name == "cmd" and "command" not in args:
+                    warning_results = self._generate_tool_param_warning("cmd", ["command"])
+                    tool_call["args"]["command"] = warning_results
+                    self.logger.warning(f"cmd 缺少 command 参数: {args}")
 
                 tool_call["args"]["session_id"] = thread_id
                 tool_calls.append(tool_call)
@@ -703,7 +730,7 @@ class ChatWorkflow:
             last_message = state["messages"][-1]
             if isinstance(last_message, AIMessage) and hasattr(last_message, "tool_calls") and last_message.tool_calls:
                 return "tool_execution_node"
-            return "final_node"
+            return "should_end_node"
 
         workflow.set_entry_point("input_parse_node")
         workflow.add_edge("input_parse_node", "context_assembly_node")
@@ -719,6 +746,270 @@ class ChatWorkflow:
         )
 
         workflow.add_edge("tool_execution_node", "context_assembly_node")
+
+        workflow.add_edge("final_node", END)
+
+        return workflow.compile(checkpointer=self.checkpointer)
+
+    async def _create_graph_core2(self):
+        """
+        工程化图工作流对象:
+        usr_input -> input_parse -> context_assembly
+        -> agent_node -> tool_node --↗
+                   ↘--> final_node
+        """
+        TOOL_CALL_TIMES = 50
+        RETRY_TIMES = 3
+
+        tools = await self.mcp_client.get_tools()
+        tools.append(sub_agent)
+
+        workflow = StateGraph(ChatStateCore2)
+
+        async def input_parse_node(state: ChatStateCore2, config: RunnableConfig):
+            """
+            输入预处理节点
+            """
+            thread_id = config["configurable"]["thread_id"]
+
+            input_msg = []
+            messages = list(state["messages"])
+
+            processed_files = await self.graph_process_files.ainvoke({"messages": messages})
+
+            files_input: HumanMessage = processed_files["combined_result"]
+
+            user_input: List[HumanMessage] = await self._get_current_round_conversation_except_files( messages)
+            history_messages = await self._get_validate_history_message(messages,2)
+
+            # 如果在这里中断时，续接时注入的中断原因 SystemMessage 需要加到 input_msg 最前面，否则 LLM 看不到
+            for msg in messages:
+                if isinstance(msg, SystemMessage) and "中断" in msg.content:
+                    input_msg.insert(0, msg)
+                    break
+
+            input_msg.extend(history_messages)
+            input_msg.append(files_input)
+            input_msg.extend(user_input)
+
+            imp_ipt = await self.llm_imp_ipt.ainvoke({"messages": input_msg})
+
+            imp_ipt = await self._filter_thinking_content(imp_ipt)
+
+            imp_ipt_content = imp_ipt.content
+            imp_ipt_additional_kwargs = imp_ipt.additional_kwargs
+            imp_ipt_id = imp_ipt.id
+            imp_ipt_response_metadata = imp_ipt.response_metadata
+
+            imp_ipt = HumanMessage(content=imp_ipt_content, additional_kwargs=imp_ipt_additional_kwargs, id=imp_ipt_id, response_metadata=imp_ipt_response_metadata)
+
+            return {
+                "imp_ipt": imp_ipt,
+                "context": [],
+                "memory_user_message": imp_ipt_content,
+                "memory_tool_results": [],
+                "memory_tool_calls": [],
+                "memory_ai_response": None,
+                "tool_call_times": 0,
+                "should_end_retry_times": 0,
+            }
+
+        async def context_assembly_node(state: ChatStateCore2, config: RunnableConfig):
+            thread_id = config["configurable"]["thread_id"]
+
+            context = []
+            tool_results = state["memory_tool_results"] if state["memory_tool_results"] else []
+
+            if not state["context"]:
+                memory_message :SystemMessage = self.memory_manager.get_relevant_memory(thread_id)
+                context.append(memory_message)
+
+                imp_ipt_msg: HumanMessage = state["imp_ipt"]
+                context.append(imp_ipt_msg)
+            else:
+                context = state["context"]
+
+                cycle_msg = await self._get_current_round_conversation_cycling(state["messages"])
+                context.extend(cycle_msg,)
+
+                for msg in cycle_msg:
+                    if isinstance(msg, ToolMessage):
+                        content_string = self._get_message_content_string(msg)
+                        tool_results.append(content_string)
+
+            return {
+                "context": context,
+                "memory_tool_results": tool_results
+            }
+
+        async def agent_node(state: ChatStateCore2, config: RunnableConfig):
+            """AI 代理节点，处理用户消息并决定是否调用工具"""
+            thread_id = config["configurable"]["thread_id"]
+            await self.check_and_trigger_interrupt(thread_id)
+
+            input_msg = state["context"]
+
+            if isinstance(state["messages"][-1], SystemMessage):
+                if "中断" in state["messages"][-1].content:
+                    input_msg.append(state["messages"][-1])
+
+            if state["memory_tool_calls"]:
+                tool_calls = state["memory_tool_calls"]
+            else:
+                tool_calls = []
+
+            tool_call_times = state["tool_call_times"]
+
+            if tool_call_times >= TOOL_CALL_TIMES:
+                interrupt_msg = SystemMessage(content=f"已超过{TOOL_CALL_TIMES}次调用工具次数，请停止工具调用提前结束对话")
+                input_msg.append(interrupt_msg)
+
+            response = await self.agent_llm.ainvoke({"messages": input_msg})
+
+            response = await self._filter_thinking_content(response)
+
+            # 符合ToolNode节点的AIMessage(REASONING)
+            format_response = self._parse_content_to_tool_calls(response)
+
+            counts = 0
+
+            # 验证工具调用
+            for tool_call in format_response.tool_calls:
+                tool_name = tool_call.get("name", "")
+                args = tool_call.get("args", {})
+
+                # todo
+                # if tool_call not in tools:
+                #     self.logger.warning(f"没有工具: {tool_call}")
+
+                # code 必须有 code 参数
+                if tool_name == "code" and "code" not in args:
+                    warning_results = self._generate_tool_param_warning("code", ["code"])
+                    tool_call["args"]["code"] = warning_results
+                    self.logger.warning(f"code 缺少 code 参数: {args}")
+
+                # cmd 必须有 command 参数
+                if tool_name == "cmd" and "command" not in args:
+                    warning_results = self._generate_tool_param_warning("cmd", ["command"])
+                    tool_call["args"]["command"] = warning_results
+                    self.logger.warning(f"cmd 缺少 command 参数: {args}")
+
+                tool_call["args"]["session_id"] = thread_id
+                tool_calls.append(tool_call)
+
+                counts += 1
+
+            tool_call_times += counts
+
+
+            return {
+                "messages": [format_response],
+                "tool_call_times": tool_call_times,
+                "memory_tool_calls": tool_calls,
+            }
+
+        tool_execution_node = ToolNode(tools=tools)  # 使用langgraph官方工具节点
+
+        async def should_end_node(state: ChatStateCore2, config: RunnableConfig):
+            thread_id = config["configurable"]["thread_id"]
+            await self.check_and_trigger_interrupt(thread_id)
+
+            context = state["context"]
+
+            last_message = state["messages"][-1]
+            response = await self.should_end_llm.ainvoke({"messages": [last_message]})
+            content = str(response.content)
+
+            decision = "end"
+            if "retry" in content or "RETRY" in content:
+                decision = "retry"
+
+            retry_times = state.get("should_end_retry_times", 0) or 0
+
+            if decision == "retry":
+                retry_times += 1
+                if retry_times >= RETRY_TIMES:
+                    # 超过3次强制结束，清理验证相关 SystemMessage 后跳 final_node
+                    cleaned_context = [msg for msg in context if not (
+                        isinstance(msg, SystemMessage) and "[Warning]" in msg.content
+                    )]
+                    return {"should_end_decision": "end", "should_end_retry_times": retry_times, "context": cleaned_context}
+                retry_msg = SystemMessage(content="[Warning] 重新检查一下RE-ACT思维链")
+                context.append(retry_msg)
+                return {"should_end_decision": decision, "should_end_retry_times": retry_times, "context": context, "messages": [retry_msg]}
+
+            cleaned_context = [msg for msg in context if not (
+                isinstance(msg, SystemMessage) and "[Warning]" in msg.content
+            )]
+            return {"should_end_decision": decision, "should_end_retry_times": 0, "context": cleaned_context}
+
+        async def final_node(state: ChatStateCore2, config: RunnableConfig):
+            thread_id = config["configurable"]["thread_id"]
+            await self.check_and_trigger_interrupt(thread_id)
+
+            input_msg = state["context"]
+
+            response = await self.llm_core.ainvoke({"messages": input_msg})
+
+            response = await self._filter_thinking_content( response)
+
+            # AIMessage字段支持解包复制
+            response_dict = dict(response)
+            response_dict["additional_kwargs"] = {**response.additional_kwargs, "type": AIMessageType.SUMMARY.value}
+
+            response_better = AIMessage(**response_dict)
+
+            # 提取AI回复内容用于memory
+            memory_ai_response = self._get_message_content_string(response_better)
+
+            return {
+                "messages": [response_better],
+                "memory_ai_response": memory_ai_response,
+            }
+
+        workflow.add_node("input_parse_node", input_parse_node)
+        workflow.add_node("context_assembly_node", context_assembly_node)
+        workflow.add_node("agent_node", agent_node)
+        workflow.add_node("tool_execution_node", tool_execution_node)
+        workflow.add_node("should_end_node", should_end_node)
+        workflow.add_node("final_node", final_node)
+
+        def route_agent_output(state: ChatStateCore2) -> str:
+            """根据代理输出决定下一步"""
+            last_message = state["messages"][-1]
+            if isinstance(last_message, AIMessage) and hasattr(last_message, "tool_calls") and last_message.tool_calls:
+                return "tool_execution_node"
+            return "should_end_node"
+
+        def route_should_end(state: ChatStateCore2) -> str:
+            """should_end_node 返回 end 则去 final_node，返回 retry 则回 context_assembly_node"""
+            decision = state.get("should_end_decision", "end")
+            if decision == "retry":
+                return "context_assembly_node"
+            return "final_node"
+
+        workflow.set_entry_point("input_parse_node")
+        workflow.add_edge("input_parse_node", "context_assembly_node")
+
+        workflow.add_edge("context_assembly_node", "agent_node")
+
+        workflow.add_conditional_edges("agent_node",
+            route_agent_output,
+            {
+                "tool_execution_node": "tool_execution_node",
+                "should_end_node": "should_end_node",
+            }
+        )
+
+        workflow.add_edge("tool_execution_node", "context_assembly_node")
+
+        workflow.add_conditional_edges("should_end_node",
+            route_should_end,
+            {
+                "final_node": "final_node",
+                "context_assembly_node": "context_assembly_node",
+            }
+        )
 
         workflow.add_edge("final_node", END)
 
@@ -773,4 +1064,4 @@ class ChatWorkflow:
             "messages": messages},
             config=config,
         ):
-                yield e
+            yield e

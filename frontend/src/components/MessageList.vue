@@ -77,9 +77,10 @@ export default {
   emits: ['restore', 'restream', 'open-link', 'preview-file', 'interrupt', 'resume', 'quote'],
   data() {
     return {
-      userInterrupted: false,   // 用户主动介入，打断自动滚动
       isAutoScrolling: false,   // 当前是否在自动滚动中
-      rafId: null               // requestAnimationFrame id
+      rafId: null,              // requestAnimationFrame id
+      // 内容更新前用户是否处于底部（beforeUpdate 钩子捕获，用于跨过大块内容更新）
+      _userAtBottomBeforeUpdate: true
     }
   },
   computed: {
@@ -121,20 +122,27 @@ export default {
       return true
     },
 
-    // 平滑滚动到底部，duration 根据距离动态计算
-    scrollToBottom(force = false) {
+    // 用户是否在底部（50px 容差）
+    isAtBottom() {
+      const c = this.$refs.messagesContainer
+      if (!c) return true
+      return c.scrollHeight - c.scrollTop - c.clientHeight < 50
+    },
+
+    // 滚动到底部
+    // force: 强制无视 isAtBottom()，用于首屏加载等场景
+    scrollToBottom({ force = false } = {}) {
       const container = this.$refs.messagesContainer
       if (!container) return
-      if (force) this.userInterrupted = false
-      if (this.userInterrupted) return
+
+      // stick-to-bottom：用户不在底部就不跟随（除非强制）
+      if (!force && !this.isAtBottom()) return
 
       this.$nextTick(() => {
         const distance = container.scrollHeight - container.scrollTop - container.clientHeight
         if (distance <= 0) return
 
-        // 距离越长速度越快：基础 300ms，每 500px 多加 80ms，上限 800ms
         const duration = Math.min(300 + Math.floor(distance / 500) * 80, 800)
-
         this.smoothScroll(container, container.scrollTop + distance, duration)
       })
     },
@@ -154,7 +162,8 @@ export default {
       this.isAutoScrolling = true
 
       const step = (now) => {
-        if (this.userInterrupted) {
+        // 用户已不在底部 → 中断动画（stick-to-bottom）
+        if (!this.isAtBottom()) {
           this.isAutoScrolling = false
           return
         }
@@ -174,27 +183,20 @@ export default {
       this.rafId = requestAnimationFrame(step)
     },
 
-    // 用户主动滚动（wheel / touchstart）时打断自动滚动
+    // 用户主动滚动（wheel / touchstart / scroll）时打断自动滚动
+    // 不再维护 userInterrupted 锁；由 isAtBottom() 在 scrollToBottom 里持续探测
     handleUserScroll() {
-      if (this.isAutoScrolling) {
-        this.userInterrupted = true
-        if (this.rafId) {
-          cancelAnimationFrame(this.rafId)
-          this.rafId = null
-        }
-        this.isAutoScrolling = false
+      // 跳过两种情况：
+      // 1. 自动滚动自身产生的 scroll 事件（否则 smoothScroll 会被自己打断）
+      // 2. 流式期间 + 用户仍在底部 → 不打断（auto-follow 优先于微动）
+      if (this.isAutoScrolling && this.isAtBottom()) return
+      // 取消正在进行的平滑动画
+      if (this.rafId) {
+        cancelAnimationFrame(this.rafId)
+        this.rafId = null
       }
+      this.isAutoScrolling = false
     },
-
-    // 用户滚回底部时恢复自动跟随
-    handleScroll() {
-      const container = this.$refs.messagesContainer
-      if (!container) return
-      const isAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 50
-      if (isAtBottom) {
-        this.userInterrupted = false
-      }
-    }
   },
   watch: {
     messages: {
@@ -203,7 +205,10 @@ export default {
           this._suppressScroll = false
           return
         }
-        if (!this.userInterrupted) {
+        // 内容增加前用户处于底部 → 强制跟随（避免工具输出等大块内容撑高 scrollHeight 后 50px 容差失效）
+        if (this._userAtBottomBeforeUpdate) {
+          this.scrollToBottom({ force: true })
+        } else {
           this.scrollToBottom()
         }
       },
@@ -212,22 +217,31 @@ export default {
     },
     isLoading(newVal) {
       if (newVal) {
-        // 发送消息时重置打断状态，强制滚到底部
-        this.scrollToBottom(true)
+        // 发送消息时不强制到底，沿用 isAtBottom() 判定
+        this.scrollToBottom()
       }
     }
+  },
+  beforeUpdate() {
+    // 在 Vue 把新内容 patch 到 DOM 之前，捕获用户是否处于底部。
+    // 这样 watcher 触发时（即 DOM 已更新，scrollHeight 已被新内容撑高），
+    // 仍能根据「更新前的状态」决定是否强制跟随——避免工具输出/大段文本一次性
+    // 增加 scrollHeight 导致 isAtBottom() 因新距离 > 50px 返回 false 而失跟。
+    this._userAtBottomBeforeUpdate = this.isAtBottom()
   },
   mounted() {
     const container = this.$refs.messagesContainer
     if (container) {
-      container.addEventListener('scroll', this.handleScroll, { passive: true })
+      // 修：原本挂的是 this.handleScroll（未定义），键盘/滚动条拖动/触摸板的滚动都不会触发打断。
+      // 改挂 handleUserScroll，覆盖所有滚动方式，wheel/touchstart 留作冗余。
+      container.addEventListener('scroll', this.handleUserScroll, { passive: true })
       container.addEventListener('wheel', this.handleUserScroll, { passive: true })
       container.addEventListener('touchstart', this.handleUserScroll, { passive: true })
 
       // 监听容器尺寸变化（图片/异步内容加载会让容器变高），
-      // 如果用户没有主动滚，就直接跟到新底部，避免卡在"图片还没加载时算出的旧底部"。
+      // 如果用户在底部，就直接跟到新底部，避免卡在"图片还没加载时算出的旧底部"。
       this.resizeObserver = new ResizeObserver(() => {
-        if (this.userInterrupted) return
+        if (!this.isAtBottom()) return
         const c = this.$refs.messagesContainer
         if (!c) return
         // 取消正在进行的平滑动画，直接跳到新底部
@@ -244,7 +258,7 @@ export default {
   beforeUnmount() {
     const container = this.$refs.messagesContainer
     if (container) {
-      container.removeEventListener('scroll', this.handleScroll)
+      container.removeEventListener('scroll', this.handleUserScroll)
       container.removeEventListener('wheel', this.handleUserScroll)
       container.removeEventListener('touchstart', this.handleUserScroll)
     }

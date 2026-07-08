@@ -1,5 +1,5 @@
 from operator import add
-from typing import TypedDict, Annotated, List, Optional, Dict, Any, Literal
+from typing import TypedDict, Annotated, List, Optional, Dict, Any
 
 from langgraph.graph import add_messages
 from langchain_core.messages import BaseMessage, HumanMessage
@@ -20,6 +20,7 @@ class MemoryUpdateFormat(BaseModel):
         self.tool_calls = tool_calls
         self.tool_results = tool_results
 
+
 class ChatStateCore2(TypedDict):
     """State for the ChatMe graph2"""
     messages: Annotated[list[BaseMessage], add_messages]
@@ -33,6 +34,8 @@ class ChatStateCore2(TypedDict):
     memory_ai_response: Annotated[Optional[str], "待写入memory的AI回复"]
     memory_tool_calls: Annotated[List[Dict[str, Any]], "待写入memory的工具调用"]
     memory_tool_results: Annotated[List[str], "待写入memory的工具结果"]
+    should_end_decision: Annotated[Optional[str], "should_end_node 的决策结果，end 或 retry"]
+    should_end_retry_times: Annotated[int, "should_end_node 连续 retry 的次数，超过3次强制跳 final_node"]
 
 
 class AIMessageType(str, Enum):

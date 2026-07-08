@@ -330,7 +330,7 @@ def _execute_code_in_local(code: str, language: str) -> str:
         os.unlink(temp_file)
 
 @server.tool
-def execute_code(code: str, language: Literal["python", "nodejs", "javascript", "js"] = "python", use_sandbox: bool = False, session_id: str = "") -> Optional[str]:
+def code(code: str, language: Literal["python", "nodejs", "javascript", "js"] = "python", use_sandbox: bool = False, session_id: str = "") -> Optional[str]:
     """
     执行代码（默认本地 venv，沙盒仅用于不可信代码）
 
@@ -349,11 +349,12 @@ def execute_code(code: str, language: Literal["python", "nodejs", "javascript", 
     if use_sandbox and _sandbox_pool is None:
         logger.warning(f"会话 {session_id} 请求沙盒但沙盒池未初始化，降级到本地 venv")
 
+    logger.debug(f"会话 {session_id} 使用本地环境执行代码")
     # 默认：本地 venv 执行（host 视角，可访问文件系统 + 导入后端模块）
     return _execute_code_in_local(code, language)
 
 @server.tool
-def execute_command(command: Annotated[ str, "系统执行命令"], timeout: int = 30, session_id: str="") -> str:
+def cmd(command: Annotated[ str, "系统执行命令"], timeout: int = 30, session_id: str="") -> str:
     """在安全的沙盒环境中执行终端命令"""
     is_dangerous, reason = is_dangerous_command(command=command)
     if is_dangerous:
@@ -363,8 +364,8 @@ def execute_command(command: Annotated[ str, "系统执行命令"], timeout: int
     # 检测脚本执行
     is_script, script_lang = _is_script_command(command)
     if is_script:
-        logger.warning(f"会话{session_id}尝试用 execute_command 执行{script_lang}")
-        return f"Error: execute_command 不能执行{script_lang}脚本，请使用 execute_code 工具"
+        logger.warning(f"会话{session_id}尝试用 cmd 执行{script_lang}")
+        return f"Error: cmd 不能执行{script_lang}脚本，请使用 code 工具"
 
     # 白名单检查
     is_allowed, allow_reason = _is_allowed_command(command)
@@ -415,7 +416,7 @@ def execute_command(command: Annotated[ str, "系统执行命令"], timeout: int
         )
 
         output = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n\nReturn code: {result.returncode}"
-        logger.info(f"会话{session_id}中执行终端命令成功")
+        logger.debug(f"会话{session_id}中执行终端命令成功")
         return output
     except subprocess.TimeoutExpired:
         logger.error(f"会话{session_id}中终端命令执行超时")
@@ -450,7 +451,7 @@ def interrupt(message: str, session_id: str = ""):
 
 
 @server.tool
-def get_current_datetime(session_id: str = "") -> str:
+def ctime(session_id: str = "") -> str:
     """
     获取当前的日期和时间（自动使用本机时区）
 

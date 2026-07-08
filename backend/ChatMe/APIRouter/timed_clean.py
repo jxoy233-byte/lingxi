@@ -46,6 +46,11 @@ def get_log_dir() -> Path:
     return Path.cwd() / ".chatme" / "logs"
 
 
+def get_memory_dir() -> Path:
+    """获取记忆文件目录"""
+    return Path.cwd() / ".chatme" / "memory"
+
+
 def touch_file(path: Path):
     """
     刷新文件时间戳，让文件保持"活跃"状态
@@ -100,6 +105,45 @@ def clean_logs(days: int = 2) -> tuple[int, float]:
         if file_date <= cutoff:
             size = file.stat().st_size
             file.unlink()
+            removed += 1
+            freed_size += size
+
+    return removed, freed_size
+
+
+def clean_memory(days: int = 30) -> tuple[int, float]:
+    """
+    清理记忆目录中长期未访问的 session 记忆文件。
+    记忆目录结构: .chatme/memory/{session_id}/
+    如果某个 session_id 在 Redis 中已不存在，则删除对应的记忆目录。
+    """
+    import shutil
+    memory_dir = get_memory_dir()
+    if not memory_dir.exists():
+        return 0, 0
+
+    import redis
+    from ChatMe.ChatMeConfig import get_redis_checkpointer_url
+
+    redis_url = get_redis_checkpointer_url()
+    r = redis.from_url(redis_url)
+
+    # 从 Redis 中扫描所有 checkpoint key，提取活跃的 session_id
+    active_ids: set[str] = set()
+    for key in r.scan_iter(match="checkpoint:*", count=1000):
+        parts = key.decode().split(":")
+        if len(parts) >= 2:
+            active_ids.add(parts[1])
+
+    removed = 0
+    freed_size = 0
+    for item in memory_dir.iterdir():
+        if not item.is_dir():
+            continue
+        # 如果 session_id 不在活跃列表中，删除整个目录
+        if item.name not in active_ids:
+            size = sum(f.stat().st_size for f in item.rglob("*") if f.is_file())
+            shutil.rmtree(item)
             removed += 1
             freed_size += size
 
@@ -168,13 +212,20 @@ async def _cleanup_task():
             f"释放 {log_freed / 1024 / 1024:.2f} MB"
         )
 
+    memory_removed, memory_freed = clean_memory(days=30)
+    if memory_removed > 0:
+        logger.info(
+            f"记忆清理完成: 删除 {memory_removed} 个会话记忆，"
+            f"释放 {memory_freed / 1024 / 1024:.2f} MB"
+        )
+
     orphaned_removed, orphaned_names = await clean_orphaned_sessions()
     if orphaned_removed > 0:
         logger.info(f"孤立会话清理完成: 删除 {orphaned_removed} 个目录 {orphaned_names}")
     else:
         logger.debug("无孤立会话目录需要清理")
 
-    if cache_removed == 0 and log_removed == 0 and orphaned_removed == 0:
+    if cache_removed == 0 and log_removed == 0 and memory_removed == 0 and orphaned_removed == 0:
         logger.debug("无文件需要清理")
 
 

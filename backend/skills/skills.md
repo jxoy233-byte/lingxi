@@ -4,7 +4,7 @@
 这些技能以 Python 模块形式存在，AI 可以通过生成并执行 Python 代码来调用。
 
 **使用skills**:
-execute_code的执行路径在skills目录，
+code的执行路径在skills目录，
 from xxx(直接写脚本名称，如Exa) import 模块名 ✅
 from skills.xxx import ... ❌
 ---

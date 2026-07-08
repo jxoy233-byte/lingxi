@@ -373,6 +373,27 @@ class ChatService:
             for k, v in key_value.items()
         }
 
+    @staticmethod
+    async def _switch_chunk_to_str(chunk_content: Any):
+        content = chunk_content
+        if isinstance(content, str):
+            content = str(content)
+        elif isinstance(content, dict):
+            if "type" in content and content.get("type") == "text":
+                content = str(content.get("text"))
+        elif isinstance(content, list):
+            tmp = ""
+            for c in content:
+                if isinstance(c, str):
+                    tmp += str(c)
+                elif isinstance(c, dict):
+                    if "type" in c and c.get("type") == "text":
+                        tmp += str(c.get("text"))
+            content = tmp
+        else:
+            content = str(content)
+        return content
+
     async def message_stream(
         self,
         message: str,
@@ -392,12 +413,12 @@ class ChatService:
         """
         session_ids = await self.aget_conversation_ids
 
-        # 会话ID处理：无则新建，有则直接使用（不论是否已存在于Redis，graph.invoke会自动处理）
+        # 会话ID处理：无则新建，有则直接使用
         if session_id == "" or session_id is None:
             session_id = str(uuid.uuid4().hex)
-            self.logger.info(f"创建新会话(session_id={session_id})")
+            self.logger.info(f"\n------------------------------------------------------------\n  新建会话 session_id={session_id}\n------------------------------------------------------------")
         else:
-            self.logger.debug(f"使用已有会话或创建新会话(session_id={session_id})")
+            self.logger.info(f"\n------------------------------------------------------------\n  进入会话 session_id={session_id}\n------------------------------------------------------------")
 
         input_config = {
             "configurable" :{
@@ -436,9 +457,7 @@ class ChatService:
                 if chunk['event'] == 'on_chat_model_stream':
                     # 最终返回的chunk
                     if chunk['metadata']['langgraph_node'] and chunk['metadata']['langgraph_node'] == 'final_node':
-                        content = chunk['data']['chunk'].content
-                        if not isinstance(content, str):
-                            content = str(content)
+                        content = await self._switch_chunk_to_str(chunk['data']['chunk'].content)
                         full_response += content
                         yield json.dumps(
                             {"type": "content", "content": content},
@@ -446,18 +465,14 @@ class ChatService:
                             default=str
                         ) + "\n\n"
                     elif chunk['metadata']['langgraph_node'] and chunk['metadata']['langgraph_node'] == 'input_parse_node':
-                        content = chunk['data']['chunk'].content
-                        if not isinstance(content, str):
-                            content = str(content)
+                        content = await self._switch_chunk_to_str(chunk['data']['chunk'].content)
                         yield json.dumps(
                             {"type": "reasoning", "content": content},
                             ensure_ascii=False,
                             default=str
                         ) + "\n\n"
                     elif chunk['metadata']['langgraph_node'] and chunk['metadata']['langgraph_node'] == 'agent_node':
-                        content = chunk['data']['chunk'].content
-                        if not isinstance(content, str):
-                            content = str(content)
+                        content = await self._switch_chunk_to_str(chunk['data']['chunk'].content)
                         yield json.dumps(
                             {"type": "reasoning", "content": content},
                             ensure_ascii=False,
@@ -476,20 +491,12 @@ class ChatService:
                 elif chunk['event'] == 'on_tool_end':
                     output_content = chunk['data']['output'].content
                     if output_content:
-                        if isinstance(output_content, list):
-                            for op in output_content:
-                                if op['type'] == "text":
-                                    yield json.dumps(
-                                        {"type": "tool_call_result", "id": chunk["run_id"], "content": op['text']},
-                                        ensure_ascii=False,
-                                        default=str
-                                    ) + "\n\n"
-                        elif isinstance(output_content, str):
-                            yield json.dumps(
-                                {"type": "tool_call_result", "id": chunk["run_id"], "content": output_content},
-                                ensure_ascii=False,
-                                default=str
-                            ) + "\n\n"
+                        content = await self._switch_chunk_to_str(output_content)
+                        yield json.dumps(
+                            {"type": "tool_call_result", "id": chunk["run_id"], "content": content},
+                            ensure_ascii=False,
+                            default=str
+                        ) + "\n\n"
         except Exception as e:
             error_detail = f"{str(e)}\n{traceback.format_exc()}"
             self.logger.error(f"流式响应异常(session_id:{session_id}): {error_detail}")
@@ -551,7 +558,7 @@ class ChatService:
         Returns:
             会话内容
         """
-        self.logger.info(f"获取会话: {session_id}")
+        self.logger.info(f"\n------------------------------------------------------------\n  获取会话 session_id={session_id}\n------------------------------------------------------------")
 
         config = {"configurable": {"thread_id": session_id}}
 
@@ -572,12 +579,7 @@ class ChatService:
                     role = MessageRole.USER
                     files = []
                     is_file = msg.additional_kwargs.get("is_file", False)
-                    human_message = ""
-                    for content in msg.content:
-                        if content.get("type") == "text":
-                            human_message += content.get("text", "")
-                            human_message += '\n'
-                    human_message = human_message.strip()
+                    human_message = (await self._switch_chunk_to_str(msg.content)).strip()
 
                     if is_file:
                         files = msg.additional_kwargs.get("files", [])
@@ -630,12 +632,7 @@ class ChatService:
 
                 elif isinstance(msg, ToolMessage):
                     role = MessageRole.AI
-                    tool_resp = Any
-                    for content in msg.content:
-                        if isinstance (content, dict) and content.get("type") == "text":
-                            tool_resp = content.get("text",{})
-                        elif isinstance(content, str):
-                            tool_resp = content
+                    tool_resp = await self._switch_chunk_to_str(msg.content)
                     messages_list.append(Message(
                         role=role,
                         content=f"name: {msg.name}\ncontent:{tool_resp}",
@@ -875,14 +872,8 @@ class ChatService:
                     target_index = i
                     break
 
-            # 删除比目标更新的 checkpoints
-            if target_index != 0:
-                checkpoints_to_del = checkpoints[:target_index]
-                for cp in checkpoints_to_del:
-                    cp_id_to_del = cp["checkpoint_id"]
-                    if cp_id_to_del:
-                        await self.state_saver.delete_checkpoint(thread_id=session_id, checkpoint_id=cp_id_to_del)
-                        await self._delete_specific_checkpoint(session_id, cp_id_to_del)
+            # 删除比目标更新的 checkpoints（这些是旧状态，比 backtrack 目标更晚）
+            checkpoints_to_del = checkpoints[:target_index] if target_index > 0 else []
 
             # 获取回溯后的状态
             backtrack_state = await self.graph.aget_state(config=backtrack_config)
@@ -891,12 +882,17 @@ class ChatService:
             cur_state = await self.graph.aupdate_state(config=backtrack_config, values=backtrack_state.values)
             new_checkpoint = cur_state["configurable"]["checkpoint_id"]
 
-            # 确保新 checkpoint 已写入后再删除旧的
-            await self.state_saver.delete_checkpoint(thread_id=session_id, checkpoint_id=checkpoint_id)
-            await self.state_saver.write_checkpoint(session_id, new_checkpoint)
-            await self._delete_specific_checkpoint(session_id, checkpoint_id)
+            # 删除比目标更新的旧 checkpoints
+            for cp in checkpoints_to_del:
+                cp_id_to_del = cp["checkpoint_id"]
+                if cp_id_to_del:
+                    await self.state_saver.delete_checkpoint(thread_id=session_id, checkpoint_id=cp_id_to_del)
+                    await self._delete_specific_checkpoint(session_id, cp_id_to_del)
 
             await self.chat_workflow.memory_manager.backtrack_memory(thread_id=session_id, checkpoint_id=checkpoint_id, new_checkpoint_id=new_checkpoint)
+
+            # 等待 Redis 状态完全落地，避免前端立即发起的流式请求读到旧数据
+            await asyncio.sleep(1)
 
             self.logger.info(f"会话回溯成功(session_id:{session_id}, checkpoint_id:{checkpoint_id})")
 
@@ -991,18 +987,14 @@ class ChatService:
                 if chunk['event'] == 'on_chat_model_stream':
                     # 最终返回的chunk
                     if chunk['metadata']['langgraph_node'] and chunk['metadata']['langgraph_node'] == 'final_node':
-                        content = chunk['data']['chunk'].content
-                        if not isinstance(content, str):
-                            content = str(content)
+                        content = await self._switch_chunk_to_str(chunk['data']['chunk'].content)
                         yield json.dumps(
                             {"type": "content", "content": content},
                             ensure_ascii=False,
                             default=str
                         ) + "\n\n"
                     elif chunk['metadata']['langgraph_node'] and chunk['metadata']['langgraph_node'] == 'agent_node':
-                        content = chunk['data']['chunk'].content
-                        if not isinstance(content, str):
-                            content = str(content)
+                        content = await self._switch_chunk_to_str(chunk['data']['chunk'].content)
                         yield json.dumps(
                             {"type": "reasoning", "content": content},
                             ensure_ascii=False,
@@ -1014,27 +1006,19 @@ class ChatService:
                     tool_call_args = chunk['data'].get('input', {})
                     tool_call_name = chunk['name']
                     yield json.dumps(
-                        {"type": "tool_call_name", "content": {'args': tool_call_args, 'name': tool_call_name}},
+                        {"type": "tool_call_name", "id": chunk["run_id"], "content": {'args': tool_call_args, 'name': tool_call_name}},
                         ensure_ascii=False,
                         default=str
                     ) + "\n\n"
                 elif chunk['event'] == 'on_tool_end':
                     output_content = chunk['data']['output'].content
                     if output_content:
-                        if isinstance(output_content, list):
-                            for op in output_content:
-                                if op['type'] == "text":
-                                    yield json.dumps(
-                                        {"type": "tool_call_result", "content": op['text']},
-                                        ensure_ascii=False,
-                                        default=str
-                                    ) + "\n\n"
-                        elif isinstance(output_content, str):
-                            yield json.dumps(
-                                {"type": "tool_call_result", "content": output_content},
-                                ensure_ascii=False,
-                                default=str
-                            ) + "\n\n"
+                        content = await self._switch_chunk_to_str(output_content)
+                        yield json.dumps(
+                            {"type": "tool_call_result", "id": chunk["run_id"], "content": content},
+                            ensure_ascii=False,
+                            default=str
+                        ) + "\n\n"
         except Exception as e:
             error_detail = f"{str(e)}\n{traceback.format_exc()}"
             self.logger.error(f"流式响应异常(session_id:{session_id}): {error_detail}")

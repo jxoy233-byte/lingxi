@@ -55,8 +55,10 @@ def set_logger(
     return logger
 
 
-def get_logger(name: str = None) -> logging.Logger:
+def get_logger(name: str = None, path=None) -> logging.Logger:
     """获取指定名字的 logger"""
     if name is None:
         return set_logger()
+    if path:
+        return set_logger(name=name, log_dir=path)
     return set_logger(name=name)

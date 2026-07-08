@@ -253,9 +253,9 @@ def _parse_tool_calls(content: str):
 
 @tool
 def sub_agent(
-    task: Annotated[str, "子任务描述（清晰描述要完成什么）"],
-    prompt_addon: Annotated[str, "执行步骤提示（可选），格式为工具调用链，如 cmd → cat xxx → code"] = "",
-    session_id: Annotated[str, "会话 ID"] = "",
+    task: Annotated[str, "子任务描述"],
+    prompt_addon: Annotated[str, "执行步骤提示。"] = "",
+    session_id: Annotated[str, "会话id"] = ""
 ) -> str:
     """
     触发子 agent 执行复杂任务（Plan-Execute + ReAct 模式）

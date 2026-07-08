@@ -5,8 +5,8 @@
 
 **使用skills**:
 code的执行路径在skills目录，
-from xxx(直接写脚本名称，如Exa) import 模块名 ✅
-from skills.xxx import ... ❌
+from xxx(直接写脚本名称，如Exa) import 模块名 ❌
+from skills.xxx import ... ✅
 ---
 
 # 🧭 使用总则（非常重要）

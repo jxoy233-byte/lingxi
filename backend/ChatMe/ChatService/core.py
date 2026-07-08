@@ -615,7 +615,7 @@ class ChatService:
                             msg.additional_kwargs["last_checkpoint_id"] = ""
                         messages_list.append(Message(
                             role=role,
-                            content=msg.content,
+                            content=await self._switch_chunk_to_str(msg.content),
                             files=None,
                             additional_kwargs=msg.additional_kwargs
                         ))
@@ -623,7 +623,7 @@ class ChatService:
                     elif msg.additional_kwargs.get("type") == AIMessageType.REASONING.value:
                         messages_list.append(Message(
                             role=role,
-                            content=msg.content,
+                            content=await self._switch_chunk_to_str(msg.content),
                             files=None,
                             additional_kwargs=msg.additional_kwargs
                         ))

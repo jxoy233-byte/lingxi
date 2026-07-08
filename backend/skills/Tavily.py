@@ -7,16 +7,19 @@ from typing import List, Dict, Any, Literal
 
 import requests
 
+from ChatMe.ChatMeConfig import get_skills_config
+
 
 class TavilySearch:
     """Tavily 搜索引擎客户端"""
 
     def __init__(self):
-        self.api_key = os.getenv("TAVILY_API_KEY")
+        # 优先级：config.json (via get_skills_config) > os.getenv
+        self.api_key = get_skills_config().get("tavily_api_key") or os.getenv("TAVILY_API_KEY", "")
         self.base_url = "https://api.tavily.com/search"
 
         if not self.api_key:
-            raise ValueError("TAVILY_API_KEY 环境变量未设置")
+            raise ValueError("TAVILY_API_KEY 未配置（config.json 的 skills.tavily_api_key 或环境变量）")
 
     def search(
         self,

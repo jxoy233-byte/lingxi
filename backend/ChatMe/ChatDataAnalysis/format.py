@@ -8,7 +8,7 @@ import json
 import os
 import shutil
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from ChatMe.ChatMeConfig import get_oss_config
 from ChatMe.LoggingManager.logging_config import get_logger
@@ -27,7 +27,13 @@ class ChatDataAnalysisFormat:
         Args:
             session_id: 会话 ID，用于组织输出目录
         """
-        self.logger = get_logger("ChatDataAnalysisFormat")
+        # 区分宿主机
+        if os.path.exists("/.dockerenv"):
+            log_dir = Path.home() / ".chatme" / "logs"
+        else:
+            log_dir = Path.cwd() / ".chatme" / "logs"
+
+        self.logger = get_logger(name="ChatDataAnalysisFormat", path=log_dir)
         self.session_id = session_id
         self._base_dir: Optional[str] = None
         self._generation: Optional[str] = None
@@ -289,13 +295,6 @@ class ChatDataAnalysisFormat:
         Returns:
             保存后的文件绝对路径
         """
-        # 容错：清洗 AI 混用 markdown 图片语法和 [[...]] 语法的异常输出
-        # ![alt]([[cached/...]]) → [[cached/...]]
-        import re
-        content = re.sub(r'!\[([^\]]*)\]\(\[\[([^\]]+)\]\]\)', r'[[\2]]', content)
-        # ![alt]([[cached/...]]) 带多余右括号 → [[cached/...]]
-        content = re.sub(r'!\[([^\]]*)\]\(\[\[([^\]]+)\]\]\)\)', r'[[\2]]', content)
-
         reports_dir = Path(self.get_current_generation_dir()) / "reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
 

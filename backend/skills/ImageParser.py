@@ -158,12 +158,12 @@ def parse_image(
     ]
 
     # 调用 VL 模型 API
+    from ChatMe.ChatMeConfig import get_skills_config
     try:
-        from ChatMe.ChatMeConfig import get_model_vl_config
-        vl_config = get_model_vl_config()
-        vl_base_url = vl_config.get("base_url", "http://127.0.0.1:8211/api/v1")
-        vl_api_key = vl_config.get("api_key", "empty")
-        vl_model = vl_config.get("model_name", "Qwen3-VL-2B")
+        skills = get_skills_config()
+        vl_base_url = skills.get("vl_base_url") or os.getenv("VL_BASE_URL", "http://127.0.0.1:8211/api/v1")
+        vl_api_key = skills.get("vl_api_key") or os.getenv("VL_API_KEY", "empty")
+        vl_model = skills.get("vl_model_name") or os.getenv("VL_MODEL_NAME", "Qwen3-VL-2B")
         # 配置仅作为默认值，用户传入参数时优先使用传入值
         # 如需使用配置值，传参时不要指定即可
     except Exception:

@@ -330,15 +330,14 @@ def _execute_code_in_local(code: str, language: str) -> str:
         os.unlink(temp_file)
 
 @server.tool
-def code(code: str, language: Literal["python", "nodejs", "javascript", "js"] = "python", use_sandbox: bool = False, session_id: str = "") -> Optional[str]:
+def code(
+    code: Annotated[str, "代码"],
+    language: Annotated[Literal["python", "nodejs", "javascript", "js"], "代码语言，默认 python"] = "python",
+    use_sandbox: Annotated[bool, "是否使用沙盒执行（默认 True）"] = True,
+    session_id: Annotated[str, "会话id"] = ""
+) -> Optional[str]:
     """
-    执行代码（默认本地 venv，沙盒仅用于不可信代码）
-
-    Args:
-        code: 要执行的代码
-        language: 语言类型
-        use_sandbox: 是否使用沙盒（默认 False）。仅当 AI 判断代码不可信时才设 True
-        session_id: 会话 ID
+    执行代码（默认沙盒，必要时降级到本地 venv）
     """
     # AI 判断代码不安全 → 沙盒执行
     if use_sandbox and _sandbox_pool is not None:
@@ -354,8 +353,11 @@ def code(code: str, language: Literal["python", "nodejs", "javascript", "js"] = 
     return _execute_code_in_local(code, language)
 
 @server.tool
-def cmd(command: Annotated[ str, "系统执行命令"], timeout: int = 30, session_id: str="") -> str:
-    """在安全的沙盒环境中执行终端命令"""
+def cmd(
+        command: Annotated[str, "执行系统命令"],
+        session_id: Annotated[str,"会话id"] = ""
+) -> str:
+    """在白名单内执行终端命令"""
     is_dangerous, reason = is_dangerous_command(command=command)
     if is_dangerous:
         logger.warning(f"会话{session_id}中危险命令,已安全拦截")
@@ -410,7 +412,7 @@ def cmd(command: Annotated[ str, "系统执行命令"], timeout: int = 30, sessi
             shell=True,
             capture_output=True,
             text=True,
-            timeout=timeout,
+            timeout=30,
             cwd=str(project_root),
             env=env,
         )
@@ -420,19 +422,18 @@ def cmd(command: Annotated[ str, "系统执行命令"], timeout: int = 30, sessi
         return output
     except subprocess.TimeoutExpired:
         logger.error(f"会话{session_id}中终端命令执行超时")
-        return f"Error: Command execution timed out ({timeout} seconds limit)"
+        return f"Error: Command execution timed out ({30} seconds limit)"
     except Exception as e:
         logger.error(f"会话{session_id}中错误执行终端命令")
         return f"Error: {str(e)}"
 
 @server.tool
-def interrupt(message: str, session_id: str = ""):
+def interrupt(
+    message: Annotated[str,"中断原因/要询问用户的信息"],
+    session_id: Annotated[str,"会话id"] = ""
+):
       """
       中断当前对话，向用户询问更多的信息
-
-      Args:
-          message: 中断原因/要询问用户的信息
-          session_id: 额外参数，包含 session_id
       """
       if not session_id:
           logger.warning(f"interrupt 工具调用缺少 session_id 参数")
@@ -451,7 +452,9 @@ def interrupt(message: str, session_id: str = ""):
 
 
 @server.tool
-def ctime(session_id: str = "") -> str:
+def ctime(
+        session_id: Annotated[str,"会话id"] = ""
+) -> str:
     """
     获取当前的日期和时间（自动使用本机时区）
 

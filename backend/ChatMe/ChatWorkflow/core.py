@@ -36,7 +36,9 @@ class ChatWorkflow:
         self.summary_llm = None
         self.llm_imp_ipt = None
         self.llm_imp_ipt_vl = None
+        self.should_end_llm = None
 
+        self.tools = None
         self.graph = None
         self.graph_process_files = None
         self.checkpointer = None
@@ -44,7 +46,6 @@ class ChatWorkflow:
         self.mcp_client = None
         self.memory_manager = None
         self.files_cached_dir = None
-        self.should_end_llm = None
 
     def _generate_tool_param_warning(self, tool_name: str, missing_params: List[str]) -> str:
         """生成工具参数缺失的警告信息"""
@@ -72,6 +73,10 @@ class ChatWorkflow:
             }
         )
 
+        tools = await self.mcp_client.get_tools()
+        tools.append(sub_agent)
+        self.tools = tools
+
     async def init_memory_manager(self):
         llm_memory_config, llm_memory_prompt = get_llm_memory_config()
         self.memory_manager = MemoryManager(llm_config=llm_memory_config, memory_prompt=llm_memory_prompt)
@@ -87,7 +92,7 @@ class ChatWorkflow:
         # agent_node配置
         agent_node_config ,agent_prompt = get_agent_node_config()
 
-        self.agent_llm = ChatOpenAI(**agent_node_config)
+        self.agent_llm = ChatOpenAI(**agent_node_config).bind_tools(self.tools)
         prompt = ChatPromptTemplate.from_messages([("system", agent_prompt), MessagesPlaceholder("messages")])
         self.agent_llm = prompt | self.agent_llm
 
@@ -419,7 +424,8 @@ class ChatWorkflow:
             additional_kwargs=ai_response.additional_kwargs,
             response_metadata=ai_response.response_metadata,
             id=ai_response.id,
-            usage_metadata=getattr(ai_response, "usage_metadata", None)
+            usage_metadata=getattr(ai_response, "usage_metadata", None),
+            tool_calls=getattr(ai_response, "tool_calls", []) or [],
         )
 
 
@@ -761,8 +767,6 @@ class ChatWorkflow:
         TOOL_CALL_TIMES = 50
         RETRY_TIMES = 3
 
-        tools = await self.mcp_client.get_tools()
-        tools.append(sub_agent)
 
         workflow = StateGraph(ChatStateCore2)
 
@@ -865,6 +869,7 @@ class ChatWorkflow:
                 input_msg.append(interrupt_msg)
 
             response = await self.agent_llm.ainvoke({"messages": input_msg})
+            print(response)
 
             response = await self._filter_thinking_content(response)
 
@@ -908,7 +913,7 @@ class ChatWorkflow:
                 "memory_tool_calls": tool_calls,
             }
 
-        tool_execution_node = ToolNode(tools=tools)  # 使用langgraph官方工具节点
+        tool_execution_node = ToolNode(tools=self.tools)  # 使用langgraph官方工具节点
 
         async def should_end_node(state: ChatStateCore2, config: RunnableConfig):
             thread_id = config["configurable"]["thread_id"]

@@ -17,8 +17,8 @@ services:
 
   sandbox:
     build:
-      context: ./sandbox
-      dockerfile: Dockerfile
+      context: . # 项目根
+      dockerfile: sandbox/Dockerfile
     image: chatme-python-sandbox:latest
     profiles:
       - never  # 不会自动启动，按需手动运行

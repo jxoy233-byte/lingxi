@@ -336,6 +336,31 @@ class ChatMeConfig:
             "region": self.get("oss.region", fallback_env="OSS_REGION"),
         }
 
+    def get_skills_config(self) -> dict:
+        """获取 skills 配置（API key 等）
+
+        优先级：config.json > 环境变量
+        - 搜索类（config.json 的 skills 段）：bocha_api_key / exa_api_key / tavily_api_key
+        - 视觉模型类（复用 llm_providers.vl）：vl_base_url / vl_api_key / vl_model_name
+
+        容器内自动把 127.0.0.1 替换为 host.docker.internal（容器访问 host 的特殊 DNS）
+        """
+        cfg = {
+            "bocha_api_key": self.get("skills.bocha_api_key", fallback_env="BOCHA_API_KEY"),
+            "exa_api_key": self.get("skills.exa_api_key", fallback_env="EXA_API_KEY"),
+            "tavily_api_key": self.get("skills.tavily_api_key", fallback_env="TAVILY_API_KEY"),
+            "vl_base_url": self.get("llm_providers.vl.base_url", fallback_env="VL_BASE_URL",
+                                     default="http://127.0.0.1:8211/api/v1"),
+            "vl_api_key": self.get("llm_providers.vl.api_key", fallback_env="VL_API_KEY", default="empty"),
+            "vl_model_name": self.get("llm_providers.vl.model_name", fallback_env="VL_MODEL_NAME",
+                                        default="Qwen3-VL-2B"),
+        }
+        # 容器内：127.0.0.1 → host.docker.internal
+        if os.path.exists("/.dockerenv"):
+            if "127.0.0.1" in cfg.get("vl_base_url", ""):
+                cfg["vl_base_url"] = cfg["vl_base_url"].replace("127.0.0.1", "host.docker.internal")
+        return cfg
+
     def get_oss_bucket(self) -> str:
         """获取 OSS bucket 名称"""
         return self.get("oss.bucket", fallback_env="OSS_BUCKET")
@@ -389,6 +414,14 @@ def get_directory(name: str) -> str:
 def get_oss_config() -> dict:
     """获取 OSS 配置"""
     return config.get_oss_config()
+
+
+def get_skills_config() -> dict:
+    """获取 skills 配置（API key 等）
+
+    优先级：config.json > 环境变量
+    """
+    return config.get_skills_config()
 
 
 def get_app_config() -> dict:

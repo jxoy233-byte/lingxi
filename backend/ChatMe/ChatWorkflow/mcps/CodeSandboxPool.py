@@ -1,12 +1,36 @@
-import subprocess
-import tempfile
+import json
 import os
+import subprocess
 import threading
+from pathlib import Path
 
 
 class SandboxPool:
-    def __init__(self, size=2, image="chatme-python-sandbox:latest"):
+    def __init__(
+        self,
+        size=2,
+        image="chatme-python-sandbox:latest",
+        skills_path=None,    # 可选覆盖，默认按 __file__ 推断 backend/skills
+        cached_path=None,    # 可选覆盖，默认按 __file__ 推断 backend/cached
+        config_path=None,
+    ):
         self.image = image
+
+        # __file__ = backend/ChatMe/ChatWorkflow/mcps/CodeSandboxPool.py
+        # 4 层 .parent 上去 = backend/
+        backend_root = Path(__file__).resolve().parents[3]
+        # 5 层 .parent 上去 = 项目根（用来定位 sandbox/）
+        top_root = Path(__file__).resolve().parents[4]
+        self.skills_path = os.path.abspath(skills_path or backend_root / "skills")
+        self.cached_path = os.path.abspath(cached_path or backend_root / "cached")
+        self.config_path = os.path.abspath(config_path or backend_root / ".chatme" / "config.json")
+        self.logs_path = os.path.abspath(config_path or backend_root / ".chatme" / "logs")
+        # 自动生成的 sandbox-only config（只含 skills 段，权限 600，不入 git）
+        self.sandbox_config_path = os.path.abspath(top_root / "sandbox" / ".sandbox-config.json")
+
+        # 从 host config.json 抽取 skills 段，生成 sandbox-only 配置
+        self._generate_sandbox_config()
+
         self.lock = threading.Lock()
         self.containers = []
         # 预启动容器
@@ -14,18 +38,66 @@ class SandboxPool:
             cid = self._create_container()
             if cid:
                 self.containers.append(cid)
-        print(f"[SandboxPool] 初始化完成，容器数: {len(self.containers)}")
+        print(
+            f"[SandboxPool] 初始化完成，容器数: {len(self.containers)}, "
+        )
+
+    def _generate_sandbox_config(self):
+        """
+        从 host config.json 抽取 skills 段，生成 sandbox-only 配置。
+
+        容器内只需要 skills 的 API key，不需要 llm_providers / oss / app 等其他段。
+        生成的文件权限 600，路径 sandbox/.sandbox-config.json（已 .gitignore）。
+        """
+        try:
+            if not os.path.exists(self.config_path):
+                print(f"[SandboxPool] config.json 不存在: {self.config_path}，跳过抽取")
+                return
+
+            with open(self.config_path, "r", encoding="utf-8") as f:
+                full = json.load(f)
+
+            sandbox_cfg = {"skills": full.get("skills", {})}
+
+            os.makedirs(os.path.dirname(self.sandbox_config_path), exist_ok=True)
+            with open(self.sandbox_config_path, "w", encoding="utf-8") as f:
+                json.dump(sandbox_cfg, f, ensure_ascii=False, indent=2)
+            os.chmod(self.sandbox_config_path, 0o600)
+            print(f"[SandboxPool] 已生成 sandbox-only config: {self.sandbox_config_path}")
+        except Exception as e:
+            print(f"[SandboxPool] 生成 sandbox config 失败: {e}")
 
     def _create_container(self):
-        """启动一个常驻容器"""
+        """
+        启动一个常驻容器：
+        - mount skills(ro) + cached(rw) + sandbox-only config + logs
+        - 容器内能看到：/skills, /cached, /.chatme/config.json（仅 skills 段）, /.chatme/logs
+        - ChatMeConfig / ChatDataAnalysis 已通过 Dockerfile COPY 进 site-packages
+        """
         try:
-            result = subprocess.run([
+            self._generate_sandbox_config()
+
+            cmd = [
                 "docker", "run", "-d",
-                "--tmpfs=/tmp:rw,noexec,size=64m",
-                "--tmpfs=/sandbox:rw,noexec,size=64m",
+                # skills 只读：保护源码 + 让 import skills.* 直接生效
+                "-v", f"{self.skills_path}:/skills:ro",
+                # cached 读写：用户上传立即可见，沙盒生成图表立即给用户
+                "-v", f"{self.cached_path}:/cached:rw",
+                # sandbox-only config（仅 skills 段，不含 llm/oss/app）
+                "-v", f"{self.sandbox_config_path}:/.chatme/config.json:ro",
+                # 日志：容器内写 /.chatme/logs，host 上落到 backend/.chatme/logs
+                "-v", f"{self.logs_path}:/.chatme/logs:rw",
+                # cached/ 和 skills/ 所处目录
+                "-e", "PYTHONPATH=/",
+                # 用于访问 host 上的后端 VL 模型（127.0.0.1:8211）
+                "--add-host=host.docker.internal:host-gateway",
+                # tmpfs 工作区（mode=1777 让 UID 1000 可写）
+                "--tmpfs=/tmp:rw,noexec,size=64m,mode=1777",
+                "--tmpfs=/sandbox:rw,noexec,size=64m,mode=1777",
                 self.image,
                 "sleep", "infinity"
-            ], capture_output=True, text=True, timeout=10)
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             container_id = result.stdout.strip()
             print(f"[SandboxPool] 创建容器: {container_id}")
             return container_id
@@ -41,7 +113,7 @@ class SandboxPool:
         container_id = self.containers.pop()
         suffix = ".py" if language == "python" else ".js"
 
-        # 调试：检查容器状态
+        # 检查容器状态
         result = subprocess.run(
             ["docker", "inspect", container_id, "--format", "{{.State.Running}}"],
             capture_output=True, text=True
@@ -55,40 +127,31 @@ class SandboxPool:
             if not container_id:
                 raise RuntimeError("无法创建新容器")
 
-        # 写入临时文件
-        with tempfile.NamedTemporaryFile(mode='w', suffix=suffix, delete=False) as f:
-            f.write(code)
-            temp_file = f.name
-
         try:
             with self.lock:
-                # 复制代码到容器
-                cp_result = subprocess.run([
-                    "docker", "cp", temp_file, f"{container_id}:/sandbox/code{suffix}"
-                ], capture_output=True, text=True)
-                if cp_result.returncode != 0:
-                    raise Exception(f"docker cp failed: {cp_result.stderr}")
+                # 写入代码到容器：docker exec -i + cat > file
+                # （不能用 docker cp：cp 写入的是镜像 writable layer，
+                #   会被启动时 --tmpfs=/sandbox 挂载点遮住，exec 时找不到）
+                write_result = subprocess.run([
+                    "docker", "exec", "-i", container_id,
+                    "sh", "-c", f"cat > /sandbox/code{suffix}"
+                ], input=code, capture_output=True, text=True, timeout=10)
+                if write_result.returncode != 0:
+                    raise Exception(f"写入容器失败: {write_result.stderr}")
 
-                # 执行代码
+                # 执行代码（PYTHONPATH 已在 docker run 时设为 /）
                 result = subprocess.run([
                     "docker", "exec", container_id,
                     "python", f"/sandbox/code{suffix}"
                 ], capture_output=True, text=True, timeout=30)
 
-                # 清空 /sandbox 目录
-                subprocess.run([
-                    "docker", "exec", container_id,
-                    "sh", "-c", "rm -f /sandbox/*"
-                ], capture_output=True)
+                # 不再 rm /sandbox —— tmpfs 在容器回收时自动清；
+                # 重要产出写到 /cached，由 host 文件系统管
 
             output = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n\nReturn code: {result.returncode}"
             return output
 
         finally:
-            try:
-                os.unlink(temp_file)
-            except Exception:
-                pass
             self.containers.append(container_id)
 
     def shutdown(self):

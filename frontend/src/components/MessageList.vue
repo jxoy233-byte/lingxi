@@ -39,6 +39,20 @@
 <script>
 import MessageItem from './MessageItem.vue'
 
+// 滚动相关 tuning 常量（统一在这里好调）
+const ENTRY_SCROLL_MS       = 500
+const RAMP_PHASE1_FRACTION  = 0.5    // P1 走 50% 距离
+const RAMP_PHASE1_MS        = 600
+const RAMP_PHASE2_MS        = 250
+const LOCKED_FOLLOW_MS      = 150
+const INTERRUPT_DEBOUNCE_MS = 100    // ramp 开始后这段时间内的 wheel 不算打断（吸收触摸板惯性）
+
+function _easeOutCubic(t) { return 1 - Math.pow(1 - t, 3) }
+function _easeInCubic(t)  { return t * t * t }
+function _easeInOutCubic(t) {
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2
+}
+
 export default {
   name: 'MessageList',
   components: {
@@ -80,7 +94,17 @@ export default {
       isAutoScrolling: false,   // 当前是否在自动滚动中
       rafId: null,              // requestAnimationFrame id
       // 内容更新前用户是否处于底部（beforeUpdate 钩子捕获，用于跨过大块内容更新）
-      _userAtBottomBeforeUpdate: true
+      _userAtBottomBeforeUpdate: true,
+
+      // —— 滚动状态机 ——
+      // 'entry'   会话入场/刷新：easeInOut 滑到底
+      // 'ramp'    流式刚启动：双阶段（先慢后快）下滑
+      // 'locked'  已锁定跟随：每次 append snappy 跟上
+      // 'idle'    默认：stick-to-bottom
+      scrollMode: 'idle',
+      _rampStartedAt: 0,
+      _suppressScroll: false,
+      _wasLoading: false
     }
   },
   computed: {
@@ -130,20 +154,40 @@ export default {
     },
 
     // 滚动到底部
-    // force: 强制无视 isAtBottom()，用于首屏加载等场景
-    scrollToBottom({ force = false } = {}) {
+    // - force: 强制无视 isAtBottom()，用于首屏加载等场景（旧 API 兼容）
+    // - profile: 'entry'（easeInOut ~500ms 平滑入场）| null（短 snappy 跟随）
+    scrollToBottom({ force = false, profile = null } = {}) {
       const container = this.$refs.messagesContainer
       if (!container) return
+
+      // 已经在 entry/ramping：让这两种模式接管，避免动画打架
+      if (this.scrollMode === 'entry' || this.scrollMode === 'ramping') return
 
       // stick-to-bottom：用户不在底部就不跟随（除非强制）
       if (!force && !this.isAtBottom()) return
 
       this.$nextTick(() => {
+        // 二次检查：跑 nextTick 时可能 scrollMode 又被改了
+        if (this.scrollMode === 'entry' || this.scrollMode === 'ramping') return
+        // 如果 isLoading 已经 true，watcher 会启动 ramp 接管；这里让路
+        if (this.isLoading && profile !== 'entry') return
+
         const distance = container.scrollHeight - container.scrollTop - container.clientHeight
         if (distance <= 0) return
 
-        const duration = Math.min(300 + Math.floor(distance / 500) * 80, 800)
-        this.smoothScroll(container, container.scrollTop + distance, duration)
+        if (profile === 'entry') {
+          this._setMode('entry')
+          this._startEntry()
+        } else {
+          // 普通跟随：短 snappy easeOut
+          this._runRaf({
+            container,
+            startTop: container.scrollTop,
+            targetTop: container.scrollTop + distance,
+            duration: LOCKED_FOLLOW_MS,
+            easing: 'easeOutCubic'
+          })
+        }
       })
     },
 
@@ -152,45 +196,204 @@ export default {
       this._suppressScroll = true
     },
 
-    smoothScroll(container, targetTop, duration) {
-      if (this.rafId) cancelAnimationFrame(this.rafId)
+    // —— 状态机 ——
+    _setMode(mode) {
+      if (this.scrollMode === mode) return
+      this.scrollMode = mode
+    },
 
-      const startTop = container.scrollTop
+    _cancelRaf() {
+      if (this.rafId) {
+        cancelAnimationFrame(this.rafId)
+        this.rafId = null
+      }
+      this.isAutoScrolling = false
+    },
+
+    // 通用 RAF stepper：duration ms 内把 container.scrollTop 从 startTop 走到 targetTop
+    _runRaf({ container, startTop, targetTop, duration, easing, onUpdate, onComplete }) {
+      this._cancelRaf()
       const diff = targetTop - startTop
       const startTime = performance.now()
-
       this.isAutoScrolling = true
 
       const step = (now) => {
-        // 用户已不在底部 → 中断动画（stick-to-bottom）
+        // stick-to-bottom：用户离开底部 >50px 就停（_handleUserIntent 同时切 mode）
         if (!this.isAtBottom()) {
           this.isAutoScrolling = false
           return
         }
         const elapsed = now - startTime
-        const progress = Math.min(elapsed / duration, 1)
-        // easeOutCubic
-        const ease = 1 - Math.pow(1 - progress, 3)
-        container.scrollTop = startTop + diff * ease
-
-        if (progress < 1) {
+        const t = Math.min(elapsed / duration, 1)
+        const eased = this._easeFn(t, easing)
+        const newTop = startTop + diff * eased
+        // 防御：防止越过当前 scrollHeight
+        const maxTop = container.scrollHeight - container.clientHeight
+        container.scrollTop = Math.min(newTop, maxTop)
+        if (onUpdate) onUpdate(newTop, t)
+        if (t < 1) {
           this.rafId = requestAnimationFrame(step)
         } else {
           this.isAutoScrolling = false
+          if (onComplete) onComplete()
         }
       }
 
       this.rafId = requestAnimationFrame(step)
     },
 
-    // 用户主动滚动（wheel / touchstart / scroll）时打断自动滚动
-    // 不再维护 userInterrupted 锁；由 isAtBottom() 在 scrollToBottom 里持续探测
-    handleUserScroll() {
-      // 跳过两种情况：
-      // 1. 自动滚动自身产生的 scroll 事件（否则 smoothScroll 会被自己打断）
-      // 2. 流式期间 + 用户仍在底部 → 不打断（auto-follow 优先于微动）
-      if (this.isAutoScrolling && this.isAtBottom()) return
-      // 取消正在进行的平滑动画
+    _easeFn(t, type) {
+      switch (type) {
+        case 'easeInOutCubic': return _easeInOutCubic(t)
+        case 'easeInCubic':    return _easeInCubic(t)
+        case 'easeOutCubic':   return _easeOutCubic(t)
+        default:               return t
+      }
+    },
+
+    smoothScroll(container, targetTop, duration, easing = 'easeOutCubic') {
+      this._runRaf({
+        container,
+        startTop: container.scrollTop,
+        targetTop,
+        duration,
+        easing,
+        onComplete: () => { /* 由调用者决定 mode 切换 */ }
+      })
+    },
+
+    // —— entry profile ——
+    _startEntry() {
+      const container = this.$refs.messagesContainer
+      if (!container) return
+      this._runRaf({
+        container,
+        startTop: container.scrollTop,
+        targetTop: container.scrollHeight - container.clientHeight,
+        duration: ENTRY_SCROLL_MS,
+        easing: 'easeInOutCubic',
+        onComplete: () => { this._setMode('idle') }
+      })
+    },
+
+    // —— ramp profile（双阶段）——
+    _startRamp() {
+      const container = this.$refs.messagesContainer
+      if (!container) return
+
+      const startTop = container.scrollTop
+      const scrollHeight = container.scrollHeight
+      const clientHeight = container.clientHeight
+      const fullDistance = scrollHeight - startTop - clientHeight
+
+      if (fullDistance <= 0) {
+        // 已经在底部，直接进 locked
+        this._setMode('locked')
+        return
+      }
+
+      // P1 target clamp：不超过物理底部
+      const phase1Target = Math.min(
+        startTop + fullDistance * RAMP_PHASE1_FRACTION,
+        scrollHeight - clientHeight
+      )
+      this._rampStartedAt = performance.now()
+
+      this._runRaf({
+        container,
+        startTop,
+        targetTop: phase1Target,
+        duration: RAMP_PHASE1_MS,
+        easing: 'easeOutCubic',  // P1 用 easeOut（开始就有动感，能感受到在动）
+        onComplete: () => {
+          if (this.scrollMode !== 'ramping') return
+          // P2：加速到真正底部（重新 snapshot 距离）
+          const remaining = (container.scrollHeight - container.clientHeight) - container.scrollTop
+          if (remaining <= 0) {
+            this._setMode('locked')
+            return
+          }
+          this._runRaf({
+            container,
+            startTop: container.scrollTop,
+            targetTop: container.scrollTop + remaining,
+            duration: RAMP_PHASE2_MS,
+            easing: 'easeInCubic',
+            onComplete: () => {
+              if (this.scrollMode === 'ramping') this._setMode('locked')
+            }
+          })
+        }
+      })
+    },
+
+    // —— locked follow（每次 append 短 snappy 到底）——
+    _scheduleLockedFollow() {
+      const container = this.$refs.messagesContainer
+      if (!container) return
+      const distance = container.scrollHeight - container.scrollTop - container.clientHeight
+      if (distance <= 0) return
+      this._runRaf({
+        container,
+        startTop: container.scrollTop,
+        targetTop: container.scrollTop + distance,
+        duration: LOCKED_FOLLOW_MS,
+        easing: 'easeOutCubic',
+        onComplete: () => { this._setMode('locked') }
+      })
+    },
+
+    // 用户中断 ramp：停在当前位置
+    _userInterruptDuringRamp() {
+      this._cancelRaf()
+      this._setMode('idle')
+    },
+
+    // —— 用户输入分两类监听 ——
+    // 1. scroll 事件：可能是我们自己 RAF 产生的，也可能是用户 wheel 浏览器滚动引发的
+    //    区分方式：isAutoScrolling=true 时是我们自己的 scroll，吞掉；否则走 _handleUserIntent
+    handleScrollEvent() {
+      if (this.isAutoScrolling) return
+      this._handleUserIntent()
+    },
+
+    // 2. wheel / touchstart 事件：明确是用户输入
+    //    关键：ramp 阶段不能再被 `isAutoScrolling && isAtBottom()` 早退吞掉，
+    //    否则用户在 ramp P2（接近底部）阶段 wheel 就触发不了打断
+    handleUserInput() {
+      this._handleUserIntent()
+    },
+
+    // 统一的用户意图分发：按当前 scrollMode 决定处理
+    _handleUserIntent() {
+      if (this.scrollMode === 'ramping') {
+        // ramp 启动 < 100ms 的 wheel 视为触摸板惯性，吞掉不中断
+        if (performance.now() - this._rampStartedAt < INTERRUPT_DEBOUNCE_MS) return
+        this._userInterruptDuringRamp()
+        return
+      }
+
+      if (this.scrollMode === 'locked') {
+        // 取消 in-flight follow 动画，避免和用户的手指打架
+        if (this.rafId) {
+          cancelAnimationFrame(this.rafId)
+          this.rafId = null
+        }
+        this.isAutoScrolling = false
+        // 检测离开底部：直接退 idle（简化的语义；不回锁）
+        if (!this.isAtBottom()) {
+          this._setMode('idle')
+        }
+        return
+      }
+
+      if (this.scrollMode === 'entry') {
+        this._cancelRaf()
+        this._setMode('idle')
+        return
+      }
+
+      // 'idle'：取消任何 in-flight auto-scroll
       if (this.rafId) {
         cancelAnimationFrame(this.rafId)
         this.rafId = null
@@ -205,7 +408,14 @@ export default {
           this._suppressScroll = false
           return
         }
-        // 内容增加前用户处于底部 → 强制跟随（避免工具输出等大块内容撑高 scrollHeight 后 50px 容差失效）
+        // ramping / entry：让当前动画接管，watcher 不动
+        if (this.scrollMode === 'ramping' || this.scrollMode === 'entry') return
+        // locked：每次新消息 snappy 跟上
+        if (this.scrollMode === 'locked') {
+          this._scheduleLockedFollow()
+          return
+        }
+        // idle：原 sticky-bottom 行为
         if (this._userAtBottomBeforeUpdate) {
           this.scrollToBottom({ force: true })
         } else {
@@ -216,9 +426,40 @@ export default {
       immediate: false
     },
     isLoading(newVal) {
-      if (newVal) {
-        // 发送消息时不强制到底，沿用 isAtBottom() 判定
-        this.scrollToBottom()
+      const wasLoading = this._wasLoading
+      this._wasLoading = newVal
+
+      if (newVal && !wasLoading) {
+        // 流式刚启动：若用户在底部就开始 ramp，否则就 idle（不强拉）
+        this.$nextTick(() => {
+          if (this.isAtBottom()) {
+            this._setMode('ramping')
+            this._startRamp()
+          } else {
+            this._setMode('idle')
+          }
+        })
+        return
+      }
+
+      if (!newVal && wasLoading) {
+        // 流式结束：ramping/locked → idle
+        if (this.scrollMode === 'ramping' || this.scrollMode === 'locked') {
+          this._cancelRaf()
+          this._setMode('idle')
+        }
+      }
+    },
+    currentSessionId(newVal, oldVal) {
+      if (newVal && newVal !== oldVal) {
+        // 会话切换触发 entry 平滑入场（兜底；App.vue 也可能已经触发过）
+        this.$nextTick(() => {
+          if (this.messages.length > 0) {
+            this._cancelRaf()
+            this._setMode('entry')
+            this._startEntry()
+          }
+        })
       }
     }
   },
@@ -232,19 +473,20 @@ export default {
   mounted() {
     const container = this.$refs.messagesContainer
     if (container) {
-      // 修：原本挂的是 this.handleScroll（未定义），键盘/滚动条拖动/触摸板的滚动都不会触发打断。
-      // 改挂 handleUserScroll，覆盖所有滚动方式，wheel/touchstart 留作冗余。
-      container.addEventListener('scroll', this.handleUserScroll, { passive: true })
-      container.addEventListener('wheel', this.handleUserScroll, { passive: true })
-      container.addEventListener('touchstart', this.handleUserScroll, { passive: true })
+      // scroll 事件：自己 RAF 的 scroll 用 isAutoScrolling 早退吞掉；用户的 scroll 走 _handleUserIntent
+      // wheel / touchstart：明确是用户输入，直接进 _handleUserIntent
+      container.addEventListener('scroll', this.handleScrollEvent, { passive: true })
+      container.addEventListener('wheel', this.handleUserInput, { passive: true })
+      container.addEventListener('touchstart', this.handleUserInput, { passive: true })
 
       // 监听容器尺寸变化（图片/异步内容加载会让容器变高），
       // 如果用户在底部，就直接跟到新底部，避免卡在"图片还没加载时算出的旧底部"。
+      // ramping / entry 阶段暂停：不要 yank 节奏。
       this.resizeObserver = new ResizeObserver(() => {
-        if (!this.isAtBottom()) return
         const c = this.$refs.messagesContainer
         if (!c) return
-        // 取消正在进行的平滑动画，直接跳到新底部
+        if (this.scrollMode === 'ramping' || this.scrollMode === 'entry') return
+        if (!this.isAtBottom()) return
         if (this.rafId) {
           cancelAnimationFrame(this.rafId)
           this.rafId = null
@@ -253,16 +495,25 @@ export default {
         c.scrollTop = c.scrollHeight
       })
       this.resizeObserver.observe(container)
+
+      // 初次挂载：若已经有当前会话+消息，触发 entry 平滑入场
+      // （覆盖页面刷新、首次进入等场景；App.vue 也会通过 scrollToBottom(true) 触发一次）
+      this.$nextTick(() => {
+        if (this.currentSessionId && this.messages.length > 0) {
+          this._setMode('entry')
+          this._startEntry()
+        }
+      })
     }
   },
   beforeUnmount() {
     const container = this.$refs.messagesContainer
     if (container) {
-      container.removeEventListener('scroll', this.handleUserScroll)
-      container.removeEventListener('wheel', this.handleUserScroll)
-      container.removeEventListener('touchstart', this.handleUserScroll)
+      container.removeEventListener('scroll', this.handleScrollEvent)
+      container.removeEventListener('wheel', this.handleUserInput)
+      container.removeEventListener('touchstart', this.handleUserInput)
     }
-    if (this.rafId) cancelAnimationFrame(this.rafId)
+    this._cancelRaf()
     if (this.resizeObserver) {
       this.resizeObserver.disconnect()
       this.resizeObserver = null

@@ -90,102 +90,8 @@ Task arrives → Is there a skill for this?
 **Skill-first rule**: When in doubt whether a skill exists → explore skills/ first. It's always safer to check than to assume.
 
 ## Project Structure
-skills/ — Skill library (check here first)
-cached/ — Cached files operation dir
-
-## Good Chain Examples
-
-Good (skill found):
-cmd("ls skills/") → Found Sum skill
-cmd("cat skills/skills.md") → Read Sum MD File
-cmd("cat skills/Exa.py")
-code("python","from Exa import ...")
-
-Good (environment exploration):
-cmd("ls skills/") → No relevant skill
-cmd("ls cached/") → Check if needed
-... → execute commands to find files dir
----
-*when file content is truncated and need to know more about it*:
-cmd("ls cached/...") → Check if needed
-cmd("cat cached/.../filename")
----
-*when files need to know about images*:
-cmd("cat skills/ImageParser.py") → ready to process images
-code("python", "From ImageParser import ...")
-
-Good (data analysis):
-*execute when user inputs data analysis files*:
-cmd("ls cached/")
-cmd("ls cached/'input_file_name'/...") → ensure files exist and prepare data dirs for the coming data analysis
----
-*if based on the last data analysis*:
-code(python, "...with open(xx.py)as f:code = f.read()")
----
-*core*:
-cmd("ls skills/") → Check skills overview
-cmd("cat skills/DataAnalysis.md")  → Read spec first to know about how to input file dirs, output results and so on
-code("python", "from ChatMe.ChatDataAnalysis.format import ChatDataAnalysisFormat;import pandas as pd, numpy as np; ...")  →
-- libs available in local venv: pandas, numpy, matplotlib...
-- generate + analyze + save (charts/data/reports/scripts) to 'OUTPUT_DIR' with prepared functions in one pass when possible
-
-*complex tasks (multi-step / multi-file / ML / large data)*:
-code(...) → split into multiple calls, each building on previous
-- read prior output to decide next step (don't blindly retry)
-
-Good (spawn sub-agent for complex tasks):
-*Data analysis and chart generation (full example)*:
-sub_agent(
-    task="Analyze uploaded sales data, generate daily trend chart and monthly summary table",
-    prompt_addon="cmd(ls cached/) → confirm file dir; cmd(cat skills/DataAnalysis.md) → read format docs; code(python, "load data"); code(python, "analyze and chart"); code(python, "save data analysis")→"
-)
-→ sub-agent returns the result text directly
-"""
-
-PROMPT_MAIN_FLOW = """
-## Decision Flow
-```
-Task arrives → Is there a skill for this?
-│
-├─ Time references (today/tomorrow/now/this week/current date)?
-│   YES → ctime FIRST, then proceed
-│
-├─ Matching skill? (see examples below)
-│   YES → **FIRST**: cat skills/skills.md for overview
-│         → Then read the specific skill file
-│         ⚠️ NEVER read individual skill files without reading skills.md first
-│
-├─ Uncertain? → ls skills/ to explore (it's free and safe)
-│
-├─ Code execution needed? (data processing, calculation, drawing)
-│   YES → code
-│
-├─ Need 2+ tool calls with dependent steps? (step B needs A's result)
-│   YES → sub_agent
-│
-├─ Tool call made → results received → output DONE immediately
-│
-├─ Can solve directly from training knowledge?
-│   YES → output DONE
-│
-└─ None of the above → interrupt (need human confirmation)
-```
-
-**Skill examples** (→ go to skills.md first):
-- "latest AI news" / "recent prices" / "search for X" → Tavily/Exa skill
-- "analyze this CSV" / "generate a chart" / "visualize this" → DataAnalysis skill
-- "ER diagram" / "mermaid" / "flowchart" → DataAnalysis skill
-- "parse this image" / "what's in this screenshot" → ImageParser skill
-
-**When to use sub_agent**:
-- 2+ tool calls where steps are dependent (next step needs previous result)
-- Tasks requiring skill file exploration before execution
-
-**Skill-first rule**: When in doubt whether a skill exists → explore skills/ first. It's always safer to check than to assume.
-
-## Project Structure
-skills/ — Skill library (check here first)
-cached/ — Cached files operation dir
+skills/ — Skill library (read only)
+cached/ — Cached files operation dir (read and write)
 
 ## Good Chain Examples
 
@@ -286,6 +192,7 @@ Parameters:
 - prompt_addon (optional, string): Execution steps hint — a chain of tool calls to guide the sub-agent, e.g. "cmd → cat DataAnalysis.md → code" style
 
 ### cmd — Environment Exploring & File Operations
+Parameters: command (required, string)
 **Allowed Commands**:
 | Scenario | Commands |
 |----------|----------|
@@ -295,19 +202,18 @@ Parameters:
 | Network probe | `curl` (only as last resort when no suitable skills available) |
 
 Note: On other OS, commands may differ — adjust accordingly.
-⚠️ Scripts Execution must use `code`, not `cmd`
 
 ### code — Code Execution & Skill Usage & Data Analysis & other codes required scenes
 Use when: Writing or running code to solve problems, invoke skills, process data, or perform actions that require code execution.
-Parameters: code (required, string), language (default: "python"), use_sandbox(default, False)
+Parameters: code (required, string), language (default: "python"), use_sandbox(default, True)
 
 Important:
 - Always remember to print final key results you need to pass to the next step.
-- Default use_sandbox=False (local venv, has full host access for cached dir and skills dir). Set use_sandbox=True only when the code is unsafe to run locally.
+- Default use_sandbox=True(sandbox, isolated execution with /skills ro + /cached rw).
 - Don't add comments in your codes
 - If you want to write some scripts files, you must write under 'cached/' dir
 
-### ctime — Time Reference
+### ctime — Timf Reference
 Use when: Task involves any time reference including "today", "tomorrow", "now", "this week", "current date/time", "what time is it", etc.
 Must call this FIRST before any other time-related operations.
 Parameters: none
@@ -318,6 +224,7 @@ PROMPT_TOOLS_SUB = """
 ## Tool
 
 ### cmd — Environment Exploring & File Operations
+Parameters: command (required, string)
 **Allowed Commands**:
 | Scenario | Commands |
 |----------|----------|
@@ -331,11 +238,11 @@ Note: On other OS, commands may differ — adjust accordingly.
 
 ### code — Code Execution & Skill Usage & Data Analysis & other codes required scenes
 Use when: Writing or running code to solve problems, invoke skills, process data, or perform actions that require code execution.
-Parameters: code (required, string), language (default: "python"), use_sandbox(default, False)
+Parameters: code (required, string), language (default: "python"), use_sandbox(default, True)
 
 Important:
 - Always remember to print final key results you need to pass to the next step.
-- Default use_sandbox=False (local venv, has full host access for cached dir and skills dir). Set use_sandbox=True only when the code is unsafe to run locally.
+- Default use_sandbox=True(sandbox, isolated execution with /skills ro + /cached rw).
 - Don't add comments in your codes
 - If you want to write some scripts files, you must write under 'cached/' dir
 
@@ -511,7 +418,7 @@ def get_should_end_node_config():
     temperature = 0.01
     max_tokens = int(os.getenv("SHOULD_END_MAX_TOKENS", "1024"))
     top_p = float(os.getenv("OPENAI_TOP_P", "1.0"))
-    timeout = 30
+    timeout = int(os.getenv("OPENAI_TIMEOUT", "60"))
     max_retries = 3
 
     llm_config = {
@@ -575,7 +482,7 @@ def get_graph_final_node_config():
     temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.9"))
     max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "8192"))
     top_p = float(os.getenv("OPENAI_TOP_P", "1.0"))
-    timeout = 30
+    timeout = int(os.getenv("OPENAI_TIMEOUT", "60"))
     max_retries = 3
 
     # 大模型配置：
@@ -761,7 +668,7 @@ def get_agent_node_config():
     temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.2"))
     max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "4096"))
     top_p = float(os.getenv("OPENAI_TOP_P", "1.0"))
-    timeout = 30
+    timeout = int(os.getenv("OPENAI_TIMEOUT", "60"))
     max_retries = 3
 
     llm_config = {
@@ -796,10 +703,10 @@ def get_history_summary_node_config():
     api_key = active.get("api_key")
     base_url = active.get("base_url")
 
-    temperature = float(os.getenv("DEEPSEEK_TEMPERATURE", "0.5"))
-    max_tokens = int(os.getenv("DEEPSEEK_MAX_TOKENS", "4096"))
-    top_p = float(os.getenv("DEEPSEEK_TOP_P", "1.0"))
-    timeout = 30
+    temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.5"))
+    max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "4096"))
+    top_p = float(os.getenv("OPENAI_TOP_P", "1.0"))
+    timeout = int(os.getenv("OPENAI_TIMEOUT", "60"))
     max_retries = 3
 
     llm_config = {
@@ -972,10 +879,10 @@ def get_imp_ipt_config():
     api_key = active.get("api_key")
     base_url = active.get("base_url")
 
-    temperature = float(os.getenv("DEEPSEEK_TEMPERATURE", "0.5"))
-    max_tokens = int(os.getenv("DEEPSEEK_MAX_TOKENS", "4096"))
-    top_p = float(os.getenv("DEEPSEEK_TOP_P", "1.0"))
-    timeout = 30
+    temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.3"))
+    max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "4096"))
+    top_p = float(os.getenv("OPENAI_TOP_P", "1.0"))
+    timeout = int(os.getenv("OPENAI_TIMEOUT", "60"))
     max_retries = 3
 
     imp_ipt_llm_config = {
@@ -994,10 +901,11 @@ def get_imp_ipt_config():
 你是用户输入优化器，负责将原始输入转化为下游Agent更好理解的输入形态。
 
 【核心原则】
-1. 你不是回答者，是翻译者/重构者
+1. 你不是回答者，是优化器——只改写输入形态，不回答问题
 2. 只做格式和表达方式的优化，不改变用户原始意图
 3. 文件解析结果是用户的输入素材，必须原样保留
 4. 复杂问题转化为可执行的规划输入
+5. 保持用户原始语言，不要在语言之间翻译
 
 【处理规则】
 
@@ -1007,11 +915,11 @@ def get_imp_ipt_config():
 
 优先级2 - 指代模糊：
 输入含"它、那个、继续、上次"等指代词，且无法从上下文推断。
-处理：输出加一行 [注意：基于假设...]，假设内容需明确标注。
+处理：在原输入下方追加一行 [Note: assuming ...]，明确写出你的假设。注意：这不是向用户提问，是给下游 Agent 的提示。
 
 优先级3 - 极短输入：
-输入少于5个字。
-处理：能推断意图则补全，无法推断则保留原输入并加引导标注。
+输入少于5个字
+处理：原样保留原始输入，不补全、不加标注、不追加任何文字。极短输入本身已是完整形态，没有可优化的空间。
 
 优先级4 - 复杂任务（需规划）：
 输入涉及多步骤、多文件、多个目标，或目标模糊需拆解。
@@ -1030,12 +938,17 @@ def get_imp_ipt_config():
 - 禁止直接回答问题、生成完整方案或代码
 - 禁止添加输入中没有的约束或目标
 - 禁止改变用户意图
-- 禁止输出Markdown、列表（规划输入除外）
+- 禁止在语言之间翻译（保留用户原始语言）
+- 禁止输出 Markdown、列表（规划输入除外）
 - 禁止写"根据上文"、"请根据"等引用说明
-- 禁止对类别A做扩展处理
+- 禁止向用户提问、索要澄清、加问候语、添加结束词（如"Done"、"好的"等）
 
 【Fallback 规则】
-无法优化时（如意图不明、无法判断），直接输出原始输入，不生成任何解释性、结论性文字。
+无法优化时（如意图不明、无法判断），直接输出原始输入，不生成任何解释性、结论性、问候性文字。
+
+【输出契约】
+- 没有前言、后语、解释、Markdown 包装
+- 不在末尾追加"Done"、"好的"、"请问..."等任何额外文字
 
 【输出格式】
 简单输入：纯文本，保持原意
@@ -1064,7 +977,7 @@ def get_llm_memory_config():
     temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.15"))
     max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "8192"))
     top_p = float(os.getenv("OPENAI_TOP_P", "1.0"))
-    timeout = 30
+    timeout = int(os.getenv("OPENAI_TIMEOUT", "60"))
     max_retries = 3
 
     llm_config = {
@@ -1149,7 +1062,7 @@ def get_model_vl_config():
     temperature = float(os.getenv("VL_TEMPERATURE", "0.5"))
     max_tokens = int(os.getenv("VL_MAX_TOKENS", "8192"))
     top_p = float(os.getenv("VL_TOP_P", "1.0"))
-    timeout = 30
+    timeout = int(os.getenv("OPENAI_TIMEOUT", "60"))
     max_retries = 3
 
     llm_config = {

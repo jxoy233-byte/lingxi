@@ -3,6 +3,8 @@ from typing import Literal
 
 import requests
 
+from ChatMe.ChatMeConfig import get_skills_config
+
 
 def search_web(query: str,
                freshness: Literal["noLimit", "oneDay", "oneWeek", "oneMonth", "oneYear"] = "noLimit",
@@ -25,6 +27,11 @@ def search_web(query: str,
     """
     url = "https://api.bochaai.com/v1/web-search"
 
+    # 优先级：config.json (via get_skills_config) > os.getenv
+    api_key = get_skills_config().get("bocha_api_key") or os.getenv("BOCHA_API_KEY", "")
+    if not api_key:
+        return "Error: BOCHA_API_KEY 未配置（config.json 的 skills.bocha_api_key 或环境变量）"
+
     payload = {
        "query": query,
        "summary": summary,
@@ -32,7 +39,7 @@ def search_web(query: str,
        "count": count
     }
     headers = {
-       'Authorization': f'Bearer {os.getenv("BOCHA_API_KEY")}',
+       'Authorization': f'Bearer {api_key}',
        'Content-Type': 'application/json'
     }
 

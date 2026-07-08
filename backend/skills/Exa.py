@@ -7,15 +7,18 @@ import os
 import requests
 from typing import List, Dict, Any, Literal
 
+from ChatMe.ChatMeConfig import get_skills_config
+
 class ExaSearch:
     """Exa 搜索引擎客户端"""
 
     def __init__(self):
-        self.api_key = os.getenv("EXA_API_KEY")
+        # 优先级：config.json (via get_skills_config) > os.getenv
+        self.api_key = get_skills_config().get("exa_api_key") or os.getenv("EXA_API_KEY", "")
         self.base_url = "https://api.exa.ai"
 
         if not self.api_key:
-            raise ValueError("EXA_API_KEY 环境变量未设置")
+            raise ValueError("EXA_API_KEY 未配置（config.json 的 skills.exa_api_key 或环境变量）")
 
     def search(self, query: str, num_results: int = 5, type: Literal["instant","fast","auto","deep"] = "auto", maxCharacters:int =2000, **metadata) -> List[Dict[str, Any]]:
         """

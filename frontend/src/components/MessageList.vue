@@ -40,7 +40,7 @@
 import MessageItem from './MessageItem.vue'
 
 // 滚动相关 tuning 常量（统一在这里好调）
-const ENTRY_SCROLL_MS       = 500
+const ENTRY_SCROLL_MS       = 800
 const RAMP_PHASE1_FRACTION  = 0.5    // P1 走 50% 距离
 const RAMP_PHASE1_MS        = 600
 const RAMP_PHASE2_MS        = 250
@@ -169,8 +169,10 @@ export default {
       this.$nextTick(() => {
         // 二次检查：跑 nextTick 时可能 scrollMode 又被改了
         if (this.scrollMode === 'entry' || this.scrollMode === 'ramping') return
-        // 如果 isLoading 已经 true，watcher 会启动 ramp 接管；这里让路
-        if (this.isLoading && profile !== 'entry') return
+        // isLoading 时让路给 ramp/locked；但如果用户原本就在底部（beforeUpdate 捕获的 _userAtBottomBeforeUpdate），
+        // 即使新 token 推高了 scrollHeight 让 isAtBottom() 因 >50px 容差返回 false，也要 snappy 跟
+        // ——beforeUpdate 的快照才是"用户意图"的真实信号；isAtBottom() 在新内容追加后会失真
+        if (this.isLoading && profile !== 'entry' && !this._userAtBottomBeforeUpdate) return
 
         const distance = container.scrollHeight - container.scrollTop - container.clientHeight
         if (distance <= 0) return
@@ -218,8 +220,11 @@ export default {
       this.isAutoScrolling = true
 
       const step = (now) => {
-        // stick-to-bottom：用户离开底部 >50px 就停（_handleUserIntent 同时切 mode）
-        if (!this.isAtBottom()) {
+        // 检测「用户主动往上滚」而非「是否在底部」：
+        //   - content 增长时 scrollTop 不变，scrollHeight 涨，原本的 !isAtBottom() 误 bail
+        //   - 用户主动 wheel/touchstart 才会让 scrollTop 减小（往上），这是真正要 bail 的信号
+        //   - 用户中断主要被 _handleUserIntent 同步处理；这里是冗余安全网
+        if (container.scrollTop < startTop - 1) {
           this.isAutoScrolling = false
           return
         }
@@ -304,10 +309,12 @@ export default {
         startTop,
         targetTop: phase1Target,
         duration: RAMP_PHASE1_MS,
-        easing: 'easeOutCubic',  // P1 用 easeOut（开始就有动感，能感受到在动）
+        // P1：linear 匀速慢动——给用户时间反应，符合"慢慢来"
+        easing: 'linear',
         onComplete: () => {
           if (this.scrollMode !== 'ramping') return
           // P2：加速到真正底部（重新 snapshot 距离）
+          // easeOutCubic：slow start, fast end——从 P1 的匀速平滑加速到 snappy
           const remaining = (container.scrollHeight - container.clientHeight) - container.scrollTop
           if (remaining <= 0) {
             this._setMode('locked')
@@ -318,7 +325,7 @@ export default {
             startTop: container.scrollTop,
             targetTop: container.scrollTop + remaining,
             duration: RAMP_PHASE2_MS,
-            easing: 'easeInCubic',
+            easing: 'easeOutCubic',
             onComplete: () => {
               if (this.scrollMode === 'ramping') this._setMode('locked')
             }
@@ -406,6 +413,17 @@ export default {
       handler() {
         if (this._suppressScroll) {
           this._suppressScroll = false
+          // 阻止浏览器 overflow-anchor 自动滚动：保存 scrollTop，DOM 更新后恢复
+          const container = this.$refs.messagesContainer
+          if (container) {
+            const savedTop = container.scrollTop
+            this.$nextTick(() => {
+              // 只在确实发生自动滚动时恢复（容差 1px）
+              if (Math.abs(container.scrollTop - savedTop) > 1) {
+                container.scrollTop = savedTop
+              }
+            })
+          }
           return
         }
         // ramping / entry：让当前动画接管，watcher 不动
@@ -430,14 +448,12 @@ export default {
       this._wasLoading = newVal
 
       if (newVal && !wasLoading) {
-        // 流式刚启动：若用户在底部就开始 ramp，否则就 idle（不强拉）
+        // 流式刚启动：总是开 ramp，给"自动往下滑"的趋势
+        // 用户的控制权由 ramp 中的 wheel/touch 打断机制保证
+        // 即使之前用户已滚开（上一轮流式时主动离开过底部），新一轮流式也要重新 ramp 一次
         this.$nextTick(() => {
-          if (this.isAtBottom()) {
-            this._setMode('ramping')
-            this._startRamp()
-          } else {
-            this._setMode('idle')
-          }
+          this._setMode('ramping')
+          this._startRamp()
         })
         return
       }

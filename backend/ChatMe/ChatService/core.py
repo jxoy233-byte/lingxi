@@ -10,6 +10,7 @@ from typing import AsyncGenerator, Set, List, Any, Optional, Dict
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
 from langgraph.types import StateSnapshot
 from langgraph_sdk.auth.exceptions import HTTPException
+from openai import conversations
 from redisvl.query import FilterQuery
 from langgraph.checkpoint.redis.util import from_storage_safe_id
 
@@ -621,12 +622,25 @@ class ChatService:
                         ))
                         checkpoint_index += 1
                     elif msg.additional_kwargs.get("type") == AIMessageType.REASONING.value:
-                        messages_list.append(Message(
-                            role=role,
-                            content=await self._switch_chunk_to_str(msg.content),
-                            files=None,
-                            additional_kwargs=msg.additional_kwargs
-                        ))
+                        if msg.tool_calls:
+                            additional_kwargs = dict(msg.additional_kwargs)
+                            additional_kwargs["tool_calls"] = [
+                                {"name": tc.get("name", ""), "args": tc.get("args", {})}
+                                for tc in msg.tool_calls
+                            ]
+                            messages_list.append(Message(
+                                role=role,
+                                content=await self._switch_chunk_to_str(msg.content),
+                                files=None,
+                                additional_kwargs=additional_kwargs
+                            ))
+                        else:
+                            messages_list.append(Message(
+                                role=role,
+                                content=await self._switch_chunk_to_str(msg.content),
+                                files=None,
+                                additional_kwargs=msg.additional_kwargs
+                            ))
                     else:
                         continue
 

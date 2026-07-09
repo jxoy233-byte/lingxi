@@ -856,7 +856,7 @@ export default {
         })
 
         this.startResponseTimer()
-        this.$refs.messageList?.scrollToBottom(true)
+        this.$refs.messageList?.scrollToBottom({ force: true })
 
         // 5. 调用 message_stream
         const streamResponse = await fetch('/chat/', {
@@ -962,7 +962,7 @@ export default {
             }
           }
 
-          this.$refs.messageList?.scrollToBottom(true)
+          this.$refs.messageList?.scrollToBottom({ force: true })
         }
       } catch (error) {
         console.error('重新对话失败:', error)
@@ -1324,7 +1324,7 @@ export default {
 
       this.isLoading = true
 
-      this.$refs.messageList?.scrollToBottom(true)
+      this.$refs.messageList?.scrollToBottom({ force: true })
 
       this.responseStartTime = Date.now()
       this.currentResponseTime = 0

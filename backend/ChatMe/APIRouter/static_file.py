@@ -68,9 +68,6 @@ def _get_safe_path(path: str) -> Optional[Path]:
     base = CACHED_DIR
     target = (base / path).resolve()
 
-    logger.info(f"_get_safe_path: path={path}, base={base}, target={target}")
-    logger.info(f"startswith check: target={str(target)}, starts with base={str(base)}? {str(target).startswith(str(base))}")
-
     # 确保目标在 CACHED_DIR 内
     if not str(target).startswith(str(base)):
         logger.warning(f"路径穿越检测: {target} 不在 {base} 内")
@@ -95,7 +92,6 @@ async def serve_cached_file(
     Returns:
         文件内容
     """
-    logger.info(f"dir: {BACKEND_DIR}")
     safe_path = _get_safe_path(file_path)
 
     if safe_path is None:
@@ -107,7 +103,7 @@ async def serve_cached_file(
     if not safe_path.is_file():
         raise HTTPException(status_code=400, detail="该路径不是文件")
 
-    logger.info(f"静态文件访问: {safe_path}, download={download}")
+    logger.debug(f"静态文件访问: {safe_path}, download={download}")
 
     # 缓存头：1小时
     cache_headers = {

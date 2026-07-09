@@ -178,13 +178,14 @@
                     <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
                   </svg>
                   <span class="tool-name">{{ tool.name }}</span>
+                  <span v-if="getCodeExecutionEnv(tool.name, tool.args)" class="tool-env-label" :class="`env-${getCodeExecutionEnv(tool.name, tool.args)}`">:: {{ getCodeExecutionEnv(tool.name, tool.args) }}</span>
                   <span v-if="tool.result !== null" class="tool-check">✓</span>
                   <span v-else class="tool-running-dot"></span>
                   <svg v-if="tool.result !== null" class="tool-expand-chevron" :class="{ rotated: expandedTools[i] }" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <polyline points="9 18 15 12 9 6"/>
                   </svg>
                 </div>
-                <div v-if="tool.args && hasArgs(tool.args)" class="tool-args">{{ formatArgs(tool.args) }}</div>
+                <div v-if="tool.args && hasArgs(tool.args, tool.name)" class="tool-args">{{ formatArgs(tool.args, tool.name) }}</div>
                 <div v-if="tool.result !== null && expandedTools[i]" class="tool-result">{{ tool.result }}</div>
               </div>
             </div>
@@ -1851,16 +1852,35 @@ export default {
         [index]: !this.expandedTools[index]
       }
     },
-    hasArgs(args) {
-      if (!args) return false
-      return Object.keys(args).length > 0
+    hasArgs(args, toolName = '') {
+      const filtered = this.filterInternalArgs(args, toolName)
+      return Object.keys(filtered).length > 0
     },
-    formatArgs(args) {
+    formatArgs(args, toolName = '') {
+      const filtered = this.filterInternalArgs(args, toolName)
       try {
-        return JSON.stringify(args, null, 2)
+        return JSON.stringify(filtered, null, 2)
       } catch {
-        return String(args)
+        return String(filtered)
       }
+    },
+    filterInternalArgs(args, toolName = '') {
+      if (!args || typeof args !== 'object') return {}
+      const filtered = { ...args }
+      delete filtered.session_id
+      if (toolName === 'code') {
+        // MCP 暴露给 LLM 时名字是 sandbox（去 use_ 前缀），兼容历史 use_sandbox
+        delete filtered.sandbox
+        delete filtered.use_sandbox
+      }
+      return filtered
+    },
+    getCodeExecutionEnv(toolName, args) {
+      if (toolName !== 'code') return null
+      if (!args) return 'sandbox'
+      // MCP 暴露给 LLM 时名字是 sandbox（去 use_ 前缀），兼容历史 use_sandbox
+      if (args.sandbox === false || args.use_sandbox === false) return 'local'
+      return 'sandbox'
     },
     getFileTypeLabel(type) {
       if (!type) return '未知'
@@ -2994,6 +3014,17 @@ export default {
   font-size: 12px;
   color: var(--text-primary);
   flex: 1;
+}
+
+.tool-env-label {
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-weight: 400;
+}
+
+.tool-env-label.env-local {
+  color: #d97706;
 }
 
 .tool-check {

@@ -189,6 +189,8 @@ class ChatWorkflow:
         某些模型（如 Grok）将 tool_calls 以 JSON 字符串形式放在 content 中，
         需要手动解析并转换为标准格式
         """
+        ai_message.additional_kwargs = {"type": AIMessageType.REASONING.value}
+
         # 保护 None 值
         raw_content = ai_message.content
         if raw_content is None:
@@ -287,7 +289,6 @@ class ChatWorkflow:
             ai_message.tool_calls = tool_calls[:MAX_PARALLEL_TOOL_CALLS]
             ai_message.content = content
 
-        ai_message.additional_kwargs = {"type": AIMessageType.REASONING.value}
         return ai_message
 
     async def _get_validate_history_message(self, history_messages: List[BaseMessage],limit: int)-> List[BaseMessage]:
@@ -784,7 +785,7 @@ class ChatWorkflow:
             files_input: HumanMessage = processed_files["combined_result"]
 
             user_input: List[HumanMessage] = await self._get_current_round_conversation_except_files( messages)
-            history_messages = await self._get_validate_history_message(messages,2)
+            # history_messages = await self._get_validate_history_message(messages,2)
 
             # 如果在这里中断时，续接时注入的中断原因 SystemMessage 需要加到 input_msg 最前面，否则 LLM 看不到
             for msg in messages:
@@ -792,7 +793,7 @@ class ChatWorkflow:
                     input_msg.insert(0, msg)
                     break
 
-            input_msg.extend(history_messages)
+            # input_msg.extend(history_messages)
             input_msg.append(files_input)
             input_msg.extend(user_input)
 

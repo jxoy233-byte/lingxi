@@ -177,6 +177,38 @@ async def get_file_config():
     return await chat_service.get_file_config()
 
 
+@ChatMe_app.get("/{session_id}/data-analysis/tree", summary="检测会话的 data_analysis 目录结构")
+async def get_data_analysis_tree(
+    session_id: str = Path(..., description="会话ID")
+):
+    """
+    检测会话 cached 目录下的 data_analysis/ 目录是否存在。
+    存在则返回扁平文件列表，供前端自行构树 + 动态加载文件预览。
+
+    返回:
+        exists: bool - 目录是否存在
+        root_path: str - 根路径（相对 cached/）
+        files: list[dict] - 扁平文件列表，每项含 path / size / modified_at
+    """
+    from ChatMe.APIRouter.static_file import CACHED_DIR, list_data_analysis_files
+
+    data_analysis_dir = CACHED_DIR / session_id / "data_analysis"
+    base_rel = f"cached/{session_id}/data_analysis"
+
+    if not data_analysis_dir.exists():
+        return {
+            "exists": False,
+            "root_path": base_rel,
+            "files": [],
+        }
+
+    return {
+        "exists": True,
+        "root_path": base_rel,
+        "files": list_data_analysis_files(data_analysis_dir, base_rel),
+    }
+
+
 @ChatMe_app.post("/{session_id}/backtrack", summary="会话回溯")
 async def backtrack_checkpoint(
     session_id: str = Path(..., description="会话唯一ID"),

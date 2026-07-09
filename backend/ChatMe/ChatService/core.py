@@ -1043,35 +1043,35 @@ class ChatService:
                 default=str
             ) + "\n\n"
 
-            if await self._judge_is_interrupted(session_id):
-                key_value = await self._get_interrupted_info(session_id)
-                reason = key_value.get("reason", "user_initiated_interrupt")
+        if await self._judge_is_interrupted(session_id):
+            key_value = await self._get_interrupted_info(session_id)
+            reason = key_value.get("reason", "user_initiated_interrupt")
 
-                self.logger.info(f"会话{session_id}被中断: {reason}")
+            self.logger.info(f"会话{session_id}被中断: {reason}")
 
-                checkpoint_id = await self._save_round_checkpoint(session_id)
+            checkpoint_id = await self._save_round_checkpoint(session_id)
 
-                # 补充checkpoint_id字段进去
-                await self.redis_client.hset(
-                    f"interrupt:{session_id}",
-                    mapping={
-                        "reason": key_value.get("reason", "user_initiated_interrupt"),
-                        "checkpoint_id": checkpoint_id,
-                        "timestamp": key_value.get("timestamp", "")
-                    })
+            # 补充checkpoint_id字段进去
+            await self.redis_client.hset(
+                f"interrupt:{session_id}",
+                mapping={
+                    "reason": key_value.get("reason", "user_initiated_interrupt"),
+                    "checkpoint_id": checkpoint_id,
+                    "timestamp": key_value.get("timestamp", "")
+                })
 
-                yield json.dumps(
-                    {
-                        "type": "interrupt",
-                        "session_id": session_id,
-                        "checkpoint_id": checkpoint_id,
-                        "reason": reason,
-                    },
-                    ensure_ascii=False,
-                    default=str
-                ) + "\n\n"
+            yield json.dumps(
+                {
+                    "type": "interrupt",
+                    "session_id": session_id,
+                    "checkpoint_id": checkpoint_id,
+                    "reason": reason,
+                },
+                ensure_ascii=False,
+                default=str
+            ) + "\n\n"
 
-                return
+            return
 
         checkpoint_id = await self._save_round_checkpoint(session_id)
 

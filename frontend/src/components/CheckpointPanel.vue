@@ -100,7 +100,8 @@ export default {
   border-left: 1px solid var(--border-color);
   display: flex;
   flex-direction: column;
-  z-index: 100;
+  /* 必须 > DataAnalysisTree panel(150)，否则文件树会盖在历史记录之上 */
+  z-index: 200;
   box-shadow: -4px 0 12px rgba(0, 0, 0, 0.08);
 }
 

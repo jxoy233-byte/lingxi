@@ -10,13 +10,17 @@ import shutil
 from pathlib import Path
 from typing import Any, Optional
 
+import requests
+
 from ChatMe.ChatMeConfig import get_oss_config
 from ChatMe.LoggingManager.logging_config import get_logger
 
 
 class ChatDataAnalysisFormat:
     """
-    数据分析执行配置规范类
+    数据分析执行配置规范类。
+
+    *默认执行路径工作目录就可以了 '/'*
     """
 
 
@@ -170,6 +174,137 @@ class ChatDataAnalysisFormat:
     # 操作规范
     # --------------------------------------------------------
 
+    @staticmethod
+    def get_data_analysis_header() -> str:
+        """
+        获取数据分析代码的通用 header 字符串
+
+        在 AI 生成的代码字符串顶部拼接此 header，可抑制常见的
+        FutureWarning / DeprecationWarning / UserWarning / RuntimeWarning
+        等无关紧要的警告。这些警告在 pandas / numpy / matplotlib / sklearn
+        等库执行时频繁出现，会污染 stdout、挤占 token 预算。
+
+        Returns:
+            可直接 prepend 到 code() 入参代码串的 Python header（不含末尾换行）
+
+        示例：
+            from ChatMe.ChatDataAnalysis.format import ChatDataAnalysisFormat
+            header = ChatDataAnalysisFormat.get_data_analysis_header()
+            code = header + "\\n" + user_code
+        """
+        return (
+            "import warnings\n"
+            "warnings.filterwarnings('ignore', category=FutureWarning)\n"
+            "warnings.filterwarnings('ignore', category=DeprecationWarning)\n"
+            "warnings.filterwarnings('ignore', category=UserWarning)\n"
+            "warnings.filterwarnings('ignore', category=RuntimeWarning)\n"
+        )
+
+    @staticmethod
+    def _format_check_error(status_code, exception, path, url, port) -> str:
+        """统一 AI-friendly 错误信息格式：`[类型] 描述 | 建议`
+
+        - HTTP 访问层错误（400/403/404）→ 额外附带 path 字符串语法诊断
+        - 网络层 / 服务端错误 → 维持通用建议
+        """
+        if exception is not None:
+            exc_name = type(exception).__name__
+            exc_msg = str(exception)
+            if "Connection" in exc_name or "refused" in exc_msg.lower():
+                return (
+                    f"[后端未连通] 无法连接 {url} | 检查后端服务 (port {port}) 是否启动，"
+                    f"可通过 CHATME_BACKEND_HOST/CHATME_BACKEND_PORT 环境变量覆盖"
+                )
+            if "timeout" in exc_name.lower() or "timeout" in exc_msg.lower():
+                return "[请求超时] 5 秒内未响应 | 网络较慢或后端无响应，可稍后重试"
+            return (
+                f"[网络异常] {exc_name}: {exc_msg} | "
+                f"检查网络连接和后端服务状态"
+            )
+        if status_code == 400:
+            return (
+                f"[路径格式错误] {path} | "
+                f"合法示例: cached/'session_id'/data_analysis/gen_001/xxx/xxx.png |"
+                f"路径要符合规范[[path]]后续引用语法"
+            )
+        if status_code == 403:
+            return (
+                f"[访问被拒] {path} | "
+                f"合法路径模板:cached/'session_id'/data_analysis/... |"
+                f"路径要符合规范[[path]]后续引用语法"
+            )
+        if status_code == 404:
+            return (
+                f"[文件不存在] {path} | "
+                f"完整文件路径示例:cached/'session_id'/data_analysis/gen_001/xxx/xxx.suffix |"
+                f"路径要符合规范[[path]]引用语法"
+            )
+        if status_code == 500:
+            return "[服务端异常] HTTP 500"
+        if status_code and status_code >= 400:
+            return f"[HTTP 错误] status_code={status_code}"
+        return f"[未知错误] status_code={status_code}"
+
+    @staticmethod
+    def check_static_file(path: str) -> dict:
+        """
+        校验文件是否可通过 /static/ 接口正常访问
+
+        在沙盒内发送 HTTP 请求到后端静态文件服务，验证 AI 生成的文件
+        （图表 / 数据 / 报告 / Mermaid 等）已被正确保存并可被前端访问。
+        用于防止 AI 写错路径、文件未实际生成、服务端未启动等异常。
+
+        Args:
+            path: 相对于 /static/ 的路径，格式如
+                  "cached/{session_id}/data_analysis/gen_001/charts/xxx.png"
+
+        Returns:
+            dict 包含 url / accessible / status_code / content_type / size / error
+
+        error 字段格式（AI 可直接 parse）：
+            成功时为 None；失败时统一为 `[类型] 描述 | 建议`
+            - [后端未连通] / [请求超时] / [网络异常]
+            - [文件不存在] / [服务端异常] / [HTTP 错误]
+        """
+
+        # 环境检测：沙盒用 host.docker.internal，本机用 127.0.0.1
+        is_sandbox = os.path.exists("/.dockerenv")
+        default_host = "host.docker.internal" if is_sandbox else "127.0.0.1"
+        host = os.getenv("CHATME_BACKEND_HOST", default_host)
+        port = os.getenv("CHATME_BACKEND_PORT", "8211")
+        url = f"http://{host}:{port}/static/{path}"
+
+        try:
+            resp = requests.get(url, timeout=5)
+            accessible = resp.status_code == 200
+            return {
+                "url": url,
+                "accessible": accessible,
+                "status_code": resp.status_code,
+                "content_type": resp.headers.get("content-type"),
+                "error": None if accessible else ChatDataAnalysisFormat._format_check_error(
+                    status_code=resp.status_code,
+                    exception=None,
+                    path=path,
+                    url=url,
+                    port=port,
+                ),
+            }
+        except Exception as e:
+            return {
+                "url": url,
+                "accessible": False,
+                "status_code": None,
+                "content_type": None,
+                "error": ChatDataAnalysisFormat._format_check_error(
+                    status_code=None,
+                    exception=e,
+                    path=path,
+                    url=url,
+                    port=port,
+                ),
+            }
+
     def remove_dir(self, generation: str):
         """
         删除指定 generation 的分析结果目录
@@ -284,25 +419,37 @@ class ChatDataAnalysisFormat:
         self.logger.debug(f"数据文件已保存: {data_path}")
         return str(data_path)
 
-    def save_report(self, content: str, filename: str) -> str:
+    def save_report(self, content: str, filename: str, mode: str = "w") -> str:
         """
         保存报告文件到 reports/ 目录
 
         Args:
             content: 报告内容（Markdown 或纯文本）
             filename: 文件名（需含后缀，如 report.md、summary.txt）
+            mode: 写入模式，"w" 覆盖（默认），"a" 追加到末尾
 
         Returns:
             保存后的文件绝对路径
+
+        用法提示：
+            长报告建议分块写，避免单次 code() 调用超过 LLM max_tokens：
+            da.save_report(intro, "report.md")                # mode="w" 创建文件
+            da.save_report(section1, "report.md", mode="a")   # 续写
+            da.save_report(section2, "report.md", mode="a")   # 续写
+
+            Markdown 段落分隔建议在 content 末尾留 \\n\\n。
         """
+        if mode not in ("w", "a"):
+            raise ValueError(f"save_report mode 必须是 'w' 或 'a'，收到: {mode}")
+
         reports_dir = Path(self.get_current_generation_dir()) / "reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
 
         report_path = reports_dir / filename
-        with open(report_path, "w", encoding="utf-8") as f:
+        with open(report_path, mode, encoding="utf-8") as f:
             f.write(content)
 
-        self.logger.debug(f"报告已保存: {report_path}")
+        self.logger.debug(f"报告已保存 ({mode}): {report_path}")
         return str(report_path)
 
     # --------------------------------------------------------

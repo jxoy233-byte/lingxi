@@ -5,6 +5,7 @@
 子目录不再过滤；
 """
 import os
+import sys
 import builtins
 from pathlib import Path
 

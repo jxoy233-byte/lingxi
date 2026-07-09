@@ -87,13 +87,12 @@ class SandboxPool:
                 "-v", f"{self.sandbox_config_path}:/.chatme/config.json:ro",
                 # 日志：容器内写 /.chatme/logs，host 上落到 backend/.chatme/logs
                 "-v", f"{self.logs_path}:/.chatme/logs:rw",
-                # cached/ 和 skills/ 所处目录
+                # 工作目录约束：PYTHONPATH=/ 让 /cached、/skills 直接可 import，
+                # WORKDIR=/ 让代码中的相对路径（如 open('cached/xxx')）也能解析。
+                # 不再挂 tmpfs —— 代码直接写到根目录 /code.py，跟 /cached、/skills 同级
                 "-e", "PYTHONPATH=/",
                 # 用于访问 host 上的后端 VL 模型（127.0.0.1:8211）
                 "--add-host=host.docker.internal:host-gateway",
-                # tmpfs 工作区（mode=1777 让 UID 1000 可写）
-                "--tmpfs=/tmp:rw,noexec,size=64m,mode=1777",
-                "--tmpfs=/sandbox:rw,noexec,size=64m,mode=1777",
                 self.image,
                 "sleep", "infinity"
             ]
@@ -129,24 +128,25 @@ class SandboxPool:
 
         try:
             with self.lock:
-                # 写入代码到容器：docker exec -i + cat > file
-                # （不能用 docker cp：cp 写入的是镜像 writable layer，
-                #   会被启动时 --tmpfs=/sandbox 挂载点遮住，exec 时找不到）
+                # 写入代码到容器根目录：/code.py
+                # （不能直接用 docker cp：cp 写入的是镜像 writable layer）
+                # 容器以 root 运行，能在 / 下创建/覆盖 /code.py
                 write_result = subprocess.run([
                     "docker", "exec", "-i", container_id,
-                    "sh", "-c", f"cat > /sandbox/code{suffix}"
+                    "sh", "-c", f"cat > /code{suffix}"
                 ], input=code, capture_output=True, text=True, timeout=10)
                 if write_result.returncode != 0:
                     raise Exception(f"写入容器失败: {write_result.stderr}")
 
-                # 执行代码（PYTHONPATH 已在 docker run 时设为 /）
+                # 执行代码 + 自动清理 /code.py（无论成功失败都删，避免敏感信息残留）
+                # -w / 显式指定 cwd=/，让代码里写 open('cached/xxx') 能解析到 /cached/xxx
+                # sh -c 链路：python /code.py → 存 rc → rm -f /code.py → 透传 rc
                 result = subprocess.run([
-                    "docker", "exec", container_id,
-                    "python", f"/sandbox/code{suffix}"
+                    "docker", "exec", "-w", "/", container_id,
+                    "sh", "-c", f"python /code{suffix}; rc=$?; rm -f /code{suffix}; exit $rc"
                 ], capture_output=True, text=True, timeout=30)
 
-                # 不再 rm /sandbox —— tmpfs 在容器回收时自动清；
-                # 重要产出写到 /cached，由 host 文件系统管
+                # 重要产出写到 /cached，由 host 文件系统管（mount rw，不随容器清理）
 
             output = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n\nReturn code: {result.returncode}"
             return output

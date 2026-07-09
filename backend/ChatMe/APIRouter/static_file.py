@@ -6,8 +6,9 @@
     from ChatMe.APIRouter.static_file import static_file_router
     app.include_router(static_file_router)
 """
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Body
 from fastapi.responses import FileResponse
@@ -24,7 +25,36 @@ CACHED_DIR = BACKEND_DIR / "cached"
 static_file_router = APIRouter(prefix="/static", tags=["静态文件"])
 
 
-@static_file_router.put("/cached/{file_path:path}", summary="写入文件内容")
+def list_data_analysis_files(data_analysis_dir: Path, base_rel: str) -> List[dict]:
+    """
+    列出 data_analysis 目录下所有文件（扁平列表），供前端自行构树。
+
+    Args:
+        data_analysis_dir: data_analysis 绝对路径
+        base_rel: 路径前缀，如 "cached/{session_id}/data_analysis"
+
+    Returns:
+        [{"path": "cached/.../xxx.png", "size": int, "modified_at": str}, ...]
+    """
+    files = []
+    if not data_analysis_dir.exists() or not data_analysis_dir.is_dir():
+        return files
+    for f in data_analysis_dir.rglob("*"):
+        if not f.is_file() or f.name.startswith("."):
+            continue
+        # 相对 BACKEND_DIR 取，保证 path 含 "cached/" 前缀，与 /static/cached/ 路由一致
+        rel = f.relative_to(BACKEND_DIR).as_posix()
+        stat = f.stat()
+        files.append({
+            "path": rel,
+            "size": stat.st_size,
+            "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+        })
+    files.sort(key=lambda x: x["path"])
+    return files
+
+
+@static_file_router.put("/{file_path:path}", summary="写入文件内容")
 async def write_cached_file(
     file_path: str,
     content: str = Body(..., description="文件内容")
@@ -33,7 +63,7 @@ async def write_cached_file(
     写入文件内容到 cached 目录
 
     Args:
-        file_path: 相对于 cached/ 的路径
+        file_path: 相对于 cached/ 的路径（可带或不带 "cached/" 前缀）
         content: 文件内容
     """
     safe_path = _get_safe_path(file_path)
@@ -59,10 +89,13 @@ def _get_safe_path(path: str) -> Optional[Path]:
     """
     将相对路径转换为安全的绝对路径
     防止路径穿越攻击
+    接受两种格式：
+      - "cached/{sid}/..." （自动剥 cached/ 前缀）
+      - "{sid}/..." （直接拼到 CACHED_DIR）
     """
-    # 移除开头的 /
-    if path.startswith("/"):
-        path = path[1:]
+    # 移除开头的 cached/
+    if path.startswith("cached/"):
+        path = path[len("cached/"):]
 
     # 拼接基础目录
     base = CACHED_DIR
@@ -76,7 +109,7 @@ def _get_safe_path(path: str) -> Optional[Path]:
     return target
 
 
-@static_file_router.get("/cached/{file_path:path}", summary="访问 cached 目录下的文件")
+@static_file_router.get("/{file_path:path}", summary="访问 cached 目录下的文件")
 async def serve_cached_file(
     file_path: str,
     download: bool = Query(False, description="是否下载而非预览")
@@ -85,8 +118,9 @@ async def serve_cached_file(
     访问 cached 目录下的文件
 
     Args:
-        file_path: 相对于 cached/ 的路径
-                   例如: abc123/data_analysis_output/gen_001/charts/sales.png
+        file_path: 相对于 cached/ 的路径（可带或不带 "cached/" 前缀）
+                   例如: cached/abc123/data_analysis/gen_001/charts/sales.png
+                        或: abc123/data_analysis/gen_001/charts/sales.png
         download: True=下载, False=预览(默认inline显示)
 
     Returns:

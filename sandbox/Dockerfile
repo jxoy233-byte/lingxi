@@ -21,10 +21,12 @@ COPY sandbox/requirements.txt .
 RUN python -m pip install --upgrade pip -i https://mirrors.aliyun.com/pypi/simple/ \
     &&  pip install --no-build-isolation --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ -r requirements.txt
 
-# 创建工作目录
-RUN mkdir -p /sandbox /.chatme && chown -R 1000:1000 /sandbox /.chatme
+# 创建配置目录（config + logs 挂载点）
+# 这样 /code.py 能直接写在根目录下，跟 /cached、/skills 同一层级
+RUN mkdir -p /.chatme
 
-WORKDIR /sandbox
-USER 1000
+# 工作目录设为根目录 / —— 让代码中的相对路径（如 open('cached/xxx')）
+# 能直接解析到 /cached/xxx、/skills/xxx
+WORKDIR /
 
 CMD ["python"]

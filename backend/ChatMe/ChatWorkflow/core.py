@@ -786,6 +786,7 @@ class ChatWorkflow:
 
             user_input: List[HumanMessage] = await self._get_current_round_conversation_except_files( messages)
             # history_messages = await self._get_validate_history_message(messages,2)
+            history_memory: SystemMessage = self.memory_manager.get_relevant_memory(thread_id)
 
             # 如果在这里中断时，续接时注入的中断原因 SystemMessage 需要加到 input_msg 最前面，否则 LLM 看不到
             for msg in messages:
@@ -793,6 +794,7 @@ class ChatWorkflow:
                     input_msg.insert(0, msg)
                     break
 
+            input_msg.append(history_memory)
             # input_msg.extend(history_messages)
             input_msg.append(files_input)
             input_msg.extend(user_input)

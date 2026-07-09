@@ -951,17 +951,20 @@ export default {
               if (renderedSvg) {
                 renderedSvg.removeAttribute('width')
                 renderedSvg.removeAttribute('height')
-                renderedSvg.style.width = '900px'
-                renderedSvg.style.maxWidth = 'none'
-                renderedSvg.style.maxHeight = '500px'
+                // 对话框内：宽度按容器自适应（不超过 900px），
+                // 高度放开限制，让长流程图整体显示不滚动
+                renderedSvg.style.width = '100%'
+                renderedSvg.style.maxWidth = '900px'
+                renderedSvg.style.height = 'auto'
+                renderedSvg.style.maxHeight = 'none'
               }
-              // 给外层 block 也加 overflow 确保滚动
-              block.style.maxHeight = '600px'
-              block.style.overflow = 'auto'
+              // 外层 block 不再限制高度，长流程图直接完整展开
+              block.style.maxHeight = 'none'
+              block.style.overflow = 'visible'
               const mermaidRendered = block.querySelector('.mermaid-rendered')
               if (mermaidRendered) {
-                mermaidRendered.style.maxHeight = '600px'
-                mermaidRendered.style.overflow = 'auto'
+                mermaidRendered.style.maxHeight = 'none'
+                mermaidRendered.style.overflow = 'visible'
               }
             })
           } else {
@@ -3401,14 +3404,15 @@ export default {
 
 .file-render-block[data-type="mmd"] .mermaid-rendered {
   display: block !important;
-  padding: 12px;
-  overflow: auto !important;
-  max-height: 900px !important;
+  padding: 10px;
+  overflow: visible !important;
+  max-height: none !important;
   text-align: center;
 }
 
 .file-render-block[data-type="mmd"] .mermaid-rendered svg {
-  max-height: none !important;
+  max-width: 100%;
+  height: auto;
   cursor: grab;
 }
 

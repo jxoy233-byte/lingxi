@@ -126,7 +126,7 @@ code(python, "...with open(xx.py)as f:code = f.read()")
 cmd("ls skills/") → Check skills overview
 cmd("cat skills/DataAnalysis.md")  → Read spec first to know about how to input file dirs, output results and so on
 code("python", "from ChatMe.ChatDataAnalysis.format import ChatDataAnalysisFormat;import pandas as pd, numpy as np; ...")  →
-- libs available in local venv: pandas, numpy, matplotlib...
+- libs available both in sandbox and local: pandas, numpy, matplotlib...
 - generate + analyze + save (charts/data/reports/scripts) to 'OUTPUT_DIR' with prepared functions in one pass when possible
 
 *complex tasks (multi-step / multi-file / ML / large data)*:
@@ -416,7 +416,7 @@ def get_should_end_node_config():
     base_url = active.get("base_url")
 
     temperature = 0.01
-    max_tokens = int(os.getenv("SHOULD_END_MAX_TOKENS", "1024"))
+    max_tokens = int(os.getenv("SHOULD_END_MAX_TOKENS", "2048"))
     top_p = float(os.getenv("OPENAI_TOP_P", "1.0"))
     timeout = int(os.getenv("OPENAI_TIMEOUT", "60"))
     max_retries = 3
@@ -580,8 +580,9 @@ Inline: [Python](https://python.org) is popular. Not at bottom.
 
 ### Data Analysis Results (AI-generated files)
 ⚠️ All AI-generated files — charts, mermaid, reports, data — MUST use `[[path]]` syntax. NEVER use markdown links like `[text](url)` for these files.
-Correct: `[[cached/session_id/data_analysis/gen_xxx/charts/xxx.png]]`
-Wrong: `报告：[xxx.md](cached/.../xxx.md)` ← forbidden
+`[[cached/session_id/data_analysis/gen_xxx/charts/xxx.png]]` ✅
+图片：`![description](path)` ❌
+报告：`[xxx.md](cached/.../xxx.md)` ❌
 
 Render with `[[]]` custom syntax:
 ```
@@ -666,7 +667,7 @@ def get_agent_node_config():
     base_url = active.get("base_url")
 
     temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.2"))
-    max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "4096"))
+    max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "16384"))
     top_p = float(os.getenv("OPENAI_TOP_P", "1.0"))
     timeout = int(os.getenv("OPENAI_TIMEOUT", "60"))
     max_retries = 3
@@ -704,7 +705,7 @@ def get_history_summary_node_config():
     base_url = active.get("base_url")
 
     temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.5"))
-    max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "4096"))
+    max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "8192"))
     top_p = float(os.getenv("OPENAI_TOP_P", "1.0"))
     timeout = int(os.getenv("OPENAI_TIMEOUT", "60"))
     max_retries = 3
@@ -1060,7 +1061,7 @@ def get_model_vl_config():
     local = vl_config.get("local")
 
     temperature = float(os.getenv("VL_TEMPERATURE", "0.5"))
-    max_tokens = int(os.getenv("VL_MAX_TOKENS", "8192"))
+    max_tokens = int(os.getenv("VL_MAX_TOKENS", "4096"))
     top_p = float(os.getenv("VL_TOP_P", "1.0"))
     timeout = int(os.getenv("OPENAI_TIMEOUT", "60"))
     max_retries = 3

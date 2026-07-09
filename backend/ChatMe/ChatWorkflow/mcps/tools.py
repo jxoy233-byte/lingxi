@@ -110,7 +110,7 @@ def _create_sub_agent_graph(prompt):
         api_key=llm_config.get("api_key"),
         base_url=llm_config.get("base_url"),
         temperature=0.2,
-        max_tokens=8192,
+        max_tokens=16384,
         extra_body=extra_body,
     )
     # 通过 ChatPromptTemplate 注入 system prompt，与主工作流一致
@@ -118,7 +118,7 @@ def _create_sub_agent_graph(prompt):
         ("system", prompt),
         MessagesPlaceholder("messages")
     ])
-    sub_llm_with_prompt = prompt_template | sub_llm
+    sub_llm_with_prompt = prompt_template | sub_llm.bind_tools(tools)
 
 
     def agent_node(state :SubAgentState, config):

@@ -14,6 +14,20 @@
           <span class="file-name" :title="fileName">{{ fileName }}</span>
         </div>
         <div class="toolbar-actions">
+          <!-- 文件列表切换：仅在有 session 时显示 -->
+          <button
+            v-if="sessionId"
+            @click="toggleFileTree"
+            class="tool-btn"
+            :class="{ active: showFileTree }"
+            title="文件列表"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 3h18v4H3z"/>
+              <path d="M3 11h18v4H3z"/>
+              <path d="M3 19h18v2H3z"/>
+            </svg>
+          </button>
           <!-- 编辑模式：只显示一个保存按钮 -->
           <template v-if="isEditing">
             <button @click="saveFile" class="tool-btn tool-btn-primary" title="保存">
@@ -59,6 +73,33 @@
 
       <!-- 内容区域 -->
       <div class="content-container">
+        <!-- 内部文件树浮层下拉（toggleable） -->
+        <transition name="tree-fade">
+          <div v-if="showFileTree" class="inner-file-tree" @click.stop>
+            <div class="inner-tree-header">
+              <span class="inner-tree-title">📁 文件列表</span>
+              <button class="tool-btn tool-btn-mini" @click="showFileTree = false" title="关闭">×</button>
+            </div>
+            <div class="inner-tree-body">
+              <div v-if="treeLoading" class="inner-tree-empty">加载中…</div>
+              <div v-else-if="!treeRootNode || !treeRootNode.children || treeRootNode.children.length === 0" class="inner-tree-empty">
+                暂无文件
+              </div>
+              <div v-else class="inner-tree-list">
+                <div
+                  v-for="child in treeRootChildren"
+                  :key="child.name + '_' + child.type"
+                >
+                  <DataTreeNode
+                    :node="child"
+                    :depth="0"
+                    @file-click="onInnerFileClick"
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+        </transition>
         <!-- 可渲染文件（md/mmd）：Tab 切换 + 缩放控制 -->
         <div v-if="isRenderableFile && !isEditing" class="render-tabs">
           <button
@@ -87,6 +128,14 @@
           ></textarea>
         </div>
 
+        <!-- 图片：直接渲染（不取文本，避免把二进制塞 content） -->
+        <div
+          v-else-if="isImageFile"
+          class="content-body image-preview"
+        >
+          <img :src="fileUrl" :alt="fileName" />
+        </div>
+
         <!-- 非编辑模式：显示内容 -->
         <div
           v-else-if="content"
@@ -94,7 +143,7 @@
           :class="{ 'mermaid-zoom-container': isMermaidFile && viewTab === 'rendered' }"
           :style="isMermaidFile && viewTab === 'rendered' ? { '--mermaid-scale': mermaidZoomScale } : {}"
           ref="mermaidContainer"
-          @wheel.prevent="onMermaidWheel"
+          @wheel="onWheel"
         >
           <div v-html="renderedContent"></div>
         </div>
@@ -113,17 +162,20 @@
 <script>
 import { marked } from 'marked'
 import hljs from 'highlight.js'
+import DataTreeNode from './DataTreeNode.vue'
 
 export default {
   name: 'FilePreviewPanel',
+  components: { DataTreeNode },
   props: {
     visible: { type: Boolean, default: false },
     fileName: { type: String, default: '' },
     content: { type: String, default: '' },
     fileUrl: { type: String, default: '' },
-    renderedSvg: { type: String, default: '' }
+    renderedSvg: { type: String, default: '' },
+    sessionId: { type: String, default: '' }
   },
-  emits: ['close'],
+  emits: ['close', 'file-select'],
   data() {
     return {
       panelWidth: 480,
@@ -133,7 +185,13 @@ export default {
       viewTab: 'rendered',
       mermaidZoomScale: 1,
       isEditing: false,
-      editedContent: ''
+      editedContent: '',
+      // 内部文件树
+      showFileTree: false,
+      treeFiles: [],
+      treeRootPath: '',
+      treeRootNode: null,
+      treeLoading: false
     }
   },
   watch: {
@@ -144,15 +202,38 @@ export default {
         this.isEditing = false
         this.editedContent = ''
       }
+    },
+    sessionId: {
+      immediate: false,
+      handler(newVal) {
+        // 切换会话时重置内部文件树状态
+        if (newVal) {
+          this.showFileTree = false
+          this.treeFiles = []
+          this.treeRootNode = null
+        }
+      }
     }
   },
   methods: {
-    onMermaidWheel(e) {
-      const delta = e.deltaY > 0 ? -0.1 : 0.1
-      this.mermaidZoomScale = Math.min(3, Math.max(0.3, this.mermaidZoomScale + delta))
+    onWheel(e) {
+      // 只有 mermaid 渲染态才拦截滚轮做缩放；其他情况让滚轮正常滚动 .content-container
+      if (this.isMermaidFile && this.viewTab === 'rendered') {
+        e.preventDefault()
+        const delta = e.deltaY > 0 ? -0.1 : 0.1
+        this.mermaidZoomScale = Math.min(3, Math.max(0.3, this.mermaidZoomScale + delta))
+      }
     }
   },
   computed: {
+    // 内部文件树根节点的 children（按目录优先 + 字典序排序）
+    treeRootChildren() {
+      if (!this.treeRootNode || !this.treeRootNode.children) return []
+      return [...this.treeRootNode.children].sort((a, b) => {
+        if (a.type !== b.type) return a.type === 'directory' ? -1 : 1
+        return a.name.localeCompare(b.name)
+      })
+    },
     // 可渲染文件（md/mmd）：有渲染效果且支持原文/渲染切换
     isRenderableFile() {
       return this.isMarkdownFile || this.isMermaidFile
@@ -165,6 +246,10 @@ export default {
     isMermaidFile() {
       const name = (this.fileName || '').toLowerCase()
       return name.endsWith('.mmd')
+    },
+    isImageFile() {
+      const name = (this.fileName || '').toLowerCase()
+      return /\.(png|jpe?g|gif|webp|svg)$/.test(name)
     },
     // 可编辑文件：所有文本类文件（md, txt, mmd, py, json, csv, sh 等）
     isEditableFile() {
@@ -204,6 +289,71 @@ export default {
       div.textContent = text
       return div.innerHTML
     },
+    async toggleFileTree() {
+      this.showFileTree = !this.showFileTree
+      if (this.showFileTree && (!this.treeRootNode || this.treeFiles.length === 0)) {
+        await this.loadFileTree()
+      }
+    },
+    async loadFileTree() {
+      if (!this.sessionId) return
+      this.treeLoading = true
+      try {
+        const resp = await fetch(`/chat/${this.sessionId}/data-analysis/tree`)
+        if (!resp.ok) {
+          this.treeFiles = []
+          this.treeRootNode = null
+          return
+        }
+        const data = await resp.json()
+        this.treeRootPath = data.root_path || ''
+        this.treeFiles = data.files || []
+        this.buildTreeNode()
+      } catch (e) {
+        console.error('[FilePreviewPanel] loadFileTree failed:', e)
+        this.treeFiles = []
+        this.treeRootNode = null
+      } finally {
+        this.treeLoading = false
+      }
+    },
+    buildTreeNode() {
+      const root = { name: 'data_analysis', type: 'directory', children: [] }
+      const basePrefix = this.treeRootPath.endsWith('/') ? this.treeRootPath : this.treeRootPath + '/'
+      for (const file of this.treeFiles) {
+        const rel = file.path.startsWith(basePrefix)
+          ? file.path.slice(basePrefix.length)
+          : file.path
+        const parts = rel.split('/').filter(Boolean)
+        if (parts.length === 0) continue
+        let current = root
+        for (let i = 0; i < parts.length; i++) {
+          const part = parts[i]
+          const isFile = i === parts.length - 1
+          if (isFile) {
+            current.children.push({
+              name: part,
+              type: 'file',
+              path: file.path,
+              size: file.size,
+              modified_at: file.modified_at
+            })
+          } else {
+            let dir = current.children.find(c => c.name === part && c.type === 'directory')
+            if (!dir) {
+              dir = { name: part, type: 'directory', children: [] }
+              current.children.push(dir)
+            }
+            current = dir
+          }
+        }
+      }
+      this.treeRootNode = root
+    },
+    onInnerFileClick(node) {
+      // 内部文件树点击：保持侧栏打开，方便连续切换预览文件
+      this.$emit('file-select', node)
+    },
     reload() {
       // 强制重新渲染
       this.$forceUpdate()
@@ -239,6 +389,21 @@ export default {
       }
     },
     downloadFile() {
+      // mermaid 文件的"渲染效果"tab：下载渲染后的 SVG（而不是源 .mmd 文本）
+      if (this.isMermaidFile && this.viewTab === 'rendered' && this.renderedSvg) {
+        const baseName = (this.fileName || 'diagram').replace(/\.mmd$/i, '')
+        const blob = new Blob([this.renderedSvg], { type: 'image/svg+xml;charset=utf-8' })
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = baseName + '.svg'
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        URL.revokeObjectURL(url)
+        return
+      }
+
       console.log('[FilePreviewPanel] fileUrl:', this.fileUrl)
       console.log('[FilePreviewPanel] fileName:', this.fileName)
       console.log('[FilePreviewPanel] content length:', this.content ? this.content.length : 0)
@@ -298,15 +463,17 @@ export default {
   right: 0;
   top: 0;
   bottom: 0;
+  height: 100vh;
   background: var(--bg-primary);
   border-left: 1px solid var(--border-color);
-  display: flex;
-  flex-direction: column;
   z-index: 100;
   box-shadow: -4px 0 20px rgba(0, 0, 0, 0.1);
   min-width: 320px;
   max-width: 800px;
   will-change: width;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .resize-handle {
@@ -399,6 +566,83 @@ export default {
   background: var(--bg-hover);
   color: var(--text-primary);
 }
+.tool-btn.active {
+  background: var(--button-bg);
+  color: #fff;
+}
+.tool-btn-mini {
+  width: 22px;
+  height: 22px;
+  font-size: 14px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+.tool-btn-mini:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* 内部文件树浮层（从 content-container 顶部展开的下拉菜单） */
+.inner-file-tree {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  width: 320px;
+  max-width: calc(100% - 24px);
+  max-height: 60vh;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.inner-tree-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  flex-shrink: 0;
+}
+.inner-tree-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+.inner-tree-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+.inner-tree-empty {
+  padding: 20px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.inner-tree-list {
+  font-size: 12.5px;
+}
+.tree-fade-enter-active,
+.tree-fade-leave-active {
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+.tree-fade-enter-from,
+.tree-fade-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
+}
 
 .tool-btn-primary {
   background: var(--button-bg) !important;
@@ -410,9 +654,37 @@ export default {
 }
 
 .content-container {
-  flex: 1;
+  flex: 1 1 0;
   overflow-y: auto;
-  padding: 24px;
+  overflow-x: hidden;
+  padding: 16px;
+  min-height: 0;
+  position: relative;
+  /* 显式约束高度，overflow 滚动一定生效，不依赖 flex 传递 */
+  height: calc(100vh - 64px);
+  -webkit-overflow-scrolling: touch;
+  /* 让滚动条常驻可见，macOS overlay 模式下用户感知不到能滚动 */
+  scrollbar-gutter: stable;
+}
+.content-container::-webkit-scrollbar {
+  width: 8px;
+}
+.content-container::-webkit-scrollbar-track {
+  background: transparent;
+}
+.content-container::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.18);
+  border-radius: 4px;
+}
+.content-container::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.32);
+}
+/* 深色主题 */
+:global(.dark-theme) .content-container::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+}
+:global(.dark-theme) .content-container::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.32);
 }
 
 .content-body {
@@ -420,6 +692,26 @@ export default {
   line-height: 1.7;
   color: var(--text-primary);
   word-wrap: break-word;
+  overflow-wrap: anywhere;
+  min-height: 0;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.content-body.image-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  background: var(--bg-secondary, #f9fafb);
+}
+.content-body.image-preview img {
+  max-width: 100%;
+  max-height: 70vh;
+  object-fit: contain;
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
 }
 
 /* Markdown 样式 */
@@ -486,7 +778,7 @@ export default {
   border: 1px solid var(--code-block-border);
 }
 
-/* 纯文本/代码文件预览：无 Markdown 渲染，等宽字体、保留缩进换行 */
+/* 纯文本/代码文件预览：等宽字体、长行换行、纵向滚动由外层 .content-container 承担 */
 .content-body :deep(pre.plain-text-content) {
   background: var(--code-block-bg);
   padding: 16px;
@@ -496,9 +788,11 @@ export default {
   font-size: 13px;
   line-height: 1.6;
   color: var(--code-block-text);
-  white-space: pre;
-  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
   margin: 0;
+  max-width: 100%;
 }
 
 .content-body :deep(pre code) {
@@ -662,8 +956,9 @@ export default {
 }
 
 .content-body :deep(.mermaid-zoom-inner svg) {
+  width: 100%;          /* 跟随面板宽度自适应 */
   max-width: 100%;
-  max-height: 400px;
+  max-height: 65vh;     /* 不超过视口高度的 65% */
   height: auto;
   cursor: grab;
 }
@@ -672,18 +967,7 @@ export default {
   cursor: grabbing;
 }
 
-.content-body :deep(.plain-text-content) {
-  margin: 0;
-  padding: 16px;
-  background: var(--bg-secondary);
-  border-radius: 8px;
-  font-family: 'Courier New', monospace;
-  font-size: 13px;
-  line-height: 1.6;
-  color: var(--text-primary);
-  white-space: pre-wrap;
-  word-wrap: break-word;
-}
+/* .plain-text-content 样式已统一在上面 :deep(pre.plain-text-content) 处定义 */
 
 /* 编辑区域 */
 .edit-area {

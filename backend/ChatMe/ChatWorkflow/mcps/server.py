@@ -339,7 +339,7 @@ def code(
     """
     执行代码（默认沙盒，必要时降级到本地 venv）
     """
-    # AI 判断代码不安全 → 沙盒执行
+    # 沙盒执行
     if use_sandbox and _sandbox_pool is not None:
         logger.debug(f"会话 {session_id} 使用沙盒容器执行代码")
         return _sandbox_pool.execute(code, language)
@@ -349,7 +349,6 @@ def code(
         logger.warning(f"会话 {session_id} 请求沙盒但沙盒池未初始化，降级到本地 venv")
 
     logger.debug(f"会话 {session_id} 使用本地环境执行代码")
-    # 默认：本地 venv 执行（host 视角，可访问文件系统 + 导入后端模块）
     return _execute_code_in_local(code, language)
 
 @server.tool

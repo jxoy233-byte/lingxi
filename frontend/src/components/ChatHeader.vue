@@ -15,6 +15,7 @@
       <h1>灵析</h1>
     </div>
     <div class="header-actions">
+      <slot name="extra-actions" />
       <button
         v-if="hasSession"
         @click="$emit('toggle-checkpoints')"

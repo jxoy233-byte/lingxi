@@ -30,7 +30,14 @@
           @toggle-theme="toggleTheme"
           @toggle-checkpoints="toggleCheckpoints"
           @toggle-sidebar="toggleMobileSidebar"
-        />
+        >
+          <template v-if="currentSessionId" #extra-actions>
+            <DataAnalysisTree
+              :session-id="currentSessionId"
+              @file-click="onDataAnalysisFileClick"
+            />
+          </template>
+        </ChatHeader>
 
         <MessageList
           ref="messageList"
@@ -105,8 +112,10 @@
         :content="filePreviewContent"
         :file-url="filePreviewUrl"
         :rendered-svg="filePreviewRenderedSvg"
+        :session-id="currentSessionId"
         @close="showFilePreview = false"
         @reload="reloadPreview"
+        @file-select="onDataAnalysisFileClick"
       />
 
       <!-- 点击空白区域关闭文件预览面板 -->
@@ -173,6 +182,7 @@ import ConfirmDialog from './components/ConfirmDialog.vue'
 import CheckpointPanel from './components/CheckpointPanel.vue'
 import WebPreviewPanel from './components/WebPreviewPanel.vue'
 import FilePreviewPanel from './components/FilePreviewPanel.vue'
+import DataAnalysisTree from './components/DataAnalysisTree.vue'
 import mermaid from 'mermaid'
 
 export default {
@@ -185,7 +195,8 @@ export default {
     ConfirmDialog,
     CheckpointPanel,
     WebPreviewPanel,
-    FilePreviewPanel
+    FilePreviewPanel,
+    DataAnalysisTree
   },
   data() {
     return {
@@ -633,6 +644,57 @@ export default {
         this.filePreviewContent = '无法预览此文件。\n\n文件名：' + (file.name || '未知') + '\n文件类型：' + (suffix ? suffix.replace('.', '') : '未知') + '\n\n请下载后查看。'
         this.filePreviewUrl = file.url || file.preview || ''
         this.showFilePreview = true
+      }
+    },
+    async onDataAnalysisFileClick(fileNode) {
+      // fileNode: { name, type, path, size, modified_at }
+      // path 形如 cached/{session_id}/data_analysis/gen_001/...
+      const url = `/static/${fileNode.path}`
+      const name = fileNode.name || ''
+      const dotIdx = name.lastIndexOf('.')
+      const ext = dotIdx >= 0 ? name.slice(dotIdx + 1).toLowerCase() : ''
+      const suffix = dotIdx >= 0 ? name.slice(dotIdx) : ''
+      const isImage = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext)
+
+      // 公共状态先填好，面板打开即可见
+      this.filePreviewName = name
+      this.filePreviewUrl = url
+      this.filePreviewRenderedSvg = ''
+      this.currentPreviewFile = { name, suffix, url, preview: url }
+
+      if (isImage) {
+        // 图片：不取文本（避免把二进制塞 content），由 FilePreviewPanel 直接 <img> 渲染
+        this.filePreviewContent = ''
+        this.showFilePreview = true
+        return
+      }
+
+      // 文本类：fetch 内容 + 用 FilePreviewPanel 打开（支持渲染/编辑）
+      try {
+        const resp = await fetch(url)
+        if (!resp.ok) {
+          console.error('[DataAnalysis] fetch failed:', resp.status, url)
+          return
+        }
+        const text = await resp.text()
+        this.filePreviewContent = text
+
+        // mermaid 文件：渲染 SVG 供 FilePreviewPanel 的"渲染效果" tab
+        if (ext === 'mmd' && text) {
+          try {
+            const id = 'panel-' + Date.now()
+            const { svg } = await mermaid.render(id, text)
+            this.filePreviewRenderedSvg = svg
+          } catch (e) {
+            console.warn('[DataAnalysis] mermaid render failed:', e)
+            this.filePreviewRenderedSvg =
+              '<p style="color:red;padding:12px;">渲染失败: ' + (e.message || e) + '</p>'
+          }
+        }
+
+        this.showFilePreview = true
+      } catch (e) {
+        console.error('[DataAnalysis] load error:', e)
       }
     },
     reloadPreview() {
@@ -1894,6 +1956,8 @@ export default {
   --button-hover: #0d8c6d;
   --sidebar-bg: #f7f7f8;
   --header-bg: #ffffff;
+  /* 数据分析产物面板 */
+  --primary-color: #3b82f6;
   /* 代码块 */
   --code-block-bg: #f7f7f8;
   --code-block-border: rgba(234, 235, 236, 0.9);

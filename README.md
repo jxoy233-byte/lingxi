@@ -16,7 +16,7 @@
 - [API 概览](#api-概览)
 - [代码沙盒](#代码沙盒)
 - [MCP 工具](#mcp-工具)
-- [近期优化](#近期优化)
+- [设计文档](#设计文档)
 - [部署打包](#部署打包)
 - [开发注意事项](#开发注意事项)
 - [许可证](#许可证)
@@ -90,6 +90,7 @@ ChatMe/
 ├── frontend/                             # Vue + Electron 前端
 ├── docker-compose.yml                    # Redis 服务编排
 ├── docker_data/                          # Redis 持久化数据
+├── docs/                                 # 综合实践文档（详见 [设计文档](#设计文档)）
 └── .env.example
 ```
 
@@ -113,7 +114,7 @@ ChatMe/
 | `tool_execution_node` | 工具执行（搜索 / MCP 工具 / Docker 沙盒），由 LangGraph 官方 `ToolNode` 提供 |
 | `final_node` | 最终回复生成（独立于 agent 的 LLM），带 SUMMARY 标记 |
 
-> 节点状态使用 LangGraph TypedDict + `add_messages` reducer 维护，state 定义见 [`ChatMe/ChatWorkflow/config/models.py`](backend/ChatMe/ChatWorkflow/config/models.py)。
+> AI 协作者请阅读 [`CLAUDE.md`](CLAUDE.md) 获取完整的工作流说明、关键文件、协作偏好。
 
 ## 快速开始
 
@@ -142,12 +143,10 @@ uv sync                                          # 安装依赖
 
 # 启动 MCP 服务器（端口 18080）
 # 首次启动会自动：1) 检查 Redis  2) 清理残留沙盒容器  3) 初始化沙盒池
-uv run chatme_mcp / python -m backend/ChatMe/ChatWorkflow/mcps/mcp_server
-# 等价：uv run python -m ChatMe.ChatWorkflow.mcps.server
+uv run chatme_mcp                                # 等价于 uv run python -m ChatMe.ChatWorkflow.mcps.server
 
 # 另开终端，启动主服务（端口 8211）
-uv run chatme_main / python main.py
-# 等价：uv run python main.py
+uv run chatme_main                               # 等价于 uv run python main.py
 ```
 
 ### 2. 启动前端
@@ -162,15 +161,6 @@ npm run dev  # 访问 http://localhost:5173
 
 ```bash
 npm run electron:dev:all    # 同时启动 Vite + Electron
-```
-
-#### 桌面端打包
-
-```bash
-npm run electron:build          # 当前平台
-npm run electron:build:mac      # macOS DMG
-npm run electron:build:win      # Windows NSIS
-npm run electron:build:linux    # Linux AppImage
 ```
 
 ### 3. 构建代码沙盒镜像（首次使用前）
@@ -205,7 +195,7 @@ OPENAI_FREQUENCY_PENALTY=0.0
 OPENAI_PRESENCE_PENALTY=0.0
 ```
 
-### 配置文件示例(重命名为config.json)
+### 配置文件示例（重命名为 config.json）
 
 ```json
 {
@@ -276,27 +266,9 @@ ChatMe/
 │   ├── src/                              # Vue 组件
 │   └── vite.config.js
 ├── docker-compose.yml
+├── docs/                                 # 综合实践文档
 └── docker_data/
 ```
-
-### 关键文件
-
-| 文件 | 职责 |
-|------|------|
-| `backend/ChatMe/ChatWorkflow/core.py` | 工作流定义，节点逻辑，4 个 LLM 实例（`MessagesPlaceholder` 处理） |
-| `backend/ChatMe/ChatWorkflow/config/graph_config.py` | prompts 和模型配置 |
-| `backend/ChatMe/ChatWorkflow/config/models.py` | 图状态 TypedDict |
-| `backend/ChatMe/ChatWorkflow/mcps/server.py` | FastMCP 工具服务入口 |
-| `backend/ChatMe/ChatWorkflow/mcps/CodeSandboxPool.py` | Docker 沙盒容器池 |
-| `backend/ChatMe/ChatService/core.py` | 聊天服务，SSE 流式输出 |
-| `backend/ChatMe/ChatService/FilesLoaders/core.py` | 文件加载与处理（`_maybe_truncate` 大文件截断） |
-| `backend/ChatMe/ChatService/FilesLoaders/config.py` | 文件大小/类型/截断阈值常量 |
-| `backend/ChatMe/ChatDataAnalysis/format.py` | 数据分析规范（generation 管理） |
-| `backend/ChatMe/APIRouter/main.py` | `/chat` 前缀主对话路由 |
-| `backend/ChatMe/APIRouter/model_vl.py` | `/api` 前缀 VL 模型 API |
-| `sandbox/Dockerfile` | 代码沙盒镜像定义 |
-| `frontend/src/App.vue` | 全局状态管理，SSE 事件处理 |
-| `frontend/electron/main.js` | Electron 主进程 |
 
 ## API 概览
 
@@ -330,7 +302,7 @@ ChatMe/
 
 ## 代码沙盒
 
-[`backend/ChatMe/ChatWorkflow/mcps/CodeSandboxPool.py`](backend/ChatMe/ChatWorkflow/mcps/CodeSandboxPool.py) 提供基于 Docker 容器的安全代码执行能力：
+`backend/ChatMe/ChatWorkflow/mcps/CodeSandboxPool.py` 提供基于 Docker 容器的安全代码执行能力：
 
 - **预启动容器池**：默认 2 个常驻容器（`sleep infinity`），按需取用 / 归还
 - **隔离环境**：使用 tmpfs 限制 `/tmp`、`/sandbox`（各 64m，noexec）
@@ -354,12 +326,20 @@ MCP 服务器（`mcps/server.py`，FastMCP 3.x）暴露以下核心工具：
 
 每个 tool 函数都带 `session_id` 参数。
 
-## 近期优化
+## 设计文档
 
-- **大文件截断**：`FilesLoaders._maybe_truncate` 对超过 `TEXT_TRUNCATE_LENGTH`（默认 3000 字符）的文本按行截断，提示 AI 通过环境探索读全量。阈值在 `FilesLoaders/config.py` 调整。
-- **SystemMessage 正确传递**：4 个 LLM 全部用 `MessagesPlaceholder("messages")` 替代字符串占位符 `{messages}`，避免 `SystemMessage` 被 `str()` 成一坨塞进 human 消息。
-- **VL 模型提速**：`file_process_node` 跳过非图片文件（CSV / MD / TXT / JSON / PDF / Word / Excel 都不再走 Qwen3-VL），VL prompt 也重写为只针对图片。
-- **依赖更新**：`pyproject.toml` 新增 `unstructured>=0.16.0`（CSV / MD / XML 解析依赖），安装后自动下载 NLTK 数据。
+`docs/综合实践文档/` 目录下提供了完整的设计资料（**该目录在 `.gitignore` 中，仅在本地存在**）：
+
+| 文件 | 内容 |
+|------|------|
+| `01_需求规格说明书.md` | 需求规格说明书 |
+| `02_概要设计说明书.md` | 概要设计说明书 |
+| `03_详细设计说明书.md` | 详细设计说明书 |
+| `部署图.png` | 系统部署架构图 |
+| `时序图.png` | 关键时序图 |
+| `程序流程图/` | 程序流程图目录 |
+
+每个 `.md` 文件有对应的 `.docx` 版本。如果目录缺失，请从团队渠道获取。
 
 ## 部署打包
 
@@ -393,6 +373,14 @@ docker-compose up -d redis
 ```
 
 ### 桌面端打包
+
+```bash
+cd frontend
+npm run electron:build          # 当前平台
+npm run electron:build:mac      # macOS DMG
+npm run electron:build:win      # Windows NSIS
+npm run electron:build:linux    # Linux AppImage
+```
 
 桌面端通过 `electron-builder` 打包，应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 1.0.0）在 `frontend/electron/electron.config.js` 中配置。
 

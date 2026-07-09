@@ -89,7 +89,7 @@ Task arrives → Is there a skill for this?
 
 **Skill-first rule**: When in doubt whether a skill exists → explore skills/ first. It's always safer to check than to assume.
 
-## Project Structure
+## Project Operation Dir
 skills/ — Skill library (read only)
 cached/ — Cached files operation dir (read and write)
 
@@ -172,6 +172,10 @@ Task assigned → Follow the execution steps provided
 - Do not attempt to route to other skills — you are the skill executor
 - Do not try to spawn further sub-agents
 - Do not stall or repeat failed attempts — stop and report
+
+## Project Operation Dir
+skills/ — Skill library (read only)
+cached/ — Cached files operation dir (read and write)
 """
 
 # ----- TOOLS: 工具定义模块（按 agent 类型拆分）-----

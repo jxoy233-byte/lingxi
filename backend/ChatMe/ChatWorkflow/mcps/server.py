@@ -264,7 +264,12 @@ def _is_allowed_command(command: str) -> tuple[bool, str]:
 
 
 def _execute_code_in_local(code: str, language: str) -> str:
-    """本地虚拟环境执行"""
+    """本地虚拟环境执行（cwd=backend/，跟沙盒语义一致：相对路径 cached/xxx 都能解析）
+
+    沙盒 cwd=/ + 容器内 /cached /skills mount；
+    本机 cwd=backend/ + backend/cached/ backend/skills/ 真实存在。
+    AI 写代码时用相对路径 `cached/xxx` / `skills/xxx` 在两边都有效。
+    """
     project_root = Path.cwd()
     skills_dir = project_root / "skills"
 
@@ -293,21 +298,32 @@ def _execute_code_in_local(code: str, language: str) -> str:
     if not current_path.startswith(venv_bin):
         env['PATH'] = f"{venv_bin}:{current_path}"
 
+    # PYTHONPATH 包含 backend_dir + skills_dir
+    # 让 `import Exa`（走 skills_dir）、`from ChatMe.xxx import xxx`（走 backend_dir）都能解析
     backend_dir = str(project_root)
-    current_pythonpath = env.get('PYTHONPATH', '')
-    if backend_dir not in current_pythonpath:
-        env['PYTHONPATH'] = f"{backend_dir}{os.pathsep}{current_pythonpath}" if current_pythonpath else backend_dir
+    skills_abs = str(skills_dir)
+    existing_pythonpath = env.get('PYTHONPATH', '')
+    new_pythonpath_parts = [backend_dir, skills_abs]
+    seen = set()
+    merged = []
+    for p in ([existing_pythonpath] if existing_pythonpath else []) + new_pythonpath_parts:
+        if p and p not in seen:
+            seen.add(p)
+            merged.append(p)
+    env['PYTHONPATH'] = os.pathsep.join(merged)
 
     suffix = ".py" if language == "python" else ".js"
 
-    with tempfile.NamedTemporaryFile(mode='w', suffix=suffix, delete=False, dir=skills_dir) as f:
-        f.write(code)
-        temp_file = f.name
-
+    # 临时文件写到 /tmp（与沙盒一致位置），执行完立即清理
+    temp_file = f"/tmp/code{suffix}"
     try:
+        with open(temp_file, 'w') as f:
+            f.write(code)
+
         if language == "python":
             result = subprocess.run(
                 [venv_python, temp_file],
+                cwd=str(project_root),
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -319,6 +335,7 @@ def _execute_code_in_local(code: str, language: str) -> str:
                 return "Error: Node.js 未找到"
             result = subprocess.run(
                 [node_cmd, temp_file],
+                cwd=str(project_root),
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -327,7 +344,10 @@ def _execute_code_in_local(code: str, language: str) -> str:
 
         return f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n\nReturn code: {result.returncode}"
     finally:
-        os.unlink(temp_file)
+        try:
+            os.unlink(temp_file)
+        except FileNotFoundError:
+            pass
 
 @server.tool
 def code(

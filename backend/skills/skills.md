@@ -4,7 +4,6 @@
 这些技能以 Python 模块形式存在，AI 可以通过生成并执行 Python 代码来调用。
 
 **使用skills**:
-code的执行路径在skills目录，
 from xxx(直接写脚本名称，如Exa) import 模块名 ❌
 from skills.xxx import ... ✅
 ---
@@ -162,5 +161,9 @@ ImageParser 是一个**图片解析**技能，使用 VL 模型（Qwen3-VL）来�
 tavily_result = tavily_search("某话题", search_depth="basic", max_results=3)
 exa_result = exa_search("某话题深度分析", num_results=5)
 ```
+
+---
+
+***对于没有在本文件备注的技能目录或者技能脚本则自行探索使用***
 
 ---

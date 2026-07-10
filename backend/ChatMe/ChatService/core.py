@@ -37,6 +37,7 @@ class ChatService:
         self.graph = self.chat_workflow.graph
         self.state_saver = RedisStateSaver()
         self.redis_client = self.checkpointer._redis
+        self._memory_update_tasks: Dict[str, asyncio.Task] = {}
 
     @property
     async def aget_conversation_ids(self) -> List[str]:
@@ -296,8 +297,10 @@ class ChatService:
                     )
 
                 try: # 更新每轮记忆文件 — 后台静默执行，不阻塞返回
-                    asyncio.create_task(
-                        self._update_memory_bg(session_id=session_id,checkpoint_id=checkpoint_id, state=state)
+                    self._schedule_memory_update(
+                        session_id=session_id,
+                        checkpoint_id=checkpoint_id,
+                        state=state,
                     )
 
                 except Exception as e:
@@ -309,12 +312,78 @@ class ChatService:
             self.logger.error(f"保存每轮检查点失败(session_id:{session_id}): {str(e)}")
             return None
 
+    def _schedule_memory_update(
+        self,
+        session_id: str,
+        checkpoint_id: str,
+        state: StateSnapshot,
+    ) -> None:
+        """后台调度记忆更新；同一会话按上一轮 task 串行执行。"""
+        previous_task = self._memory_update_tasks.get(session_id)
+
+        async def runner() -> bool:
+            if previous_task and not previous_task.done():
+                try:
+                    await asyncio.shield(previous_task)
+                except Exception as e:
+                    self.logger.error(f"等待上一轮记忆更新失败(thread_id={session_id}): {e}")
+            return await self._update_memory_bg(
+                session_id=session_id,
+                checkpoint_id=checkpoint_id,
+                state=state,
+            )
+
+        self._memory_update_tasks[session_id] = asyncio.create_task(runner())
+
+    async def _wait_previous_memory_update(self, session_id: str) -> Optional[str]:
+        """等待同一会话上一轮后台记忆更新结束，返回 done / failed；无等待则返回 None。"""
+        task = self._memory_update_tasks.get(session_id)
+        if task is None:
+            return None
+        if task.done():
+            return self._get_memory_update_status(session_id)
+
+        try:
+            self.logger.info(f"等待上一轮记忆更新开始(session_id={session_id})")
+            success = await asyncio.shield(task)
+            status = "done" if success else "failed"
+            self.logger.info(f"等待上一轮记忆更新完成(session_id={session_id}, status={status})")
+            return status
+        except Exception as e:
+            self.logger.error(f"等待记忆更新失败(thread_id={session_id}): {e}")
+            return "failed"
+
+    def _get_memory_update_status(self, session_id: str) -> str:
+        """获取当前会话最近一次后台记忆更新状态。"""
+        task = self._memory_update_tasks.get(session_id)
+        if task is None:
+            return "idle"
+        if not task.done():
+            return "pending"
+        try:
+            return "done" if task.result() else "failed"
+        except Exception:
+            return "failed"
+
+    async def _drop_memory_update_task(self, session_id: str) -> None:
+        """移除并消费会话的后台记忆任务，避免遗留已完成/未完成 awaitable。"""
+        task = self._memory_update_tasks.pop(session_id, None)
+        if task is None:
+            return
+        try:
+            if task.done():
+                task.result()
+            else:
+                await asyncio.shield(task)
+        except Exception as e:
+            self.logger.error(f"清理记忆更新任务失败(thread_id={session_id}): {e}")
+
     async def _update_memory_bg(
         self,
         session_id: str,
         checkpoint_id: str,
         state: StateSnapshot
-    ):
+    ) -> bool:
         """后台静默更新记忆，不阻塞主流程"""
         try:
             memory_user_message = state.values.get("memory_user_message")
@@ -329,13 +398,14 @@ class ChatService:
                 tool_results=memory_tool_results
             )
 
-            await self.chat_workflow.memory_manager.update_memory(
+            return await self.chat_workflow.memory_manager.update_memory(
                 thread_id=session_id,
                 checkpoint_id=checkpoint_id,
                 memory_data=memory_update_format
             )
         except Exception as e:
             self.logger.error(f"后台更新记忆失败(thread_id={session_id}): {str(e)}")
+            return False
 
     async def _delete_last_round_checkpoint(self, session_id: str):
         """
@@ -454,6 +524,22 @@ class ChatService:
                 default=str
             ) + "\n\n"
 
+            memory_status = self._get_memory_update_status(session_id)
+            if memory_status == "pending":
+                yield json.dumps(
+                    {"type": "memory_wait_start", "session_id": session_id},
+                    ensure_ascii=False,
+                    default=str
+                ) + "\n\n"
+
+                memory_status = await self._wait_previous_memory_update(session_id)
+
+                yield json.dumps(
+                    {"type": "memory_wait_done", "session_id": session_id, "status": memory_status or "done"},
+                    ensure_ascii=False,
+                    default=str
+                ) + "\n\n"
+
             async for chunk in self.chat_workflow.astream(messages=messages, config=input_config):
                 if chunk['event'] == 'on_chat_model_stream':
                     # 最终返回的chunk
@@ -531,6 +617,7 @@ class ChatService:
                     "type": "interrupt",
                     "session_id": session_id,
                     "checkpoint_id": checkpoint_id,
+                    "memory_status": self._get_memory_update_status(session_id),
                     "reason": reason,
                 },
                 ensure_ascii=False,
@@ -549,6 +636,7 @@ class ChatService:
             "full_response": full_response,
             "session_id": session_id,
             "checkpoint_id": checkpoint_id,
+            "memory_status": self._get_memory_update_status(session_id),
         }) + "\n\n"
 
     async def get_conversation(self, session_id: str) ->Conversation:
@@ -718,12 +806,16 @@ class ChatService:
         彻底删除Redis中的会话数据：包含检查点+历史状态+索引
         """
         try:
+            await self._wait_previous_memory_update(session_id)
+
             await self.state_saver.delete_thread(session_id)
             # langgraph新版本 删除会话 adelete_thread
             await self.checkpointer.adelete_thread(
                 thread_id=session_id,
             )
             await self.chat_workflow.memory_manager.delete_memory(thread_id=session_id)
+
+            await self._drop_memory_update_task(session_id)
 
             self.logger.info(f"会话删除成功(session_id:{session_id})")
             return True
@@ -872,6 +964,8 @@ class ChatService:
             await self.redis_client.delete(f"interrupt:{session_id}")
 
         try:
+            await self._wait_previous_memory_update(session_id)
+
             checkpoints = await self.state_saver.get_checkpoints(session_id)
 
             if not checkpoints:
@@ -906,7 +1000,7 @@ class ChatService:
             await self.chat_workflow.memory_manager.backtrack_memory(thread_id=session_id, checkpoint_id=checkpoint_id, new_checkpoint_id=new_checkpoint)
 
             # 等待 Redis 状态完全落地，避免前端立即发起的流式请求读到旧数据
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
 
             self.logger.info(f"会话回溯成功(session_id:{session_id}, checkpoint_id:{checkpoint_id})")
 
@@ -984,15 +1078,31 @@ class ChatService:
                 key_value = await self._get_interrupted_info(session_id)
                 reinvoke_message = [SystemMessage(content=f"中断原因:{key_value['reason']}\n用户进行中断续接,要求为: {message}")]
 
-            # 清除中断时留下的状态
-            await self.redis_client.delete(key)
-            await self._delete_last_round_checkpoint(session_id)
-
             yield json.dumps(
                 {"type": "init", "session_id": session_id},
                 ensure_ascii=False,
                 default=str
             ) + "\n\n"
+
+            memory_status = self._get_memory_update_status(session_id)
+            if memory_status == "pending":
+                yield json.dumps(
+                    {"type": "memory_wait_start", "session_id": session_id},
+                    ensure_ascii=False,
+                    default=str
+                ) + "\n\n"
+
+                memory_status = await self._wait_previous_memory_update(session_id)
+
+                yield json.dumps(
+                    {"type": "memory_wait_done", "session_id": session_id, "status": memory_status or "done"},
+                    ensure_ascii=False,
+                    default=str
+                ) + "\n\n"
+
+            # 清除中断时留下的状态
+            await self.redis_client.delete(key)
+            await self._delete_last_round_checkpoint(session_id)
 
             async for chunk in self.chat_workflow.astream(
                 reinvoke_message,
@@ -1065,6 +1175,7 @@ class ChatService:
                     "type": "interrupt",
                     "session_id": session_id,
                     "checkpoint_id": checkpoint_id,
+                    "memory_status": self._get_memory_update_status(session_id),
                     "reason": reason,
                 },
                 ensure_ascii=False,
@@ -1082,5 +1193,6 @@ class ChatService:
             "type": "done",
             "session_id": session_id,
             "checkpoint_id": checkpoint_id,
+            "memory_status": self._get_memory_update_status(session_id),
             "interrupted_before": True
         }) + "\n\n"

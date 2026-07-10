@@ -75,13 +75,24 @@ ChatMe/
 
 | 节点 | 职责 |
 |------|------|
-| `input_parse_node` | 输入预处理、文件解析（docling / OSS / VL）、输入优化（`improve_input`） |
-| `context_assembly_node` | 上下文组装（拼接 `imp_ipt` / memory / 当前轮循环消息）、中断检查 |
+| `input_parse_node` | 输入预处理、文件解析（docling / OSS / VL）、输入优化（`improve_input`），给 `imp_ipt` 标记 `additional_kwargs.imp_ipt=True` |
+| `context_assembly_node` | 上下文组装（拼接 `imp_ipt` / memory / 当前轮循环消息）+ **ReAct 流程压缩**（见下）+ 中断检查 |
 | `agent_node` | AI 决策（调用工具 or 结束）。工具调用超过 20 次会注入 SystemMessage 提示停止 |
 | `tool_execution_node` | LangGraph 官方 `ToolNode`，执行搜索 / MCP / Docker 沙盒 |
-| `final_node` | 最终回复生成（独立于 agent 的 LLM），带 SUMMARY 标记 |
+| `final_node` | 最终回复生成（独立于 agent 的 LLM），用 **dynamic system prompt** 把 `imp_ipt` 注入 system 层（不参与 messages 序列），输出带 SUMMARY 标记 |
 
 State 定义在 [`backend/ChatMe/ChatWorkflow/config/models.py`](backend/ChatMe/ChatWorkflow/config/models.py)（`ChatStateCore2` / `FileParseState`），用 LangGraph TypedDict + `add_messages` reducer。
+
+### ReAct 流程压缩
+
+`context_assembly_node` 在每轮组装时按"完整工具 loop 节拍"触发一次整体覆盖式压缩，避免长 ReAct 轨迹把 prompt 撑爆：
+
+- **触发条件**：完整工具 loop 数 ≥ `REACT_COMPACT_LOOPS`（默认 5）+ `REACT_KEEP_LOOPS`（默认 2）= 7 轮，**且** draft 字符数 ≥ `REACT_COMPACT_MIN_CHARS`（默认 2000），**且** `tool_call_times != last_compact_at_tool_calls`（防 state 恢复或失败后重复触发）。
+- **范围**：压缩前 N-keep 轮的 ReAct 轨迹，**最近 keep（默认 2）轮完整 loop 原文保留**（不被摘要覆盖），imp_ipt 之前的 memory / 其他 SystemMessage 整体保留。
+- **产物**：新摘要以 `【ReAct 摘要】` 标题的 SystemMessage 形式插入 imp_ipt 之后；写入 state 的 `context_summary_text` / `last_compact_at_tool_calls`。
+- **失败兜底**：长度 [80, 2500] 区间外 / 含残留标签 / LLM 异常一律 `return None`，context 保持不变。
+- **辅助方法**（`core.py`）：`_content_chars` / `_should_compact_react` / `_find_imp_ipt_idx` / `_find_complete_tool_loops` / `_build_compaction_draft` / `_try_compact_react`。**全程靠 content 特征扫描定位，不写死下标**。
+- **专用 LLM**：`get_react_compact_config()`，`REACT_COMPACT_TEMPERATURE=0.3` / `REACT_COMPACT_MAX_TOKENS=2048`（env 可覆盖），目标 ≤ 2000 字中文 markdown。
 
 ### 工作流启动入口
 
@@ -124,12 +135,13 @@ uv run chatme_main
 | 文件 | 职责 |
 |------|------|
 | `backend/main.py` | FastAPI 入口，挂载 4 个 Router |
-| `backend/ChatMe/ChatWorkflow/core.py` | 工作流定义、节点逻辑、LLM 实例（`MessagesPlaceholder` 处理） |
-| `backend/ChatMe/ChatWorkflow/config/graph_config.py` | prompts 与模型配置 |
-| `backend/ChatMe/ChatWorkflow/config/models.py` | 图状态 TypedDict |
+| `backend/ChatMe/ChatWorkflow/core.py` | 工作流定义、节点逻辑、5 个 LLM 实例（`MessagesPlaceholder` 处理）、ReAct 流程压缩、final_node dynamic system prompt 注入 |
+| `backend/ChatMe/ChatWorkflow/config/graph_config.py` | prompts 与模型配置（含 `get_react_compact_config`） |
+| `backend/ChatMe/ChatWorkflow/config/models.py` | 图状态 TypedDict（含 `context_summary_text` / `last_compact_at_tool_calls`） |
+| `backend/ChatMe/ChatWorkflow/Memory/core.py` | 长期记忆管理：per-thread `asyncio.Lock` + 临时文件原子写（`fsync` + `os.replace`） |
 | `backend/ChatMe/ChatWorkflow/mcps/server.py` | FastMCP 工具入口 |
 | `backend/ChatMe/ChatWorkflow/mcps/CodeSandboxPool.py` | Docker 沙盒容器池 |
-| `backend/ChatMe/ChatService/core.py` | 聊天服务，SSE 流式输出 |
+| `backend/ChatMe/ChatService/core.py` | 聊天服务，SSE 流式输出 + 记忆任务调度（`_memory_update_tasks` 串行队列 + `memory_wait_*` 事件） |
 | `backend/ChatMe/ChatService/FilesLoaders/core.py` | 文件加载 + `_maybe_truncate` 大文件截断 |
 | `backend/ChatMe/ChatService/FilesLoaders/config.py` | 文件大小/类型/截断阈值常量 |
 | `backend/ChatMe/ChatDataAnalysis/format.py` | 数据分析规范（`ChatDataAnalysisFormat` 类、generation 管理） |
@@ -137,6 +149,7 @@ uv run chatme_main
 | `backend/ChatMe/APIRouter/main.py` | `/chat` 前缀主对话路由 |
 | `backend/ChatMe/APIRouter/model_vl.py` | `/api` VL 模型路由 |
 | `backend/ChatMe/APIRouter/timed_clean.py` | 定时清理任务 |
+| `backend/ChatMe/LoggingManager/logging_config.py` | `QueueHandler` + `QueueListener` 异步日志，`atexit` 清理 |
 | `sandbox/Dockerfile` | 代码沙盒镜像定义 |
 
 ### 前端
@@ -189,6 +202,10 @@ docker-compose up -d redis                            # 端口 6024，密码 123
 4. **流式响应滚动 UX**：入场 `easeInOut`；流式 ramp（慢→快）+ 100ms 打断防抖；用户 wheel / touch 立即让出控制权。
 5. **MCP 工具参数前缀被剥**：Python `use_sandbox` 在 MCP schema 里是 `sandbox`；过滤 / 判断要查实际 args key，兼容新旧两种。
 6. **`should_end_node` 设计偏好**：LLM 决策节点的单条喂入 / 完整写回、低频字面量子串匹配、独立 `max_tokens` env、prompt / 解析兜底一致。
+7. **ReAct 流程压缩节拍**：`REACT_COMPACT_LOOPS=5` + `REACT_KEEP_LOOPS=2`（≥ 7 个完整工具 loop 才触发），压缩前 N-keep 轮，**最近 keep 轮原文保留不被摘要覆盖**；imp_ipt 是唯一 draft 切分锚点（`additional_kwargs.imp_ipt=True`），全程不写死下标。
+8. **Memory 并发安全**：`MemoryManager` 内部维护 `_thread_locks[thread_id]`，`update_memory` / `delete_memory` / `backtrack_memory` / `delete_latest_backup_memory` 全部走 `async with self._get_thread_lock(thread_id)`；文件写入走 `_atomic_write_text`（写 `*.tmp` + `fsync` + `os.replace`）。
+9. **ChatService 记忆任务串行**：每会话在 `_memory_update_tasks[session_id]` 里只保留一个 asyncio.Task，新任务通过 `asyncio.shield` 串接上一轮；新请求发起 / 删除会话 / 回溯 前会先 `_wait_previous_memory_update` 等待；SSE 暴露 `memory_wait_start` / `memory_wait_done` 事件，`interrupt` / `done` 事件携带 `memory_status` 字段。
+10. **异步日志**：写文件走 `QueueHandler` + `QueueListener` 模式，业务线程不入 IO；`atexit` 统一 `listener.stop()` 清理。
 
 ### 代码 / 提交风格
 
@@ -199,10 +216,15 @@ docker-compose up -d redis                            # 端口 6024，密码 123
 
 ### 工作流修改注意点
 
-1. 4 个 LLM 全部用 `MessagesPlaceholder("messages")`，不要回到字符串 `{messages}` 占位（会导致 SystemMessage 被 `str()`）
+1. 5 个 LLM（`llm_core` / `agent_llm` / `summary_llm` / `react_compact_llm` / `llm_imp_ipt`）全部用 `MessagesPlaceholder("messages")`，不要回到字符串 `{messages}` 占位（会导致 SystemMessage 被 `str()`）
 2. 后端 `_filter_thinking_content` 过滤 `<thinking>` 等思考标签，前端再二次过滤
 3. VL 模型只处理图片（`file_process_node` 已跳过非图片文件）
 4. `execute_code` 工具默认 `use_sandbox=True`（即 MCP schema 里看到的是 `sandbox`）
+5. **`imp_ipt` 是 draft 切分锚点**：`input_parse_node` 输出的 `imp_ipt` 唯一身份是 `additional_kwargs.imp_ipt == True`；ReAct 压缩 / final_node 注入 / 后续扩展都靠这个标志定位本轮意图，不要换成"最后一条 HumanMessage"这种隐式契约
+6. **final_node 不再走 `MessagesPlaceholder`**：imp_ipt 走 `_final_system_template.format(imp_ipt=...)` 注入到 system prompt 独占最高注意力位；context 中要先把 `imp_ipt` pop 出去再喂给 `llm_core`，避免重复注入
+7. **ReAct 压缩失败不要 raise**：`_try_compact_react` 一律返回 `None`，由 `context_assembly_node` 保持原 context 不变；不要让压缩异常把整轮回复炸掉
+8. **Memory 操作加锁**：读写 / 删除 / 回溯全部走 `_get_thread_lock(thread_id).acquire()`，新方法（如新增的 `restore_memory`）必须继承这个约定
+9. **ChatService 记忆任务串行**：新入口（新建 / 中断续接 / 回溯 / 删除）必须先 `_wait_previous_memory_update(session_id)`，避免读到旧记忆或与后台 task 写竞争
 
 ## 完整设计文档
 

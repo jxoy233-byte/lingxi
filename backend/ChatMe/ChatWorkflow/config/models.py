@@ -37,6 +37,10 @@ class ChatStateCore2(TypedDict):
     should_end_decision: Annotated[Optional[str], "should_end_node 的决策结果，end 或 retry"]
     should_end_retry_times: Annotated[int, "should_end_node 连续 retry 的次数，超过3次强制跳 final_node"]
 
+    # ReAct 流程压缩：context_assembly_node 中按 tool_call 节拍整体覆盖
+    context_summary_text: Annotated[Optional[str], "ReAct 压缩产物的纯文本；context_assembly_node 中按阈值整体覆盖更新"]
+    last_compact_at_tool_calls: Annotated[int, "上一次成功 ReAct 压缩时的 tool_call_times；用于防 state 恢复或失败后重复触发"]
+
 
 class AIMessageType(str, Enum):
     """AIMessage区分消息类型的枚举类"""

@@ -224,9 +224,9 @@ class FilesLoaders:
             kept_lines.append(line)
             current_chars += line_len
 
-        # 边缘情况：单行就超限 → 硬截到 max_chars
+        # 边缘情况：单行就超限 → 硬截到头部
         if not kept_lines and lines:
-            kept_lines = [lines[0][:max_chars]]
+            kept_lines = [lines[0][:200]]
             total_lines = 1
 
         kept_count = len(kept_lines)

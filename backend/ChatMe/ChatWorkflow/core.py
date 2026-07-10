@@ -1,4 +1,6 @@
+import asyncio
 import json
+import os
 import re
 from collections import defaultdict
 from pathlib import Path
@@ -16,7 +18,7 @@ from langgraph.types import Send, interrupt
 
 from .config.graph_config import get_agent_node_config, get_graph_final_node_config, \
     get_imp_ipt_config, get_history_summary_node_config, get_llm_memory_config, get_model_vl_config, \
-    get_should_end_node_config
+    get_should_end_node_config, get_react_compact_config
 from .config.models import ChatStateCore2, AIMessageType, FileParseState
 from .Memory.core import MemoryManager
 from .mcps.tools import sub_agent
@@ -31,9 +33,11 @@ class ChatWorkflow:
     def __init__(self):
         self.logger = get_logger(__class__.__name__)
 
+        self._final_system_template = None
         self.llm_core = None
         self.agent_llm = None
         self.summary_llm = None
+        self.react_compact_llm = None
         self.llm_imp_ipt = None
         self.llm_imp_ipt_vl = None
         self.should_end_llm = None
@@ -85,9 +89,9 @@ class ChatWorkflow:
         # 最终节点配置
         llm_config, system_prompt = get_graph_final_node_config()
 
+        # final_node 用 dynamic system prompt 注入（imp_ipt 占位段由 final_node.format() 注入），
+        self._final_system_template = system_prompt
         self.llm_core = ChatOpenAI(**llm_config)
-        prompt = ChatPromptTemplate.from_messages([("system", system_prompt), MessagesPlaceholder("messages")])
-        self.llm_core = prompt | self.llm_core
 
         # agent_node配置
         agent_node_config ,agent_prompt = get_agent_node_config()
@@ -102,6 +106,13 @@ class ChatWorkflow:
         self.summary_llm = ChatOpenAI(**summary_llm_config)
         prompt = ChatPromptTemplate.from_messages([("system", summary_llm_prompt), MessagesPlaceholder("messages")])
         self.summary_llm = prompt | self.summary_llm
+
+        # ReAct 流程压缩节点配置
+        react_compact_llm_config, react_compact_prompt = get_react_compact_config()
+
+        self.react_compact_llm = ChatOpenAI(**react_compact_llm_config)
+        prompt = ChatPromptTemplate.from_messages([("system", react_compact_prompt), MessagesPlaceholder("messages")])
+        self.react_compact_llm = prompt | self.react_compact_llm
 
         # 输入优化大模型配置
         imp_ipt_llm_config, imp_ipt_llm_prompt = get_imp_ipt_config()
@@ -443,6 +454,158 @@ class ChatWorkflow:
 
         return None
 
+    # =========================================================================
+    # ReAct 流程压缩 helper
+    # =========================================================================
+
+    @staticmethod
+    def _content_chars(messages: List[BaseMessage]) -> int:
+        """
+        累计 context 中所有消息的字符数（粗略用于触发判断）
+        """
+        total = 0
+        for m in messages:
+            content = m.content
+            if isinstance(content, str):
+                total += len(content)
+            elif isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict):
+                        total += len(item.get("text", "") or item.get("content", "") or "")
+                    elif isinstance(item, str):
+                        total += len(item)
+            total += len(getattr(m, "id", "") or "")
+        return total
+
+    @staticmethod
+    def _should_compact_react(
+        complete_loop_count: int,
+        compact_loops: int,
+        keep_loops: int,
+        tool_call_times: int,
+        last_compact_at: int,
+        draft_chars: int,
+        min_chars: int,
+    ) -> bool:
+        """
+        触发判断：
+        - 至少存在 compact_loops + keep_loops 个完整工具 loop
+        - 不是同一次压缩内重复触发（tool_call_times != last_compact_at 防 state 恢复）
+        - draft_chars 不少于 min_chars（防短 context 空压）
+        """
+        return (
+            complete_loop_count >= compact_loops + keep_loops
+            and tool_call_times != last_compact_at
+            and draft_chars >= min_chars
+        )
+
+    @staticmethod
+    def _find_imp_ipt_idx(context: List[BaseMessage]) -> Optional[int]:
+        """
+        通过 additional_kwargs.imp_ipt == True 来定位本轮用户意图。
+
+        imp_ipt 是 draft 的天然切分锚点：
+          - 它之前的内容（含 memory_sys 等）全部保留
+          - 它之后的内容要被新摘要整体覆盖
+        """
+        for i, m in enumerate(context):
+            if isinstance(m, HumanMessage) and m.additional_kwargs.get("imp_ipt"):
+                return i
+        return None
+
+    @staticmethod
+    def _find_complete_tool_loops(context: List[BaseMessage]) -> List[List[int]]:
+        """
+        找 context 中所有完整工具 loop。
+        一个 loop = AIMessage(tool_calls=[...]) + 后续所有匹配 tool_call_id 的 ToolMessage。
+        只有全部 tool_call_id 都找到对应 ToolMessage 时才算完整。
+        返回每个 loop 的消息下标列表：[ai_idx, tool_idx1, tool_idx2, ...]。
+        """
+        loops: List[List[int]] = []
+        pending_ai_idx: Optional[int] = None
+        pending_call_ids: set[str] = set()
+        pending_tool_indices: List[int] = []
+
+        for i, m in enumerate(context):
+            if isinstance(m, AIMessage):
+                new_ids = {tc.get("id") for tc in (m.tool_calls or []) if tc.get("id")}
+                if new_ids:
+                    pending_ai_idx = i
+                    pending_call_ids = new_ids
+                    pending_tool_indices = []
+            elif isinstance(m, ToolMessage):
+                if pending_ai_idx is not None and m.tool_call_id in pending_call_ids:
+                    pending_tool_indices.append(i)
+                    pending_call_ids.remove(m.tool_call_id)
+                    if not pending_call_ids:
+                        loops.append([pending_ai_idx, *pending_tool_indices])
+                        pending_ai_idx = None
+                        pending_tool_indices = []
+
+        return loops
+
+    @staticmethod
+    def _build_compaction_draft(
+        context: List[BaseMessage],
+        s_new: str,
+        keep_loops: List[List[int]],
+    ) -> Optional[List[BaseMessage]]:
+        """
+        基于 _find_imp_ipt_idx 与完整工具 loop 动态拼装压缩 draft：
+
+          1. imp_ipt 之前的所有内容（含 memory_sys、可能的其他 SystemMessage）→ 整体保留
+          2. 在 imp_ipt 之后插入新 SystemMessage（替换原 summary 与被压缩的 ReAct 历史）
+          3. 末尾挂最近保留的完整工具 loop 原文（默认最近 2 轮）
+
+        找不到 imp_ipt 时返回 None，调用方应放弃本次压缩。
+        """
+        imp_ipt_idx = ChatWorkflow._find_imp_ipt_idx(context)
+        if imp_ipt_idx is None:
+            return None
+
+        draft: List[BaseMessage] = list(context[:imp_ipt_idx + 1])
+        draft.append(SystemMessage(content=f"【ReAct 摘要】\n{s_new}"))
+
+        for loop in keep_loops:
+            for idx in loop:
+                draft.append(context[idx])
+
+        return draft
+
+    async def _try_compact_react(self, context: List[BaseMessage]) -> Optional[str]:
+        """
+        喂整体 context 给 react_compact_llm，让它从 BaseMessage 类型识别长期记忆 / 用户意图 / ReAct 轨迹并产出 ≤2000 字中文摘要。
+
+        整体覆盖式：返回新摘要后由 context_assembly_node 替换 context[2] 位置（旧 summary + 中间 ReAct 历史一次性覆盖）。
+        失败 / 输出异常一律返回 None，调用方保持 context 不变。
+        """
+        if self.react_compact_llm is None:
+            return None
+        if len(context) < 4:
+            return None
+
+        timeout_sec = 30
+        try:
+            resp = await asyncio.wait_for(
+                self.react_compact_llm.ainvoke({"messages": context}),
+                timeout=timeout_sec,
+            )
+            resp = await self._filter_thinking_content(resp)
+            text = self._get_message_content_string(resp).strip()
+
+            # 长度兜底（[80, 2500] 范围）
+            if not text or len(text) < 80 or len(text) > 2500:
+                self.logger.warning(f"ReAct 压缩结果长度异常: {len(text)}")
+                return None
+            # 残留标签兜底
+            if re.search(r"(\\u|<tool_calls>|<thinking>)", text):
+                self.logger.warning("ReAct 压缩结果含残留标签")
+                return None
+            return text
+        except Exception as e:
+            self.logger.warning(f"ReAct 压缩失败: {e}")
+            return None
+
     async def _create_graph_process_files(self):
         """
         处理文件图工作流
@@ -767,6 +930,9 @@ class ChatWorkflow:
         """
         TOOL_CALL_TIMES = 50
         RETRY_TIMES = 3
+        REACT_COMPACT_LOOPS = 5
+        REACT_KEEP_LOOPS = 2
+        REACT_COMPACT_MIN_CHARS = 2000
 
 
         workflow = StateGraph(ChatStateCore2)
@@ -808,7 +974,15 @@ class ChatWorkflow:
             imp_ipt_id = imp_ipt.id
             imp_ipt_response_metadata = imp_ipt.response_metadata
 
-            imp_ipt = HumanMessage(content=imp_ipt_content, additional_kwargs=imp_ipt_additional_kwargs, id=imp_ipt_id, response_metadata=imp_ipt_response_metadata)
+            # imp_ipt 标记：业务流各处用 additional_kwargs.imp_ipt == True 来唯一识别本轮意图
+            imp_ipt = HumanMessage(
+                content=imp_ipt_content,
+                additional_kwargs={**imp_ipt_additional_kwargs, "imp_ipt": True},
+                id=imp_ipt_id,
+                response_metadata=imp_ipt_response_metadata,
+            )
+
+            self.logger.info(f"[imp_ipt_llm]:{imp_ipt_content}")
 
             return {
                 "imp_ipt": imp_ipt,
@@ -819,6 +993,8 @@ class ChatWorkflow:
                 "memory_ai_response": None,
                 "tool_call_times": 0,
                 "should_end_retry_times": 0,
+                "context_summary_text": "",
+                "last_compact_at_tool_calls": 0,
             }
 
         async def context_assembly_node(state: ChatStateCore2, config: RunnableConfig):
@@ -844,6 +1020,41 @@ class ChatWorkflow:
                         content_string = self._get_message_content_string(msg)
                         tool_results.append(content_string)
 
+            # ✨ ReAct 流程压缩：达到 compact + keep 个完整工具 loop 后，压缩前 compact 轮，保留最近 keep 轮原文
+            tool_call_times = state.get("tool_call_times", 0)
+            last_compact_at = state.get("last_compact_at_tool_calls", 0)
+            draft_chars = self._content_chars(context)
+            complete_loops = self._find_complete_tool_loops(context)
+
+            if self._should_compact_react(
+                len(complete_loops),
+                REACT_COMPACT_LOOPS,
+                REACT_KEEP_LOOPS,
+                tool_call_times,
+                last_compact_at,
+                draft_chars,
+                REACT_COMPACT_MIN_CHARS,
+            ):
+                keep_loops = complete_loops[-REACT_KEEP_LOOPS:]
+                keep_indices = {idx for loop in keep_loops for idx in loop}
+                compact_context = [
+                    msg for i, msg in enumerate(context)
+                    if i not in keep_indices
+                ]
+
+                s_new = await self._try_compact_react(compact_context)
+                if s_new is not None:
+                    # 压缩输入排除最近保留的完整工具 loop，draft 再从原始 context 挂回最近 loop 原文，避免摘要与原文重复。
+                    draft = self._build_compaction_draft(context, s_new, keep_loops)
+                    if draft is not None:
+                        self.logger.debug(f"[react压缩]: compact_loops={len(complete_loops) - len(keep_loops)}, keep_loops={len(keep_loops)}, context={context}")
+                        return {
+                            "context": draft,
+                            "memory_tool_results": tool_results,
+                            "context_summary_text": s_new,
+                            "last_compact_at_tool_calls": tool_call_times,
+                        }
+                # 压缩失败 / 定位失败：不改 context，原样返回
             return {
                 "context": context,
                 "memory_tool_results": tool_results
@@ -872,7 +1083,6 @@ class ChatWorkflow:
                 input_msg.append(interrupt_msg)
 
             response = await self.agent_llm.ainvoke({"messages": input_msg})
-            print(response)
 
             response = await self._filter_thinking_content(response)
 
@@ -928,6 +1138,7 @@ class ChatWorkflow:
             response = await self.should_end_llm.ainvoke({"messages": [last_message]})
             content = str(response.content)
 
+            self.logger.debug(f"[should_end] response: {content}")
             decision = "end"
             if "retry" in content or "RETRY" in content:
                 decision = "retry"
@@ -955,11 +1166,31 @@ class ChatWorkflow:
             thread_id = config["configurable"]["thread_id"]
             await self.check_and_trigger_interrupt(thread_id)
 
-            input_msg = state["context"]
+            # imp_ipt 在 system 层独占最高注意力位；{imp_ipt} 占位由 _final_system_template.format() 注入。
+            context = list(state["context"])
 
-            response = await self.llm_core.ainvoke({"messages": input_msg})
+            self.logger.debug(f"[final_context]: {context}")
+
+            imp_ipt_idx = self._find_imp_ipt_idx(context)
+            if imp_ipt_idx is not None:
+                context.pop(imp_ipt_idx)
+
+            imp_ipt_msg: HumanMessage = state["imp_ipt"]
+            # 防止占位符出错
+            escaped_imp_ipt = imp_ipt_msg.content.replace("{", "{{").replace("}", "}}")
+            system_prompt = self._final_system_template.format(imp_ipt=escaped_imp_ipt)
+
+            response = await self.llm_core.ainvoke(
+                [
+                    SystemMessage(content=system_prompt),
+                    *context,
+                    HumanMessage(content="请生成回复"),
+                ]
+            )
 
             response = await self._filter_thinking_content( response)
+
+            self.logger.debug(f"[final_node]: {response}")
 
             # AIMessage字段支持解包复制
             response_dict = dict(response)

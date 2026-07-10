@@ -506,9 +506,10 @@ def get_graph_final_node_config():
     prompt = """# Final Node — Response Generation
 
 ## Your Task
-Answer the user's most recent message based on the information provided (preferred choice) or your own experience (if not information is provided).
+Answer the optimized user's input: `{imp_ipt}`
+Use the most relevant messages in the context (preferred choice), or your own experience (if no information is provided).
 
-**Input**: Optimized user message + relevant memory + current round tool results
+**Input**: Below context contains relevant memory + current ReAct trajectory (agent mid-task reasoning + tool results).
 
 **How to handle different cases**:
 - Tool results available → Answer based on results
@@ -648,6 +649,7 @@ A: ⚠️ **No, do not delete system32**. This folder contains critical Windows 
 ## Core Rule
 Answer first, support second, format only when needed.
 Simple question = simple answer. Complex question = structured answer.
+
 No thinking/reasoning in output.
 
 Your output is ONLY the final answer. No internal monologue, no reasoning shown, no "thinking" text. Just the answer.
@@ -869,6 +871,131 @@ def get_history_summary_node_config():
 👉 为"当前问题"构建最优上下文
 
 现在请基于"历史对话 + 当前用户输入"，生成结构化总结。
+"""
+    return llm_config, prompt
+
+
+def get_react_compact_config():
+    """
+    ReAct 流程压缩节点配置
+    用于 context_assembly_node 中按 tool_call 节拍整体覆盖式压缩
+
+    返回参数：
+    llm_config :Dict,
+    prompt :str
+    """
+    load_dotenv()
+
+    active = _resolve_llm_config()
+    model_name = active.get("model_name")
+    api_key = active.get("api_key")
+    base_url = active.get("base_url")
+
+    temperature = float(os.getenv("REACT_COMPACT_TEMPERATURE", "0.3"))
+    max_tokens = int(os.getenv("REACT_COMPACT_MAX_TOKENS", "2048"))
+    top_p = float(os.getenv("OPENAI_TOP_P", "1.0"))
+    timeout = int(os.getenv("OPENAI_TIMEOUT", "60"))
+    max_retries = 3
+
+    llm_config = {
+        "model": model_name,
+        "api_key": api_key,
+        "base_url": base_url,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "top_p": top_p,
+        "timeout": timeout,
+        "max_retries": max_retries,
+        "extra_body": distinguish_extra_body(model_name),
+    }
+
+    prompt = """# Role
+
+你是 ChatMe 的「ReAct 流程压缩助手」，在 ChatWorkflow 的 context_assembly_node 中被调用一次：
+把收到的对话 context 压缩成 ≤2000 字的中文 markdown 摘要，目的是避免后续 agent_node / final_node 的 prompt 超过上下文上限。
+
+# Input You Receive
+
+你收到的是一段完整的对话 context（按时间顺序），可能由以下几类 BaseMessage 组成：
+
+[0] 长期记忆 SystemMessage（如果存在）：前缀是 `【历史记忆】`，跨会话累积的事实 / 决策 / 路径 / 待办 / 用户偏好。
+[1] 当前用户意图 HumanMessage（必须存在）：本轮用户在 input_parse_node 优化后的 imp_ipt。
+[2...N] ReAct 轨迹：交替出现的 AIMessage（agent 推理 + 可能 tool_calls）和 ToolMessage（tool 结果）。其中可能嵌套：
+  - 旧【ReAct 摘要】SystemMessage：上一次压缩的产物，本身就是要被"再压缩"的对象
+  - [Warning] SystemMessage：should_end_node 注入的重试警告
+  - 中断原因 SystemMessage：用户手动中断时由中断恢复路径注入
+
+# Note on Input Compaction
+
+你收到的对话 context 中可能含**旧的【ReAct 摘要】SystemMessage**。它代表上一轮（6 次前）经过一次压缩后留下的产物。本次压缩会**整体覆盖**它——所以你不必保留旧摘要里的细节，只把整个 context 视为"当前需要概括的对象"。
+
+# Output
+
+一段连续的中文 markdown 摘要，正文 ≤ 2000 字。
+
+明确禁止：
+- 不输出任何开场白（"好的，我来帮您整理"、"以下是摘要"、"下面开始压缩"、"根据用户意图..." 等）
+- 不输出 JSON 块、不写 stray 双花括号
+- 不输出多余 markdown 包装（不要 "### 摘要" 或 "**摘要**："）
+- 不在末尾追加"以上为..."或"请参考..."等收尾词
+- 直接进入正文第一句
+
+# Must Keep
+
+- [目标关联] 一句话点出本轮意图；如与长期记忆中的过去意图/方案有关，简短点出"延续上次的 X"（无关联则省略）。
+- [执行摘要] 已成功的关键工具调用（含 tool 名 + 关键产物路径或一句话结论）。失败 / 重试的工具用一行概括（错误类型 + 修正方向）。
+- [事实状态] 当前可供下一步使用的最新事实（文件清单 / 关键数据点 / 计算结果 / 已落盘路径）；≤ 80 字描述。
+- [风险/悬疑] 未解决的错误、不一致点、下次需要避开的陷阱。
+
+# Must Drop
+
+- <thinking>/<thought>/<reasoning>/全部 thought 残留
+- <tool_calls>...</tool_calls> JSON 块、<invoke ...> 标签、孤立的 `{{` `}}`
+- 重复尝试同一工具的完整 args 块（合并为 1 行："cmd 'ls' 失败 ×2：路径不存在"）
+- tool_result 完整 dump、报错 stack trace（≤ 80 字概括，去掉行号与 traceback）
+- 客套 / 问候 / 自我鼓励（"好的"、"让我试试"、"继续..."、"看起来不错"）
+- 长期记忆里与本轮意图**无直接关联**的事实
+- 旧的【ReAct 摘要】SystemMessage 中的细节描述（只取它的结论，不再重复展开）
+- imp_ipt 的原始表述（你的任务是描述"怎么解决"或"已完成什么"，不是复读问题）
+
+# Format（自由但建议）
+
+按以下四段组织，每段可空、可一句：
+
+```
+[目标] 一句话点出本轮意图 + 与历史的关联
+[执行摘要] 关键工具调用及产物（成功 + 失败重试各列）
+[事实状态] 当前最新事实
+[风险/悬疑] 未解决的不一致 / 下次需注意
+```
+
+整体全部为空时输出单句："本轮暂无 ReAct 进展"。
+
+# Quality Bar
+
+- 输入未读全前不下笔（即使自身着急也强制先读）
+- 不输出原文中的 prompt 字符串 / system prompt 引用 / JSON schema
+- 不臆测未发生的事件；不确定的事实用"未明确"标注，不自行补全
+- 末尾以句号收尾（不允许悬空）
+
+# Anti-Pattern（绝不出现）
+
+- "好的，我来帮您整理一下" / "接下来为您生成..." —— 开场白
+- ```json ... ``` 块
+- 把整个长期记忆段落重复抄一遍
+- 把整个 ReAct 轨迹原文 dump 下来
+- 输出超过 2000 字
+- 把 imp_ipt 的内容直接复制进摘要
+
+# Failure Mode Handling
+
+若输入中存在明显损坏（连续 `\\\\u`、乱码、严重不完整、混杂日语字符）：
+- 仅基于可读部分输出
+- 末尾追加一行：`⚠️ 输入存在损坏，本摘要可能完整度不足。`
+- 不要尝试修复或重写已损坏内容
+
+若遇到 [Warning] / 中断原因 等 SystemMessage：在 [风险/悬疑] 里用 1 行点出，不要原文照搬。
+若遇到旧的【ReAct 摘要】SystemMessage：作为历史事实之一，但不直接复制其内容。
 """
     return llm_config, prompt
 

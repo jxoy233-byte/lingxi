@@ -1,7 +1,21 @@
 import logging
+import atexit
+import queue
 from pathlib import Path
 from datetime import datetime
-from logging.handlers import RotatingFileHandler
+from logging.handlers import RotatingFileHandler, QueueHandler, QueueListener
+
+
+_log_listeners: dict[str, QueueListener] = {}
+
+
+def _stop_log_listeners() -> None:
+    for listener in list(_log_listeners.values()):
+        listener.stop()
+    _log_listeners.clear()
+
+
+atexit.register(_stop_log_listeners)
 
 
 def set_logger(
@@ -50,7 +64,15 @@ def set_logger(
     file_handler.setLevel(log_level)
     file_handler.setFormatter(formatter)
 
-    logger.addHandler(file_handler)
+    log_queue = queue.Queue()
+    queue_handler = QueueHandler(log_queue)
+    queue_handler.setLevel(log_level)
+
+    listener = QueueListener(log_queue, file_handler, respect_handler_level=True)
+    listener.start()
+    _log_listeners[name] = listener
+
+    logger.addHandler(queue_handler)
 
     return logger
 

@@ -6,7 +6,7 @@
 import asyncio
 import re
 import os
-from typing import Annotated, List, final
+from typing import Annotated, List
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -285,11 +285,12 @@ def sub_agent(
     else:
         final_messages = []
 
+    logger.debug(f"[sub_agent] 会话 {session_id} 思维链: {final_messages}")
     for msg in reversed(final_messages):
         if isinstance(msg, AIMessage):
+            logger.debug(f"[sub_agent] 会话 {session_id} 最终消息: {msg}")
             content = msg.content if hasattr(msg, "content") else str(msg)
             if content.strip():
-                logger.debug(f"[sub_agent] 会话 {session_id} 结果: {content}")
                 return content
 
     logger.debug(f"[sub_agent] 会话 {session_id} 结果: [无输出]")

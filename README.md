@@ -26,12 +26,15 @@
 ## 项目特性
 
 - **多智能体工作流**：基于 LangGraph StateGraph 实现 `input_parse → context_assembly → agent_node ↔ tool_execution_node → final_node` 的循环决策结构
-- **流式 SSE 响应**：前端通过 EventSource 实时接收 `content` / `reasoning` / `tool_call_*` 事件
+- **ReAct 流程压缩**：`context_assembly_node` 按"完整工具 loop 节拍"自动压缩长 ReAct 轨迹，imp_ipt 标记做切分锚点，最近 keep 轮原文保留，防止 prompt 撑爆
+- **流式 SSE 响应**：前端通过 EventSource 实时接收 `content` / `reasoning` / `tool_call_*` / `memory_wait_*` 事件
 - **多模态文件解析**：支持图片（OSS / base64）、文本（CSV / JSON / MD / TXT / XML）、文档（PDF / Word / PowerPoint / Excel），docling + qwen-vl-utils + unstructured 组合方案
 - **Docker 沙盒执行**：基于预启动容器池 + tmpfs 隔离，提供安全的 Python 数据分析代码执行环境
-- **多 LLM Provider**：OpenAI / DeepSeek / 本地 VL 模型（Qwen3-VL-2B）统一抽象
-- **对话记忆管理**：基于 Redis checkpointer 的状态恢复 + 自建 memory manager 的长期记忆
+- **多 LLM Provider**：OpenAI / DeepSeek / 本地 VL 模型（Qwen3-VL-2B）统一抽象，5 个独立 LLM（core / agent / summary / react_compact / imp_ipt）可分别配参
+- **对话记忆管理**：基于 Redis checkpointer 的状态恢复 + 自建 memory manager 的长期记忆；per-thread `asyncio.Lock` + 原子写（`fsync` + `os.replace`）保证并发安全；后台记忆任务按会话串行执行
+- **final_node dynamic system prompt**：imp_ipt 通过 `_final_system_template.format(imp_ipt=...)` 注入 system 层独占最高注意力位
 - **OSS 对象存储**：阿里云 OSS 集成，图片/文件上传后通过 URL 直接访问
+- **异步日志**：`QueueHandler` + `QueueListener` 解耦业务线程与 IO，`atexit` 统一清理
 - **桌面端打包**：Electron + electron-builder 多平台打包（macOS / Windows / Linux）
 
 ## 技术栈
@@ -108,11 +111,21 @@ ChatMe/
 
 | 节点 | 职责 |
 |------|------|
-| `input_parse_node` | 输入预处理、文件解析（docling / VL）、输入优化（`improve_input`） |
-| `context_assembly_node` | 上下文组装（拼接 `imp_ipt`、memory、当前轮循环消息）、中断检查 |
+| `input_parse_node` | 输入预处理、文件解析（docling / VL）、输入优化（`improve_input`），给 `imp_ipt` 打 `additional_kwargs.imp_ipt=True` 标记 |
+| `context_assembly_node` | 上下文组装（拼接 `imp_ipt`、memory、当前轮循环消息）、**ReAct 流程压缩**、中断检查 |
 | `agent_node` | AI 代理决策，决定调用工具或结束；工具调用超过 20 次会发 SystemMessage 提示停止 |
 | `tool_execution_node` | 工具执行（搜索 / MCP 工具 / Docker 沙盒），由 LangGraph 官方 `ToolNode` 提供 |
-| `final_node` | 最终回复生成（独立于 agent 的 LLM），带 SUMMARY 标记 |
+| `final_node` | 最终回复生成（独立于 agent 的 LLM），用 **dynamic system prompt** 把 `imp_ipt` 注入 system 层（不参与 messages 序列），输出带 SUMMARY 标记 |
+
+### ReAct 流程压缩
+
+`context_assembly_node` 在每轮组装时按"完整工具 loop 节拍"触发一次整体覆盖式压缩：
+
+- **触发**：完整工具 loop 数 ≥ `REACT_COMPACT_LOOPS`（默认 5）+ `REACT_KEEP_LOOPS`（默认 2）= 7，**且** draft 字符数 ≥ `REACT_COMPACT_MIN_CHARS`（默认 2000），**且** `tool_call_times != last_compact_at_tool_calls`（防 state 恢复或失败后重复触发）。
+- **范围**：压缩前 N-keep 轮 ReAct 轨迹，**最近 keep（默认 2）轮完整 loop 原文保留**；imp_ipt 之前的 memory / 其他 SystemMessage 整体保留。
+- **产物**：以 `【ReAct 摘要】` SystemMessage 形式插入 imp_ipt 之后；写入 state 的 `context_summary_text` / `last_compact_at_tool_calls`。
+- **失败兜底**：长度 [80, 2500] 区间外 / 含残留标签 / LLM 异常一律丢弃，context 保持不变。
+- **专用 LLM**：`get_react_compact_config()`，`REACT_COMPACT_TEMPERATURE=0.3` / `REACT_COMPACT_MAX_TOKENS=2048`（env 可覆盖），目标 ≤ 2000 字中文 markdown。
 
 > AI 协作者请阅读 [`CLAUDE.md`](CLAUDE.md) 获取完整的工作流说明、关键文件、协作偏好。
 
@@ -241,19 +254,19 @@ ChatMe/
 │   │   ├── ChatDataAnalysis/             # ChatDataAnalysisFormat 类
 │   │   ├── ChatMeConfig/                 # 配置加载器
 │   │   ├── ChatService/
-│   │   │   ├── core.py                   # ChatService，SSE 流式输出
+│   │   │   ├── core.py                   # ChatService，SSE 流式输出 + 记忆任务调度
 │   │   │   ├── RedisStateSaver/          # 自建 checkpoint 索引
 │   │   │   └── FilesLoaders/             # 文件加载 + 大文件截断
 │   │   ├── ChatWorkflow/
-│   │   │   ├── core.py                   # 工作流定义，4 个 LLM 实例
+│   │   │   ├── core.py                   # 工作流定义，5 个 LLM 实例 + ReAct 流程压缩
 │   │   │   ├── config/
-│   │   │   │   ├── graph_config.py       # prompts 和模型配置
+│   │   │   │   ├── graph_config.py       # prompts 和模型配置（含 react_compact）
 │   │   │   │   └── models.py             # ChatStateCore2 / FileParseState
 │   │   │   ├── mcps/
 │   │   │   │   ├── server.py             # FastMCP 工具入口
 │   │   │   │   └── CodeSandboxPool.py    # Docker 容器池
-│   │   │   └── Memory/                   # 长期记忆管理
-│   │   ├── LoggingManager/
+│   │   │   └── Memory/                   # 长期记忆（per-thread Lock + 原子写）
+│   │   ├── LoggingManager/               # 异步日志（QueueHandler + QueueListener）
 │   │   └── test/
 │   ├── skills/                           # 技能包（Python 模块）
 │   ├── .chatme/
@@ -390,12 +403,17 @@ npm run electron:build:linux    # Linux AppImage
 2. **Redis** 通过 `docker-compose up -d redis` 启动，端口 6024，密码 `123456`
 3. **代码沙盒**需要先 `docker-compose build sandbox` 构建镜像
 4. **思考内容过滤**：后端 `_filter_thinking_content` 过滤 AI 输出中的 `<thinking>` 等思考标签
-5. **流式响应**：前端通过 SSE 实时接收 `content` / `reasoning` / `tool_call_*` 事件
+5. **流式响应**：前端通过 SSE 实时接收 `content` / `reasoning` / `tool_call_*` / `memory_wait_*` 事件；`memory_wait_start` / `memory_wait_done` 在新请求发起 / 中断续接 且上一轮记忆任务仍在后台时插入；`interrupt` / `done` 事件携带 `memory_status` 字段（`idle` / `pending` / `done` / `failed`）
 6. **配置脱敏**：`backend/.chatme/config.json` 包含真实 API key，提交时务必脱敏
-7. **多 LLM Provider**：可通过 `llm_providers` 切换 openai / deepseek / vl（本地 VL）
+7. **多 LLM Provider**：可通过 `llm_providers` 切换 openai / deepseek / vl（本地 VL）；`react_compact` 共用活动 provider，可通过 `REACT_COMPACT_TEMPERATURE` / `REACT_COMPACT_MAX_TOKENS` 单独配参
 8. **OSS**：图片 / 文件上传后通过 OSS URL 访问，缓存目录在 `cached/`
 9. **环境探索模式**：当文件被截断时（提示中含 `[文件过大已截断]`），AI 应走 `execute_command(ls cached/...)` + `cat cached/.../filename` 流程读全量
 10. **unstructured 首次使用**：CSV / MD / XML 解析会自动下载 NLTK 数据（punkt、averaged_perceptron_tagger 等），需外网环境
+11. **ReAct 流程压缩**：`context_assembly_node` 按"完整工具 loop 节拍"自动压缩（前 N-keep 轮被摘要，最近 2 轮原文保留）；`REACT_COMPACT_LOOPS=5` / `REACT_KEEP_LOOPS=2` / `REACT_COMPACT_MIN_CHARS=2000`；压缩失败不 raise
+12. **Memory 并发安全**：`MemoryManager` 内部 per-thread `asyncio.Lock` 串行化；新加 memory 方法必须继承 `async with self._get_thread_lock(thread_id)`；写盘走 `_atomic_write_text`（`*.tmp` + `fsync` + `os.replace`）
+13. **ChatService 记忆任务串行**：每会话只有一个后台 `_update_memory_bg` 任务（`_memory_update_tasks[session_id]`），新请求 / 删除 / 回溯前会先 `_wait_previous_memory_update` 等待；新入口必须先等待，避免读到旧记忆或与后台 task 写竞争
+14. **异步日志**：`LoggingManager` 用 `QueueHandler` + `QueueListener` 写文件，业务线程不入 IO；`atexit` 统一 `listener.stop()` 清理，新增 logger 走 `set_logger`
+15. **imp_ipt 唯一标识**：`input_parse_node` 输出的 `imp_ipt` 身份是 `additional_kwargs.imp_ipt == True`；ReAct 压缩 / final_node 注入 / 后续扩展都靠这个标志定位本轮意图
 
 ## 许可证
 

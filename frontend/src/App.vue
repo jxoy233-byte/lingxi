@@ -33,6 +33,7 @@
         >
           <template v-if="currentSessionId" #extra-actions>
             <DataAnalysisTree
+              ref="dataAnalysisTree"
               :session-id="currentSessionId"
               @file-click="onDataAnalysisFileClick"
             />
@@ -885,6 +886,8 @@ export default {
         const conversation = await convResponse.json()
         this.$refs.messageList?.suppressNextScroll()
         this.messages = this.processConversationMessages(conversation.messages)
+        // 同步文件树（AI 回溯后 cached 下的文件可能变化）
+        this.$refs.dataAnalysisTree?.reload()
 
         // 3. 清除中断状态（backtrack 后后端已清除，前端保持同步）
         if (conversation.interrupted_info?.reason) {
@@ -1071,6 +1074,8 @@ export default {
             const conversation = await convResponse.json()
             this.$refs.messageList?.suppressNextScroll()
             this.messages = this.processConversationMessages(conversation.messages)
+            // 同步文件树（恢复检查点后 cached 下的文件可能变化）
+            this.$refs.dataAnalysisTree?.reload()
 
             // 清除中断状态（后端已清除，前端保持同步）
             if (conversation.interrupted_info?.reason) {
@@ -1228,6 +1233,8 @@ export default {
           const conversation = await response.json()
           this.$refs.messageList?.suppressNextScroll()
           this.messages = this.processConversationMessages(conversation.messages)
+          // 同步文件树
+          this.$refs.dataAnalysisTree?.reload()
           // 同步中断状态
           const reason = conversation.interrupted_info?.reason
           if (reason) {
@@ -1263,6 +1270,8 @@ export default {
             // 如果是当前会话，静默刷新
             this.$refs.messageList?.suppressNextScroll()
             this.messages = this.processConversationMessages(conversation.messages)
+            // 同步文件树
+            this.$refs.dataAnalysisTree?.reload()
             // 同步中断状态
             const reason = conversation.interrupted_info?.reason
             if (reason) {
@@ -1800,6 +1809,8 @@ export default {
           // 静默刷新消息，不触发自动滚动
           this.$refs.messageList?.suppressNextScroll()
           this.messages = this.processConversationMessages(conversation.messages)
+          // 同步文件树（AI 跑完一轮可能新写文件到 cached/data_analysis/）
+          this.$refs.dataAnalysisTree?.reload()
           // 同步侧边栏标题和更新时间
           const conv = this.conversations.find(c => c.session_id === sessionId)
           if (conv) {
@@ -1834,6 +1845,8 @@ export default {
 
           this.$refs.messageList?.suppressNextScroll()
           this.messages = this.processConversationMessages(conversation.messages)
+          // 同步文件树
+          this.$refs.dataAnalysisTree?.reload()
 
           // 更新侧边栏中的对话时间
           const conv = this.conversations.find(c => c.session_id === this.currentSessionId)

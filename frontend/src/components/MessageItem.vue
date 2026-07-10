@@ -178,7 +178,7 @@
                     <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
                   </svg>
                   <span class="tool-name">{{ tool.name }}</span>
-                  <span v-if="getCodeExecutionEnv(tool.name, tool.args)" class="tool-env-label" :class="`env-${getCodeExecutionEnv(tool.name, tool.args)}`">:: {{ getCodeExecutionEnv(tool.name, tool.args) }}</span>
+                  <span v-if="getToolExecutionEnv(tool.name, tool.args)" class="tool-env-label" :class="`env-${getToolExecutionEnv(tool.name, tool.args)}`">:: {{ getToolExecutionEnv(tool.name, tool.args) }}</span>
                   <span v-if="tool.result !== null" class="tool-check">✓</span>
                   <span v-else class="tool-running-dot"></span>
                   <svg v-if="tool.result !== null" class="tool-expand-chevron" :class="{ rotated: expandedTools[i] }" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1881,17 +1881,37 @@ export default {
       if (!args || typeof args !== 'object') return {}
       const filtered = { ...args }
       delete filtered.session_id
-      if (toolName === 'code') {
+      // cmd / code 都支持 use_sandbox，统一剥掉这个内部参数
+      if (toolName === 'code' || toolName === 'cmd') {
         // MCP 暴露给 LLM 时名字是 sandbox（去 use_ 前缀），兼容历史 use_sandbox
         delete filtered.sandbox
         delete filtered.use_sandbox
       }
       return filtered
     },
-    getCodeExecutionEnv(toolName, args) {
-      if (toolName !== 'code') return null
+    formatArgs(args, toolName = '') {
+      const filtered = this.filterInternalArgs(args, toolName)
+      // cmd: 直接展示 shell 命令，去 JSON 包装
+      if (toolName === 'cmd' && typeof filtered.command === 'string') {
+        return filtered.command
+      }
+      // code: 语言非默认时打标签，再跟代码体
+      if (toolName === 'code' && typeof filtered.code === 'string') {
+        const lang = filtered.language || 'python'
+        const isDefault = lang === 'python' || lang === 'py'
+        return isDefault ? filtered.code : `[${lang}]\n${filtered.code}`
+      }
+      // 其他工具：JSON dump
+      try {
+        return JSON.stringify(filtered, null, 2)
+      } catch {
+        return String(filtered)
+      }
+    },
+    getToolExecutionEnv(toolName, args) {
+      // cmd 和 code 都走 use_sandbox；UI 标签统一显示执行环境
+      if (toolName !== 'code' && toolName !== 'cmd') return null
       if (!args) return 'sandbox'
-      // MCP 暴露给 LLM 时名字是 sandbox（去 use_ 前缀），兼容历史 use_sandbox
       if (args.sandbox === false || args.use_sandbox === false) return 'local'
       return 'sandbox'
     },

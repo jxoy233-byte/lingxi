@@ -83,3 +83,5 @@ docs/
 
 # Electron desktop release output (project root)
 release/
+frontend/release/
+frontend/dist/

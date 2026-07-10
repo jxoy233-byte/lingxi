@@ -21,7 +21,7 @@
     "productName": "灵析",
     "copyright": "Copyright © 2026 灵析",
     "directories": {
-      "output": "release/electron-builder",
+      "output": "../release/electron-builder",
       "buildResources": "build"
     },
     "files": [
@@ -29,7 +29,6 @@
       "dist/favicon.ico",
       "dist/assets/**",
       "electron/**/*",
-      "vite.config.js",
       "package.json"
     ],
     "extraResources": [

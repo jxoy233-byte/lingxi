@@ -3,7 +3,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
-.Python
+.Python/
 build/
 develop-eggs/
 dist/
@@ -17,7 +17,7 @@ sdist/
 var/
 wheels/
 *.egg-info/
-.installed.cfg
+.installed.cfg/
 *.egg
 
 # Virtual Environment
@@ -80,3 +80,6 @@ docker_data/
 backend/.chatme/config.json
 
 docs/
+
+# Electron desktop release output (project root)
+release/

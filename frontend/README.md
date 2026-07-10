@@ -310,7 +310,7 @@ const isTest = process.env.NODE_ENV === 'test'
 | `app.name` | `灵析` | 应用名（菜单栏第一项、`app.getName()`） |
 | `app.title` | `灵析——数据分析智能助手` | 窗口标题 / 关于弹窗 |
 | `app.identifier` | `com.chatme.app` | bundle identifier |
-| `app.version` | `1.0.0` | 同步后端版本号 |
+| `app.version` | `0.0.1` | 同步后端版本号 |
 | `window.width × height` | `1100 × 720` | 主窗口尺寸 |
 | `window.minWidth × minHeight` | `650 × 480` | 最小尺寸 |
 | `devServer.url` | 从 Vite 导入的 `http://localhost:5173` | Electron 开发时加载的 URL |
@@ -420,12 +420,12 @@ return new Response(data, {
 npm run electron:build
 
 # 明确指定平台
-npm run electron:build:mac      # 输出到 release/electron-builder/：*.dmg + *.zip
+npm run electron:build:mac      # 输出到 ../release/electron-builder/：*.dmg + *.zip
 npm run electron:build:win      # 输出 *.exe（NSIS 安装器）
 npm run electron:build:linux    # 输出 *.AppImage
 ```
 
-`electron-builder` 的输出目录是 `release/electron-builder/`（与 Vite 的 `dist/` 区分开）。
+`electron-builder` 的输出目录是 `../release/electron-builder/`（项目根，与 Vite 的 `dist/` / `frontend/` 区分开）。
 
 ### macOS 公证
 
@@ -441,7 +441,7 @@ DMG 阶段需要 `dmgbuild-bundle-arm64-*.tar.gz` 包，npmmirror 当前缺这�
 
 打包产物位置：
 ```
-frontend/release/electron-builder/
+release/electron-builder/
 ├── mac-arm64/
 │   └── 灵析.app          ← 直接打开
 ├── 灵析-0.0.1-arm64-mac.zip
@@ -451,10 +451,10 @@ frontend/release/electron-builder/
 打开方式：
 ```bash
 # Finder 双击
-open /Users/jx/coding/projects/ChatMe/frontend/release/electron-builder/mac-arm64/灵析.app
+open /Users/jx/coding/projects/ChatMe/release/electron-builder/mac-arm64/灵析.app
 
 # 命令行（直接执行）
-"/Users/jx/coding/projects/ChatMe/frontend/release/electron-builder/mac-arm64/灵析.app/Contents/MacOS/灵析"
+"/Users/jx/coding/projects/ChatMe/release/electron-builder/mac-arm64/灵析.app/Contents/MacOS/灵析"
 
 # 解压 zip 后再打开
 unzip 灵析-0.0.1-arm64-mac.zip -d ~/Downloads

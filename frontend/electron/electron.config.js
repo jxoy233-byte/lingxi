@@ -5,8 +5,13 @@ import { app } from 'electron'
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
-const viteConfig = await import('../vite.config.js')
-const { viteServerConfig, viteBuildConfig } = viteConfig
+// ⚠️ 不能 import '../vite.config.js'：
+// vite.config.js 自身 import 'vite'，而 asar 不打包 node_modules（5.6MB 控制要求），
+// 启动时会报 ERR_MODULE_NOT_FOUND 'vite' 直接崩。
+// 这里只复制 vite.config.js 里 viteServerConfig 的两个值——port 和 proxy target。
+// 同步规则：改 vite.config.js 的 port / proxy target 时也要同步改这里。
+const VITE_DEV_PORT = 5173
+const VITE_PROXY_BACKEND = 'http://127.0.0.1:8211'
 
 export default {
   // 应用基本信息
@@ -14,7 +19,7 @@ export default {
     name: '灵析',
     title: '灵析——数据分析智能助手',
     identifier: 'com.chatme.app',
-    version: '1.0.0'
+    version: '0.0.1'
   },
 
   // 窗口配置
@@ -27,15 +32,15 @@ export default {
     titleBarStyle: 'default'
   },
 
-  // 从 Vite 自动导入的配置
+  // dev server 配置（和 vite.config.js viteServerConfig 对齐）
   devServer: {
-    url: `http://localhost:${viteServerConfig.port}`,
-    port: viteServerConfig.port,
-    strictPort: viteServerConfig.strictPort
+    url: `http://localhost:${VITE_DEV_PORT}`,
+    port: VITE_DEV_PORT,
+    strictPort: true
   },
 
   backend: {
-    apiUrl: viteServerConfig.proxy?.['/chat']?.target || 'http://127.0.0.1:8211',
+    apiUrl: VITE_PROXY_BACKEND,
     proxyPath: '/chat'
   },
 

@@ -587,12 +587,14 @@ class ChatService:
         except Exception as e:
             error_detail = f"{str(e)}\n{traceback.format_exc()}"
             self.logger.error(f"流式响应异常(session_id:{session_id}): {error_detail}")
-            # 异常返回错误信息 + 双换行符 + 不执行return，避免生成器强制关闭
+            # 异常返回错误信息 + 双换行符。yield 后立即 return，
             yield json.dumps(
                 {"type": "error", "error": str(e)},
                 ensure_ascii=False,
                 default=str
             ) + "\n\n"
+
+            return
 
         if await self._judge_is_interrupted(session_id):
             key_value = await self._get_interrupted_info(session_id)
@@ -1146,12 +1148,14 @@ class ChatService:
         except Exception as e:
             error_detail = f"{str(e)}\n{traceback.format_exc()}"
             self.logger.error(f"流式响应异常(session_id:{session_id}): {error_detail}")
-            # 异常返回错误信息 + 双换行符 + 不执行return，避免生成器强制关闭
+            # 异常返回错误信息 + 双换行符。yield 后立即 return，
             yield json.dumps(
                 {"type": "error", "error": str(e)},
                 ensure_ascii=False,
                 default=str
             ) + "\n\n"
+
+            return
 
         if await self._judge_is_interrupted(session_id):
             key_value = await self._get_interrupted_info(session_id)

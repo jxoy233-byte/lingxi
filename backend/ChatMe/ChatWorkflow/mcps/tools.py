@@ -15,6 +15,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 
+from ChatMe.ChatWorkflow.decorators import node_guard
 from ChatMe.LoggingManager.logging_config import get_logger
 
 logger = get_logger("sub_agent_tools")
@@ -121,6 +122,7 @@ def _create_sub_agent_graph(prompt):
     sub_llm_with_prompt = prompt_template | sub_llm.bind_tools(tools)
 
 
+    @node_guard("sub_agent.agent_node", logger=logger)
     def agent_node(state :SubAgentState, config):
         from langchain_core.messages import HumanMessage
         session_id = config["configurable"].get("session_id")
@@ -265,15 +267,25 @@ def sub_agent(
     - 完成后直接输出结果文本
     - 主 agent 收到子 agent 结果后继续主流程
     """
-    from ChatMe.ChatWorkflow.config.graph_config import build_sub_agent_prompt
+    try:
+        from ChatMe.ChatWorkflow.config.graph_config import build_sub_agent_prompt
 
-    system_prompt = build_sub_agent_prompt(task, prompt_addon)
-    graph = _get_sub_agent_graph(prompt=system_prompt)
+        system_prompt = build_sub_agent_prompt(task, prompt_addon)
+        graph = _get_sub_agent_graph(prompt=system_prompt)
 
-    logger.info(f"[sub_agent] 会话 {session_id} task={task[:50]}...")
+        logger.info(f"[sub_agent] 会话 {session_id} task={task[:50]}...")
 
-    config = {"configurable": {"session_id": session_id}}
-    result = asyncio.run(graph.ainvoke({"messages": []}, config=config))
+        config = {"configurable": {"session_id": session_id}}
+        result = asyncio.run(graph.ainvoke({"messages": []}, config=config))
+    except Exception as e:
+        error_text = f"{type(e).__name__}: {e}"
+        logger.error(f"[sub_agent] 会话 {session_id} 执行失败: {error_text}", exc_info=True)
+        return (
+            "[sub-agent 执行失败]\n"
+            f"错误类型: {type(e).__name__}\n"
+            f"错误信息: {e}\n"
+            "说明: 子 agent 执行过程中连接或模型调用异常，主流程可根据当前已有信息继续处理，必要时拆分任务后重试。"
+        )
 
     # 提取最终回复（兼容多种 result 形态：dict / State 对象 / list）
     if isinstance(result, dict):
@@ -295,3 +307,4 @@ def sub_agent(
 
     logger.debug(f"[sub_agent] 会话 {session_id} 结果: [无输出]")
     return "[sub-agent 无输出]"
+

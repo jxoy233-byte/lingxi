@@ -237,7 +237,8 @@ export default {
       interruptReason: '',  // 中断原因
       showResumeInput: false,  // 显示续接输入框
       resumeInputText: '',  // 续接输入文本
-      currentQuote: null  // 当前引用内容：{ content: string }
+      currentQuote: null,  // 当前引用内容：{ content: string }
+      _sessionHadError: new Set()  // 处于「出错保护态」的 session_id 集合；保护态下不重拉 messages，避免覆盖错误气泡
     }
   },
   mounted() {
@@ -357,6 +358,9 @@ export default {
         return
       }
 
+      // 用户主动续接 → 视为恢复，清掉旧错误保护态
+      this._sessionHadError.delete(this.currentSessionId)
+
       // 有消息则直接执行续接
       this.isInterrupted = false
       this.isLoading = true
@@ -404,6 +408,8 @@ export default {
         }
         this.currentAiMessageIndex = aiMessageIndex
         this.startResponseTimer()
+        // 预先取最后一个用户消息，给 error 兜底分支用（避免 SSE 上来就 error 时 lastUserMessage 未定义）
+        const lastUserMessage = this.messages.filter(m => m.role === 'user').pop()?.content || ''
         let buffer = ''
         while (true) {
           const { done, value } = await reader.read()
@@ -455,12 +461,23 @@ export default {
                   responseTime: this.currentResponseTime,
                   checkpointId: data.checkpoint_id || null
                 }
-                // 获取最后一个用户消息来更新标题
-                const lastUserMessage = this.messages.filter(m => m.role === 'user').pop()?.content || ''
+                // lastUserMessage 已在 SSE 循环前预先取出
                 await this.updateTitleAndRefresh(this.currentSessionId, lastUserMessage)
               } else if (data.type === 'error') {
                 console.error('续接响应错误:', data.error)
-                this.messages[aiMessageIndex] = { ...this.messages[aiMessageIndex], content: `续接失败：${data.error}`, streaming: false }
+                this._sessionHadError.add(this.currentSessionId)
+                this.messages[aiMessageIndex] = {
+                  ...this.messages[aiMessageIndex],
+                  content: `续接失败：${data.error}`,
+                  error: true,
+                  errorMessage: data.error,
+                  streaming: false,
+                  thinkingDone: true
+                }
+                // 仅更新标题，不重拉 messages
+                if (this.currentSessionId) {
+                  await this.updateTitleOnly(this.currentSessionId, lastUserMessage)
+                }
               } else if (data.type === 'interrupt') {
                 this.stopResponseTimer()
                 const reason = data.reason || '用户主动中断'
@@ -1232,6 +1249,13 @@ export default {
     // 右键刷新指定会话
     async refreshConversation(sessionId) {
       try {
+        // 出错保护态：跳过 messages 刷新，只更新侧边栏
+        if (this._sessionHadError.has(sessionId)) {
+          console.log(`[会话出错保护] 跳过会话刷新: ${sessionId}`)
+          // 此时侧边栏的标题/时间已经在 loadConversations 拉过，无需再处理
+          return
+        }
+
         const response = await fetch(`/chat/${sessionId}/conversation`)
         if (response.ok) {
           const conversation = await response.json()
@@ -1402,6 +1426,19 @@ export default {
       // 优先使用 currentSessionId，回退到 URL path
       const requestSessionId = this.currentSessionId || this.$route.params.sessionId || ''
 
+      // 用户主动发起新一轮请求 → 视为恢复，清掉旧错误保护态
+      this._sessionHadError.delete(requestSessionId)
+
+      // 立即把当前会话加入侧边栏顶部，让用户马上看到「最新对话」
+      // 占位标题「新对话」会在 AI 回复后由 updateTitleAndRefresh 校正
+      if (requestSessionId && !this.conversations.find(c => c.session_id === requestSessionId)) {
+        this.conversations.unshift({
+          session_id: requestSessionId,
+          title: '新对话',
+          updated_at: new Date().toISOString()
+        })
+      }
+
       try {
         const requestBody = {
           message: message,
@@ -1477,6 +1514,13 @@ export default {
                   if (requestSessionId) {
                     await this.refreshSession(requestSessionId)
                   }
+                } else if (data.type === 'error') {
+                  // 原会话出错 → 记入保护 + 更新侧边栏标题（不碰当前 this.messages）
+                  console.error('AI响应错误（原会话）:', data.error)
+                  this._sessionHadError.add(requestSessionId)
+                  if (requestSessionId) {
+                    await this.updateTitleOnly(requestSessionId, message)
+                  }
                 }
                 continue
               }
@@ -1528,15 +1572,19 @@ export default {
                   console.log('会话已切换，跳过本地消息更新，请求归属会话:', requestSessionId)
                 }
 
+                // 防御：如果此前已标记 error，则 done 不能覆盖错误气泡
+                const wasError = this.messages[aiMessageIndex]?.error === true
                 this.messages[aiMessageIndex] = {
+                  ...this.messages[aiMessageIndex],
                   role: 'ai',
-                  content: data.full_response,
+                  content: wasError ? this.messages[aiMessageIndex].content : data.full_response,
                   reasoning: this.messages[aiMessageIndex].reasoning,
                   toolCalls: this.messages[aiMessageIndex].toolCalls,
                   thinkingDone: true,
                   streaming: false,
                   responseTime: responseTime,
-                  checkpointId: data.checkpoint_id || null
+                  checkpointId: data.checkpoint_id || null,
+                  error: wasError || undefined
                 }
 
                 // 如果是新建会话（没有 session_id）
@@ -1567,10 +1615,21 @@ export default {
                 }
               } else if (data.type === 'error') {
                 console.error('AI响应错误:', data.error)
-                this.messages[aiMessageIndex] = {
-                  ...this.messages[aiMessageIndex],
-                  content: `抱歉，出现了一些问题：${data.error}`,
-                  streaming: false
+                this._sessionHadError.add(requestSessionId)
+                if (!sessionChanged) {
+                  this.messages[aiMessageIndex] = {
+                    ...this.messages[aiMessageIndex],
+                    content: `抱歉，出现了一些问题：${data.error}`,
+                    error: true,
+                    errorMessage: data.error,
+                    streaming: false,
+                    thinkingDone: true,
+                    responseTime: this.currentResponseTime
+                  }
+                }
+                // 仅更新标题，不重拉 messages（保护错误气泡）
+                if (requestSessionId) {
+                  await this.updateTitleOnly(requestSessionId, message)
                 }
               } else if (data.type === 'interrupt') {
                 this.stopResponseTimer()
@@ -1599,6 +1658,12 @@ export default {
               // 会话已切换，刷新原会话
               if (data.type === 'done' && requestSessionId) {
                 await this.refreshSession(requestSessionId)
+              } else if (data.type === 'error' && requestSessionId) {
+                // 兜底：buffer 最后一条事件是 error，且用户已切走
+                // 仍然给原会话打上保护态 + 只更新标题
+                console.error('AI响应错误（buffer，原会话）:', data.error)
+                this._sessionHadError.add(requestSessionId)
+                await this.updateTitleOnly(requestSessionId, message)
               }
             } else {
               if (data.type === 'reasoning') {
@@ -1634,15 +1699,19 @@ export default {
                 this.stopResponseTimer()
                 const responseTime = this.currentResponseTime
 
+                // 防御：如果此前已标记 error，则 done 不能覆盖错误气泡
+                const wasError = this.messages[aiMessageIndex]?.error === true
                 this.messages[aiMessageIndex] = {
+                  ...this.messages[aiMessageIndex],
                   role: 'ai',
-                  content: data.full_response,
+                  content: wasError ? this.messages[aiMessageIndex].content : data.full_response,
                   reasoning: this.messages[aiMessageIndex].reasoning,
                   toolCalls: this.messages[aiMessageIndex].toolCalls,
                   thinkingDone: true,
                   streaming: false,
                   responseTime: responseTime,
-                  checkpointId: data.checkpoint_id || null
+                  checkpointId: data.checkpoint_id || null,
+                  error: wasError || undefined
                 }
 
                 if (!this.currentSessionId && data.session_id) {
@@ -1667,6 +1736,33 @@ export default {
         this.stopResponseTimer()
       }
     },
+    async updateTitleOnly(sessionId, userMessage) {
+      // 只更新会话标题（含侧边栏同步），不重拉 messages。
+      // 出错后调用，避免覆盖前端的错误气泡。
+      if (!sessionId || !userMessage) return
+      const title = userMessage.substring(0, 12) + (userMessage.length > 12 ? '...' : '')
+      try {
+        await fetch(`/chat/${sessionId}/title`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title })
+        })
+      } catch (error) {
+        console.error('更新标题失败:', error)
+      }
+      // 同步侧边栏
+      const conv = this.conversations.find(c => c.session_id === sessionId)
+      if (conv) {
+        conv.title = title
+      } else {
+        // 新会话首次出现，插入侧边栏顶部（无 updated_at，用当前时间）
+        this.conversations.unshift({
+          session_id: sessionId,
+          title,
+          updated_at: new Date().toISOString()
+        })
+      }
+    },
     async updateTitleAndRefresh(sessionId, userMessage) {
       // 1. 用用户消息更新标题
       const title = userMessage.substring(0, 12) + (userMessage.length > 12 ? '...' : '')
@@ -1678,6 +1774,22 @@ export default {
         })
       } catch (error) {
         console.error('更新标题失败:', error)
+      }
+
+      // 出错保护态：仅同步侧边栏标题，跳过 messages 刷新（避免覆盖错误气泡）
+      if (this._sessionHadError.has(sessionId)) {
+        console.log(`[会话出错保护] 跳过 messages 刷新: ${sessionId}`)
+        const conv = this.conversations.find(c => c.session_id === sessionId)
+        if (conv) {
+          conv.title = title
+        } else {
+          this.conversations.unshift({
+            session_id: sessionId,
+            title,
+            updated_at: new Date().toISOString()
+          })
+        }
+        return
       }
 
       // 2. 获取最新对话内容（含更新后的标题 + 历史记录）
@@ -1708,6 +1820,12 @@ export default {
     },
     async refreshCurrentConversation() {
       if (!this.currentSessionId) return
+
+      // 出错保护态：跳过刷新（避免覆盖错误气泡）
+      if (this._sessionHadError.has(this.currentSessionId)) {
+        console.log(`[会话出错保护] 跳过当前会话刷新: ${this.currentSessionId}`)
+        return
+      }
 
       try {
         const response = await fetch(`/chat/${this.currentSessionId}/conversation`)

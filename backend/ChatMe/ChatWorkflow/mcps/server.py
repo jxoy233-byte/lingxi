@@ -357,7 +357,7 @@ def code(
     session_id: Annotated[str, "会话id"] = ""
 ) -> Optional[str]:
     """
-    执行代码（默认沙盒，必要时降级到本地 venv）
+    执行代码（默认沙盒，宿主机开放skills/和cached/目录可直接操作；非需要时不降级到本地 venv）
     """
     # 沙盒执行
     if use_sandbox and _sandbox_pool is not None:

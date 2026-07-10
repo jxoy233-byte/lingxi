@@ -221,6 +221,16 @@
           </button>
         </div>
 
+        <!-- AI 错误消息：与正常文本渲染区分开，避免报错堆栈被当成 markdown -->
+        <div v-else-if="message.error" class="message-error-box">
+          <svg class="message-error-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <line x1="12" y1="8" x2="12" y2="12"/>
+            <line x1="12" y1="16" x2="12.01" y2="16"/>
+          </svg>
+          <div class="message-error-content">{{ message.content }}</div>
+        </div>
+
         <!-- AI 消息文本（文件消息不显示content） -->
         <div v-else-if="message.content && !message.additional_kwargs?.is_file" class="message-text" :class="{ 'collapsed': isUserMessageCollapsed }" v-html="isUserMessageCollapsed ? collapsedContent : renderedContent" @click.capture="handleLinkClick" @click="handleMarkdownImageClick"></div>
 
@@ -2256,6 +2266,39 @@ export default {
   word-break: break-word;
   font-size: 15px;
   min-width: 0;
+}
+
+/* AI 错误消息框：与正常 markdown 渲染区分，避免报错堆栈被当成语法 */
+.message-error-box {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 12px 16px;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 8px;
+  color: #b91c1c;
+  max-width: 100%;
+  margin: 4px 0;
+}
+
+.dark-theme .message-error-box {
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.35);
+  color: #fca5a5;
+}
+
+.message-error-icon {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.message-error-content {
+  flex: 1;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 14px;
+  line-height: 1.5;
 }
 
 .user-message .message-text {

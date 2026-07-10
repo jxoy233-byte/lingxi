@@ -23,6 +23,8 @@ from .config.models import ChatStateCore2, AIMessageType, FileParseState
 from .Memory.core import MemoryManager
 from .mcps.tools import sub_agent
 from ..LoggingManager.logging_config import get_logger
+from .decorators import node_guard
+
 
 class ChatWorkflow:
     """
@@ -612,6 +614,7 @@ class ChatWorkflow:
         """
         workflow = StateGraph(FileParseState)
 
+        @node_guard("split_files_node", logger=self.logger)
         async def split_files_node(state: FileParseState):
             """拆分文件节点"""
 
@@ -630,6 +633,7 @@ class ChatWorkflow:
                 "files": files,
             }
 
+        @node_guard("file_process_node", logger=self.logger)
         async def file_process_node(state: FileParseState):
             """文件处理节点"""
 
@@ -674,6 +678,7 @@ class ChatWorkflow:
 
             return {"parsed_results": [resp_str]}
 
+        @node_guard("aggregator_node", logger=self.logger)
         async def aggregator_node(state: FileParseState):
             """
             文件处理结果聚合节点
@@ -937,6 +942,7 @@ class ChatWorkflow:
 
         workflow = StateGraph(ChatStateCore2)
 
+        @node_guard("input_parse_node", logger=self.logger)
         async def input_parse_node(state: ChatStateCore2, config: RunnableConfig):
             """
             输入预处理节点
@@ -982,7 +988,7 @@ class ChatWorkflow:
                 response_metadata=imp_ipt_response_metadata,
             )
 
-            self.logger.info(f"[imp_ipt_llm]:{imp_ipt_content}")
+            self.logger.info(f"[imp_ipt_llm]:{imp_ipt}")
 
             return {
                 "imp_ipt": imp_ipt,
@@ -997,6 +1003,7 @@ class ChatWorkflow:
                 "last_compact_at_tool_calls": 0,
             }
 
+        @node_guard("context_assembly_node", logger=self.logger)
         async def context_assembly_node(state: ChatStateCore2, config: RunnableConfig):
             thread_id = config["configurable"]["thread_id"]
 
@@ -1060,6 +1067,7 @@ class ChatWorkflow:
                 "memory_tool_results": tool_results
             }
 
+        @node_guard("agent_node", logger=self.logger)
         async def agent_node(state: ChatStateCore2, config: RunnableConfig):
             """AI 代理节点，处理用户消息并决定是否调用工具"""
             thread_id = config["configurable"]["thread_id"]
@@ -1119,7 +1127,6 @@ class ChatWorkflow:
 
             tool_call_times += counts
 
-
             return {
                 "messages": [format_response],
                 "tool_call_times": tool_call_times,
@@ -1128,6 +1135,7 @@ class ChatWorkflow:
 
         tool_execution_node = ToolNode(tools=self.tools)  # 使用langgraph官方工具节点
 
+        @node_guard("should_end_node", logger=self.logger)
         async def should_end_node(state: ChatStateCore2, config: RunnableConfig):
             thread_id = config["configurable"]["thread_id"]
             await self.check_and_trigger_interrupt(thread_id)
@@ -1162,6 +1170,7 @@ class ChatWorkflow:
             )]
             return {"should_end_decision": decision, "should_end_retry_times": 0, "context": cleaned_context}
 
+        @node_guard("final_node", logger=self.logger)
         async def final_node(state: ChatStateCore2, config: RunnableConfig):
             thread_id = config["configurable"]["thread_id"]
             await self.check_and_trigger_interrupt(thread_id)

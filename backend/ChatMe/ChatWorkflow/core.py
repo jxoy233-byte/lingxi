@@ -1146,7 +1146,7 @@ class ChatWorkflow:
             response = await self.should_end_llm.ainvoke({"messages": [last_message]})
             content = str(response.content)
 
-            self.logger.debug(f"[should_end] response: {content}")
+            self.logger.debug(f"[should_end] response: {response}")
             decision = "end"
             if "retry" in content or "RETRY" in content:
                 decision = "retry"

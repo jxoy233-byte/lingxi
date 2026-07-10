@@ -20,10 +20,11 @@ ChatMe（产品名「灵析」Lingxi）是一个基于 LangGraph 的多智能体
 
 ### 前端
 - **Web**: Vue 3 + Vite（端口 5173）
-- **桌面端**: Electron 41 + electron-builder
+- **桌面端**: Electron 41 + electron-builder 26
 - **样式**: CSS Variables + 原生 CSS
 - **Markdown / 数学**: marked + highlight.js + katex
-- **特性**: 流式 SSE、主题切换、响应式布局
+- **Electron 关键能力**：`file://` 协议拦截（→ 后端代理等价 Vite dev proxy）、SSE 流透传、↻ 页面刷新按钮（ChatHeader + DataAnalysisTree 共用 SVG path `M20.49 15a9 9 0 1 1-2.12-9.36L23 10`）、多环境切换（dev/test/prod）
+- **特性**: 流式 SSE、主题切换、响应式布局、头部刷新按钮
 
 ## 架构
 
@@ -50,12 +51,13 @@ ChatMe/
 ├── frontend/
 │   ├── electron/                         # 主进程 / preload / 配置
 │   ├── src/
-│   │   ├── App.vue                       # 全局状态 + SSE 处理
-│   │   ├── components/                   # Vue 组件
+│   │   ├── App.vue                       # 全局状态 + SSE 处理 + 刷新页面
+│   │   ├── components/                   # Vue 组件（含 ChatHeader / DataAnalysisTree 等）
 │   │   ├── router/
 │   │   └── main.js
+│   ├── build/                            # electron-builder 资源（icon.icns/ico/png）
 │   ├── vite.config.js
-│   └── package.json                      # lingxi-frontend
+│   └── package.json                      # lingxi-frontend + electron-builder 配置
 ├── docker-compose.yml                    # Redis 服务编排
 ├── docker_data/                          # Redis 持久化
 └── docs/                                 # 综合实践文档（详见 README 引用）
@@ -108,25 +110,31 @@ uv run chatme_main
 
 | 组件 | 职责 |
 |------|------|
-| `App.vue` | 全局状态管理，SSE 事件分发；维护 `_sessionHadError` 集合做"错误气泡保护态"（出错后该 session 不再被右侧刷新覆盖） |
+| `App.vue` | 全局状态管理，SSE 事件分发；维护 `_sessionHadError` 集合做"错误气泡保护态"（出错后该 session 不再被右侧刷新覆盖）；`refreshPage()` 触发 `window.location.reload()` |
 | `Sidebar.vue` / `ConversationItem.vue` | 会话列表 |
 | `MessageList.vue` | 消息列表容器 + 滚动控制 |
 | `MessageItem.vue` | 单条消息渲染（思考过程 / Markdown / 代码高亮），`message.error=true` 时渲染为红色错误框（避免报错堆栈被当 markdown） |
 | `MessageInput.vue` | 输入框 + 文件上传 + 语音输入 |
-| `ChatHeader.vue` | 头部 + 主题切换 |
+| `ChatHeader.vue` | 头部 + 主题切换 + ↻ 刷新页面按钮（与 `DataAnalysisTree` 同款 SVG path：`M20.49 15a9 9 0 1 1-2.12-9.36L23 10` + polyline 箭头） |
 | `CheckpointPanel.vue` | 回溯面板 |
 | `FilePreviewPanel.vue` / `FilePreviewModal.vue` | 文件预览 |
-| `DataAnalysisTree.vue` / `DataTreeNode.vue` | 数据分析树形结构展示 |
+| `DataAnalysisTree.vue` / `DataTreeNode.vue` | 数据分析树形结构展示；`DataAnalysisTree` 面板头部 reload 按钮与 `ChatHeader` 共用同款 SVG |
 | `WebPreviewPanel.vue` | 网页预览窗口（Electron IPC 触发） |
 | `SearchResults.vue` | 搜索结果展示 |
 | `ConfirmDialog.vue` | 确认对话框 |
 
 ### Electron 主进程能力
 
-- **多环境支持**：`development` / `test` / `production`，通过 `NODE_ENV` 切换
-- **安全策略**：生产环境禁用 DevTools / 右键菜单 / 危险快捷键
+- **多环境支持**：`development` / `test` / `production`，通过 `NODE_ENV` 严格切换（不再受 `!app.isPackaged` 拖累，否则 `electron .` 永远走 dev 分支，加载不到 `dist/`）
+- **`file://` 协议拦截**：`protocol.handle('file', ...)` 在 `app.whenReady()` 内注册（必须 ready 才能拿到 `session.defaultSession`，且要在 createWindow 之前）；`/chat/*` + `/static/*` 通过 `net.fetch` 转发到后端（等价 Vite dev proxy），其他走白名单校验后从 asar 内 `dist/` 读盘
+- **API 转发三件套**：method / headers / body 必须显式透传 + `duplex: 'half'`（POST `/chat/` 的 body 否则被丢，等于给后端发 GET，请求会落到不对的路由）
+- **SSE 流必须重建 Response**：`net.fetch` 返回的 Response 直接给 `protocol.handle` 会被 buffer，SSE 退化成一次性出现；必须显式 `new Response(upstream.body, { status, statusText, headers })` 透传 stream
+- **静态文件白名单**：`resolvedPath` 必须在 `distDir + path.sep` 之下，否则 `403 Forbidden`（防 `fetch('/etc/passwd')` 类 path traversal）；hashed assets 永久缓存 `public, max-age=31536000, immutable`，index.html 不缓存
+- **图标必须放包外**：`nativeImage` 不读 asar 内文件，所以 `build/` 通过 `package.json` 的 `extraResources: [{ from: "build", to: "build" }]` 复制到 `app/Contents/Resources/build/`，运行时用 `process.resourcesPath` 取；`app.dock.setIcon` / `BrowserWindow.icon` 都必须是 PNG，不认 `.icns`
+- **安全策略**：生产环境禁用 DevTools / 右键菜单 / 危险快捷键（`F12` / `CmdOrCtrl+Shift+I/C/J`）
 - **网页预览**：通过 IPC `open-web-preview` 在独立窗口打开外部链接
 - **导航控制**：主窗口允许内嵌 localhost/file，外部链接走 `shell.openExternal`
+- **macOS Dock 图标**：dev 模式下也通过 `app.dock.setIcon` 显式设置（`BrowserWindow.icon` 在 macOS 不影响 Dock）；必须是 PNG，否则 `UnhandledPromiseRejectionWarning: Failed to load image from path`
 
 ## 关键文件
 
@@ -142,7 +150,7 @@ uv run chatme_main
 | `backend/ChatMe/ChatWorkflow/Memory/core.py` | 长期记忆管理：per-thread `asyncio.Lock` + 临时文件原子写（`fsync` + `os.replace`） |
 | `backend/ChatMe/ChatWorkflow/mcps/server.py` | FastMCP 工具入口（`code` / `execute_command` 等） |
 | `backend/ChatMe/ChatWorkflow/mcps/tools.py` | sub_agent 工具：内部用 `node_guard` 装饰 `agent_node`，整体 try/except 返回 `[sub-agent 执行失败]` 兜底字符串，让主 agent 可继续 |
-| `backend/ChatMe/ChatWorkflow/mcps/CodeSandboxPool.py` | Docker 沙盒容器池 |
+| `backend/ChatMe/ChatWorkflow/mcps/CodeSandboxPool.py` | Docker 沙盒容器池；`execute(code, lang)` 跑 Python/Node（先写 `/code.<py\|js>` 再跑再删），`execute_command(cmd)` 跑 shell（直接 `docker exec sh -c`） |
 | `backend/ChatMe/ChatService/core.py` | 聊天服务，SSE 流式输出 + 记忆任务调度（`_memory_update_tasks` 串行队列 + `memory_wait_*` 事件） |
 | `backend/ChatMe/ChatService/FilesLoaders/core.py` | 文件加载 + `_maybe_truncate` 大文件截断 |
 | `backend/ChatMe/ChatService/FilesLoaders/config.py` | 文件大小/类型/截断阈值常量（`TEXT_TRUNCATE_LENGTH=4000`） |
@@ -158,10 +166,15 @@ uv run chatme_main
 
 | 文件 | 职责 |
 |------|------|
-| `frontend/src/App.vue` | 全局状态 + SSE 事件处理 |
-| `frontend/electron/main.js` | Electron 主进程 |
-| `frontend/electron/electron.config.js` | 桌面端配置（窗口 / 快捷键 / 安全 / IPC） |
-| `frontend/vite.config.js` | Vite 配置（同时导出 `viteServerConfig` 给 Electron 复用） |
+| `frontend/src/App.vue` | 全局状态 + SSE 事件处理 + `refreshPage()` 触发 `window.location.reload()` |
+| `frontend/src/components/ChatHeader.vue` | 头部 + 主题切换 + ↻ 刷新按钮 |
+| `frontend/src/components/DataAnalysisTree.vue` | 数据分析面板 + reload 按钮（与 ChatHeader 共用 SVG path） |
+| `frontend/electron/main.js` | Electron 主进程 + `protocol.handle('file', ...)` 拦截器 + macOS Dock `setIcon` |
+| `frontend/electron/electron.config.js` | 桌面端配置（窗口 / 快捷键 / 安全 / IPC / 图标路径，含 `app.isPackaged` 双形态） |
+| `frontend/electron/preload.js` | preload：`contextBridge` 暴露 `electronAPI` / `electron` |
+| `frontend/vite.config.js` | Vite 配置（同时导出 `viteServerConfig` 给 Electron 复用，`base: './'` 必须在顶层） |
+| `frontend/package.json` | npm scripts + `electron-builder` build 配置（files 白名单 + extraResources + 三平台 icon） |
+| `frontend/build/icon.icns / .ico / .png` | electron-builder 应用图标（mac / win / linux） |
 
 ## 命令行工具
 
@@ -211,6 +224,11 @@ docker-compose up -d redis                            # 端口 6024，密码 123
 11. **节点异常统一兜底**：所有 LangGraph 节点（ChatWorkflow 5 个主节点 + 文件图 3 个节点 + sub_agent agent_node）都打 `@node_guard("<name>")`：`except Exception` 捕获后 log + 包装 `RuntimeError` 让 SSE 外层统一返回 `error` 事件；但 `except GraphBubbleUp`（LangGraph 控制流异常的基类，涵盖 `GraphInterrupt` / `ParentCommand` 等）必须**原样 `raise`**，不能包装 —— `interrupt()` 主动中断、`Command` 透传都依赖该异常穿透各层到达 runtime。新加节点必须继承这个分层约定。
 12. **前端错误气泡保护**：App.vue 维护 `_sessionHadError: Set<session_id>`，SSE `error` 事件触发时把 `session_id` 标记为保护态；保护态下 `done` 事件不会覆盖错误气泡，`refreshConversation` / `updateTitleAndRefresh` 跳过 messages 重拉，只更新侧边栏；用户主动发起新一轮请求或续接时清掉保护态。
 13. **`cmd` / `code` 工具默认走沙盒**：`server.py` 的 `cmd` 和 `code` 都默认 `use_sandbox=True`（MCP schema 里是 `sandbox` 参数），沙盒不可用时降级到本机（`cmd` → 本机 subprocess.run，`code` → 本机 venv）；白名单 + 危险检测 + 脚本检测在沙盒 / 本机两边都做。沙盒入口是 `SandboxPool.execute_command(cmd)` / `execute(code, lang)`，分别对应 shell / code 执行；`execute_command` 直接 `docker exec sh -c <cmd>`，命令里可含管道 / 重定向 / glob；`execute` 先写 `/code.py` 再跑再删（避免敏感信息残留）。
+14. **SandboxPool 池锁必须包住整个 pop → exec → append 周期**：池容量有限（默认 2），并发 N+1（N=池容量）调用时第 N+1 个会撞上空列表报 `No available containers in pool`；**`self.containers.pop()` 必须在 `with self.lock:` 内**，否则 pop 跑在锁外、exec 跑在锁内，N+1 并发下 N 个 pop 完，第 N+1 个直接 `if not self.containers` 报错。`execute(code, lang)` 和 `execute_command(cmd)` 都用同一个 `self.lock`，所有"取出容器 → 跑 → 归还"必须整段锁内。新加执行方法必须继承这个锁结构。
+14. **Electron `file://` 协议拦截必须透传 method/body/headers**：`protocol.handle('file', ...)` 在 `app.whenReady()` 内注册；`/chat/*` 转发到后端时**必须**显式带 `method: request.method, headers: request.headers, ...(request.body && { body: request.body, duplex: 'half' })`，否则 POST `/chat/` 的 body 被丢、后端收到 GET 请求、SSE 流式响应直接退化成一次性；SSE 流必须显式 `new Response(upstream.body, { status, statusText, headers })` 透传 stream，避免 `protocol.handle` 把 stream 当 buffer 处理
+15. **Electron 图标必须放包外**：`nativeImage.createFromPath` 不读 asar 内文件；`build/` 通过 `package.json` 的 `extraResources` 复制到 `app/Contents/Resources/build/`（macOS）/ `app/resources/build/`（Win）/ `app/build/`（Linux），运行时用 `process.resourcesPath` 取真实路径；`paths.icon` / `paths.iconMac` 通过 `app.isPackaged` 切换 dev (`__dirname/build/icon.png`) vs packaged (`process.resourcesPath/build/icon.png`)；`app.dock.setIcon` 和 `BrowserWindow.icon` 都必须是 PNG，传 `.icns` 会得空 image 并 Promise reject
+16. **Electron `protocol.handle` 静态文件必须白名单校验**：`resolvedPath = path.resolve(pathname)` 后必须检查 `startsWith(distDir + path.sep)`，否则 `403 Forbidden`；不写这一行的话渲染层一句 `fetch('/etc/passwd')` 就能读任意磁盘路径
+17. **Electron 输出目录用 `release/electron-builder`**：`directories.output` 不要设 `dist/electron-builder`，否则会和 Vite 的 `dist/` 撞目录，且会被 `files` 模式误打进 asar；当前 `output: "release/electron-builder"` + `files: ["dist/**", "electron/**", "vite.config.js", "package.json"]` 是白名单显式列出，asar 体积 5.6MB（之前未优化时 419MB）
 
 ### 代码 / 提交风格
 
@@ -232,6 +250,9 @@ docker-compose up -d redis                            # 端口 6024，密码 123
 9. **ChatService 记忆任务串行**：新入口（新建 / 中断续接 / 回溯 / 删除）必须先 `_wait_previous_memory_update(session_id)`，避免读到旧记忆或与后台 task 写竞争
 10. **节点异常统一打 `@node_guard`**：新加 LangGraph 节点必须 `@node_guard("<node_name>")`，禁止裸定义让异常穿透；`sub_agent` 这种嵌套调用外层再包一层 try/except 返回兜底字符串，主 agent 才能继续
 11. **前端错误气泡不被覆盖**：SSE 出现 `error` 时前端已经把 `message.error=true` 渲染到气泡，后端 `done` 不能复活 AI 内容；新增 SSE 事件路径必须沿用 `wasError` 防御
+12. **SandboxPool 池锁**：新加执行方法（除 `execute` / `execute_command` 外）必须把 pop → exec → append 整段放在 `with self.lock:` 内，不能像原 `execute` 那样 pop 在锁外；不要因为"exec 不需要锁"就只锁 exec，池子本身的"取容器"操作也得串行化，否则 N+1 并发撞空池
+12. **Electron `protocol.handle` 注册时机**：必须放在 `app.whenReady().then(...)` 内（内部访问 `session.defaultSession` 要求 ready），且要在 `createWindow` 之前；否则首屏 `file://` 请求绕过拦截器、asar 协议相关 API 抛 `Session can only be received when app is ready`
+13. **Electron 路径双形态**：asar 内可读的文件（preload、index.html）用 `__dirname`（asar patch 支持）；asar 外（图标、`extraResources` 复制过去的资源）用 `process.resourcesPath`；用 `app.isPackaged` 三元判断是 dev 还是 packaged 的统一约定
 
 ## 完整设计文档
 

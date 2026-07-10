@@ -36,7 +36,7 @@
 - **final_node dynamic system prompt**：imp_ipt 通过 `_final_system_template.format(imp_ipt=...)` 注入 system 层独占最高注意力位
 - **OSS 对象存储**：阿里云 OSS 集成，图片/文件上传后通过 URL 直接访问
 - **异步日志**：`QueueHandler` + `QueueListener` 解耦业务线程与 IO，`atexit` 统一清理
-- **桌面端打包**：Electron + electron-builder 多平台打包（macOS / Windows / Linux）
+- **桌面端打包**：Electron 41 + electron-builder 26 多平台打包（macOS / Windows / Linux），含 `file://` 协议拦截器等价 Vite dev proxy、↻ 页面刷新按钮、IPC `open-web-preview` 网页预览窗口
 
 ## 技术栈
 
@@ -60,10 +60,11 @@
 | 模块 | 选型 |
 |------|------|
 | Web 框架 | Vue 3 + Vite |
-| 桌面端 | Electron 41 + electron-builder |
+| 桌面端 | Electron 41 + electron-builder 26 |
 | 样式 | CSS Variables + 原生 CSS |
 | Markdown / 数学 | marked + highlight.js + katex |
-| 特性 | 流式 SSE、主题切换、响应式布局、网页预览 |
+| 桌面端关键能力 | `file://` 协议拦截（→ 后端代理）、SSE 流透传、↻ 页面刷新、多环境切换（dev/test/prod） |
+| 特性 | 流式 SSE、主题切换、响应式布局、网页预览、头部刷新按钮 |
 
 ## 架构概览
 
@@ -92,7 +93,10 @@ ChatMe/
 │   ├── pyproject.toml
 │   └── main.py                           # FastAPI 入口
 ├── sandbox/                              # 代码沙盒 Docker 镜像
-├── frontend/                             # Vue + Electron 前端
+├── frontend/                             # Vue + Electron 前端（详见 frontend/README.md）
+│   ├── electron/                         # 主进程 / preload / 配置
+│   ├── src/                              # Vue 组件
+│   └── vite.config.js
 ├── docker-compose.yml                    # Redis 服务编排
 ├── docker_data/                          # Redis 持久化数据
 ├── docs/                                 # 综合实践文档（详见 [设计文档](#设计文档)）
@@ -324,6 +328,10 @@ ChatMe/
 - **隔离环境**：使用 tmpfs 限制 `/tmp`、`/sandbox`（各 64m，noexec）
 - **预装库**：numpy、pandas、scipy、scikit-learn、sympy、matplotlib、seaborn、plotly、bokeh、altair、pygal、pyecharts、folium、networkx、requests、bs4、lxml、openpyxl、xlrd、pillow、jinja2、markupsafe（阿里云 PyPI 镜像）
 - **执行流程**：`docker cp` 注入代码 → `docker exec` 运行 → 清空沙盒目录 → 归还容器
+- **两个执行入口**：
+  - `execute(code, lang)` —— code 工具：写 `/code.<py|js>` → `python /code.<py|js>` → `rm -f`（避免敏感信息残留）
+  - `execute_command(cmd)` —— cmd 工具：直接 `docker exec -w / sh -c <cmd>`，命令里可含管道 / 重定向 / glob
+- **池锁结构**：`pop → exec → append` 整段在 `with self.lock:` 内串行化，避免 N+1 并发撞空池报 `No available containers in pool`
 - **超时保护**：单次执行 30s 超时
 - **自动恢复**：检测到容器未运行时自动重建
 
@@ -341,12 +349,18 @@ MCP 服务器（`mcps/server.py`，FastMCP 3.x）暴露以下核心工具：
 
 | 工具 | 说明 |
 |------|------|
-| `execute_code` | Docker 沙盒中执行 Python / Node.js 代码（`use_sandbox=True` 切到容器） |
-| `execute_command` | 终端命令白名单执行（带危险命令检测） |
+| `execute_code` | 默认在 Docker 沙盒中执行 Python / Node.js 代码（`use_sandbox=False` 降级到本机 venv） |
+| `execute_command` | 默认在 Docker 沙盒中执行白名单内的 shell 命令（`use_sandbox=False` 降级到本机 subprocess.run）；带危险命令检测 |
 | `interrupt` | 中断当前对话 |
 | `get_current_datetime` | 获取当前日期时间 |
 
 每个 tool 函数都带 `session_id` 参数。
+
+**沙盒执行入口**（`mcps/CodeSandboxPool.py`）：
+- `execute(code, lang)` — code 工具用，先把 code 写到容器 `/code.<py\|js>` 再跑，跑完立即删（避免敏感信息残留）
+- `execute_command(cmd)` — cmd 工具用，直接 `docker exec sh -c <cmd>`，命令里可含管道 / 重定向 / glob
+
+两者共享同一池（默认 2 容器），`pop → exec → append` 整段走 `self.lock`，避免 N+1 并发撞空池。
 
 ## 设计文档
 
@@ -398,13 +412,36 @@ docker-compose up -d redis
 
 ```bash
 cd frontend
-npm run electron:build          # 当前平台
-npm run electron:build:mac      # macOS DMG
-npm run electron:build:win      # Windows NSIS
-npm run electron:build:linux    # Linux AppImage
+npm install
+
+# 当前平台
+npm run electron:build
+
+# 明确指定平台
+npm run electron:build:mac      # macOS arm64 + x64（DMG + ZIP）
+npm run electron:build:win      # Windows NSIS（x64）
+npm run electron:build:linux    # Linux AppImage（x64）
 ```
 
 桌面端通过 `electron-builder` 打包，应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 1.0.0）在 `frontend/electron/electron.config.js` 中配置。
+
+**图标路径双形态**：`build/`（`icon.icns` / `icon.ico` / `icon.png`）通过 `package.json` 的 `extraResources` 复制到 `app/Contents/Resources/build/`，运行时用 `process.resourcesPath` 读取；`nativeImage` 不能读 asar 内文件，所以必须放包外。
+
+**输出位置**：`frontend/release/electron-builder/`（与 Vite 的 `dist/` 区分开）：
+- `mac-arm64/灵析.app` — 直接打开
+- `mac/` — x64 .app
+- `灵析-0.0.1-arm64-mac.zip` / `灵析-0.0.1-mac.zip` — 分发包
+- `linux-unpacked/` — Linux 解压目录
+- `win-unpacked.exe` — Windows 安装器
+
+**DMG 镜像问题**：dmg-builder 在 npmmirror 缺包，DMG 阶段会 404。绕过方案：
+- 只打 zip：`npx electron-builder --mac zip --arm64 --x64`
+- DMG 走 GitHub 直链：`ELECTRON_BUILDER_BINARIES_MIRROR=https://github.com npx electron-builder --mac dmg`
+
+**Electron 核心机制**（详见 `frontend/README.md`）：
+- `protocol.handle('file', ...)` 在 `app.whenReady()` 内注册，把 `/chat/*` 和 `/static/*` 转发到后端（等价 Vite dev proxy）；其他 `file://` 走白名单校验后从 asar 内 `dist/` 读盘
+- API 转发必须显式带 `method/headers/body + duplex: 'half'`（POST `/chat/` 的 body 否则被丢），SSE 流必须显式 `new Response(upstream.body, ...)` 透传避免被 buffer
+- 多环境由 `NODE_ENV` 严格控制：`development` / `test` / `production` 分别走 Vite dev / Vite dev / 本地 dist；`app.isPackaged` 仅用于决定图标路径来源
 
 ## 开发注意事项
 
@@ -425,6 +462,9 @@ npm run electron:build:linux    # Linux AppImage
 15. **imp_ipt 唯一标识**：`input_parse_node` 输出的 `imp_ipt` 身份是 `additional_kwargs.imp_ipt == True`；ReAct 压缩 / final_node 注入 / 后续扩展都靠这个标志定位本轮意图
 16. **节点异常统一兜底**：所有 LangGraph 节点（含 ChatWorkflow 5 个主节点 + 文件图 3 个节点 + sub_agent agent_node）都通过 `@node_guard("<name>")` 装饰；新加节点必须继承这个约定，否则异常会穿透到 LangGraph 内核造成不可预期行为
 17. **前端错误气泡保护**：App.vue 维护 `_sessionHadError: Set<session_id>`，SSE 出现 `error` 时把 `message.error=true` 渲染为红色错误框（避免报错堆栈被当 markdown），同时把 session 标记为保护态；保护态下 `done` 事件不会复活 AI 内容，`refreshConversation` / `updateTitleAndRefresh` 跳过 messages 重拉只更新侧边栏；用户主动发起新一轮请求或续接时清掉保护态
+18. **SandboxPool 池锁必须包整段**：池默认 2 容器，新加 `execute_*` 方法时必须把 `pop → exec → append` 整段放在 `with self.lock:` 内；不能像最初 `execute()` 那样把 pop 放锁外只锁 exec——并发 N+1 会撞空池报 `No available containers in pool`
+18. **Electron `file://` 协议拦截**：`protocol.handle('file', ...)` 在 `app.whenReady()` 内注册（必须 ready 才能拿到 `session.defaultSession`），`/chat/*` + `/static/*` 转发到后端（等价 Vite dev proxy），其他走白名单校验后从 asar 内 `dist/` 读盘；API 转发必须显式带 `method/headers/body + duplex:'half'`（POST `/chat/` 的 body 否则被丢），SSE 流必须显式 `new Response(upstream.body, ...)` 透传避免被 buffer
+19. **Electron 图标必须放包外**：`nativeImage` 不能读 asar 内文件，所以 `build/` 通过 `extraResources` 复制到 `app/Contents/Resources/build/`，运行时用 `process.resourcesPath` 取；`app.dock.setIcon` / `BrowserWindow.icon` 都必须是 PNG，不认 `.icns`（打包后的 `.icns` 由 `package.json` 的 `build.mac.icon` 给 OS 用）
 
 ## 许可证
 

@@ -1,5 +1,6 @@
 import path from 'path'
 import { fileURLToPath } from 'url'
+import { app } from 'electron'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -39,10 +40,26 @@ export default {
   },
 
   // 路径配置
+  // 关键约束：asar 内的文件路径可读（preload / index.html），但 nativeImage 等原生 API
+  // 不能读 asar 内部，所以图标必须放在 asar 外面（通过 package.json 的 extraResources
+  // 复制到 app/Contents/Resources/build/，运行时用 process.resourcesPath 取）。
   paths: {
-    indexHtml: path.join(__dirname, '../index.html'),
+    // 正式模式加载 vite build 产物（dist/index.html）。
+    // 源模板（../index.html）里引用 /src/main.js，在 file:// 下访问不到，会白屏。
+    // __dirname 在 asar 内解析为 .../app.asar/electron，../dist 即 .../app.asar/dist，asar patch 支持。
+    indexHtml: path.join(__dirname, '../dist/index.html'),
     preload: path.join(__dirname, 'preload.js'),
-    icon: path.join(__dirname, 'public/favicon.ico')
+    // 窗口图标（macOS 标题栏 / Windows 标题栏 / Linux 任务栏）：打包后从包外取
+    icon: app.isPackaged
+      ? path.join(process.resourcesPath, 'build', 'icon.png')
+      : path.join(__dirname, 'public/favicon.png'),
+    // macOS Dock 图标（必须在 dev 模式下通过 app.dock.setIcon 显式设置，
+    // 因为 BrowserWindow.icon 在 macOS 不影响 Dock）。
+    // 必须是 PNG：app.dock.setIcon 内部走 nativeImage.createFromPath，不认 .icns。
+    // 打包后的 .icns 由 package.json 的 build.mac.icon 提供给 OS。
+    iconMac: app.isPackaged
+      ? path.join(process.resourcesPath, 'build', 'icon.png')
+      : path.join(__dirname, '../build/icon.png')
   },
 
   // 安全策略配置

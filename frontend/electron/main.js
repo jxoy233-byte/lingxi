@@ -1,6 +1,7 @@
-import { app, BrowserWindow, Menu, shell, ipcMain } from 'electron'
+import { app, BrowserWindow, Menu, shell, ipcMain, protocol, net } from 'electron'
 import path from 'path'
 import { fileURLToPath } from 'url'
+import { promises as fs } from 'fs'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -11,11 +12,102 @@ const config = configModule.default
 let mainWindow
 let previewWindow = null
 
-// 判断是否为开发环境
-const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
+// 判断是否为开发环境：严格按 NODE_ENV 判定（去掉 || !app.isPackaged，
+// 否则 electron . 永远走 dev 分支，导致 electron:prod 加载不到 dist/）
+const isDev = process.env.NODE_ENV === 'development'
 
 // 判断是否为测试环境
 const isTest = process.env.NODE_ENV === 'test'
+
+// file:// 协议拦截器 MIME 表（处理相对路径资源时需要正确 Content-Type）
+const MIME_TYPES = {
+  '.html': 'text/html; charset=utf-8',
+  '.js':   'application/javascript; charset=utf-8',
+  '.mjs':  'application/javascript; charset=utf-8',
+  '.css':  'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png':  'image/png',
+  '.jpg':  'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif':  'image/gif',
+  '.svg':  'image/svg+xml',
+  '.ico':  'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2':'font/woff2',
+  '.ttf':  'font/ttf'
+}
+
+/**
+ * file:// 协议拦截器：
+ * - /chat/* 和 /static/* 转发到后端（等价于 dev 模式下 Vite proxy）
+ * - 其他 file:// 请求直接从磁盘读盘返回（避开 net.fetch(file://) 在协议回调里可能的循环 / MIME 问题）
+ *
+ * 必须在 app.whenReady() 里调用（内部访问 session.defaultSession 要求 ready），
+ * 且要在 createWindow 之前注册，否则首屏 file:// 请求会绕过拦截器。
+ */
+function registerFileProtocolInterceptor() {
+  // 白名单基准目录：所有静态文件请求必须落在 dist/ 内，防止 fetch(/etc/passwd) 类 path traversal
+  // dev 模式下指向源码 dist/；打包后指向 app.asar 内 dist/（Electron 的 fs patch 支持）
+  const distDir = path.resolve(__dirname, '../dist')
+
+  protocol.handle('file', async (request) => {
+    const url = new URL(request.url)
+    const pathname = url.pathname
+
+    // API 路径转发到后端
+    // 必须转发 method / headers / body —— 否则 POST /chat/ 会变成 GET，
+    // 流式响应（SSE）的请求体也会被丢。
+    // SSE 响应（text/event-stream）需要 duplex: 'half' 才能正确转发流式请求体；
+    // 同时显式重建 Response 把 body stream 透传，避免 protocol.handle buffer。
+    if (pathname.startsWith('/chat/') || pathname.startsWith('/static/')) {
+      const backendUrl = `${config.backend.apiUrl}${pathname}${url.search}`
+      console.log('[proxy]', request.method, request.url, '→', backendUrl)
+
+      const init = {
+        method: request.method,
+        headers: request.headers,
+        ...(request.body && { body: request.body, duplex: 'half' })
+      }
+      const upstream = await net.fetch(backendUrl, init)
+
+      // 显式重建 Response：确保 body 是 ReadableStream（不是 buffer）+ headers 全透传。
+      // SSE 场景必须这样，否则 Electron 会等全部响应收完才一次性吐给 renderer，
+      // 流式"打字机效果"就退化成"一次性出现"。
+      return new Response(upstream.body, {
+        status: upstream.status,
+        statusText: upstream.statusText,
+        headers: upstream.headers
+      })
+    }
+
+    // 静态资源：先做白名单校验，再读盘
+    try {
+      const filePath = decodeURIComponent(pathname)
+      const resolvedPath = path.resolve(filePath)
+
+      // 白名单：必须在 distDir 之下（用 + path.sep 防止 /dist-evil/ 这种前缀撞库）
+      if (!resolvedPath.startsWith(distDir + path.sep) && resolvedPath !== distDir) {
+        console.warn('[file] blocked non-dist read:', resolvedPath)
+        return new Response('Forbidden', { status: 403 })
+      }
+
+      const data = await fs.readFile(resolvedPath)
+      const ext = path.extname(resolvedPath).toLowerCase()
+      const mime = MIME_TYPES[ext] || 'application/octet-stream'
+      return new Response(data, {
+        headers: {
+          'Content-Type': mime,
+          'Content-Length': String(data.length),
+          // index.html 不缓存，hashed assets 永久缓存
+          'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=31536000, immutable'
+        }
+      })
+    } catch (e) {
+      console.error('[file] read fail:', pathname, e.message)
+      return new Response(`Not found: ${pathname}`, { status: 404 })
+    }
+  })
+}
 
 /**
  * 获取当前环境的配置
@@ -67,7 +159,7 @@ async function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       devTools: envConfig.devTools,
-      preload: path.join(__dirname, config.paths.preload)
+      preload: config.paths.preload
     },
     show: false,
     center: true
@@ -329,6 +421,23 @@ function setupSecurityPolicies() {
 
 // ==================== 应用生命周期 ====================
 app.whenReady().then(async () => {
+  // file:// 协议拦截器（必须在 createWindow 之前注册）
+  registerFileProtocolInterceptor()
+
+  // macOS: 显式设置 Dock 图标（BrowserWindow.icon 在 macOS 不影响 Dock，
+  // 未打包时 Dock 默认显示 Electron logo，这里用 PNG 覆盖）。
+  // 注意：setIcon 返回 Promise，必须 catch 否则会冒 unhandledRejection。
+  if (process.platform === 'darwin' && app.dock) {
+    try {
+      const result = app.dock.setIcon(config.paths.iconMac)
+      if (result && typeof result.catch === 'function') {
+        result.catch(err => console.error('[icon] dock setIcon 失败:', err.message))
+      }
+    } catch (e) {
+      console.error('[icon] dock setIcon 抛错:', e.message)
+    }
+  }
+
   await createWindow()
   setupSecurityPolicies()
 })

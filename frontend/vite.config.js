@@ -27,8 +27,8 @@ export const viteServerConfig = {
 
 export const viteBuildConfig = {
   outDir: 'dist',
-  emptyOutDir: true,
-  base: './'
+  emptyOutDir: true
+  // 注意：base 选项必须在顶层 defineConfig 里设，这里放无效
 }
 
 export const viteResolveConfig = {
@@ -39,6 +39,8 @@ export const viteResolveConfig = {
 
 // Vite 默认导出
 export default defineConfig({
+  // base 必须是顶层选项：file:// 加载时要用相对路径才能解析到 ./assets/*
+  base: './',
   plugins: [vue()],
   resolve: viteResolveConfig,
   server: viteServerConfig,

@@ -30,6 +30,7 @@
           @toggle-theme="toggleTheme"
           @toggle-checkpoints="toggleCheckpoints"
           @toggle-sidebar="toggleMobileSidebar"
+          @refresh="refreshPage"
         >
           <template v-if="currentSessionId" #extra-actions>
             <DataAnalysisTree
@@ -279,6 +280,11 @@ export default {
     toggleTheme() {
       this.isDarkTheme = !this.isDarkTheme
       localStorage.setItem('chatme-theme', this.isDarkTheme ? 'dark' : 'light')
+    },
+    refreshPage() {
+      // 浏览器/Electron 通用：location.reload() 会重新走 protocol.handle 拦截器，
+      // 把 /chat/* 重新代理到后端，所有 Vue state 重置
+      window.location.reload()
     },
     toggleSidebar() {
       this.sidebarCollapsed = !this.sidebarCollapsed

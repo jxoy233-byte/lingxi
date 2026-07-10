@@ -106,28 +106,28 @@ class SandboxPool:
 
     def execute(self, code, language="python"):
         """从池中取出容器执行代码"""
-        if not self.containers:
-            raise RuntimeError("No available containers in pool")
+        with self.lock:
+            if not self.containers:
+                raise RuntimeError("No available containers in pool")
 
-        container_id = self.containers.pop()
-        suffix = ".py" if language == "python" else ".js"
+            container_id = self.containers.pop()
+            suffix = ".py" if language == "python" else ".js"
 
-        # 检查容器状态
-        result = subprocess.run(
-            ["docker", "inspect", container_id, "--format", "{{.State.Running}}"],
-            capture_output=True, text=True
-        )
-        is_running = result.stdout.strip() == "true"
+            # 检查容器状态
+            result = subprocess.run(
+                ["docker", "inspect", container_id, "--format", "{{.State.Running}}"],
+                capture_output=True, text=True
+            )
+            is_running = result.stdout.strip() == "true"
 
-        if not is_running:
-            # 删除并重新创建
-            subprocess.run(["docker", "rm", "-f", container_id], capture_output=True)
-            container_id = self._create_container()
-            if not container_id:
-                raise RuntimeError("无法创建新容器")
+            if not is_running:
+                # 删除并重新创建
+                subprocess.run(["docker", "rm", "-f", container_id], capture_output=True)
+                container_id = self._create_container()
+                if not container_id:
+                    raise RuntimeError("无法创建新容器")
 
-        try:
-            with self.lock:
+            try:
                 # 写入代码到容器根目录：/code.py
                 # （不能直接用 docker cp：cp 写入的是镜像 writable layer）
                 # 容器以 root 运行，能在 / 下创建/覆盖 /code.py
@@ -148,11 +148,10 @@ class SandboxPool:
 
                 # 重要产出写到 /cached，由 host 文件系统管（mount rw，不随容器清理）
 
-            output = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n\nReturn code: {result.returncode}"
-            return output
-
-        finally:
-            self.containers.append(container_id)
+                output = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n\nReturn code: {result.returncode}"
+                return output
+            finally:
+                self.containers.append(container_id)
 
     def execute_command(self, command: str, timeout: int = 30) -> str:
         """从池中取出容器执行 shell 命令
@@ -162,27 +161,27 @@ class SandboxPool:
         - cwd=/ 让相对路径（cached/xxx）能解析到 /cached/xxx（与 code 一致语义）
         - 白名单 / 危险检测由调用方（server.py 的 cmd 工具）负责
         """
-        if not self.containers:
-            raise RuntimeError("No available containers in pool")
+        with self.lock:
+            if not self.containers:
+                raise RuntimeError("No available containers in pool")
 
-        container_id = self.containers.pop()
+            container_id = self.containers.pop()
 
-        # 检查容器状态
-        result = subprocess.run(
-            ["docker", "inspect", container_id, "--format", "{{.State.Running}}"],
-            capture_output=True, text=True
-        )
-        is_running = result.stdout.strip() == "true"
+            # 检查容器状态
+            result = subprocess.run(
+                ["docker", "inspect", container_id, "--format", "{{.State.Running}}"],
+                capture_output=True, text=True
+            )
+            is_running = result.stdout.strip() == "true"
 
-        if not is_running:
-            # 删除并重新创建
-            subprocess.run(["docker", "rm", "-f", container_id], capture_output=True)
-            container_id = self._create_container()
-            if not container_id:
-                raise RuntimeError("无法创建新容器")
+            if not is_running:
+                # 删除并重新创建
+                subprocess.run(["docker", "rm", "-f", container_id], capture_output=True)
+                container_id = self._create_container()
+                if not container_id:
+                    raise RuntimeError("无法创建新容器")
 
-        try:
-            with self.lock:
+            try:
                 # sh -c 让管道 / 重定向 / glob 全部走容器内 shell 解析
                 # -w / 与 code 路径一致：相对路径 cached/xxx 解析到 /cached/xxx
                 result = subprocess.run([
@@ -190,10 +189,10 @@ class SandboxPool:
                     "sh", "-c", command
                 ], capture_output=True, text=True, timeout=timeout)
 
-            output = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n\nReturn code: {result.returncode}"
-            return output
-        finally:
-            self.containers.append(container_id)
+                output = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n\nReturn code: {result.returncode}"
+                return output
+            finally:
+                self.containers.append(container_id)
 
     def shutdown(self):
         """关闭所有容器"""

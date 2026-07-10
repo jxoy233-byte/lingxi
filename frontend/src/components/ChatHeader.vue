@@ -17,6 +17,16 @@
     <div class="header-actions">
       <slot name="extra-actions" />
       <button
+        @click="$emit('refresh')"
+        class="refresh-btn"
+        title="刷新页面 (Ctrl/⌘+R)"
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="23 4 23 10 17 10"/>
+          <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+        </svg>
+      </button>
+      <button
         v-if="hasSession"
         @click="$emit('toggle-checkpoints')"
         class="checkpoint-btn"
@@ -52,7 +62,7 @@ export default {
       default: false
     }
   },
-  emits: ['toggle-theme', 'toggle-checkpoints', 'toggle-sidebar']
+  emits: ['toggle-theme', 'toggle-checkpoints', 'toggle-sidebar', 'refresh']
 }
 </script>
 
@@ -115,7 +125,8 @@ export default {
 }
 
 .checkpoint-btn,
-.theme-toggle-btn {
+.theme-toggle-btn,
+.refresh-btn {
   width: 40px;
   height: 40px;
   border: none;
@@ -128,7 +139,8 @@ export default {
   justify-content: center;
 }
 
-.checkpoint-btn {
+.checkpoint-btn,
+.refresh-btn {
   color: var(--text-secondary);
 }
 
@@ -136,6 +148,17 @@ export default {
   background: var(--bg-hover);
   color: var(--button-bg);
   opacity: 0.8;
+}
+
+.refresh-btn:hover {
+  background: var(--bg-hover);
+  color: var(--button-bg);
+  opacity: 0.8;
+}
+
+.refresh-btn:active svg {
+  transform: rotate(360deg);
+  transition: transform 0.6s ease;
 }
 
 .theme-toggle-btn {

@@ -196,7 +196,7 @@ Parameters:
 - prompt_addon (optional, string): Execution steps hint — a chain of tool calls to guide the sub-agent, e.g. "cmd → cat DataAnalysis.md → code" style
 
 ### cmd — Environment Exploring & File Operations
-Parameters: command (required, string)
+Parameters: command (required, string), use_sandbox(default, True)
 **Allowed Commands**:
 | Scenario | Commands |
 |----------|----------|
@@ -211,7 +211,7 @@ Note: On other OS, commands may differ — adjust accordingly.
 Use when: Writing or running code to solve problems, invoke skills, process data, or perform actions that require code execution.
 Parameters: code (required, string), language (default: "python"), use_sandbox(default, True)
 
-Important:
+Important for cmd && code:
 - Always remember to print final key results you need to pass to the next step.
 - Default use_sandbox=True(sandbox, isolated execution with /skills ro + /cached rw).
 - Don't add comments in your codes
@@ -228,7 +228,7 @@ PROMPT_TOOLS_SUB = """
 ## Tool
 
 ### cmd — Environment Exploring & File Operations
-Parameters: command (required, string)
+Parameters: command (required, string), use_sandbox(default, True)
 **Allowed Commands**:
 | Scenario | Commands |
 |----------|----------|
@@ -244,7 +244,7 @@ Note: On other OS, commands may differ — adjust accordingly.
 Use when: Writing or running code to solve problems, invoke skills, process data, or perform actions that require code execution.
 Parameters: code (required, string), language (default: "python"), use_sandbox(default, True)
 
-Important:
+Important for cmd && code:
 - Always remember to print final key results you need to pass to the next step.
 - Default use_sandbox=True(sandbox, isolated execution with /skills ro + /cached rw).
 - Don't add comments in your codes

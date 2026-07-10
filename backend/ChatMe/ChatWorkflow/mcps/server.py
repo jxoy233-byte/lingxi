@@ -361,22 +361,23 @@ def code(
     """
     # 沙盒执行
     if use_sandbox and _sandbox_pool is not None:
-        logger.debug(f"会话 {session_id} 使用沙盒容器执行代码")
+        logger.debug(f"会话 {session_id} 使用[沙盒容器]执行代码")
         return _sandbox_pool.execute(code, language)
 
     # 沙盒池未初始化但 AI 想要沙盒 → 降级到本地
     if use_sandbox and _sandbox_pool is None:
         logger.warning(f"会话 {session_id} 请求沙盒但沙盒池未初始化，降级到本地 venv")
 
-    logger.debug(f"会话 {session_id} 使用本地环境执行代码")
+    logger.debug(f"会话 {session_id} 使用[本地环境]执行代码")
     return _execute_code_in_local(code, language)
 
 @server.tool
 def cmd(
         command: Annotated[str, "执行系统命令"],
+        use_sandbox: Annotated[bool, "是否使用沙盒执行（默认 True）"] = True,
         session_id: Annotated[str,"会话id"] = ""
 ) -> str:
-    """在白名单内执行终端命令"""
+    """在白名单内执行终端命令（默认沙盒，宿主机只开放 skills/ 和 cached/ 目录）"""
     is_dangerous, reason = is_dangerous_command(command=command)
     if is_dangerous:
         logger.warning(f"会话{session_id}中危险命令,已安全拦截")
@@ -393,6 +394,17 @@ def cmd(
     if not is_allowed:
         logger.warning(f"会话{session_id}中非白名单命令: {allow_reason}")
         return f"Error: {allow_reason}"
+
+    # 沙盒执行
+    if use_sandbox and _sandbox_pool is not None:
+        logger.debug(f"会话 {session_id} 使用[沙盒容器]执行命令")
+        return _sandbox_pool.execute_command(command)
+
+    # 沙盒池未初始化但 AI 想要沙盒 → 降级到本地
+    if use_sandbox and _sandbox_pool is None:
+        logger.warning(f"会话 {session_id} 请求沙盒但沙盒池未初始化，降级到本地 venv")
+
+    logger.debug(f"会话 {session_id} 使用[本地环境]执行命令")
 
     # 向上查找项目根目录的虚拟环境
     project_root = Path.cwd()

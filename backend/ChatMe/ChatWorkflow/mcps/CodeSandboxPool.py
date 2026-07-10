@@ -154,6 +154,47 @@ class SandboxPool:
         finally:
             self.containers.append(container_id)
 
+    def execute_command(self, command: str, timeout: int = 30) -> str:
+        """从池中取出容器执行 shell 命令
+
+        与 execute(code, language) 的差异：
+        - 不写临时文件，直接 docker exec sh -c <command>，命令里可以含管道 / 重定向 / glob
+        - cwd=/ 让相对路径（cached/xxx）能解析到 /cached/xxx（与 code 一致语义）
+        - 白名单 / 危险检测由调用方（server.py 的 cmd 工具）负责
+        """
+        if not self.containers:
+            raise RuntimeError("No available containers in pool")
+
+        container_id = self.containers.pop()
+
+        # 检查容器状态
+        result = subprocess.run(
+            ["docker", "inspect", container_id, "--format", "{{.State.Running}}"],
+            capture_output=True, text=True
+        )
+        is_running = result.stdout.strip() == "true"
+
+        if not is_running:
+            # 删除并重新创建
+            subprocess.run(["docker", "rm", "-f", container_id], capture_output=True)
+            container_id = self._create_container()
+            if not container_id:
+                raise RuntimeError("无法创建新容器")
+
+        try:
+            with self.lock:
+                # sh -c 让管道 / 重定向 / glob 全部走容器内 shell 解析
+                # -w / 与 code 路径一致：相对路径 cached/xxx 解析到 /cached/xxx
+                result = subprocess.run([
+                    "docker", "exec", "-w", "/", container_id,
+                    "sh", "-c", command
+                ], capture_output=True, text=True, timeout=timeout)
+
+            output = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n\nReturn code: {result.returncode}"
+            return output
+        finally:
+            self.containers.append(container_id)
+
     def shutdown(self):
         """关闭所有容器"""
         for cid in self.containers:

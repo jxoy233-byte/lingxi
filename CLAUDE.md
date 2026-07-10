@@ -108,10 +108,10 @@ uv run chatme_main
 
 | 组件 | 职责 |
 |------|------|
-| `App.vue` | 全局状态管理，SSE 事件分发 |
+| `App.vue` | 全局状态管理，SSE 事件分发；维护 `_sessionHadError` 集合做"错误气泡保护态"（出错后该 session 不再被右侧刷新覆盖） |
 | `Sidebar.vue` / `ConversationItem.vue` | 会话列表 |
 | `MessageList.vue` | 消息列表容器 + 滚动控制 |
-| `MessageItem.vue` | 单条消息渲染（思考过程 / Markdown / 代码高亮） |
+| `MessageItem.vue` | 单条消息渲染（思考过程 / Markdown / 代码高亮），`message.error=true` 时渲染为红色错误框（避免报错堆栈被当 markdown） |
 | `MessageInput.vue` | 输入框 + 文件上传 + 语音输入 |
 | `ChatHeader.vue` | 头部 + 主题切换 |
 | `CheckpointPanel.vue` | 回溯面板 |
@@ -136,14 +136,16 @@ uv run chatme_main
 |------|------|
 | `backend/main.py` | FastAPI 入口，挂载 4 个 Router |
 | `backend/ChatMe/ChatWorkflow/core.py` | 工作流定义、节点逻辑、5 个 LLM 实例（`MessagesPlaceholder` 处理）、ReAct 流程压缩、final_node dynamic system prompt 注入 |
+| `backend/ChatMe/ChatWorkflow/decorators.py` | `node_guard` 装饰器：所有节点（ChatWorkflow / sub_agent）统一异常捕获 + 重抛，functools.wraps 保留 `__wrapped__` 让 LangGraph 仍按 `(state, config)` 注入 |
 | `backend/ChatMe/ChatWorkflow/config/graph_config.py` | prompts 与模型配置（含 `get_react_compact_config`） |
 | `backend/ChatMe/ChatWorkflow/config/models.py` | 图状态 TypedDict（含 `context_summary_text` / `last_compact_at_tool_calls`） |
 | `backend/ChatMe/ChatWorkflow/Memory/core.py` | 长期记忆管理：per-thread `asyncio.Lock` + 临时文件原子写（`fsync` + `os.replace`） |
-| `backend/ChatMe/ChatWorkflow/mcps/server.py` | FastMCP 工具入口 |
+| `backend/ChatMe/ChatWorkflow/mcps/server.py` | FastMCP 工具入口（`code` / `execute_command` 等） |
+| `backend/ChatMe/ChatWorkflow/mcps/tools.py` | sub_agent 工具：内部用 `node_guard` 装饰 `agent_node`，整体 try/except 返回 `[sub-agent 执行失败]` 兜底字符串，让主 agent 可继续 |
 | `backend/ChatMe/ChatWorkflow/mcps/CodeSandboxPool.py` | Docker 沙盒容器池 |
 | `backend/ChatMe/ChatService/core.py` | 聊天服务，SSE 流式输出 + 记忆任务调度（`_memory_update_tasks` 串行队列 + `memory_wait_*` 事件） |
 | `backend/ChatMe/ChatService/FilesLoaders/core.py` | 文件加载 + `_maybe_truncate` 大文件截断 |
-| `backend/ChatMe/ChatService/FilesLoaders/config.py` | 文件大小/类型/截断阈值常量 |
+| `backend/ChatMe/ChatService/FilesLoaders/config.py` | 文件大小/类型/截断阈值常量（`TEXT_TRUNCATE_LENGTH=4000`） |
 | `backend/ChatMe/ChatDataAnalysis/format.py` | 数据分析规范（`ChatDataAnalysisFormat` 类、generation 管理） |
 | `backend/ChatMe/ChatMeConfig/core.py` | 配置加载器 |
 | `backend/ChatMe/APIRouter/main.py` | `/chat` 前缀主对话路由 |
@@ -206,6 +208,8 @@ docker-compose up -d redis                            # 端口 6024，密码 123
 8. **Memory 并发安全**：`MemoryManager` 内部维护 `_thread_locks[thread_id]`，`update_memory` / `delete_memory` / `backtrack_memory` / `delete_latest_backup_memory` 全部走 `async with self._get_thread_lock(thread_id)`；文件写入走 `_atomic_write_text`（写 `*.tmp` + `fsync` + `os.replace`）。
 9. **ChatService 记忆任务串行**：每会话在 `_memory_update_tasks[session_id]` 里只保留一个 asyncio.Task，新任务通过 `asyncio.shield` 串接上一轮；新请求发起 / 删除会话 / 回溯 前会先 `_wait_previous_memory_update` 等待；SSE 暴露 `memory_wait_start` / `memory_wait_done` 事件，`interrupt` / `done` 事件携带 `memory_status` 字段。
 10. **异步日志**：写文件走 `QueueHandler` + `QueueListener` 模式，业务线程不入 IO；`atexit` 统一 `listener.stop()` 清理。
+11. **节点异常统一兜底**：所有 LangGraph 节点（ChatWorkflow 5 个主节点 + 文件图 3 个节点 + sub_agent agent_node）都打 `@node_guard("<name>")`，捕获异常 → log → `raise RuntimeError`，让 SSE 外层统一返回 `error` 事件。新加节点必须继承这个约定。
+12. **前端错误气泡保护**：App.vue 维护 `_sessionHadError: Set<session_id>`，SSE `error` 事件触发时把 `session_id` 标记为保护态；保护态下 `done` 事件不会覆盖错误气泡，`refreshConversation` / `updateTitleAndRefresh` 跳过 messages 重拉，只更新侧边栏；用户主动发起新一轮请求或续接时清掉保护态。
 
 ### 代码 / 提交风格
 
@@ -225,6 +229,8 @@ docker-compose up -d redis                            # 端口 6024，密码 123
 7. **ReAct 压缩失败不要 raise**：`_try_compact_react` 一律返回 `None`，由 `context_assembly_node` 保持原 context 不变；不要让压缩异常把整轮回复炸掉
 8. **Memory 操作加锁**：读写 / 删除 / 回溯全部走 `_get_thread_lock(thread_id).acquire()`，新方法（如新增的 `restore_memory`）必须继承这个约定
 9. **ChatService 记忆任务串行**：新入口（新建 / 中断续接 / 回溯 / 删除）必须先 `_wait_previous_memory_update(session_id)`，避免读到旧记忆或与后台 task 写竞争
+10. **节点异常统一打 `@node_guard`**：新加 LangGraph 节点必须 `@node_guard("<node_name>")`，禁止裸定义让异常穿透；`sub_agent` 这种嵌套调用外层再包一层 try/except 返回兜底字符串，主 agent 才能继续
+11. **前端错误气泡不被覆盖**：SSE 出现 `error` 时前端已经把 `message.error=true` 渲染到气泡，后端 `done` 不能复活 AI 内容；新增 SSE 事件路径必须沿用 `wasError` 防御
 
 ## 完整设计文档
 

@@ -32,6 +32,7 @@
 - **Docker 沙盒执行**：基于预启动容器池 + tmpfs 隔离，提供安全的 Python 数据分析代码执行环境
 - **多 LLM Provider**：OpenAI / DeepSeek / 本地 VL 模型（Qwen3-VL-2B）统一抽象，5 个独立 LLM（core / agent / summary / react_compact / imp_ipt）可分别配参
 - **对话记忆管理**：基于 Redis checkpointer 的状态恢复 + 自建 memory manager 的长期记忆；per-thread `asyncio.Lock` + 原子写（`fsync` + `os.replace`）保证并发安全；后台记忆任务按会话串行执行
+- **节点异常统一兜底**：`@node_guard("<node_name>")` 装饰器包住所有 LangGraph 节点，捕获异常后 log + 重抛，SSE 外层统一返回 `error` 事件
 - **final_node dynamic system prompt**：imp_ipt 通过 `_final_system_template.format(imp_ipt=...)` 注入 system 层独占最高注意力位
 - **OSS 对象存储**：阿里云 OSS 集成，图片/文件上传后通过 URL 直接访问
 - **异步日志**：`QueueHandler` + `QueueListener` 解耦业务线程与 IO，`atexit` 统一清理
@@ -81,6 +82,7 @@ ChatMe/
 │   │   │   └── FilesLoaders/             # 文件加载与处理
 │   │   ├── ChatWorkflow/                 # LangGraph 工作流核心
 │   │   │   ├── config/                   # 图配置和 prompts
+│   │   │   ├── decorators.py             # node_guard 节点异常统一兜底装饰器
 │   │   │   ├── mcps/                     # MCP 工具服务器
 │   │   │   └── Memory/                   # 记忆管理
 │   │   ├── LoggingManager/               # 日志
@@ -259,6 +261,7 @@ ChatMe/
 │   │   │   └── FilesLoaders/             # 文件加载 + 大文件截断
 │   │   ├── ChatWorkflow/
 │   │   │   ├── core.py                   # 工作流定义，5 个 LLM 实例 + ReAct 流程压缩
+│   │   │   ├── decorators.py             # node_guard 装饰器：所有节点异常统一捕获
 │   │   │   ├── config/
 │   │   │   │   ├── graph_config.py       # prompts 和模型配置（含 react_compact）
 │   │   │   │   └── models.py             # ChatStateCore2 / FileParseState
@@ -325,6 +328,12 @@ ChatMe/
 - **自动恢复**：检测到容器未运行时自动重建
 
 容器池大小可在 `SandboxPool(size=N)` 调整。
+
+### 沙盒 vs 本地 venv 语义对齐
+
+- **沙盒**：容器内 cwd=`/`，挂载点 `/cached` / `/skills`；AI 写代码用相对路径 `cached/xxx` / `skills/xxx`。
+- **本地 venv 降级**（`mcps/server.py:_execute_code_in_local`）：宿主机 cwd=`backend/`，`backend/cached/` / `backend/skills/` 真实存在；PYTHONPATH 同时包含 `backend/` + `skills/`，让 `import Exa` / `from ChatMe.xxx import xxx` 都能解析；临时文件写到 `/tmp/code.<py|js>`。
+- 两边写代码时统一使用相对路径，AI 不需要感知运行在沙盒还是本地。
 
 ## MCP 工具
 
@@ -403,7 +412,7 @@ npm run electron:build:linux    # Linux AppImage
 2. **Redis** 通过 `docker-compose up -d redis` 启动，端口 6024，密码 `123456`
 3. **代码沙盒**需要先 `docker-compose build sandbox` 构建镜像
 4. **思考内容过滤**：后端 `_filter_thinking_content` 过滤 AI 输出中的 `<thinking>` 等思考标签
-5. **流式响应**：前端通过 SSE 实时接收 `content` / `reasoning` / `tool_call_*` / `memory_wait_*` 事件；`memory_wait_start` / `memory_wait_done` 在新请求发起 / 中断续接 且上一轮记忆任务仍在后台时插入；`interrupt` / `done` 事件携带 `memory_status` 字段（`idle` / `pending` / `done` / `failed`）
+5. **流式响应**：前端通过 SSE 实时接收 `content` / `reasoning` / `tool_call_*` / `memory_wait_*` / `error` 事件；`memory_wait_start` / `memory_wait_done` 在新请求发起 / 中断续接 且上一轮记忆任务仍在后台时插入；`interrupt` / `done` 事件携带 `memory_status` 字段（`idle` / `pending` / `done` / `failed`）
 6. **配置脱敏**：`backend/.chatme/config.json` 包含真实 API key，提交时务必脱敏
 7. **多 LLM Provider**：可通过 `llm_providers` 切换 openai / deepseek / vl（本地 VL）；`react_compact` 共用活动 provider，可通过 `REACT_COMPACT_TEMPERATURE` / `REACT_COMPACT_MAX_TOKENS` 单独配参
 8. **OSS**：图片 / 文件上传后通过 OSS URL 访问，缓存目录在 `cached/`
@@ -414,6 +423,8 @@ npm run electron:build:linux    # Linux AppImage
 13. **ChatService 记忆任务串行**：每会话只有一个后台 `_update_memory_bg` 任务（`_memory_update_tasks[session_id]`），新请求 / 删除 / 回溯前会先 `_wait_previous_memory_update` 等待；新入口必须先等待，避免读到旧记忆或与后台 task 写竞争
 14. **异步日志**：`LoggingManager` 用 `QueueHandler` + `QueueListener` 写文件，业务线程不入 IO；`atexit` 统一 `listener.stop()` 清理，新增 logger 走 `set_logger`
 15. **imp_ipt 唯一标识**：`input_parse_node` 输出的 `imp_ipt` 身份是 `additional_kwargs.imp_ipt == True`；ReAct 压缩 / final_node 注入 / 后续扩展都靠这个标志定位本轮意图
+16. **节点异常统一兜底**：所有 LangGraph 节点（含 ChatWorkflow 5 个主节点 + 文件图 3 个节点 + sub_agent agent_node）都通过 `@node_guard("<name>")` 装饰；新加节点必须继承这个约定，否则异常会穿透到 LangGraph 内核造成不可预期行为
+17. **前端错误气泡保护**：App.vue 维护 `_sessionHadError: Set<session_id>`，SSE 出现 `error` 时把 `message.error=true` 渲染为红色错误框（避免报错堆栈被当 markdown），同时把 session 标记为保护态；保护态下 `done` 事件不会复活 AI 内容，`refreshConversation` / `updateTitleAndRefresh` 跳过 messages 重拉只更新侧边栏；用户主动发起新一轮请求或续接时清掉保护态
 
 ## 许可证
 

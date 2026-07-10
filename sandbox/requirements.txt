@@ -1,0 +1,29 @@
+# 数据分析基础
+numpy
+pandas
+scipy
+scikit-learn
+
+# 科学计算、可视化图表
+sympy
+matplotlib
+seaborn
+plotly
+bokeh
+altair
+pygal
+
+# 地图、网络、网络请求爬虫
+pyecharts
+folium
+networkx
+requests
+beautifulsoup4
+
+# Excel解析、图片、模板引擎
+lxml
+openpyxl
+xlrd
+pillow
+jinja2
+markupsafe

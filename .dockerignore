@@ -1,0 +1,38 @@
+# Python 编译缓存
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+
+# 编辑器
+.vscode/
+.idea/
+
+# 系统垃圾
+.DS_Store
+Thumbs.db
+
+# 测试 / 日志 / 缓存目录
+test/
+tests/
+**/test/
+logs/
+**/logs/
+*.log
+cached/
+**/cached/
+docker_data/
+docs/
+memory/
+
+# 配置（运行时挂载，不入镜像）
+backend/.chatme/config.json
+backend/.chatme/chatme.json
+sandbox/.sandbox-config.json
+sandbox/sandbox.env
+.env
+.env.local
+
+# 虚拟环境 / 依赖
+.venv/
+venv/
+backend/uv.lock

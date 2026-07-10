@@ -1,0 +1,85 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg/
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment variables
+test/.env.1
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# test
+test/
+**/test/
+*.test
+
+NUL
+NUL*
+
+
+# Todo files
+todo.md
+*.todo
+TODO.md
+
+# Cached files
+cached/
+*.cached
+cache/
+*.cache
+
+# Logs
+logs/
+*.log.*
+
+# memory
+memory/
+*.memory.*
+
+docker_data/
+
+backend/.chatme/config.json
+
+docs/
+
+# Electron desktop release output (project root)
+release/

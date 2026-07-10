@@ -1,0 +1,50 @@
+{
+  "app": {
+    "name": "ChatMe",
+    "version": "v0.0.1",
+    "description": "multiple agents system with engineers",
+    "host": "127.0.0.1",
+    "port": 8211
+  },
+  "mcp_server": {
+    "url": "http://127.0.0.1:18080/streamable",
+    "transport": "streamable_http"
+  },
+  "redis": {
+    "checkpointer_url": "redis://:123456@localhost:6024/0",
+    "state_saver_url": "redis://:123456@localhost:6024/1"
+  },
+  "llm_providers": {
+    "model1": {
+      "model_name": "MiniMax-M3",
+      "api_key": "...",
+      "base_url": "https://api.minimax.chat/v1"
+    },
+    "model2": {
+      "model_name": "optional",
+      "api_key": "optional",
+      "base_url": "optional"
+    },
+    "vl": {
+      "model_name": "Qwen3-VL-2B",
+      "api_key": "empty",
+      "base_url": "http://127.0.0.1:8211/api/v1",
+      "local": true
+    }
+  },
+  "directories": {
+    "skills_dir": "./skills",
+    "cached_dir": "./cached"
+  },
+  "skills": {
+    "bocha_api_key": "sk-2442",
+    "exa_api_key": "241f5e-d-4xx4e-ax7-xx90x",
+    "tavily_api_key": "tvly-dev-xxT"
+  },
+  "oss": {
+    "access_key_id": "optional",
+    "access_key_secret": "optional",
+    "bucket": "optional",
+    "endpoint": "optional"
+  }
+}

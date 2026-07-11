@@ -269,7 +269,9 @@ def _execute_code_in_local(code: str, language: str) -> str:
     沙盒 cwd=/ + 容器内 /cached /skills mount；
     本机 cwd=backend/ + backend/cached/ backend/skills/ 真实存在。
     AI 写代码时用相对路径 `cached/xxx` / `skills/xxx` 在两边都有效。
+    timeout 硬编码 300s（与沙盒 execute 对齐）。
     """
+    timeout = 300
     project_root = Path.cwd()
     skills_dir = project_root / "skills"
 
@@ -326,7 +328,7 @@ def _execute_code_in_local(code: str, language: str) -> str:
                 cwd=str(project_root),
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=timeout,
                 env=env,
             )
         else:
@@ -338,7 +340,7 @@ def _execute_code_in_local(code: str, language: str) -> str:
                 cwd=str(project_root),
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=timeout,
                 env=env,
             )
 
@@ -362,14 +364,24 @@ def code(
     # 沙盒执行
     if use_sandbox and _sandbox_pool is not None:
         logger.debug(f"会话 {session_id} 使用[沙盒容器]执行代码")
-        return _sandbox_pool.execute(code, language)
+        try:
+            return _sandbox_pool.execute(code, language)
+        except subprocess.TimeoutExpired:
+            logger.warning(f"会话 {session_id} code 沙盒执行超时(300s)")
+            return ("Error: code execution timed out (300s limit), "
+                    "please optimize the script or split the task into smaller steps")
 
     # 沙盒池未初始化但 AI 想要沙盒 → 降级到本地
     if use_sandbox and _sandbox_pool is None:
         logger.warning(f"会话 {session_id} 请求沙盒但沙盒池未初始化，降级到本地 venv")
 
     logger.debug(f"会话 {session_id} 使用[本地环境]执行代码")
-    return _execute_code_in_local(code, language)
+    try:
+        return _execute_code_in_local(code, language)
+    except subprocess.TimeoutExpired:
+        logger.warning(f"会话 {session_id} code 本地执行超时(300s)")
+        return ("Error: code execution timed out (300s limit), "
+                "please optimize the script or split the task into smaller steps")
 
 @server.tool
 def cmd(
@@ -398,7 +410,12 @@ def cmd(
     # 沙盒执行
     if use_sandbox and _sandbox_pool is not None:
         logger.debug(f"会话 {session_id} 使用[沙盒容器]执行命令")
-        return _sandbox_pool.execute_command(command)
+        try:
+            return _sandbox_pool.execute_command(command)
+        except subprocess.TimeoutExpired:
+            logger.warning(f"会话 {session_id} cmd 沙盒执行超时(120s)")
+            return ("Error: Command execution timed out (120s limit), "
+                    "please optimize the command or split it into smaller steps")
 
     # 沙盒池未初始化但 AI 想要沙盒 → 降级到本地
     if use_sandbox and _sandbox_pool is None:
@@ -437,13 +454,14 @@ def cmd(
     if backend_dir not in current_pythonpath:
         env['PYTHONPATH'] = f"{backend_dir}{os.pathsep}{current_pythonpath}" if current_pythonpath else backend_dir
 
+    cmd_timeout = 120
     try:
         result = subprocess.run(
             command,
             shell=True,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=cmd_timeout,
             cwd=str(project_root),
             env=env,
         )
@@ -453,7 +471,7 @@ def cmd(
         return output
     except subprocess.TimeoutExpired:
         logger.error(f"会话{session_id}中终端命令执行超时")
-        return f"Error: Command execution timed out ({30} seconds limit)"
+        return f"Error: Command execution timed out ({cmd_timeout} seconds limit)"
     except Exception as e:
         logger.error(f"会话{session_id}中错误执行终端命令")
         return f"Error: {str(e)}"

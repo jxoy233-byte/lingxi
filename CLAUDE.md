@@ -253,15 +253,3 @@ docker-compose up -d redis                            # 端口 6024，密码 123
 12. **SandboxPool 池锁**：新加执行方法（除 `execute` / `execute_command` 外）必须把 pop → exec → append 整段放在 `with self.lock:` 内，不能像原 `execute` 那样 pop 在锁外；不要因为"exec 不需要锁"就只锁 exec，池子本身的"取容器"操作也得串行化，否则 N+1 并发撞空池
 12. **Electron `protocol.handle` 注册时机**：必须放在 `app.whenReady().then(...)` 内（内部访问 `session.defaultSession` 要求 ready），且要在 `createWindow` 之前；否则首屏 `file://` 请求绕过拦截器、asar 协议相关 API 抛 `Session can only be received when app is ready`
 13. **Electron 路径双形态**：asar 内可读的文件（preload、index.html）用 `__dirname`（asar patch 支持）；asar 外（图标、`extraResources` 复制过去的资源）用 `process.resourcesPath`；用 `app.isPackaged` 三元判断是 dev 还是 packaged 的统一约定
-
-## 完整设计文档
-
-仓库内 `docs/综合实践文档/` 提供了完整的设计资料（**注意：该目录受 `.gitignore` 约束，仅在本地存在**）：
-
-- `01_需求规格说明书.md` — 需求规格
-- `02_概要设计说明书.md` — 概要设计
-- `03_详细设计说明书.md` — 详细设计
-- `部署图.png` / `时序图.png` — 架构 / 时序图
-- `程序流程图/` — 流程图目录
-
-修改前先读相关设计文档，理解上下文后再动手。

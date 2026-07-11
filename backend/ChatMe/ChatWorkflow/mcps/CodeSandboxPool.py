@@ -144,7 +144,7 @@ class SandboxPool:
                 result = subprocess.run([
                     "docker", "exec", "-w", "/", container_id,
                     "sh", "-c", f"python /code{suffix}; rc=$?; rm -f /code{suffix}; exit $rc"
-                ], capture_output=True, text=True, timeout=30)
+                ], capture_output=True, text=True, timeout=300)
 
                 # 重要产出写到 /cached，由 host 文件系统管（mount rw，不随容器清理）
 
@@ -153,14 +153,16 @@ class SandboxPool:
             finally:
                 self.containers.append(container_id)
 
-    def execute_command(self, command: str, timeout: int = 30) -> str:
+    def execute_command(self, command: str) -> str:
         """从池中取出容器执行 shell 命令
 
         与 execute(code, language) 的差异：
         - 不写临时文件，直接 docker exec sh -c <command>，命令里可以含管道 / 重定向 / glob
         - cwd=/ 让相对路径（cached/xxx）能解析到 /cached/xxx（与 code 一致语义）
         - 白名单 / 危险检测由调用方（server.py 的 cmd 工具）负责
+        - timeout 硬编码 120s
         """
+        timeout = 120
         with self.lock:
             if not self.containers:
                 raise RuntimeError("No available containers in pool")

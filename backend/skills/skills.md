@@ -4,8 +4,11 @@
 这些技能以 Python 模块形式存在，AI 可以通过生成并执行 Python 代码来调用。
 
 **使用skills**:
-from xxx(直接写脚本名称，如Exa) import 模块名 ❌
-from skills.xxx import ... ✅
+import sys
+sys.path.insert(0, "/path/to/your/module")
+
+from skills.xxx(直接写脚本名称，如Exa) import 模块名 ✅
+from Exa import ... ❌
 ---
 
 # 🧭 使用总则（非常重要）

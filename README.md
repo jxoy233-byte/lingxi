@@ -203,7 +203,7 @@ OPENAI_PRESENCE_PENALTY=0.0
 {
   "app": {
     "name": "ChatMe",
-    "version": "v0.0.1",
+    "version": "v0.0.2",
     "host": "127.0.0.1",
     "port": 8211
   },
@@ -268,7 +268,7 @@ ChatMe/
 │   ├── src/                              # Vue 组件
 │   └── vite.config.js
 ├── docker-compose.yml
-├── docs/                                 # 综合实践文档
+├── docs/                                 # 文档
 └── docker_data/
 ```
 

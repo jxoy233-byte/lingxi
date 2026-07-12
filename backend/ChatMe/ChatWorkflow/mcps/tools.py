@@ -25,7 +25,7 @@ def _generate_tool_param_warning(tool_name: str, missing_params: list) -> str:
     """生成工具参数缺失的警告信息"""
     param_list = ", ".join(missing_params)
     logger.warning(f"工具 {tool_name} 缺少参数: {missing_params}")
-    return f"[工具参数错误] {tool_name} 缺少必需参数: {param_list}，请检查格式后重试"
+    return f"[Tool param error] {tool_name} missing required param(s): {param_list}. Check format and retry."
 
 
 # =============================================================================
@@ -125,7 +125,7 @@ def _create_sub_agent_graph(prompt):
     @node_guard("sub_agent.agent_node", logger=logger)
     def agent_node(state :SubAgentState, config):
         from langchain_core.messages import HumanMessage
-        session_id = config["configurable"].get("session_id")
+        session_id = config["configurable"].get("session_id") or ""
 
         # 首次调用时 messages 为空，需要一个初始 user message 触发对话
         messages = state["messages"]
@@ -157,6 +157,13 @@ def _create_sub_agent_graph(prompt):
                     warning = _generate_tool_param_warning("cmd", ["command"])
                     tc["args"]["command"] = warning
                     logger.warning(f"会话 {session_id} cmd 缺少 command 参数: {tc['args']}")
+                # ctime 保底：ctime 不接受任何参数（除 framework 注入的 session_id）。
+                # 如果 LLM 错误地传了其它字段，清空 args 防止 MCP server 校验失败。
+                if tc["name"] == "ctime":
+                    extra = {k: v for k, v in tc["args"].items() if k != "session_id"}
+                    if extra:
+                        logger.warning(f"会话 {session_id} ctime 不应有除 session_id 外的参数，已清空: extra={extra}")
+                        tc["args"] = {}
             response.tool_calls = tool_calls
 
         return {"messages": [response]}
@@ -254,17 +261,14 @@ def _parse_tool_calls(content: str):
 
 @tool
 def sub_agent(
-    task: Annotated[str, "子任务描述"],
-    prompt_addon: Annotated[str, "执行步骤提示。"] = "",
-    session_id: Annotated[str, "会话id"] = ""
+    task: Annotated[str, "Sub-task description (one sub_agent call handles one sub-task)"],
+    prompt_addon: Annotated[str, "Execution steps hint, e.g. 'cmd → cat SKILL.md → code'"] = "",
+    session_id: Annotated[str, "Session id"] = ""
 ) -> str:
     """
-    触发子 agent 执行复杂任务（Plan-Execute + ReAct 模式）
+    Spawn a sub-agent to execute a sub-task (Plan-Execute + ReAct mode; sub-agent runs its own ReAct loop and returns the result text).
 
-    当主 agent 判断任务复杂时，可分发给子 agent 独立执行：
-    - 子 agent 拥有独立的 ReAct 循环，自己调用工具完成子任务
-    - 完成后直接输出结果文本
-    - 主 agent 收到子 agent 结果后继续主流程
+    See main agent prompt for detailed usage rules.
     """
     try:
         from ChatMe.ChatWorkflow.config.graph_config import build_sub_agent_prompt
@@ -280,10 +284,12 @@ def sub_agent(
         error_text = f"{type(e).__name__}: {e}"
         logger.error(f"[sub_agent] 会话 {session_id} 执行失败: {error_text}", exc_info=True)
         return (
-            "[sub-agent 执行失败]\n"
-            f"错误类型: {type(e).__name__}\n"
-            f"错误信息: {e}\n"
-            "说明: 子 agent 执行过程中连接或模型调用异常，主流程可根据当前已有信息继续处理，必要时拆分任务后重试。"
+            "[sub-agent execution failed]\n"
+            f"Error type: {type(e).__name__}\n"
+            f"Error message: {e}\n"
+            "Note: This sub-task failed. Other sub_agent results are NOT affected."
+            "Main agent options: skip this sub-task / retry with a smaller split /"
+            " main agent handles it directly via cmd / code / report partial completion to the user."
         )
 
     # 提取最终回复（兼容多种 result 形态：dict / State 对象 / list）
@@ -305,5 +311,5 @@ def sub_agent(
                 return content
 
     logger.debug(f"[sub_agent] 会话 {session_id} 结果: [无输出]")
-    return "[sub-agent 无输出]"
+    return "[sub-agent no output]"
 

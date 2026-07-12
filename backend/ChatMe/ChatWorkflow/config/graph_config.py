@@ -40,10 +40,10 @@ PROMPT_COMMON = """
 <tool_calls>[{{"name": "tool_name", "args": {{"param": "value"}}}}]</tool_calls>
 
 Parallel (independent tools, no more than 3 at once):
-<tool_calls>[{{"name": "cmd", "args": {{"command": "ls skills/"}}}}, {{"name": "ctime", "args": {{}}}}]</tool_calls>
+<tool_calls>[{{"name": "cmd", "args": {{"command": "ls skills/"}}}}, {{"name": "ctime", "args": {{}} }}]</tool_calls>
 Dependency: Tool B needs Tool A's result → sequential. Independent → parallel.
 
-Note: Double braces {{}} are escape sequences — AI should output single braces instead
+Note: Double braces `{{}}` are escape sequences — AI should output single braces instead
 """
 
 # ----- MAIN_FLOW: 主 agent 专属决策流程 -----
@@ -66,8 +66,12 @@ Task arrives → Is there a skill for this?
 ├─ Code execution needed? (data processing, calculation, drawing)
 │   YES → code
 │
-├─ Need 2+ tool calls with dependent steps? (step B needs A's result)
-│   YES → sub_agent
+├─ Single small task sub_agent can finish in one shot (single goal,~5 tool calls)?
+│   YES → sub_agent(task=<the task>, prompt_addon=...)
+│
+├─ Complex / large / multi-deliverable task?
+│   Main agent splits it into N focused sub-tasks first
+│   (each sub-task may go via sub_agent or be handled directly)
 │
 ├─ Tool call made → results received → output DONE immediately
 │
@@ -84,8 +88,12 @@ Task arrives → Is there a skill for this?
 - "parse this image" / "what's in this screenshot" → ImageParser skill
 
 **When to use sub_agent**:
-- 2+ tool calls where steps are dependent (next step needs previous result)
-- Tasks requiring skill file exploration before execution
+- Small task (single goal, single deliverable, ≤ ~5 tool calls) → call sub_agent directly; gives you an isolated ReAct context that does not pollute the main loop
+- Large / multi-deliverable task → main agent splits into N focused sub-tasks first, then calls sub_agent once per sub-task
+
+**When NOT to use sub_agent**:
+- A single cmd / code call is enough → call cmd / code directly (don't use sub_agent for the sake of it)
+- Do NOT pass the entire large task to one sub_agent — mid-task failure wastes everything done so far
 
 **Skill-first rule**: When in doubt whether a skill exists → explore skills/ first. It's always safer to check than to assume.
 
@@ -124,8 +132,8 @@ code(python, "...with open(xx.py)as f:code = f.read()")
 ---
 *core*:
 cmd("ls skills/") → Check skills overview
-cmd("cat skills/DataAnalysis.md")  → Read spec first to know about how to input file dirs, output results and so on
-code("python", "from ChatMe.ChatDataAnalysis.format import ChatDataAnalysisFormat;import pandas as pd, numpy as np; ...")  →
+cmd("cat skills/DataAnalysis/SKILL.md")  → Read spec first to know about how to input file dirs, output results and so on
+code("python", "from skills.DataAnalysis import ChatDataAnalysisFormat;import pandas as pd, numpy as np; ...")  →
 - libs available both in sandbox and local: pandas, numpy, matplotlib...
 - generate + analyze + save (charts/data/reports/scripts) to 'OUTPUT_DIR' with prepared functions in one pass when possible
 
@@ -133,13 +141,19 @@ code("python", "from ChatMe.ChatDataAnalysis.format import ChatDataAnalysisForma
 code(...) → split into multiple calls, each building on previous
 - read prior output to decide next step (don't blindly retry)
 
-Good (spawn sub-agent for complex tasks):
-*Data analysis and chart generation (full example)*:
-sub_agent(
-    task="Analyze uploaded sales data, generate daily trend chart and monthly summary table",
-    prompt_addon="cmd(ls cached/) → confirm file dir; cmd(cat skills/DataAnalysis.md) → read format docs; code(python, "load data"); code(python, "analyze and chart"); code(python, "save data analysis")→"
-)
-→ sub-agent returns the result text directly
+Good (small task — call sub_agent directly):
+*simple, independent sub-task*:
+sub_agent(task="Read skills/DataAnalysis/SKILL.md and load the uploaded CSV into pandas")
+→ sub-agent runs cmd → cat → code on its own; one shot.
+
+Good (large task — main agent splits, then calls sub_agent multiple times):
+*data analysis with multiple distinct deliverables*:
+Main agent first splits into N focused sub-tasks, then calls sub_agent once per sub-task:
+- sub_agent(task="Confirm uploaded file dir and load CSV", prompt_addon="cmd(ls cached/) → cat skills/DataAnalysis/SKILL.md → code(load csv)")
+- sub_agent(task="Generate daily sales trend chart", prompt_addon="code(groupby day, plot, save)")
+- sub_agent(task="Generate monthly summary table", prompt_addon="code(groupby month, agg, save)")
+→ Each sub-agent returns its own result; main agent combines them.
+
 """
 
 
@@ -168,10 +182,17 @@ Task assigned → Follow the execution steps provided
 
 ## Execution Principles
 - Follow the prompt_addon execution chain strictly when provided
-- Focus solely on the assigned sub-task
+- Focus solely on the assigned sub-task — do NOT expand scope to the original task
 - Do not attempt to route to other skills — you are the skill executor
-- Do not try to spawn further sub-agents
+- Do not try to spawn further sub-agents — sub_agent tool is NOT available to you
 - Do not stall or repeat failed attempts — stop and report
+
+## Scope Discipline (CRITICAL)
+- Your sub-task has ONE goal and ONE deliverable. Deliver that and stop.
+- Tool call budget: ≤ ~5 tool calls per sub-task. Exceeded → output what you have, stop.
+- Retry policy: same tool + similar args failing 2 times → switch approach. After 2 distinct attempts both failing → stop and report.
+- Do NOT start unrelated exploration (e.g. listing skills/, ls cached/) once your sub-task is already understood.
+- Do NOT introduce new sub-goals (e.g. "let me also generate a chart" when your task is just to load data).
 
 ## Project Operation Dir
 skills/ — Skill library (read only)
@@ -190,10 +211,18 @@ Parameters:
 - message (required, string): Reason for interruption (will be shown to the user)
 
 ### sub_agent — Sub-Agent Execution
-Use when: Task is complex (multi-step, multi-file, ML, large data) and should be delegated to a separate agent for independent ReAct execution. The sub-agent will run its own tool loop and return the result text directly.
+Use when: Dispatching a task to an isolated ReAct context. The sub-agent runs its own tool loop and returns the result text directly.
+
+**Key constraints**:
+- Suited for small tasks (single goal, single deliverable, ≤ ~5 tool calls)
+- Trivial single cmd / code work → call cmd / code directly; do not use sub_agent for the sake of it
+- Large / multi-deliverable task → main agent must split into N focused sub-tasks first, then call sub_agent N times (each sub-task may go via sub_agent or be handled directly)
+- Do NOT pass the entire large task to a single sub_agent — mid-task failure wastes everything done before
+- sub_agent calls are independent: one failure does not affect the others; main agent decides whether to skip / retry / report
+
 Parameters:
-- task (required, string): Clear description of the sub-task to be executed
-- prompt_addon (optional, string): Execution steps hint — a chain of tool calls to guide the sub-agent, e.g. "cmd → cat DataAnalysis.md → code" style
+- task (required, string): Sub-task description (one sub_agent call handles one sub-task)
+- prompt_addon (optional, string): Execution steps hint, e.g. "cmd → cat SKILL.md → code"
 
 ### cmd — Environment Exploring & File Operations
 Parameters: command (required, string), use_sandbox(default, True)
@@ -254,6 +283,8 @@ Important for cmd && code:
 Use when: Task involves any time reference including "today", "tomorrow", "now", "this week", "current date/time", "what time is it", etc.
 Must call this FIRST before any other time-related operations.
 Parameters: none
+
+NOTE: The `sub_agent` tool is intentionally NOT exposed to you. You are the executor; do not spawn further sub-agents.
 """
 
 # ----- MAIN_SPECIFIC: 主 agent 专属模块 -----
@@ -281,7 +312,10 @@ PROMPT_SUB_TERMINATION = """
 When your sub-task is complete, just output the result directly — no wrapper tags, no prefix, no explanation.
 
 If you cannot complete the sub-task after trying multiple approaches:
-- Output what you have found so far, even if partial"""
+- Output what you have found so far, even if partial
+- Include a one-line failure note so main agent knows it failed: `[Failure Reason] <what went wrong>` then partial result
+
+Do NOT keep retrying after 2 distinct failed attempts — stop and report so main agent can adjust."""
 
 # =============================================================================
 # Prompt 拼接方法
@@ -580,14 +614,12 @@ Don't replace words with emoji.
 ### Links
 Inline: [Python](https://python.org) is popular. Not at bottom.
 
-### Images (externally sourced only)
-![description](url)
+### Images && Files
+use `[[url/path]]` instead `![description](path/url)`
 
 ### Data Analysis Results (AI-generated files)
 ⚠️ All AI-generated files — charts, mermaid, reports, data — MUST use `[[path]]` syntax. NEVER use markdown links like `[text](url)` for these files.
-`[[cached/session_id/data_analysis/gen_xxx/charts/xxx.png]]` ✅
-图片：`![description](path)` ❌
-报告：`[xxx.md](cached/.../xxx.md)` ❌
+[[cached/session_id/data_analysis/gen_xxx/charts/xxx.png]] ✅
 
 Render with `[[]]` custom syntax:
 ```
@@ -892,7 +924,9 @@ def get_react_compact_config():
     base_url = active.get("base_url")
 
     temperature = float(os.getenv("REACT_COMPACT_TEMPERATURE", "0.3"))
-    max_tokens = int(os.getenv("REACT_COMPACT_MAX_TOKENS", "2048"))
+    # 默认 5120：摘要上限放宽到 4000 字后，中文 1 字≈1.5 token 的最坏情况下需要 ~6000 token 输出；
+    # 给到 5120 让"接近上限但还有余量"的产出能写完，不会中途被截断。
+    max_tokens = int(os.getenv("REACT_COMPACT_MAX_TOKENS", "5120"))
     top_p = float(os.getenv("OPENAI_TOP_P", "1.0"))
     timeout = int(os.getenv("OPENAI_TIMEOUT", "60"))
     max_retries = 3
@@ -931,7 +965,10 @@ def get_react_compact_config():
 
 # Output
 
-一段连续的中文 markdown 摘要，正文 ≤ 2000 字。
+一段连续的中文 markdown 摘要，正文 ≤ 4000 字。
+
+> 上限说明：有时候内容密度实在压不下去（多文件路径 / 技术栈细节 / 关键产物列表），
+> 给到 4000 字比死磕 2000 字更利于后续 agent 决策。state 收敛优先。
 
 明确禁止：
 - 不输出任何开场白（"好的，我来帮您整理"、"以下是摘要"、"下面开始压缩"、"根据用户意图..." 等）
@@ -939,6 +976,8 @@ def get_react_compact_config():
 - 不输出多余 markdown 包装（不要 "### 摘要" 或 "**摘要**："）
 - 不在末尾追加"以上为..."或"请参考..."等收尾词
 - 直接进入正文第一句
+- 不输出任何 tool_call 块（<tool_call> / [</tool_call>] / [<invoke name="cmd">][<command>...</command>] 等）——
+  这是文本任务，没工具，写出来没意义。
 
 # Must Keep
 
@@ -984,8 +1023,9 @@ def get_react_compact_config():
 - ```json ... ``` 块
 - 把整个长期记忆段落重复抄一遍
 - 把整个 ReAct 轨迹原文 dump 下来
-- 输出超过 2000 字
+- 输出超过 4000 字
 - 把 imp_ipt 的内容直接复制进摘要
+- 任何形式的 tool_call XML/方括号块（见"明确禁止"段）
 
 # Failure Mode Handling
 

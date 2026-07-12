@@ -10,11 +10,9 @@ ENV HOME=/
 # 清理 /skills 和 /cached 根目录下的无用的系统垃圾; python 执行脚本时自动过滤
 COPY sandbox/sitecustomize.py /usr/local/lib/python3.12/site-packages/sitecustomize.py
 
-# 安装技能依赖: ChatMeConfig,ChatDataAnalysis,LoggingManager
+# 安装技能依赖: ChatMeConfig（运行时 skills/* 通过 bind mount 注入，无须 COPY）
 COPY backend/ChatMe/__init__.py /usr/local/lib/python3.12/site-packages/ChatMe/__init__.py
 COPY backend/ChatMe/ChatMeConfig /usr/local/lib/python3.12/site-packages/ChatMe/ChatMeConfig
-COPY backend/ChatMe/ChatDataAnalysis /usr/local/lib/python3.12/site-packages/ChatMe/ChatDataAnalysis
-COPY backend/ChatMe/LoggingManager /usr/local/lib/python3.12/site-packages/ChatMe/LoggingManager
 
 COPY sandbox/requirements.txt .
 

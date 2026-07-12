@@ -77,7 +77,6 @@ ChatMe/
 │   │   │   ├── static_file.py            # /static 前缀，静态资源
 │   │   │   ├── model_vl.py               # /api 前缀，视觉语言模型
 │   │   │   └── timed_clean.py            # /admin 前缀，定时清理
-│   │   ├── ChatDataAnalysis/             # 数据分析辅助
 │   │   ├── ChatMeConfig/                 # 配置管理
 │   │   ├── ChatService/                  # 聊天服务层（SSE 流式输出）
 │   │   │   └── FilesLoaders/             # 文件加载与处理
@@ -130,8 +129,8 @@ ChatMe/
 - **触发**：完整工具 loop 数 ≥ `REACT_COMPACT_LOOPS`（默认 5）+ `REACT_KEEP_LOOPS`（默认 2）= 7，**且** draft 字符数 ≥ `REACT_COMPACT_MIN_CHARS`（默认 2000），**且** `tool_call_times != last_compact_at_tool_calls`（防 state 恢复或失败后重复触发）。
 - **范围**：压缩前 N-keep 轮 ReAct 轨迹，**最近 keep（默认 2）轮完整 loop 原文保留**；imp_ipt 之前的 memory / 其他 SystemMessage 整体保留。
 - **产物**：以 `【ReAct 摘要】` SystemMessage 形式插入 imp_ipt 之后；写入 state 的 `context_summary_text` / `last_compact_at_tool_calls`。
-- **失败兜底**：长度 [80, 2500] 区间外 / 含残留标签 / LLM 异常一律丢弃，context 保持不变。
-- **专用 LLM**：`get_react_compact_config()`，`REACT_COMPACT_TEMPERATURE=0.3` / `REACT_COMPACT_MAX_TOKENS=2048`（env 可覆盖），目标 ≤ 2000 字中文 markdown。
+- **失败兜底**：长度 [80, 4000] 区间外 / 过滤后只剩孤立标点（filter 漏网的 MiniMax-M3 tool_call 残骸）/ 含残留标签 / LLM 异常一律丢弃，context 保持不变。
+- **专用 LLM**：`get_react_compact_config()`，`REACT_COMPACT_TEMPERATURE=0.3` / `REACT_COMPACT_MAX_TOKENS=5120`（env 可覆盖），目标 ≤ 4000 字中文 markdown。
 
 > AI 协作者请阅读 [`CLAUDE.md`](CLAUDE.md) 获取完整的工作流说明、关键文件、协作偏好。
 
@@ -257,7 +256,6 @@ ChatMe/
 ├── backend/
 │   ├── ChatMe/
 │   │   ├── APIRouter/
-│   │   ├── ChatDataAnalysis/             # ChatDataAnalysisFormat 类
 │   │   ├── ChatMeConfig/                 # 配置加载器
 │   │   ├── ChatService/
 │   │   │   ├── core.py                   # ChatService，SSE 流式输出 + 记忆任务调度
@@ -455,7 +453,7 @@ npm run electron:build:linux    # Linux AppImage（x64）
 8. **OSS**：图片 / 文件上传后通过 OSS URL 访问，缓存目录在 `cached/`
 9. **环境探索模式**：当文件被截断时（提示中含 `[文件过大已截断]`），AI 应走 `execute_command(ls cached/...)` + `cat cached/.../filename` 流程读全量
 10. **unstructured 首次使用**：CSV / MD / XML 解析会自动下载 NLTK 数据（punkt、averaged_perceptron_tagger 等），需外网环境
-11. **ReAct 流程压缩**：`context_assembly_node` 按"完整工具 loop 节拍"自动压缩（前 N-keep 轮被摘要，最近 2 轮原文保留）；`REACT_COMPACT_LOOPS=5` / `REACT_KEEP_LOOPS=2` / `REACT_COMPACT_MIN_CHARS=2000`；压缩失败不 raise
+11. **ReAct 流程压缩**：`context_assembly_node` 按"完整工具 loop 节拍"自动压缩（前 N-keep 轮被摘要，最近 2 轮原文保留）；`REACT_COMPACT_LOOPS=5` / `REACT_KEEP_LOOPS=2` / `REACT_COMPACT_MIN_CHARS=2000` / 摘要上限 `4000` 字 / `REACT_COMPACT_MAX_TOKENS=5120`；压缩失败不 raise；`_filter_thinking_content` 已带 MiniMax-M3 wrapper 正则（`[</tool_call>]` / `[<]tool_call[>]` 等）+ `_try_compact_react` 孤立标点兜底，react_compact prompt 显式禁止 tool_call 块
 12. **Memory 并发安全**：`MemoryManager` 内部 per-thread `asyncio.Lock` 串行化；新加 memory 方法必须继承 `async with self._get_thread_lock(thread_id)`；写盘走 `_atomic_write_text`（`*.tmp` + `fsync` + `os.replace`）
 13. **ChatService 记忆任务串行**：每会话只有一个后台 `_update_memory_bg` 任务（`_memory_update_tasks[session_id]`），新请求 / 删除 / 回溯前会先 `_wait_previous_memory_update` 等待；新入口必须先等待，避免读到旧记忆或与后台 task 写竞争
 14. **异步日志**：`LoggingManager` 用 `QueueHandler` + `QueueListener` 写文件，业务线程不入 IO；`atexit` 统一 `listener.stop()` 清理，新增 logger 走 `set_logger`
@@ -465,6 +463,7 @@ npm run electron:build:linux    # Linux AppImage（x64）
 18. **SandboxPool 池锁必须包整段**：池默认 2 容器，新加 `execute_*` 方法时必须把 `pop → exec → append` 整段放在 `with self.lock:` 内；不能像最初 `execute()` 那样把 pop 放锁外只锁 exec——并发 N+1 会撞空池报 `No available containers in pool`
 18. **Electron `file://` 协议拦截**：`protocol.handle('file', ...)` 在 `app.whenReady()` 内注册（必须 ready 才能拿到 `session.defaultSession`），`/chat/*` + `/static/*` 转发到后端（等价 Vite dev proxy），其他走白名单校验后从 asar 内 `dist/` 读盘；API 转发必须显式带 `method/headers/body + duplex:'half'`（POST `/chat/` 的 body 否则被丢），SSE 流必须显式 `new Response(upstream.body, ...)` 透传避免被 buffer
 19. **Electron 图标必须放包外**：`nativeImage` 不能读 asar 内文件，所以 `build/` 通过 `extraResources` 复制到 `app/Contents/Resources/build/`，运行时用 `process.resourcesPath` 取；`app.dock.setIcon` / `BrowserWindow.icon` 都必须是 PNG，不认 `.icns`（打包后的 `.icns` 由 `package.json` 的 `build.mac.icon` 给 OS 用）
+20. **可滚动侧栏/面板 CSS**：所有可滚动列表（Sidebar / DataAnalysisTree / WebPreviewPanel / CheckpointPanel 等）必须按以下 7 条点写——① 数据全量入 DOM，禁止 `slice(0, N)` / `displayCount` 切片（CSS overflow 自己负责滚动）；② 侧栏 `height: 100vh; flex-shrink: 0; overflow: hidden`，外层不被内容撑大；③ 固定头部 `flex-shrink: 0` 锁尺寸；④ 滚动区用 `height: calc(100vh - X)` **不走** `flex: 1 + min-height: 0`（flex 子项 `min-height: auto` 会让 overflow 失效）；⑤ **`overflow-y: auto`**——浏览器默认；禁止用 `overflow-y: scroll`（始终空占位，列表短时也碍眼）或 `overflow-y: hidden`（用户感知不到还有内容）；⑥ **CSS-only 没法做到「溢出时才显示」**：`App.vue` 全局 `::-webkit-scrollbar { width: 8px; ... }` 会强制 macOS 自动隐藏失效。要做到溢出时才出现必须 JS + class：mounted 用 `ResizeObserver` 监听 list；`el.scrollHeight > el.clientHeight + 1` 判定溢出；挂 `.has-overflow` class；CSS：`::-webkit-scrollbar { width: 0 }` 默认隐藏，`.has-overflow::-webkit-scrollbar { width: 6px }` 才显出，滑块 `var(--border-color)` + `min-height: 30px`，hover `var(--text-secondary)`；⑦ `@scroll="handleScroll"` 直接绑在 `.list`。同时监听 conversations 增删 / collapsed 切换 / window resize，触发 `checkOverflow()` 重新挂载 class。
 
 ## 许可证
 

@@ -1,34 +1,21 @@
 # 🧠 Skills Registry
 
 本文件定义了 AI 在本环境中可使用的技能（Skills）。
-这些技能以 Python 模块形式存在，AI 可以通过生成并执行 Python 代码来调用。
+这些技能以技能模块形式存在，AI 可以通过生成并执行对应代码来调用。
 
 **使用skills**:
-import sys
-sys.path.insert(0, "/path/to/your/module")
-
 from skills.xxx(直接写脚本名称，如Exa) import 模块名 ✅
 from Exa import ... ❌
+
+*With Precondition*:
+import sys
+sys.path.insert(0, "/skills/`可选`")
+from Exa import ... ✅
 ---
 
 # 🧭 使用总则（非常重要）
 
 当用回答用户问题时，AI 必须遵循以下决策流程：
-
-## ✅ 什么时候使用 Skills
-
-如果用户问题满足以下任一条件，应优先使用技能：
-
-- 需要**最新信息**（新闻、发布、价格、趋势等）
-- 涉及**不确定或可能过时的事实**
-- 用户要求：
-  - “查一下”
-  - “最新”
-  - “有没有资料”
-  - “给我来源”
-- 需要**外部数据支持**
-- 进行**研究、对比、分析、信息收集**
-
 ---
 
 ## ⚙️ 调用规则
@@ -133,9 +120,9 @@ ImageParser 是一个**图片解析**技能，使用 VL 模型（Qwen3-VL）来�
 
 # 📊 Skill: DataAnalysis
 
-数据分析技能。进行数据分析前先查阅 `DataAnalysis.md` 规范获取配置。
+数据分析技能。进行数据分析前先查阅 `skills/DataAnalysis/SKILL.md` 规范获取配置。
 
-**文件名称**: `DataAnalysis.md`
+**文件名称**: `skills/DataAnalysis/SKILL.md`
 
 **核心能力**：
 - 数据处理与统计分析（pandas / numpy / scipy）
@@ -148,6 +135,8 @@ ImageParser 是一个**图片解析**技能，使用 VL 模型（Qwen3-VL）来�
 - 统计图表生成（折线/柱/饼/热力/箱线等）
 - 数据处理结构图（Mermaid 图表）
 - 分析报告自动生成
+
+**代码入口**: `skills.DataAnalysis.ChatDataAnalysisFormat`（沙盒内可用）
 
 ---
 

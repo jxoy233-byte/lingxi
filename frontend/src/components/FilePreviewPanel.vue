@@ -136,6 +136,32 @@
           <img :src="fileUrl" :alt="fileName" />
         </div>
 
+        <!-- HTML 文件：原文 / 渲染 tab 切换（v-show 替代 v-if 链，避免 Vue 在不同元素类型上 v-if/v-else-if 的边界情况） -->
+        <div v-if="isHtmlFile" class="html-render-area">
+          <!-- 渲染效果 tab：iframe 始终在 DOM，v-show 控制可见性 -->
+          <iframe
+            v-show="viewTab === 'rendered'"
+            :key="fileUrl || 'no-url'"
+            :src="fileUrl || 'about:blank'"
+            class="html-preview-iframe"
+            sandbox="allow-scripts allow-popups allow-same-origin"
+            referrerpolicy="no-referrer"
+          />
+          <!-- 原文 tab：v-show 控制可见性 -->
+          <div v-show="viewTab === 'raw'" class="content-body html-raw-content">
+            <pre v-if="htmlRawDisplay" class="plain-text-content">{{ htmlRawDisplay }}</pre>
+            <div v-else-if="htmlRawLoading" class="loading-hint">加载中…</div>
+            <div v-else-if="htmlRawError" class="error-hint">[加载失败] {{ htmlRawError }}</div>
+            <div v-else class="content-empty">
+              <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <polyline points="14 2 14 8 20 8"/>
+              </svg>
+              <p>暂无内容</p>
+            </div>
+          </div>
+        </div>
+
         <!-- 非编辑模式：显示内容 -->
         <div
           v-else-if="content"
@@ -162,6 +188,7 @@
 <script>
 import { marked } from 'marked'
 import hljs from 'highlight.js'
+import { sanitizeHtml, passthroughTrustedSvg } from '@/utils/sanitize.js'
 import DataTreeNode from './DataTreeNode.vue'
 
 export default {
@@ -191,7 +218,11 @@ export default {
       treeFiles: [],
       treeRootPath: '',
       treeRootNode: null,
-      treeLoading: false
+      treeLoading: false,
+      // HTML 原文 tab 异步加载状态（仅在 content 为空且 viewTab='raw' 时启用）
+      htmlRawContent: '',
+      htmlRawLoading: false,
+      htmlRawError: ''
     }
   },
   watch: {
@@ -201,6 +232,21 @@ export default {
         this.mermaidZoomScale = 1
         this.isEditing = false
         this.editedContent = ''
+      }
+    },
+    // HTML 文件切换时，清掉上一份 HTML 原文缓存，并强制回到渲染效果 tab
+    // （防止用户先前停在「原文」tab、切新文件后看不到 iframe）
+    fileName() {
+      if (this.isHtmlFile) {
+        this.viewTab = 'rendered'
+        this.htmlRawContent = ''
+        this.htmlRawError = ''
+      }
+    },
+    // 用户切到 HTML「原文」tab 且没拿到 content 时，按需 fetch fileUrl
+    viewTab(val) {
+      if (val === 'raw' && this.isHtmlFile && !this.content && !this.htmlRawContent && !this.htmlRawLoading && this.fileUrl) {
+        this.loadHtmlRawContent()
       }
     },
     sessionId: {
@@ -215,16 +261,6 @@ export default {
       }
     }
   },
-  methods: {
-    onWheel(e) {
-      // 只有 mermaid 渲染态才拦截滚轮做缩放；其他情况让滚轮正常滚动 .content-container
-      if (this.isMermaidFile && this.viewTab === 'rendered') {
-        e.preventDefault()
-        const delta = e.deltaY > 0 ? -0.1 : 0.1
-        this.mermaidZoomScale = Math.min(3, Math.max(0.3, this.mermaidZoomScale + delta))
-      }
-    }
-  },
   computed: {
     // 内部文件树根节点的 children（按目录优先 + 字典序排序）
     treeRootChildren() {
@@ -234,9 +270,9 @@ export default {
         return a.name.localeCompare(b.name)
       })
     },
-    // 可渲染文件（md/mmd）：有渲染效果且支持原文/渲染切换
+    // 可渲染文件（md/mmd/html）：有渲染效果且支持原文/渲染切换
     isRenderableFile() {
-      return this.isMarkdownFile || this.isMermaidFile
+      return this.isMarkdownFile || this.isMermaidFile || this.isHtmlFile
     },
     // 只有 .md / .markdown 走 marked 渲染
     isMarkdownFile() {
@@ -246,6 +282,11 @@ export default {
     isMermaidFile() {
       const name = (this.fileName || '').toLowerCase()
       return name.endsWith('.mmd')
+    },
+    // HTML 文件：原文 + 渲染效果（iframe 跑 Plotly/ECharts 等）
+    isHtmlFile() {
+      const name = (this.fileName || '').toLowerCase()
+      return name.endsWith('.html') || name.endsWith('.htm')
     },
     isImageFile() {
       const name = (this.fileName || '').toLowerCase()
@@ -273,21 +314,78 @@ export default {
       }
       if (this.isMermaidFile) {
         const svg = this.renderedSvg || '<p style="color:#888;">加载中...</p>'
-        return `<div class="mermaid-zoom-inner">${svg}</div>`
+        // mermaid SVG 走 trusted 库输出路径：DOMPurify 会剥 <foreignObject> 内容破坏图渲染
+        // 安全前提：prop renderedSvg 由 mermaid.render() 生成，library 解析阶段已拒绝恶意标签
+        return passthroughTrustedSvg(`<div class="mermaid-zoom-inner">${svg}</div>`)
       }
       try {
-        return marked(this.content)
+        // v-html 注入前过 DOMPurify（挡 <script>、内联事件；iframe 强制 sandbox）
+        return sanitizeHtml(marked(this.content))
       } catch (e) {
         console.warn('Markdown 渲染失败:', e)
         return this.escapeHtml(this.content)
       }
+    },
+    // HTML「原文」tab 用的显示文本：优先 content prop，否则用 fetch 缓存的 htmlRawContent
+    htmlRawDisplay() {
+      return this.content || this.htmlRawContent || ''
     }
   },
   methods: {
+    // 只有 mermaid 渲染态才拦截滚轮做缩放；其他情况让滚轮正常滚动 .content-container
+    onWheel(e) {
+      if (this.isMermaidFile && this.viewTab === 'rendered') {
+        e.preventDefault()
+        const delta = e.deltaY > 0 ? -0.1 : 0.1
+        this.mermaidZoomScale = Math.min(3, Math.max(0.3, this.mermaidZoomScale + delta))
+      }
+    },
     escapeHtml(text) {
       const div = document.createElement('div')
       div.textContent = text
       return div.innerHTML
+    },
+    // HTML 原文 fetch：处理 [[xxx.html]] inline 渲染后用户点开 panel 但 App.vue 没传 text_content 的场景
+    async loadHtmlRawContent() {
+      if (!this.fileUrl) {
+        this.htmlRawError = '无文件 URL'
+        return
+      }
+      // data: URL 同步解码
+      if (this.fileUrl.startsWith('data:text/html')) {
+        try {
+          const idx = this.fileUrl.indexOf(',')
+          if (idx < 0) {
+            this.htmlRawError = 'data: URL 格式错误'
+            return
+          }
+          const meta = this.fileUrl.slice(0, idx)
+          const payload = this.fileUrl.slice(idx + 1)
+          if (meta.includes(';base64')) {
+            const bin = atob(payload)
+            const bytes = new Uint8Array(bin.length)
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+            this.htmlRawContent = new TextDecoder('utf-8').decode(bytes)
+          } else {
+            this.htmlRawContent = decodeURIComponent(payload)
+          }
+        } catch (e) {
+          this.htmlRawError = (e && e.message) || String(e)
+        }
+        return
+      }
+      this.htmlRawLoading = true
+      this.htmlRawError = ''
+      try {
+        const resp = await fetch(this.fileUrl)
+        if (!resp.ok) throw new Error('HTTP ' + resp.status)
+        this.htmlRawContent = await resp.text()
+      } catch (e) {
+        console.warn('[FilePreviewPanel] fetch HTML 原文失败:', e)
+        this.htmlRawError = (e && e.message) || String(e)
+      } finally {
+        this.htmlRawLoading = false
+      }
     },
     async toggleFileTree() {
       this.showFileTree = !this.showFileTree
@@ -712,6 +810,51 @@ export default {
   object-fit: contain;
   border-radius: 4px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+/* HTML 渲染：把渲染/原文两个区域统一在一个 fixed-height 容器里切显示，避免互相 reflow。
+   contain: layout paint style 让 iframe 的内部绘制不冒泡到祖先（少一次 paint pass） */
+.html-render-area {
+  position: relative;
+  display: block;
+  width: 100%;
+  /* 撑满 content-container 的可视高度：减掉顶栏(64) + tabs(56) + content-container padding(32) */
+  height: calc(100vh - 64px - 56px - 32px);
+  overflow: hidden;
+  isolation: isolate;
+  contain: layout paint style;
+}
+.html-preview-iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: none;
+  border-radius: 6px;
+  background: var(--bg-primary);
+  /* GPU compositor：v-show 切显示时不需要重新 paint ancestor */
+  transform: translateZ(0);
+}
+.html-raw-content {
+  /* 撑满父区域；超过就内部滚动 */
+  width: 100%;
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  box-sizing: border-box;
+}
+.html-raw-content pre.plain-text-content {
+  width: 100%;
+  margin: 0;
+}
+.loading-hint,
+.error-hint {
+  padding: 24px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+.error-hint {
+  color: #d9534f;
 }
 
 /* Markdown 样式 */

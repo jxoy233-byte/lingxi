@@ -201,8 +201,20 @@ class ChatWorkflow:
         从 AIMessage 的 content 中提取 tool_calls 并填充到 tool_calls 字段
         某些模型（如 Grok）将 tool_calls 以 JSON 字符串形式放在 content 中，
         需要手动解析并转换为标准格式
+
+        优先级：function_calling 已识别的 tool_calls 优先；content 嵌入的 <tool_calls>
+        只在 function_calling 没结果时作为 fallback。两路并存时不去重、不合并，避免冲突。
+        末尾统一按 MAX_PARALLEL_TOOL_CALLS 截断，防止 "AI 发疯" 时并发过多。
         """
         ai_message.additional_kwargs = {"type": AIMessageType.REASONING.value}
+
+        # function_calling 已识别出 tool_calls → 直接信任，不解析 content
+        existing_tool_calls = getattr(ai_message, "tool_calls", None) or []
+        if existing_tool_calls:
+            MAX_PARALLEL_TOOL_CALLS = 3
+            if len(existing_tool_calls) > MAX_PARALLEL_TOOL_CALLS:
+                ai_message.tool_calls = existing_tool_calls[:MAX_PARALLEL_TOOL_CALLS]
+            return ai_message
 
         # 保护 None 值
         raw_content = ai_message.content
@@ -297,7 +309,6 @@ class ChatWorkflow:
                     tool_calls.append(tc)
 
         if tool_calls:
-            # 限制单次并发 tool_calls 数量，取前 3 个
             MAX_PARALLEL_TOOL_CALLS = 3
             ai_message.tool_calls = tool_calls[:MAX_PARALLEL_TOOL_CALLS]
             ai_message.content = content
@@ -421,8 +432,15 @@ class ChatWorkflow:
             r'<thought>.*?</thought>',
             r'<reasoning>.*?</reasoning>',
             r'<think>.*?</think>',
-            # 清除 MiniMax-M3 生成的 expanded 格式工具调用标签
-            r'<tool_call>.*?</tool_call>',
+            # ⚠️ MiniMax-M3 工具调用方括号包装：[</tool_call>] / [/tool_calls] / [<]tool_call[>] / [<]tool_calls[>]
+            # 两种位置会出现：① 作为孤立标记（下面的 wrapper pattern 直接清掉）；
+            # ② 跟在裸的 <tool_call> 开头后面当闭合（这种情况下 wrapper 必须被允许作为 </tool_call>
+            # 的可选外壳，否则会留下半截 tool_call 块）。
+            # 关键顺序：先跑 tool_call 块整匹配（含 wrapper 闭合），wrapper 正则放后面做兜底。
+            # 否则 wrapper 先剥 → tool_call 块找不到闭合 → 留下 <tool_call>\n<invoke>...</invoke> 这种半截垃圾。
+            r'<tool_call>.*?\[?</?tool_calls?>\]?',
+            r'\[</?tool_calls?>\]',
+            r'\[<\]tool_calls?\[>\]',
             r'\]<]minimax\[[>]',
             r'\[<invoke \w+>\]\[<(\w+)>(.*?)</\1>\]',
             # M3 在 </tool_calls> 之后多余的左括号，不破坏合法的 <tool_calls> 块本身
@@ -595,9 +613,17 @@ class ChatWorkflow:
             resp = await self._filter_thinking_content(resp)
             text = self._get_message_content_string(resp).strip()
 
-            # 长度兜底（[80, 2500] 范围）
-            if not text or len(text) < 80 or len(text) > 2500:
+            # 长度兜底（[80, 4000] 范围）
+            # 上限放宽到 4000：有时候内容密度实在压不下去（如多文件路径/技术栈细节），
+            # 留 2000 上限会导致 summary 不停被丢弃，state 永远不收敛。
+            if not text or len(text) < 80 or len(text) > 4000:
                 self.logger.warning(f"ReAct 压缩结果长度异常: {len(text)}")
+                return None
+            # 孤立标点/方括号兜底：filter 漏网时，过滤后只剩 MiniMax-M3 tool_call 残骸
+            # （单个 ] / [ / ( / 等），strip() 不掉，但也不构成有效摘要。
+            # 双保险：即使将来 wrapper 正则没覆盖到新格式，也不会把 1 字符的垃圾写进 state。
+            if len(text) < 80 and re.fullmatch(r'[\[\]\s()（）.,;:!?。，；：、！？\-_]+', text):
+                self.logger.warning(f"ReAct 压缩结果为孤立标点残骸: {repr(text)}")
                 return None
             # 残留标签兜底
             if re.search(r"(\\u|<tool_calls>|<thinking>)", text):
@@ -718,213 +744,6 @@ class ChatWorkflow:
 
         return workflow.compile()
 
-    async def _create_graph_core(self):
-        """
-        工程化图工作流对象:
-        usr_input -> input_parse -> context_assembly
-        -> agent_node -> tool_node --↗
-                   ↘--> final_node
-        """
-        TOOL_CALL_TIMES = 50
-
-        tools = await self.mcp_client.get_tools()
-        tools.append(sub_agent)
-
-        workflow = StateGraph(ChatStateCore2)
-
-        async def input_parse_node(state: ChatStateCore2, config: RunnableConfig):
-            """
-            输入预处理节点
-            """
-            thread_id = config["configurable"]["thread_id"]
-
-            input_msg = []
-            messages = list(state["messages"])
-
-            processed_files = await self.graph_process_files.ainvoke({"messages": messages})
-
-            files_input: HumanMessage = processed_files["combined_result"]
-
-            user_input: List[HumanMessage] = await self._get_current_round_conversation_except_files( messages)
-            history_messages = await self._get_validate_history_message(messages, 4)
-
-            # 续接时注入的中断原因 SystemMessage 需要加到 input_msg 最前面，否则 LLM 看不到
-            for msg in messages:
-                if isinstance(msg, SystemMessage) and ("中断原因" in msg.content or "中断续接" in msg.content):
-                    input_msg.insert(0, msg)
-                    break
-
-            input_msg.extend(history_messages)
-            input_msg.append(files_input)
-            input_msg.extend(user_input)
-
-            imp_ipt = await self.llm_imp_ipt.ainvoke({"messages": input_msg})
-
-            imp_ipt = await self._filter_thinking_content(imp_ipt)
-
-            imp_ipt_content = imp_ipt.content
-            imp_ipt_additional_kwargs = imp_ipt.additional_kwargs
-            imp_ipt_id = imp_ipt.id
-            imp_ipt_response_metadata = imp_ipt.response_metadata
-
-            imp_ipt = HumanMessage(content=imp_ipt_content, additional_kwargs=imp_ipt_additional_kwargs, id=imp_ipt_id, response_metadata=imp_ipt_response_metadata)
-
-            return {
-                "imp_ipt": imp_ipt,
-                "context": [],
-                "memory_user_message": imp_ipt_content,
-                "memory_tool_results": [],
-                "memory_tool_calls": [],
-                "memory_ai_response": None,
-                "tool_call_times": 0,
-            }
-
-        async def context_assembly_node(state: ChatStateCore2, config: RunnableConfig):
-            thread_id = config["configurable"]["thread_id"]
-
-            context = []
-            tool_results = state["memory_tool_results"] if state["memory_tool_results"] else []
-
-            if not state["context"]:
-                memory_message :SystemMessage = self.memory_manager.get_relevant_memory(thread_id)
-                context.append(memory_message)
-
-                imp_ipt_msg: HumanMessage = state["imp_ipt"]
-                context.append(imp_ipt_msg)
-            else:
-                context = state["context"]
-
-                cycle_msg = await self._get_current_round_conversation_cycling(state["messages"])
-                context.extend(cycle_msg,)
-
-                for msg in cycle_msg:
-                    if isinstance(msg, ToolMessage):
-                        content_string = self._get_message_content_string(msg)
-                        tool_results.append(content_string)
-
-            return {
-                "context": context,
-                "memory_tool_results": tool_results
-            }
-
-        async def agent_node(state: ChatStateCore2, config: RunnableConfig):
-            """AI 代理节点，处理用户消息并决定是否调用工具"""
-            thread_id = config["configurable"]["thread_id"]
-            await self.check_and_trigger_interrupt(thread_id)
-
-            input_msg = state["context"]
-
-            if isinstance(state["messages"][-1], SystemMessage):
-                if "中断" in state["messages"][-1].content:
-                    input_msg.append(state["messages"][-1])
-
-            if state["memory_tool_calls"]:
-                tool_calls = state["memory_tool_calls"]
-            else:
-                tool_calls = []
-
-            tool_call_times = state["tool_call_times"]
-
-            if tool_call_times >= TOOL_CALL_TIMES:
-                interrupt_msg = SystemMessage(content=f"已超过{TOOL_CALL_TIMES}次调用工具次数，请停止工具调用提前结束对话")
-                input_msg.append(interrupt_msg)
-
-            response = await self.agent_llm.ainvoke({"messages": input_msg})
-
-            response = await self._filter_thinking_content(response)
-
-            # 符合ToolNode节点的AIMessage(REASONING)
-            format_response = self._parse_content_to_tool_calls(response)
-
-            # 验证工具调用
-            for tool_call in format_response.tool_calls:
-                tool_name = tool_call.get("name", "")
-                args = tool_call.get("args", {})
-
-                # todo
-                # if tool_call not in tools:
-                #     self.logger.warning(f"没有工具: {tool_call}")
-
-                # code 必须有 code 参数
-                if tool_name == "code" and "code" not in args:
-                    warning_results = self._generate_tool_param_warning("code", ["code"])
-                    tool_call["args"]["code"] = warning_results
-                    self.logger.warning(f"code 缺少 code 参数: {args}")
-
-                # cmd 必须有 command 参数
-                if tool_name == "cmd" and "command" not in args:
-                    warning_results = self._generate_tool_param_warning("cmd", ["command"])
-                    tool_call["args"]["command"] = warning_results
-                    self.logger.warning(f"cmd 缺少 command 参数: {args}")
-
-                tool_call["args"]["session_id"] = thread_id
-                tool_calls.append(tool_call)
-
-            tool_call_times += 1
-
-            return {
-                "messages": [format_response],
-                "tool_call_times": tool_call_times,
-                "memory_tool_calls": tool_calls,
-            }
-
-        tool_execution_node = ToolNode(tools=tools)  # 使用langgraph官方工具节点
-
-        async def final_node(state: ChatStateCore2, config: RunnableConfig):
-            thread_id = config["configurable"]["thread_id"]
-            await self.check_and_trigger_interrupt(thread_id)
-
-            input_msg = state["context"]
-
-            response = await self.llm_core.ainvoke({"messages": input_msg})
-
-            response = await self._filter_thinking_content( response)
-
-            # AIMessage字段支持解包复制
-            response_dict = dict(response)
-            response_dict["additional_kwargs"] = {**response.additional_kwargs, "type": AIMessageType.SUMMARY.value}
-
-            response_better = AIMessage(**response_dict)
-
-            # 提取AI回复内容用于memory
-            memory_ai_response = self._get_message_content_string(response_better)
-
-            return {
-                "messages": [response_better],
-                "memory_ai_response": memory_ai_response,
-            }
-
-        workflow.add_node("input_parse_node", input_parse_node)
-        workflow.add_node("context_assembly_node", context_assembly_node)
-        workflow.add_node("agent_node", agent_node)
-        workflow.add_node("tool_execution_node", tool_execution_node)
-        workflow.add_node("final_node", final_node)
-
-        def route_agent_output(state: ChatStateCore2) -> str:
-            """根据代理输出决定下一步"""
-            last_message = state["messages"][-1]
-            if isinstance(last_message, AIMessage) and hasattr(last_message, "tool_calls") and last_message.tool_calls:
-                return "tool_execution_node"
-            return "should_end_node"
-
-        workflow.set_entry_point("input_parse_node")
-        workflow.add_edge("input_parse_node", "context_assembly_node")
-
-        workflow.add_edge("context_assembly_node", "agent_node")
-
-        workflow.add_conditional_edges("agent_node",
-            route_agent_output,
-            {
-                "tool_execution_node": "tool_execution_node",
-                "final_node": "final_node",
-            }
-        )
-
-        workflow.add_edge("tool_execution_node", "context_assembly_node")
-
-        workflow.add_edge("final_node", END)
-
-        return workflow.compile(checkpointer=self.checkpointer)
 
     async def _create_graph_core2(self):
         """
@@ -1120,7 +939,14 @@ class ChatWorkflow:
                     tool_call["args"]["command"] = warning_results
                     self.logger.warning(f"cmd 缺少 command 参数: {args}")
 
-                tool_call["args"]["session_id"] = thread_id
+                # ctime 保底：ctime 不接受任何参数（除 framework 注入的 session_id）。
+                if tool_name == "ctime":
+                    extra = {k: v for k, v in args.items() if k != "session_id"}
+                    if extra:
+                        self.logger.warning(f"ctime 不应有除 session_id 外的参数，已清空: extra={extra}")
+                        tool_call["args"] = {}
+
+                tool_call["args"]["session_id"] = thread_id or ""
                 tool_calls.append(tool_call)
 
                 counts += 1

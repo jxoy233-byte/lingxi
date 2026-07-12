@@ -1,12 +1,14 @@
 # 数据分析技能规范
 
-- *执行时，默认执行路径工作目录就可以了'/'*
-- *直接使用包装好工具函数来执行就可以了*
+> 本文件是 DataAnalysis skill 的 AI 可读规范。完整方法签名 / 边界条件见
+> `skills.DataAnalysis.ChatDataAnalysisFormat` 的 docstring。
+
+- *合理使用包装好的函数*
 
 ## 导入
 
 ```python
-from ChatMe.ChatDataAnalysis.format import ChatDataAnalysisFormat
+from skills.DataAnalysis import ChatDataAnalysisFormat
 ```
 
 ## 使用流程
@@ -27,13 +29,12 @@ INPUT_FILE = ChatDataAnalysisFormat.get_file_dir("cached/{session_id}/xxx.suffix
 ### Step 3: 获取输出目录
 
 ```python
-config = da.get_config()
-OUTPUT_DIR = config["output_dir"]  # 例如: cached/{session_id}/data_analysis/gen_001/
+OUTPUT_DIR = da.output_dir  # 例如: cached/{session_id}/data_analysis/gen_001/
 ```
 
 ### Step 4: 编写分析代码（重要）
 
-**⚠️ 同一个分析任务中，不要重复创建 ChatDataAnalysisFormat 实例或重复调用 get_config()，每次调用 get_config() 都复用同一个 OUTPUT_DIR。**
+**⚠️ 同一个分析任务中，不要重复创建 ChatDataAnalysisFormat 实例或重复访问 `output_dir` 属性，多次访问会复用同一个 generation。**
 
 **数据分析可以选择包含mermaid图**：在分析过程中，同步生成数据处理流程图（graph）或 ER 关系图（erDiagram），用于可视化业务流程和数据关系，帮助理解分析逻辑。
 
@@ -42,15 +43,14 @@ OUTPUT_DIR = config["output_dir"]  # 例如: cached/{session_id}/data_analysis/g
 ```python
 # ✅ 正确写法 - 一次初始化，全程复用 OUTPUT_DIR
 da = ChatDataAnalysisFormat(session_id=session_id)
-config = da.get_config()
-OUTPUT_DIR = config["output_dir"]
-# 后续所有代码全部使用 OUTPUT_DIR，不再调用 da.get_config()
+OUTPUT_DIR = da.output_dir
+# 后续所有代码全部使用 OUTPUT_DIR，不再访问 da.output_dir
 ```
 
 **如果需要开启新一轮分析（新的一批图表/报告），显式调用 new_generation()：**
 ```python
 gen = da.new_generation()  # 显式自增，返回新的 gen_xxx
-OUTPUT_DIR = da.base_dir / gen
+OUTPUT_DIR = str(da.base_dir / gen)
 ```
 
 ### Step 5: 保存分析文件（强制 da.save_*）
@@ -116,7 +116,7 @@ cached/
 
 ## 注意事项
 
-- `get_config()` 在首次调用时自动获取或创建 gen_001，后续调用复用同一个目录，**不会自增**
+- `output_dir` 属性在首次访问时自动获取或创建 gen_001，后续访问复用同一个目录，**不会自增**
 - 如果需要开启新一轮分析（新的一批图表/报告），调用 `da.new_generation()` 显式创建新 gen
 - 删除操作通过 `da.remove_dir("gen_xxx")` 进行
 - AI 根据场景自行决定输出格式（png/svg/html/pdf）和图表参数

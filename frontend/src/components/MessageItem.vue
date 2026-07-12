@@ -306,6 +306,7 @@ import katex from 'katex'
 import 'katex/dist/katex.min.css'
 import mermaid from 'mermaid'
 import FilePreviewModal from './FilePreviewModal.vue'
+import { sanitizeHtml } from '@/utils/sanitize.js'
 
 // 初始化 mermaid（可拖拽交互）
 mermaid.initialize({
@@ -508,7 +509,8 @@ export default {
           let html = marked(this.preprocessContent(content))
           // 再渲染 LaTeX 数学公式
           html = this.renderLatex(html)
-          return html
+          // v-html 注入前过 DOMPurify（挡 <script>、内联事件；iframe 强制 sandbox）
+          return sanitizeHtml(html)
         } catch (error) {
           console.error('Markdown 渲染失败:', error, '原始内容:', this.message.content)
           // 降级处理，直接返回纯文本
@@ -532,7 +534,8 @@ export default {
       try {
         let html = marked(this.preprocessContent(quote))
         html = this.renderLatex(html)
-        return html
+        // v-html 注入前过 DOMPurify（挡 <script>、内联事件）
+        return sanitizeHtml(html)
       } catch (error) {
         console.error('引用块 Markdown 渲染失败:', error)
         return this.escapeHtml(quote)
@@ -758,16 +761,22 @@ export default {
         // HTML 类型
         if (['html', 'htm'].includes(ext)) {
           const src = isOssUrl ? cleanPath : `/static/${cleanPath}`
+          // iframe 内通常是 sandbox 生成的可视化（Plotly / Bokeh / ECharts），需要 JS + 下载弹窗；
+          // 加上 allow-same-origin：Plotly 等库会调 parent.postMessage，需要知道父页 origin 才能正常传 target origin，
+          //   否则只能用 null 当 target origin，spec 不允许 → Plotly 报错 → 图表渲染中断。
+          // 内容来自后端生成的 trustworthy 脚本（LLM 产物 + CDN 库），不打开 allow-top-navigation 等敏感权限
+          // referrerpolicy="no-referrer"：不向外发 Referer
+          // 按钮用 data-action 而非 onclick：DOMPurify 默认剥 inline event handler，靠 Vue 事件代理分发
           return `<div class="file-render-block" data-path="${cleanPath}" data-oss-url="${isOssUrl ? cleanPath : ''}" data-type="html" data-name="${filename}">
-            <iframe src="${src}" class="file-render-iframe"></iframe>
-            <button class="fullscreen-btn" onclick="window.handleIframeFullscreen && window.handleIframeFullscreen(this)" title="查看预览"></button>
-            <button class="download-btn" onclick="window.handleFileDownload(event, this)" title="下载"></button>
+            <iframe src="${src}" class="file-render-iframe" sandbox="allow-scripts allow-popups allow-same-origin" referrerpolicy="no-referrer"></iframe>
+            <button class="fullscreen-btn" data-action="iframe-fullscreen" title="查看预览"></button>
+            <button class="download-btn" data-action="file-download" title="下载"></button>
           </div>`
         }
 
         // Mermaid 语法类型（.mmd）- 流程图/ER图等
         if (ext === 'mmd') {
-          return `<div class="file-render-block" data-path="${cleanPath}" data-oss-url="${isOssUrl ? cleanPath : ''}" data-type="mmd" data-name="${filename}" onclick="window.handleMermaidPreview && window.handleMermaidPreview(this)" style="cursor:pointer;">
+          return `<div class="file-render-block" data-path="${cleanPath}" data-oss-url="${isOssUrl ? cleanPath : ''}" data-type="mmd" data-name="${filename}" data-action="mermaid-preview" style="cursor:pointer;">
             <div class="mermaid-loading">加载中...</div>
           </div>`
         }
@@ -1081,7 +1090,7 @@ export default {
       this.previewVisible = true
     },
 
-    // iframe 预览（使用 FilePreviewModal）
+    // iframe 预览（HTML 文件走 FilePreviewPanel 展开，与工作树文件预览一致，不再弹浮窗）
     handleIframePreview(btn) {
       event.stopPropagation()
       const container = btn.closest('.file-render-block')
@@ -1093,20 +1102,26 @@ export default {
       const src = iframe.src
       const name = container.dataset.name || 'file.html'
       const ext = (name.split('.').pop() || 'html').toLowerCase()
-      const mimeType = ext === 'html' || ext === 'htm'
-        ? 'text/html'
-        : (container.dataset.type || 'text/html')
 
-      this.previewFile = {
+      // 走与 mermaid 一致的 preview-file 事件 → App.vue 打开 FilePreviewPanel
+      // 同时 fetch 一次源码作为 text_content，让 panel 的「原文」tab 有内容
+      this.$emit('preview-file', {
         name: name,
+        suffix: '.' + ext,
+        type: 'text/html',
+        file_type: 'HTML',
+        url: src,
         preview_url: src,
         iframe_url: src,
-        file_type: 'HTML',
-        type: mimeType,
-        suffix: '.' + ext,
-        preview_method: 'iframe'
-      }
-      this.previewVisible = true
+        preview_method: 'iframe',
+        text_content: '',
+        content: ''
+      })
+
+      // 异步 fetch 源码，更新 text_content（panel 内的原文 tab 用）
+      fetch(src).then(r => r.ok ? r.text() : Promise.reject(r.status)).then(text => {
+        this.$emit('preview-file-text-update', { url: src, text_content: text, content: text })
+      }).catch(() => { /* fetch 失败保持原文 tab 空，不影响渲染 tab */ })
     },
 
     // 兼容旧的方法名（避免被其他地方引用时崩溃）
@@ -1784,6 +1799,28 @@ export default {
     // 事件委托：捕获 .message-text 内 <img class="markdown-image"> 的点击
     // 替代原先 window.markdownImageClick 内联 onclick（刷新会话/复用组件时不可靠）
     handleMarkdownImageClick(e) {
+      // 1. data-action 事件代理：v-html 中的 .file-render-block 按钮 / mmd 容器
+      //    改用 data-action 属性（DOMPurify 默认剥 onclick，无法再 inline 触发）
+      const actionEl = e.target.closest && e.target.closest('[data-action]')
+      if (actionEl) {
+        const action = actionEl.dataset.action
+        if (action === 'iframe-fullscreen') {
+          e.preventDefault()
+          e.stopPropagation()
+          this.handleIframePreview(actionEl)
+          return
+        }
+        if (action === 'file-download') {
+          this.handleFileDownload(e, actionEl)
+          return
+        }
+        if (action === 'mermaid-preview') {
+          e.stopPropagation()
+          this.handleMermaidPreview(actionEl)
+          return
+        }
+      }
+      // 2. 原有：markdown image 预览
       const img = e.target.closest && e.target.closest('img.markdown-image, img[data-markdown-image="true"]')
       if (!img) return
       this.handleImagePreview(img)
@@ -3482,4 +3519,67 @@ export default {
 .file-render-block[data-type="mmd"] .mermaid-rendered svg:active {
   cursor: grabbing;
 }
+
+/* === v-html 注入的 .file-render-block + iframe + 按钮需要非 scoped ===
+   （scoped 选择器要 data-v-xxx 才命中，v-html 出来的元素不带这个属性，
+   所以这些规则要从 scoped 块搬到这里来） */
+.file-render-block {
+  position: relative;
+  display: block;
+  margin: 12px 0;
+  /* 防止 iframe 内部绝对定位元素溢出到外层 markdown */
+  overflow: hidden;
+  isolation: isolate;
+}
+.file-render-iframe {
+  display: block;
+  width: 100%;
+  height: 400px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  /* iframe 内容溢出时仅在 iframe 内部滚动，避免影响外层排版 */
+  overflow: hidden;
+}
+.file-render-block .download-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.5);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'/%3E%3Cpolyline points='7 10, 12 15, 17 10'/%3E%3Cline x1='12' y1='15' x2='12' y2='3'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 14px 14px;
+  border: none;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.2s;
+  z-index: 10;
+}
+.file-render-block:hover .download-btn { opacity: 1; }
+.file-render-block .download-btn:hover { background: rgba(0, 0, 0, 0.7); }
+.file-render-block .fullscreen-btn {
+  position: absolute;
+  top: 8px;
+  right: 44px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.5);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 3H5a2 2 0 0 0-2 2v3'/%3E%3Cpath d='M21 8V5a2 2 0 0 0-2-2h-3'/%3E%3Cpath d='M3 16v3a2 2 0 0 0 2 2h3'/%3E%3Cpath d='M16 21h3a2 2 0 0 0 2-2v-3'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 14px 14px;
+  border: none;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.2s;
+  z-index: 10;
+}
+.file-render-block:hover .fullscreen-btn { opacity: 1; }
+.file-render-block .fullscreen-btn:hover { background: rgba(0, 0, 0, 0.7); }
 </style>

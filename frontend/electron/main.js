@@ -39,7 +39,7 @@ const MIME_TYPES = {
 
 /**
  * file:// 协议拦截器：
- * - /chat/* 和 /static/* 转发到后端（等价于 dev 模式下 Vite proxy）
+ * - /chat/*、/static/*、/admin/* 转发到后端（等价于 dev 模式下 Vite proxy）
  * - 其他 file:// 请求直接从磁盘读盘返回（避开 net.fetch(file://) 在协议回调里可能的循环 / MIME 问题）
  *
  * 必须在 app.whenReady() 里调用（内部访问 session.defaultSession 要求 ready），
@@ -59,7 +59,7 @@ function registerFileProtocolInterceptor() {
     // 流式响应（SSE）的请求体也会被丢。
     // SSE 响应（text/event-stream）需要 duplex: 'half' 才能正确转发流式请求体；
     // 同时显式重建 Response 把 body stream 透传，避免 protocol.handle buffer。
-    if (pathname.startsWith('/chat/') || pathname.startsWith('/static/')) {
+    if (pathname.startsWith('/chat/') || pathname.startsWith('/static/') || pathname.startsWith('/admin/')) {
       const backendUrl = `${config.backend.apiUrl}${pathname}${url.search}`
       console.log('[proxy]', request.method, request.url, '→', backendUrl)
 

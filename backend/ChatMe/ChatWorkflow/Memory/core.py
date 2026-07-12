@@ -31,6 +31,18 @@ async def _filter_thinking_content(ai_response: AIMessage) -> AIMessage:
         r'<thought>.*?</thought>',
         r'<reasoning>.*?</reasoning>',
         r'<think>.*?</think>',
+        # ⚠️ MiniMax-M3 工具调用方括号包装：[</tool_call>] / [/tool_calls] / [<]tool_call[>] / [<]tool_calls[>]
+        # 两种位置会出现：① 作为孤立标记（下面的 wrapper pattern 直接清掉）；
+        # ② 跟在裸的 <tool_call> 开头后面当闭合（这种情况下 wrapper 必须被允许作为 </tool_call>
+        # 的可选外壳，否则会留下半截 tool_call 块）。
+        # 关键顺序：先跑 tool_call 块整匹配（含 wrapper 闭合），wrapper 正则放后面做兜底。
+        r'<tool_call>.*?\[?</?tool_calls?>\]?',
+        r'\[</?tool_calls?>\]',
+        r'\[<\]tool_calls?\[>\]',
+        r'\]<]minimax\[[>]',
+        r'\[<invoke \w+>\]\[<(\w+)>(.*?)</\1>\]',
+        # M3 在 </tool_calls> 之后多余的左括号，不破坏合法的 <tool_calls> 块本身
+        r'(?<=</tool_calls>)\s*\[+',
     ]
 
     if isinstance(content, str):

@@ -21,6 +21,7 @@
         :key="conv.session_id"
         :conversation="conv"
         :is-active="conv.session_id === activeSessionId"
+        :is-streaming="activeStreamingSessions.has(conv.session_id)"
         @select="$emit('select-conversation', conv.session_id)"
         @delete="$emit('delete-conversation', conv.session_id)"
         @update-title="$emit('update-title', $event)"
@@ -57,6 +58,11 @@ export default {
     activeSessionId: {
       type: String,
       default: null
+    },
+    activeStreamingSessions: {
+      // 正在流式的 session_id Set；由 App.vue 整 Set 替换触发响应式
+      type: Set,
+      default: () => new Set()
     }
   },
   data() {

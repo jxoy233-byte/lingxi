@@ -1,27 +1,30 @@
 <template>
   <div
-    :class="['conversation-item', { 'active': isActive }]"
+    :class="['conversation-item', { 'active': isActive, 'streaming': isStreaming }]"
     @click="$emit('select')"
     @contextmenu.prevent="$emit('refresh')"
   >
-    <div
-      class="conv-title"
-      @dblclick.stop="startEdit"
-      v-if="!isEditing"
-      :title="conversation.title"
-    >
-      {{ truncatedTitle }}
+    <div class="conv-title-row">
+      <span v-if="isStreaming" class="streaming-dot" title="正在流式响应…"></span>
+      <div
+        class="conv-title"
+        @dblclick.stop="startEdit"
+        v-if="!isEditing"
+        :title="conversation.title"
+      >
+        {{ truncatedTitle }}
+      </div>
+      <input
+        v-else
+        v-model="editTitle"
+        class="conv-title-input"
+        @blur="saveTitle"
+        @keyup.enter="saveTitle"
+        @keyup.esc="cancelEdit"
+        @click.stop
+        ref="titleInput"
+      />
     </div>
-    <input
-      v-else
-      v-model="editTitle"
-      class="conv-title-input"
-      @blur="saveTitle"
-      @keyup.enter="saveTitle"
-      @keyup.esc="cancelEdit"
-      @click.stop
-      ref="titleInput"
-    />
     <div class="conv-time">{{ formattedTime }}</div>
     <button @click.stop="$emit('delete')" class="delete-btn">×</button>
   </div>
@@ -36,6 +39,10 @@ export default {
       required: true
     },
     isActive: {
+      type: Boolean,
+      default: false
+    },
+    isStreaming: {
       type: Boolean,
       default: false
     }
@@ -128,28 +135,49 @@ export default {
   background: var(--bg-hover);
 }
 
+.conv-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.streaming-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--button-bg);
+  flex-shrink: 0;
+  animation: blink 1.2s ease-in-out infinite;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 0.3; }
+  50%      { opacity: 1; }
+}
+
 .conv-title {
   font-size: 14px;
   font-weight: 500;
-  margin-bottom: 4px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  padding-right: 24px;
+  flex: 1;
+  min-width: 0;
   cursor: text;
 }
 
 .conv-title-input {
   font-size: 14px;
   font-weight: 500;
-  margin-bottom: 4px;
   padding: 2px 4px;
   background-color: var(--bg-primary);
   border: 1px solid var(--button-bg);
   border-radius: 4px;
   color: var(--text-primary);
   outline: none;
-  width: calc(100% - 32px);
+  flex: 1;
+  min-width: 0;
 }
 
 .conv-time {

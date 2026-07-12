@@ -6,6 +6,7 @@
         :conversations="conversations"
         :active-session-id="currentSessionId"
         :mobile-open="sidebarMobileOpen"
+        :active-streaming-sessions="_activeStreamingSessions"
         @toggle="toggleSidebar"
         @new-chat="createNewChat"
         @select-conversation="loadConversation"
@@ -247,7 +248,11 @@ export default {
       resumeInputText: '',  // 续接输入文本
       currentQuote: null,  // 当前引用内容：{ content: string }
       settingsVisible: false,  // 设置弹窗可见性
-      _sessionHadError: new Set()  // 处于「出错保护态」的 session_id 集合；保护态下不重拉 messages，避免覆盖错误气泡
+      _sessionHadError: new Set(),  // 处于「出错保护态」的 session_id 集合；保护态下不重拉 messages，避免覆盖错误气泡
+      // —— 流式会话状态保存（用户切走后 SSE 继续推进 + 切回时恢复 in-progress）——
+      _activeStreamingSessions: new Set(),  // 正在流式的 session_id 集合；驱动侧栏小点 + loadConversation 分支判断
+      _streamingMessages: new Map(),       // session_id -> 当前 messages 数组引用（与 this.messages 同源）
+      _streamingMeta: new Map()            // session_id -> { aiIndex, responseStartTime, userMessage, lastUserMessage }
     }
   },
   mounted() {
@@ -392,6 +397,9 @@ export default {
         const reader = response.body.getReader()
         const decoder = new TextDecoder()
 
+        // 锁定发起续接时的 session id（SSE 消费期间如果用户切换走，要按原始 sid 处理）
+        const requestSessionId = this.currentSessionId
+
         // 找到最后一个 AI 消息，用它的索引续接
         let aiMessageIndex = -1
         for (let i = this.messages.length - 1; i >= 0; i--) {
@@ -424,6 +432,16 @@ export default {
         this.startResponseTimer()
         // 预先取最后一个用户消息，给 error 兜底分支用（避免 SSE 上来就 error 时 lastUserMessage 未定义）
         const lastUserMessage = this.messages.filter(m => m.role === 'user').pop()?.content || ''
+        // —— 注册流式会话快照（用户切走时 SSE 增量写到 snapshot，切回时直接恢复 this.messages）——
+        this._activeStreamingSessions.add(this.currentSessionId)
+        this._streamingMessages.set(this.currentSessionId, this.messages)
+        this._streamingMeta.set(this.currentSessionId, {
+          aiIndex: aiMessageIndex,
+          responseStartTime: this.responseStartTime,
+          userMessage: lastUserMessage,
+          lastUserMessage
+        })
+        this._activeStreamingSessions = new Set(this._activeStreamingSessions)
         let buffer = ''
         while (true) {
           const { done, value } = await reader.read()
@@ -436,6 +454,91 @@ export default {
             if (!line) continue
             try {
               const data = JSON.parse(line)
+
+              // 检查用户是否已切换走（续接中的会话切走，行为同 sendMessage：增量写 snapshot）
+              const sessionChanged = this.currentSessionId !== requestSessionId
+              if (sessionChanged) {
+                const snap = this._streamingMessages.get(requestSessionId)
+                const meta = this._streamingMeta.get(requestSessionId)
+                if (snap && meta) {
+                  if (data.type === 'content') {
+                    snap[meta.aiIndex] = {
+                      ...snap[meta.aiIndex],
+                      content: snap[meta.aiIndex].content + data.content,
+                      thinkingDone: true,
+                      responseTime: this.currentResponseTime
+                    }
+                  } else if (data.type === 'reasoning') {
+                    snap[meta.aiIndex] = {
+                      ...snap[meta.aiIndex],
+                      reasoning: snap[meta.aiIndex].reasoning + data.content,
+                      responseTime: this.currentResponseTime
+                    }
+                  } else if (data.type === 'tool_call_name') {
+                    const toolCalls = [...(snap[meta.aiIndex].toolCalls || [])]
+                    toolCalls.push({ name: data.content.name, args: data.content.args, id: data.id, result: null })
+                    snap[meta.aiIndex] = { ...snap[meta.aiIndex], toolCalls, responseTime: this.currentResponseTime }
+                  } else if (data.type === 'tool_call_result') {
+                    const toolCalls = [...(snap[meta.aiIndex].toolCalls || [])]
+                    const idx = toolCalls.findIndex(tc => tc.id === data.id)
+                    if (idx !== -1) toolCalls[idx] = { ...toolCalls[idx], result: data.content }
+                    snap[meta.aiIndex] = { ...snap[meta.aiIndex], toolCalls, responseTime: this.currentResponseTime }
+                  } else if (data.type === 'done') {
+                    this.stopResponseTimer()
+                    const wasError = snap[meta.aiIndex]?.error === true
+                    snap[meta.aiIndex] = {
+                      ...snap[meta.aiIndex],
+                      role: 'ai',
+                      content: wasError ? snap[meta.aiIndex].content : data.full_response,
+                      reasoning: snap[meta.aiIndex].reasoning,
+                      toolCalls: snap[meta.aiIndex].toolCalls,
+                      thinkingDone: true,
+                      streaming: false,
+                      responseTime: this.currentResponseTime,
+                      checkpointId: data.checkpoint_id || null,
+                      error: wasError || undefined
+                    }
+                    this._activeStreamingSessions.delete(requestSessionId)
+                    this._streamingMessages.delete(requestSessionId)
+                    this._streamingMeta.delete(requestSessionId)
+                    this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                    if (requestSessionId) {
+                      await this.refreshSession(requestSessionId)
+                    }
+                  } else if (data.type === 'error') {
+                    this._sessionHadError.add(requestSessionId)
+                    snap[meta.aiIndex] = {
+                      ...snap[meta.aiIndex],
+                      content: `续接失败：${data.error}`,
+                      error: true,
+                      errorMessage: data.error,
+                      streaming: false,
+                      thinkingDone: true,
+                      responseTime: this.currentResponseTime
+                    }
+                    this._activeStreamingSessions.delete(requestSessionId)
+                    this._streamingMessages.delete(requestSessionId)
+                    this._streamingMeta.delete(requestSessionId)
+                    this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                    if (requestSessionId) {
+                      await this.updateTitleOnly(requestSessionId, lastUserMessage)
+                    }
+                  } else if (data.type === 'interrupt') {
+                    this.stopResponseTimer()
+                    const reason = data.reason || '用户主动中断'
+                    snap[meta.aiIndex] = { ...snap[meta.aiIndex], streaming: false, interruptReason: reason }
+                    this._activeStreamingSessions.delete(requestSessionId)
+                    this._streamingMessages.delete(requestSessionId)
+                    this._streamingMeta.delete(requestSessionId)
+                    this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                    if (requestSessionId) {
+                      await this.refreshSession(requestSessionId)
+                    }
+                  }
+                }
+                continue
+              }
+
               if (data.type === 'init') {
                 this.hasReceivedInit = true
                 if (data.session_id) {
@@ -477,6 +580,11 @@ export default {
                 }
                 // lastUserMessage 已在 SSE 循环前预先取出
                 await this.updateTitleAndRefresh(this.currentSessionId, lastUserMessage)
+                // 清理快照
+                this._activeStreamingSessions.delete(requestSessionId)
+                this._streamingMessages.delete(requestSessionId)
+                this._streamingMeta.delete(requestSessionId)
+                this._activeStreamingSessions = new Set(this._activeStreamingSessions)
               } else if (data.type === 'error') {
                 console.error('续接响应错误:', data.error)
                 this._sessionHadError.add(this.currentSessionId)
@@ -492,6 +600,11 @@ export default {
                 if (this.currentSessionId) {
                   await this.updateTitleOnly(this.currentSessionId, lastUserMessage)
                 }
+                // 清理快照
+                this._activeStreamingSessions.delete(requestSessionId)
+                this._streamingMessages.delete(requestSessionId)
+                this._streamingMeta.delete(requestSessionId)
+                this._activeStreamingSessions = new Set(this._activeStreamingSessions)
               } else if (data.type === 'interrupt') {
                 this.stopResponseTimer()
                 const reason = data.reason || '用户主动中断'
@@ -499,6 +612,11 @@ export default {
                 this.isInterrupted = true
                 this.isInterruptedSessionId = data.session_id || this.currentSessionId || this._pendingInterruptSessionId
                 this.interruptReason = reason
+                // 清理快照
+                this._activeStreamingSessions.delete(requestSessionId)
+                this._streamingMessages.delete(requestSessionId)
+                this._streamingMeta.delete(requestSessionId)
+                this._activeStreamingSessions = new Set(this._activeStreamingSessions)
               }
             } catch (e) {
               console.error('解析 SSE 消息失败:', e, '原始内容:', line)
@@ -508,7 +626,67 @@ export default {
         if (buffer.trim()) {
           try {
             const data = JSON.parse(buffer.trim())
-            if (data.type === 'reasoning') {
+            const sessionChanged = this.currentSessionId !== requestSessionId
+            if (sessionChanged) {
+              const snap = this._streamingMessages.get(requestSessionId)
+              const meta = this._streamingMeta.get(requestSessionId)
+              if (snap && meta) {
+                if (data.type === 'content') {
+                  snap[meta.aiIndex] = {
+                    ...snap[meta.aiIndex],
+                    content: snap[meta.aiIndex].content + data.content,
+                    thinkingDone: true,
+                    responseTime: this.currentResponseTime
+                  }
+                } else if (data.type === 'reasoning') {
+                  snap[meta.aiIndex] = {
+                    ...snap[meta.aiIndex],
+                    reasoning: snap[meta.aiIndex].reasoning + data.content,
+                    responseTime: this.currentResponseTime
+                  }
+                } else if (data.type === 'done') {
+                  this.stopResponseTimer()
+                  const wasError = snap[meta.aiIndex]?.error === true
+                  snap[meta.aiIndex] = {
+                    ...snap[meta.aiIndex],
+                    role: 'ai',
+                    content: wasError ? snap[meta.aiIndex].content : data.full_response,
+                    reasoning: snap[meta.aiIndex].reasoning,
+                    toolCalls: snap[meta.aiIndex].toolCalls,
+                    thinkingDone: true,
+                    streaming: false,
+                    responseTime: this.currentResponseTime,
+                    checkpointId: data.checkpoint_id || null,
+                    error: wasError || undefined
+                  }
+                  this._activeStreamingSessions.delete(requestSessionId)
+                  this._streamingMessages.delete(requestSessionId)
+                  this._streamingMeta.delete(requestSessionId)
+                  this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                  if (requestSessionId) {
+                    await this.refreshSession(requestSessionId)
+                  }
+                } else if (data.type === 'error') {
+                  this._sessionHadError.add(requestSessionId)
+                  snap[meta.aiIndex] = {
+                    ...snap[meta.aiIndex],
+                    content: `续接失败：${data.error}`,
+                    error: true,
+                    errorMessage: data.error,
+                    streaming: false,
+                    thinkingDone: true,
+                    responseTime: this.currentResponseTime
+                  }
+                  this._activeStreamingSessions.delete(requestSessionId)
+                  this._streamingMessages.delete(requestSessionId)
+                  this._streamingMeta.delete(requestSessionId)
+                  this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                  if (requestSessionId) {
+                    await this.updateTitleOnly(requestSessionId, lastUserMessage)
+                  }
+                }
+              }
+            } else if (data.type === 'reasoning') {
               this.messages[aiMessageIndex] = {
                 ...this.messages[aiMessageIndex],
                 reasoning: this.messages[aiMessageIndex].reasoning + data.content,
@@ -550,6 +728,11 @@ export default {
                 responseTime: this.currentResponseTime,
                 checkpointId: data.checkpoint_id || null
               }
+              // 清理快照
+              this._activeStreamingSessions.delete(requestSessionId)
+              this._streamingMessages.delete(requestSessionId)
+              this._streamingMeta.delete(requestSessionId)
+              this._activeStreamingSessions = new Set(this._activeStreamingSessions)
             } else if (data.type === 'interrupt') {
               this.stopResponseTimer()
               const reason = data.reason || '用户主动中断'
@@ -557,6 +740,11 @@ export default {
               this.isInterrupted = true
               this.isInterruptedSessionId = data.session_id || this.currentSessionId || this._pendingInterruptSessionId
               this.interruptReason = reason
+              // 清理快照
+              this._activeStreamingSessions.delete(requestSessionId)
+              this._streamingMessages.delete(requestSessionId)
+              this._streamingMeta.delete(requestSessionId)
+              this._activeStreamingSessions = new Set(this._activeStreamingSessions)
             }
           } catch (e) {
             console.error('解析缓冲区剩余数据失败:', e)
@@ -968,6 +1156,17 @@ export default {
         this.startResponseTimer()
         this.$refs.messageList?.scrollToBottom({ force: true })
 
+        // —— 注册流式会话快照（行为同 sendMessage）——
+        this._activeStreamingSessions.add(requestSessionId)
+        this._streamingMessages.set(requestSessionId, this.messages)
+        this._streamingMeta.set(requestSessionId, {
+          aiIndex: aiMessageIndex,
+          responseStartTime: this.responseStartTime,
+          userMessage: restreamMessage,
+          lastUserMessage: restreamMessage
+        })
+        this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+
         // 5. 调用 message_stream
         const streamResponse = await fetch('/chat/', {
           method: 'POST',
@@ -1003,6 +1202,90 @@ export default {
 
             try {
               const data = JSON.parse(line)
+
+              // sessionChanged 分支：restream 时如果用户切走，增量写到 snapshot
+              const sessionChanged = this.currentSessionId !== requestSessionId
+              if (sessionChanged) {
+                const snap = this._streamingMessages.get(requestSessionId)
+                const meta = this._streamingMeta.get(requestSessionId)
+                if (snap && meta) {
+                  if (data.type === 'content') {
+                    snap[meta.aiIndex] = {
+                      ...snap[meta.aiIndex],
+                      content: snap[meta.aiIndex].content + data.content,
+                      thinkingDone: true,
+                      responseTime: this.currentResponseTime
+                    }
+                  } else if (data.type === 'reasoning') {
+                    snap[meta.aiIndex] = {
+                      ...snap[meta.aiIndex],
+                      reasoning: snap[meta.aiIndex].reasoning + data.content,
+                      responseTime: this.currentResponseTime
+                    }
+                  } else if (data.type === 'tool_call_name') {
+                    const toolCalls = [...(snap[meta.aiIndex].toolCalls || [])]
+                    toolCalls.push({ name: data.content.name, args: data.content.args, id: data.id, result: null })
+                    snap[meta.aiIndex] = { ...snap[meta.aiIndex], toolCalls, responseTime: this.currentResponseTime }
+                  } else if (data.type === 'tool_call_result') {
+                    const toolCalls = [...(snap[meta.aiIndex].toolCalls || [])]
+                    const idx = toolCalls.findIndex(tc => tc.id === data.id)
+                    if (idx !== -1) toolCalls[idx] = { ...toolCalls[idx], result: data.content }
+                    snap[meta.aiIndex] = { ...snap[meta.aiIndex], toolCalls, responseTime: this.currentResponseTime }
+                  } else if (data.type === 'done') {
+                    this.stopResponseTimer()
+                    const wasError = snap[meta.aiIndex]?.error === true
+                    snap[meta.aiIndex] = {
+                      ...snap[meta.aiIndex],
+                      role: 'ai',
+                      content: wasError ? snap[meta.aiIndex].content : data.full_response,
+                      reasoning: snap[meta.aiIndex].reasoning,
+                      toolCalls: snap[meta.aiIndex].toolCalls,
+                      thinkingDone: true,
+                      streaming: false,
+                      responseTime: this.currentResponseTime,
+                      checkpointId: data.checkpoint_id || null,
+                      error: wasError || undefined
+                    }
+                    this._activeStreamingSessions.delete(requestSessionId)
+                    this._streamingMessages.delete(requestSessionId)
+                    this._streamingMeta.delete(requestSessionId)
+                    this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                    if (requestSessionId) {
+                      await this.refreshSession(requestSessionId)
+                    }
+                  } else if (data.type === 'error') {
+                    this._sessionHadError.add(requestSessionId)
+                    snap[meta.aiIndex] = {
+                      ...snap[meta.aiIndex],
+                      content: `重新对话失败：${data.error}`,
+                      error: true,
+                      errorMessage: data.error,
+                      streaming: false,
+                      thinkingDone: true,
+                      responseTime: this.currentResponseTime
+                    }
+                    this._activeStreamingSessions.delete(requestSessionId)
+                    this._streamingMessages.delete(requestSessionId)
+                    this._streamingMeta.delete(requestSessionId)
+                    this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                    if (requestSessionId) {
+                      await this.updateTitleOnly(requestSessionId, restreamMessage)
+                    }
+                  } else if (data.type === 'interrupt') {
+                    this.stopResponseTimer()
+                    const reason = data.reason || '用户主动中断'
+                    snap[meta.aiIndex] = { ...snap[meta.aiIndex], streaming: false, interruptReason: reason }
+                    this._activeStreamingSessions.delete(requestSessionId)
+                    this._streamingMessages.delete(requestSessionId)
+                    this._streamingMeta.delete(requestSessionId)
+                    this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                    if (requestSessionId) {
+                      await this.refreshSession(requestSessionId)
+                    }
+                  }
+                }
+                continue
+              }
 
               if (data.type === 'init') {
                 this.hasReceivedInit = true
@@ -1059,14 +1342,24 @@ export default {
 
                 // 4. 最后刷新会话
                 await this.refreshCurrentConversation()
+                // 清理快照
+                this._activeStreamingSessions.delete(requestSessionId)
+                this._streamingMessages.delete(requestSessionId)
+                this._streamingMeta.delete(requestSessionId)
+                this._activeStreamingSessions = new Set(this._activeStreamingSessions)
               } else if (data.type === 'interrupt') {
-              this.stopResponseTimer()
-              const reason = data.reason || '用户主动中断'
-              this.messages[aiMessageIndex] = { ...this.messages[aiMessageIndex], streaming: false, interruptReason: reason }
-              this.isInterrupted = true
-              this.isInterruptedSessionId = data.session_id || requestSessionId || this._pendingInterruptSessionId
-              this.interruptReason = reason
-            }
+                this.stopResponseTimer()
+                const reason = data.reason || '用户主动中断'
+                this.messages[aiMessageIndex] = { ...this.messages[aiMessageIndex], streaming: false, interruptReason: reason }
+                this.isInterrupted = true
+                this.isInterruptedSessionId = data.session_id || requestSessionId || this._pendingInterruptSessionId
+                this.interruptReason = reason
+                // 清理快照
+                this._activeStreamingSessions.delete(requestSessionId)
+                this._streamingMessages.delete(requestSessionId)
+                this._streamingMeta.delete(requestSessionId)
+                this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+              }
             } catch (e) {
               console.error('解析消息失败:', e)
             }
@@ -1172,13 +1465,14 @@ export default {
       // 停止计时器
       this.stopResponseTimer()
 
-      // 如果有正在思考的 AI 消息（正在流式输出），移除它
-      if (this.isLoading && this.messages.length > 0) {
-        const lastMsg = this.messages[this.messages.length - 1]
-        if (lastMsg?.role === 'ai' && lastMsg?.streaming) {
-          this.messages.pop()
-        }
-      }
+      // ⚠️ 不要 pop 流式 AI 消息：
+      //   _streamingMessages 与 this.messages 是引用同源，pop 会污染 snapshot，
+      //   导致后续 SSE 切走分支写到错位的 aiIndex 上。
+      // - 切到非流式会话：this.messages 会被 loadConversation 整体替换
+      // - 切到流式会话：this.messages = snapshot（自带 in-progress AI 消息）
+      // - createNewChat：this.messages = []
+      // - confirmDelete：当前会话被删除
+      // 三条路径下原 pop 都多余且有害。
 
       this.isLoading = false
       this.isRestreaming = false
@@ -1200,51 +1494,70 @@ export default {
         return
       }
 
-      // 清理之前正在加载的状态
-      this.cleanupLoadingState()
-      // 清理输入框和文件
-      this.$refs.messageInput?.clearInput()
-      // 清理引用状态
-      this.currentQuote = null
+      // —— 检查目标会话是否正在流式响应 —— 是的话走 snapshot 恢复分支
+      const isTargetStreaming = this._activeStreamingSessions.has(sessionId)
+      const snapshot = this._streamingMessages.get(sessionId)
+      const meta = this._streamingMeta.get(sessionId)
 
-      try {
-        const response = await fetch(`/chat/${sessionId}/conversation`)
-        if (response.ok) {
-          const conversation = await response.json()
-          this.currentSessionId = sessionId
+      if (!isTargetStreaming) {
+        // 切到非流式会话：清理旧状态
+        this.cleanupLoadingState()
+        // 清理输入框和文件
+        this.$refs.messageInput?.clearInput()
+        // 清理引用状态
+        this.currentQuote = null
+      }
+      // 切到流式会话：不调 cleanupLoadingState，保留 isLoading=true + 当前 responseTimer + 计时基准
 
-          if (this.$route.params.sessionId !== sessionId) {
-            this.$router.push(`/${sessionId}`)
-          }
+      this.currentSessionId = sessionId
+      if (this.$route.params.sessionId !== sessionId) {
+        this.$router.push(`/${sessionId}`)
+      }
 
-          this.messages = this.processConversationMessages(conversation.messages)
-
-          // 检查是否处于中断状态（interrupted_info 存在表示有中断原因）
-          const interruptedReason = conversation.interrupted_info?.reason
-          if (interruptedReason) {
-            this.isInterrupted = true
-            this.isInterruptedSessionId = sessionId
-            this.interruptReason = interruptedReason
-            // 将中断原因写入最后一条 AI 消息
-            const lastAiMsg = this.messages.filter(m => m.role === 'ai').pop()
-            if (lastAiMsg) {
-              lastAiMsg.interruptReason = interruptedReason
-            }
-          } else {
-            this.isInterrupted = false
-            this.isInterruptedSessionId = null
-            this.interruptReason = ''
-          }
-        } else if (response.status === 404) {
-          // 会话不存在（可能是新会话通过 URL 进入），当作新会话处理
-          this.currentSessionId = sessionId
-          this.messages = []
-          if (this.$route.params.sessionId !== sessionId) {
-            this.$router.push(`/${sessionId}`)
-          }
+      if (isTargetStreaming && snapshot) {
+        // —— 恢复流式状态（不走 get_conversation，否则会覆盖 in-progress 消息）——
+        this.messages = snapshot
+        this.isLoading = true
+        if (meta) {
+          this.currentAiMessageIndex = meta.aiIndex
+          this.responseStartTime = meta.responseStartTime
+          // 重启 timer 用同一个 responseStartTime（让 currentResponseTime 继续推进）
+          this.startResponseTimer()
         }
-      } catch (error) {
-        console.error('加载对话失败:', error)
+        // 流式中的会话不应该处于中断态，但保险起见清掉
+        this.isInterrupted = false
+        this.isInterruptedSessionId = null
+        this.interruptReason = ''
+      } else {
+        try {
+          const response = await fetch(`/chat/${sessionId}/conversation`)
+          if (response.ok) {
+            const conversation = await response.json()
+            this.messages = this.processConversationMessages(conversation.messages)
+
+            // 检查是否处于中断状态（interrupted_info 存在表示有中断原因）
+            const interruptedReason = conversation.interrupted_info?.reason
+            if (interruptedReason) {
+              this.isInterrupted = true
+              this.isInterruptedSessionId = sessionId
+              this.interruptReason = interruptedReason
+              // 将中断原因写入最后一条 AI 消息
+              const lastAiMsg = this.messages.filter(m => m.role === 'ai').pop()
+              if (lastAiMsg) {
+                lastAiMsg.interruptReason = interruptedReason
+              }
+            } else {
+              this.isInterrupted = false
+              this.isInterruptedSessionId = null
+              this.interruptReason = ''
+            }
+          } else if (response.status === 404) {
+            // 会话不存在（可能是新会话通过 URL 进入），当作新会话处理
+            this.messages = []
+          }
+        } catch (error) {
+          console.error('加载对话失败:', error)
+        }
       }
     },
 
@@ -1279,6 +1592,12 @@ export default {
     },
     // 右键刷新指定会话
     async refreshConversation(sessionId) {
+      // 流式中的会话跳过 messages 重拉，避免覆盖 in-progress 状态（只刷侧栏）
+      if (this._activeStreamingSessions.has(sessionId)) {
+        console.log(`[流式保护] 跳过流式中会话的 messages 刷新: ${sessionId}`)
+        await this.refreshSession(sessionId)
+        return
+      }
       try {
         // 出错保护态：跳过 messages 刷新，只更新侧边栏
         if (this._sessionHadError.has(sessionId)) {
@@ -1350,6 +1669,11 @@ export default {
       } catch (error) {
         console.error('删除对话失败:', error)
       } finally {
+        // 清理 snapshot 引用（无论后端删除是否成功，前端不再持有该 session 的状态）
+        this._activeStreamingSessions.delete(this.deleteTargetId)
+        this._streamingMessages.delete(this.deleteTargetId)
+        this._streamingMeta.delete(this.deleteTargetId)
+        this._activeStreamingSessions = new Set(this._activeStreamingSessions)
         this.showDeleteConfirm = false
         this.deleteTargetId = null
       }
@@ -1515,6 +1839,18 @@ export default {
 
         this.startResponseTimer()
 
+        // —— 注册流式会话快照（用户切走时 SSE 增量写到 snapshot，切回时直接恢复 this.messages）——
+        this._activeStreamingSessions.add(requestSessionId)
+        this._streamingMessages.set(requestSessionId, this.messages)
+        this._streamingMeta.set(requestSessionId, {
+          aiIndex: aiMessageIndex,
+          responseStartTime: this.responseStartTime,
+          userMessage: message,
+          lastUserMessage: message
+        })
+        // 整 Set 替换一次触发子组件响应式（Vue 2 不监听 Set 内部变化）
+        this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+
         let buffer = ''
 
         while (true) {
@@ -1540,19 +1876,90 @@ export default {
               console.log('[SSE] sessionChanged:', sessionChanged)
 
               if (sessionChanged) {
-                // 会话已切换，继续消费流但不更新本地消息
-                if (data.type === 'done') {
-                  this.stopResponseTimer()
-                  // 刷新原会话（不更新 this.messages）
-                  if (requestSessionId) {
-                    await this.refreshSession(requestSessionId)
-                  }
-                } else if (data.type === 'error') {
-                  // 原会话出错 → 记入保护 + 更新侧边栏标题（不碰当前 this.messages）
-                  console.error('AI响应错误（原会话）:', data.error)
-                  this._sessionHadError.add(requestSessionId)
-                  if (requestSessionId) {
-                    await this.updateTitleOnly(requestSessionId, message)
+                // 会话已切换：SSE 增量只写到 snapshot（不碰 this.messages，它是别的会话数组）
+                const snap = this._streamingMessages.get(requestSessionId)
+                const meta = this._streamingMeta.get(requestSessionId)
+                if (snap && meta) {
+                  if (data.type === 'content') {
+                    snap[meta.aiIndex] = {
+                      ...snap[meta.aiIndex],
+                      content: snap[meta.aiIndex].content + data.content,
+                      thinkingDone: true,
+                      responseTime: this.currentResponseTime
+                    }
+                  } else if (data.type === 'reasoning') {
+                    snap[meta.aiIndex] = {
+                      ...snap[meta.aiIndex],
+                      reasoning: snap[meta.aiIndex].reasoning + data.content,
+                      responseTime: this.currentResponseTime
+                    }
+                  } else if (data.type === 'tool_call_name') {
+                    const toolCalls = [...(snap[meta.aiIndex].toolCalls || [])]
+                    toolCalls.push({ name: data.content.name, args: data.content.args, id: data.id, result: null })
+                    snap[meta.aiIndex] = { ...snap[meta.aiIndex], toolCalls, responseTime: this.currentResponseTime }
+                  } else if (data.type === 'tool_call_result') {
+                    const toolCalls = [...(snap[meta.aiIndex].toolCalls || [])]
+                    const idx = toolCalls.findIndex(tc => tc.id === data.id)
+                    if (idx !== -1) toolCalls[idx] = { ...toolCalls[idx], result: data.content }
+                    snap[meta.aiIndex] = { ...snap[meta.aiIndex], toolCalls, responseTime: this.currentResponseTime }
+                  } else if (data.type === 'done') {
+                    this.stopResponseTimer()
+                    const wasError = snap[meta.aiIndex]?.error === true
+                    snap[meta.aiIndex] = {
+                      ...snap[meta.aiIndex],
+                      role: 'ai',
+                      content: wasError ? snap[meta.aiIndex].content : data.full_response,
+                      reasoning: snap[meta.aiIndex].reasoning,
+                      toolCalls: snap[meta.aiIndex].toolCalls,
+                      thinkingDone: true,
+                      streaming: false,
+                      responseTime: this.currentResponseTime,
+                      checkpointId: data.checkpoint_id || null,
+                      error: wasError || undefined
+                    }
+                    // 清理快照：小点消失；后续切回该会话走 get_conversation 拿后端最终态
+                    this._activeStreamingSessions.delete(requestSessionId)
+                    this._streamingMessages.delete(requestSessionId)
+                    this._streamingMeta.delete(requestSessionId)
+                    this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                    if (requestSessionId) {
+                      await this.refreshSession(requestSessionId)
+                    }
+                  } else if (data.type === 'error') {
+                    console.error('AI响应错误（原会话）:', data.error)
+                    this._sessionHadError.add(requestSessionId)
+                    snap[meta.aiIndex] = {
+                      ...snap[meta.aiIndex],
+                      content: `抱歉，出现了一些问题：${data.error}`,
+                      error: true,
+                      errorMessage: data.error,
+                      streaming: false,
+                      thinkingDone: true,
+                      responseTime: this.currentResponseTime
+                    }
+                    this._activeStreamingSessions.delete(requestSessionId)
+                    this._streamingMessages.delete(requestSessionId)
+                    this._streamingMeta.delete(requestSessionId)
+                    this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                    if (requestSessionId) {
+                      await this.updateTitleOnly(requestSessionId, meta.lastUserMessage || message)
+                    }
+                  } else if (data.type === 'interrupt') {
+                    this.stopResponseTimer()
+                    const reason = data.reason || '用户主动中断'
+                    snap[meta.aiIndex] = {
+                      ...snap[meta.aiIndex],
+                      streaming: false,
+                      interruptReason: reason
+                    }
+                    this._activeStreamingSessions.delete(requestSessionId)
+                    this._streamingMessages.delete(requestSessionId)
+                    this._streamingMeta.delete(requestSessionId)
+                    this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                    // 仍调 refreshSession 更新侧栏（后端已完成中断落库）
+                    if (requestSessionId) {
+                      await this.refreshSession(requestSessionId)
+                    }
                   }
                 }
                 continue
@@ -1619,6 +2026,11 @@ export default {
                   checkpointId: data.checkpoint_id || null,
                   error: wasError || undefined
                 }
+                // 流式结束：清理快照（this.messages 与 snapshot 同源，下一次切换走 get_conversation）
+                this._activeStreamingSessions.delete(requestSessionId)
+                this._streamingMessages.delete(requestSessionId)
+                this._streamingMeta.delete(requestSessionId)
+                this._activeStreamingSessions = new Set(this._activeStreamingSessions)
 
                 // 如果是新建会话（没有 session_id）
                 if (!requestSessionId && data.session_id) {
@@ -1660,6 +2072,11 @@ export default {
                     responseTime: this.currentResponseTime
                   }
                 }
+                // 流式结束：清理快照
+                this._activeStreamingSessions.delete(requestSessionId)
+                this._streamingMessages.delete(requestSessionId)
+                this._streamingMeta.delete(requestSessionId)
+                this._activeStreamingSessions = new Set(this._activeStreamingSessions)
                 // 仅更新标题，不重拉 messages（保护错误气泡）
                 if (requestSessionId) {
                   await this.updateTitleOnly(requestSessionId, message)
@@ -1675,6 +2092,11 @@ export default {
                 this.isInterrupted = true
                 this.isInterruptedSessionId = data.session_id || this.currentSessionId || this._pendingInterruptSessionId
                 this.interruptReason = reason
+                // 中断：清理快照（后端已落中断状态，下次切回走 get_conversation 看到完整中断态）
+                this._activeStreamingSessions.delete(requestSessionId)
+                this._streamingMessages.delete(requestSessionId)
+                this._streamingMeta.delete(requestSessionId)
+                this._activeStreamingSessions = new Set(this._activeStreamingSessions)
               }
             } catch (e) {
               console.error('解析 SSE 消息失败:', e, '原始内容:', line)
@@ -1688,15 +2110,64 @@ export default {
             const sessionChanged = this.currentSessionId !== requestSessionId
 
             if (sessionChanged) {
-              // 会话已切换，刷新原会话
-              if (data.type === 'done' && requestSessionId) {
-                await this.refreshSession(requestSessionId)
-              } else if (data.type === 'error' && requestSessionId) {
-                // 兜底：buffer 最后一条事件是 error，且用户已切走
-                // 仍然给原会话打上保护态 + 只更新标题
-                console.error('AI响应错误（buffer，原会话）:', data.error)
-                this._sessionHadError.add(requestSessionId)
-                await this.updateTitleOnly(requestSessionId, message)
+              // 会话已切换：把 buffer 尾部事件也应用到 snapshot
+              const snap = this._streamingMessages.get(requestSessionId)
+              const meta = this._streamingMeta.get(requestSessionId)
+              if (snap && meta) {
+                if (data.type === 'content') {
+                  snap[meta.aiIndex] = {
+                    ...snap[meta.aiIndex],
+                    content: snap[meta.aiIndex].content + data.content,
+                    thinkingDone: true,
+                    responseTime: this.currentResponseTime
+                  }
+                } else if (data.type === 'reasoning') {
+                  snap[meta.aiIndex] = {
+                    ...snap[meta.aiIndex],
+                    reasoning: snap[meta.aiIndex].reasoning + data.content,
+                    responseTime: this.currentResponseTime
+                  }
+                } else if (data.type === 'done') {
+                  const wasError = snap[meta.aiIndex]?.error === true
+                  snap[meta.aiIndex] = {
+                    ...snap[meta.aiIndex],
+                    role: 'ai',
+                    content: wasError ? snap[meta.aiIndex].content : data.full_response,
+                    reasoning: snap[meta.aiIndex].reasoning,
+                    toolCalls: snap[meta.aiIndex].toolCalls,
+                    thinkingDone: true,
+                    streaming: false,
+                    responseTime: this.currentResponseTime,
+                    checkpointId: data.checkpoint_id || null,
+                    error: wasError || undefined
+                  }
+                  this._activeStreamingSessions.delete(requestSessionId)
+                  this._streamingMessages.delete(requestSessionId)
+                  this._streamingMeta.delete(requestSessionId)
+                  this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                  if (requestSessionId) {
+                    await this.refreshSession(requestSessionId)
+                  }
+                } else if (data.type === 'error') {
+                  console.error('AI响应错误（buffer，原会话）:', data.error)
+                  this._sessionHadError.add(requestSessionId)
+                  snap[meta.aiIndex] = {
+                    ...snap[meta.aiIndex],
+                    content: `抱歉，出现了一些问题：${data.error}`,
+                    error: true,
+                    errorMessage: data.error,
+                    streaming: false,
+                    thinkingDone: true,
+                    responseTime: this.currentResponseTime
+                  }
+                  this._activeStreamingSessions.delete(requestSessionId)
+                  this._streamingMessages.delete(requestSessionId)
+                  this._streamingMeta.delete(requestSessionId)
+                  this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                  if (requestSessionId) {
+                    await this.updateTitleOnly(requestSessionId, message)
+                  }
+                }
               }
             } else {
               if (data.type === 'reasoning') {
@@ -1758,6 +2229,11 @@ export default {
                 if (this.currentSessionId) {
                   await this.updateTitleAndRefresh(this.currentSessionId, message)
                 }
+                // 清理快照
+                this._activeStreamingSessions.delete(requestSessionId)
+                this._streamingMessages.delete(requestSessionId)
+                this._streamingMeta.delete(requestSessionId)
+                this._activeStreamingSessions = new Set(this._activeStreamingSessions)
               }
             }
           } catch (e) {
@@ -1908,13 +2384,12 @@ export default {
       this.responseTimerInterval = setInterval(() => {
         if (this.responseStartTime) {
           this.currentResponseTime = Math.floor((Date.now() - this.responseStartTime) / 100) / 10
-          // 实时更新当前 AI 消息的响应时间
-          if (this.currentAiMessageIndex !== null && this.messages[this.currentAiMessageIndex]) {
-            this.messages[this.currentAiMessageIndex] = {
-              ...this.messages[this.currentAiMessageIndex],
-              responseTime: this.currentResponseTime
-            }
-          }
+          // ⚠️ 不要在这里直接写 this.messages[currentAiMessageIndex].responseTime：
+          //   用户切到别的会话后 this.messages 是别的数组，currentAiMessageIndex 仍指原会话 AI 下标，
+          //   会把别人的消息 responseTime 写脏。
+          //   改由 SSE handler 在每个 content/reasoning/tool_call 事件里同步写入
+          //   this.messages[aiIndex]（用户当前看的会话）或 snap[meta.aiIndex]（切走的会话），
+          //   这样切走期间 SSE handler 也会把最新 currentResponseTime 写到正确位置。
         }
       }, 100)
     },

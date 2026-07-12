@@ -592,25 +592,63 @@ class ChatWorkflow:
 
         return draft
 
+    def _build_clean_compact_input(self, context: List[BaseMessage]) -> Optional[List[BaseMessage]]:
+        """
+        重组 context 为"干净"格式喂给 react_compact_llm：
+
+        - Header 原文保留（imp_ipt 之前所有内容：含 memory_sys）
+        - SystemMessage 原文保留（旧【ReAct 摘要】 / [Warning] / 中断原因等）
+        - ToolMessage 原文保留（多段连续，不合并）
+        - AIMessage 全部丢弃（不再喂 tool_calls 字段给模型，避免诱导其生成 tool_call 块）
+        - 找不到 imp_ipt 时返回 None
+
+        返回一个不含 AIMessage 的 BaseMessage 列表。
+        """
+        imp_ipt_idx = self._find_imp_ipt_idx(context)
+        if imp_ipt_idx is None:
+            return None
+
+        # 重组：剥离 AIMessage，其他类型保留
+        cleaned: List[BaseMessage] = []
+        for i, msg in enumerate(context):
+            if i <= imp_ipt_idx:
+                cleaned.append(msg)                       # 头部原文保留
+            elif isinstance(msg, (SystemMessage, ToolMessage)):
+                cleaned.append(msg)                       # 元 SystemMessage / 多段 ToolMessage 原文保留
+            # AIMessage 全部丢弃（防 tool_calls 字段诱导）
+
+        return cleaned
+
     async def _try_compact_react(self, context: List[BaseMessage]) -> Optional[str]:
         """
-        喂整体 context 给 react_compact_llm，让它从 BaseMessage 类型识别长期记忆 / 用户意图 / ReAct 轨迹并产出 ≤2000 字中文摘要。
+        把 context 重组为"干净"格式（剥离 AIMessage 结构）后喂给 react_compact_llm，
+        让它从用户意图 + 工具调用历史 + 元 SystemMessage 中产出 ≤4000 字中文摘要。
 
-        整体覆盖式：返回新摘要后由 context_assembly_node 替换 context[2] 位置（旧 summary + 中间 ReAct 历史一次性覆盖）。
+        整体覆盖式：返回新摘要后由 context_assembly_node 替换 context[imp_ipt+1] 位置
+        （旧 summary + 中间 ReAct 历史一次性覆盖）。
         失败 / 输出异常一律返回 None，调用方保持 context 不变。
+
+        ⚠️ 关键：剥离 AIMessage 是为了避免 react_compact_llm 模仿 tool_call 结构。
+        即使没绑工具，M3 weights 看到 input 里的 tool_calls 字段也会在 content 里
+        模仿输出 `<tool_calls>...</tool_calls>` 块。剥离 AIMessage 后 input 里没有
+        tool_calls 结构，模仿概率显著降低，不需要再跑 filter。
         """
         if self.react_compact_llm is None:
             return None
         if len(context) < 4:
             return None
 
+        # 重组为干净输入（剥离 AIMessage）
+        clean_input = self._build_clean_compact_input(context)
+        if clean_input is None:
+            return None
+
         timeout_sec = 30
         try:
             resp = await asyncio.wait_for(
-                self.react_compact_llm.ainvoke({"messages": context}),
+                self.react_compact_llm.ainvoke({"messages": clean_input}),
                 timeout=timeout_sec,
             )
-            resp = await self._filter_thinking_content(resp)
             text = self._get_message_content_string(resp).strip()
 
             # 长度兜底（[80, 4000] 范围）
@@ -618,16 +656,6 @@ class ChatWorkflow:
             # 留 2000 上限会导致 summary 不停被丢弃，state 永远不收敛。
             if not text or len(text) < 80 or len(text) > 4000:
                 self.logger.warning(f"ReAct 压缩结果长度异常: {len(text)}")
-                return None
-            # 孤立标点/方括号兜底：filter 漏网时，过滤后只剩 MiniMax-M3 tool_call 残骸
-            # （单个 ] / [ / ( / 等），strip() 不掉，但也不构成有效摘要。
-            # 双保险：即使将来 wrapper 正则没覆盖到新格式，也不会把 1 字符的垃圾写进 state。
-            if len(text) < 80 and re.fullmatch(r'[\[\]\s()（）.,;:!?。，；：、！？\-_]+', text):
-                self.logger.warning(f"ReAct 压缩结果为孤立标点残骸: {repr(text)}")
-                return None
-            # 残留标签兜底
-            if re.search(r"(\\u|<tool_calls>|<thinking>)", text):
-                self.logger.warning("ReAct 压缩结果含残留标签")
                 return None
             return text
         except Exception as e:

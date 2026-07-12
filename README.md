@@ -2,6 +2,8 @@
 
 基于 LangGraph 的多智能体数据分析对话系统。支持流式响应、工具调用、对话记忆管理、文档/图片多模态解析，以及基于 Docker 沙盒的安全 Python 代码执行。同时提供 Web 端和 Electron 桌面端两种运行形态。
 
+> AI 协作者请阅读 [`CLAUDE.md`](CLAUDE.md) 获取完整的工作流说明、关键文件、协作偏好与踩坑记录。
+
 ---
 
 ## 目录
@@ -25,18 +27,16 @@
 
 ## 项目特性
 
-- **多智能体工作流**：基于 LangGraph StateGraph 实现 `input_parse → context_assembly → agent_node ↔ tool_execution_node → final_node` 的循环决策结构
-- **ReAct 流程压缩**：`context_assembly_node` 按"完整工具 loop 节拍"自动压缩长 ReAct 轨迹，imp_ipt 标记做切分锚点，最近 keep 轮原文保留，防止 prompt 撑爆
+- **多智能体工作流**：基于 LangGraph StateGraph 实现 `input_parse → context_assembly → agent_node ↔ tool_execution_node → final_node` 循环
+- **ReAct 流程压缩**：`context_assembly_node` 按完整工具 loop 节拍自动压缩长 ReAct 轨迹，`imp_ipt` 标记做切分锚点，最近 keep 轮原文保留（详见 CLAUDE.md）
 - **流式 SSE 响应**：前端通过 EventSource 实时接收 `content` / `reasoning` / `tool_call_*` / `memory_wait_*` 事件
-- **多模态文件解析**：支持图片（OSS / base64）、文本（CSV / JSON / MD / TXT / XML）、文档（PDF / Word / PowerPoint / Excel），docling + qwen-vl-utils + unstructured 组合方案
-- **Docker 沙盒执行**：基于预启动容器池 + tmpfs 隔离，提供安全的 Python 数据分析代码执行环境
-- **多 LLM Provider**：OpenAI / DeepSeek / 本地 VL 模型（Qwen3-VL-2B）统一抽象，5 个独立 LLM（core / agent / summary / react_compact / imp_ipt）可分别配参
-- **对话记忆管理**：基于 Redis checkpointer 的状态恢复 + 自建 memory manager 的长期记忆；per-thread `asyncio.Lock` + 原子写（`fsync` + `os.replace`）保证并发安全；后台记忆任务按会话串行执行
-- **节点异常统一兜底**：`@node_guard("<node_name>")` 装饰器包住所有 LangGraph 节点，捕获异常后 log + 重抛，SSE 外层统一返回 `error` 事件
-- **final_node dynamic system prompt**：imp_ipt 通过 `_final_system_template.format(imp_ipt=...)` 注入 system 层独占最高注意力位
-- **OSS 对象存储**：阿里云 OSS 集成，图片/文件上传后通过 URL 直接访问
-- **异步日志**：`QueueHandler` + `QueueListener` 解耦业务线程与 IO，`atexit` 统一清理
-- **桌面端打包**：Electron 41 + electron-builder 26 多平台打包（macOS / Windows / Linux），含 `file://` 协议拦截器等价 Vite dev proxy、↻ 页面刷新按钮、IPC `open-web-preview` 网页预览窗口
+- **多模态文件解析**：图片（OSS / base64）、文本（CSV / JSON / MD / TXT / XML）、文档（PDF / Word / PowerPoint / Excel），docling + qwen-vl-utils + unstructured
+- **Docker 沙盒执行**：预启动容器池 + tmpfs 隔离，提供安全的 Python 数据分析环境
+- **多 LLM Provider**：OpenAI / DeepSeek / 本地 VL（Qwen3-VL-2B）统一抽象，5 个独立 LLM（core / agent / summary / react_compact / imp_ipt）可分别配参
+- **对话记忆**：Redis checkpointer 状态恢复 + 自建 memory manager 长期记忆；per-thread Lock + 原子写 + 后台任务串行
+- **节点异常统一兜底**：`@node_guard` 装饰器包住所有 LangGraph 节点，异常后 SSE 外层统一返回 `error` 事件
+- **OSS 对象存储**：阿里云 OSS，图片 / 文件上传后通过 URL 直接访问
+- **桌面端打包**：Electron 41 + electron-builder 26 多平台打包，含 `file://` 协议拦截器等价 Vite dev proxy、↻ 刷新按钮、网页预览窗口
 
 ## 技术栈
 
@@ -63,41 +63,37 @@
 | 桌面端 | Electron 41 + electron-builder 26 |
 | 样式 | CSS Variables + 原生 CSS |
 | Markdown / 数学 | marked + highlight.js + katex |
-| 桌面端关键能力 | `file://` 协议拦截（→ 后端代理）、SSE 流透传、↻ 页面刷新、多环境切换（dev/test/prod） |
-| 特性 | 流式 SSE、主题切换、响应式布局、网页预览、头部刷新按钮 |
+| 桌面端关键能力 | `file://` 协议拦截（→ 后端代理）、SSE 流透传、↻ 刷新按钮、多环境切换 |
+| 特性 | 流式 SSE、主题切换、响应式布局、网页预览 |
 
 ## 架构概览
 
 ```
 ChatMe/
-├── backend/                              # Python 后端
+├── backend/
 │   ├── ChatMe/
-│   │   ├── APIRouter/                    # FastAPI 路由
-│   │   │   ├── main.py                   # /chat 前缀，主对话路由
-│   │   │   ├── static_file.py            # /static 前缀，静态资源
-│   │   │   ├── model_vl.py               # /api 前缀，视觉语言模型
-│   │   │   └── timed_clean.py            # /admin 前缀，定时清理
+│   │   ├── APIRouter/                    # FastAPI 路由（/chat /static /api /admin）
 │   │   ├── ChatMeConfig/                 # 配置管理
 │   │   ├── ChatService/                  # 聊天服务层（SSE 流式输出）
 │   │   │   └── FilesLoaders/             # 文件加载与处理
 │   │   ├── ChatWorkflow/                 # LangGraph 工作流核心
-│   │   │   ├── config/                   # 图配置和 prompts
-│   │   │   ├── decorators.py             # node_guard 节点异常统一兜底装饰器
-│   │   │   ├── mcps/                     # MCP 工具服务器
-│   │   │   └── Memory/                   # 记忆管理
-│   │   ├── LoggingManager/               # 日志
+│   │   │   ├── config/                   # 图配置与 prompts
+│   │   │   ├── decorators.py             # node_guard 节点异常统一兜底
+│   │   │   ├── mcps/                     # MCP 工具服务器 + Docker 沙盒
+│   │   │   └── Memory/                   # 长期记忆管理
+│   │   ├── LoggingManager/               # 异步日志
 │   │   └── test/                         # 单元测试
-│   ├── skills/                           # 技能包（Bocha, Exa, Tavily, ImageParser, DataAnalysis）
-│   ├── .chatme/                          # 局部配置（可选）
+│   ├── skills/                           # 技能包（Bocha / Exa / Tavily / ImageParser / DataAnalysis）
+│   ├── .chatme/                          # 局部配置（仓库内已含）
 │   ├── pyproject.toml
 │   └── main.py                           # FastAPI 入口
-├── sandbox/                              # 代码沙盒 Docker 镜像
-├── frontend/                             # Vue + Electron 前端（详见 frontend/README.md）
+├── sandbox/                              # 代码沙盒 Docker 镜像（Python 3.12）
+├── frontend/
 │   ├── electron/                         # 主进程 / preload / 配置
 │   ├── src/                              # Vue 组件
 │   └── vite.config.js
 ├── docker-compose.yml                    # Redis 服务编排
-├── docker_data/                          # Redis 持久化数据
+├── docker_data/                          # Redis 持久化
 ├── docs/                                 # 综合实践文档（详见 [设计文档](#设计文档)）
 └── .env.example
 ```
@@ -112,27 +108,15 @@ ChatMe/
                               final_node → END
 ```
 
-### 节点说明
-
 | 节点 | 职责 |
 |------|------|
-| `input_parse_node` | 输入预处理、文件解析（docling / VL）、输入优化（`improve_input`），给 `imp_ipt` 打 `additional_kwargs.imp_ipt=True` 标记 |
-| `context_assembly_node` | 上下文组装（拼接 `imp_ipt`、memory、当前轮循环消息）、**ReAct 流程压缩**、中断检查 |
-| `agent_node` | AI 代理决策，决定调用工具或结束；工具调用超过 20 次会发 SystemMessage 提示停止 |
-| `tool_execution_node` | 工具执行（搜索 / MCP 工具 / Docker 沙盒），由 LangGraph 官方 `ToolNode` 提供 |
-| `final_node` | 最终回复生成（独立于 agent 的 LLM），用 **dynamic system prompt** 把 `imp_ipt` 注入 system 层（不参与 messages 序列），输出带 SUMMARY 标记 |
+| `input_parse_node` | 输入预处理、文件解析（docling / VL）、输入优化，给 `imp_ipt` 打 `additional_kwargs.imp_ipt=True` 标记 |
+| `context_assembly_node` | 上下文组装 + **ReAct 流程压缩** + 中断检查 |
+| `agent_node` | AI 决策，决定调用工具或结束；工具调用超过 20 次会注入 SystemMessage 提示停止 |
+| `tool_execution_node` | 工具执行（搜索 / MCP / Docker 沙盒），由 LangGraph 官方 `ToolNode` 提供 |
+| `final_node` | 最终回复生成（独立 LLM），用 dynamic system prompt 把 `imp_ipt` 注入 system 层，输出带 SUMMARY 标记 |
 
-### ReAct 流程压缩
-
-`context_assembly_node` 在每轮组装时按"完整工具 loop 节拍"触发一次整体覆盖式压缩：
-
-- **触发**：完整工具 loop 数 ≥ `REACT_COMPACT_LOOPS`（默认 5）+ `REACT_KEEP_LOOPS`（默认 2）= 7，**且** draft 字符数 ≥ `REACT_COMPACT_MIN_CHARS`（默认 2000），**且** `tool_call_times != last_compact_at_tool_calls`（防 state 恢复或失败后重复触发）。
-- **范围**：压缩前 N-keep 轮 ReAct 轨迹，**最近 keep（默认 2）轮完整 loop 原文保留**；imp_ipt 之前的 memory / 其他 SystemMessage 整体保留。
-- **产物**：以 `【ReAct 摘要】` SystemMessage 形式插入 imp_ipt 之后；写入 state 的 `context_summary_text` / `last_compact_at_tool_calls`。
-- **失败兜底**：长度 [80, 4000] 区间外 / 过滤后只剩孤立标点（filter 漏网的 MiniMax-M3 tool_call 残骸）/ 含残留标签 / LLM 异常一律丢弃，context 保持不变。
-- **专用 LLM**：`get_react_compact_config()`，`REACT_COMPACT_TEMPERATURE=0.3` / `REACT_COMPACT_MAX_TOKENS=5120`（env 可覆盖），目标 ≤ 4000 字中文 markdown。
-
-> AI 协作者请阅读 [`CLAUDE.md`](CLAUDE.md) 获取完整的工作流说明、关键文件、协作偏好。
+State 定义在 `backend/ChatMe/ChatWorkflow/config/models.py`（`ChatStateCore2` / `FileParseState`）。完整工作流说明、ReAct 压缩实现、关键文件、协作偏好见 [`CLAUDE.md`](CLAUDE.md)。
 
 ## 快速开始
 
@@ -262,18 +246,18 @@ ChatMe/
 │   │   │   ├── RedisStateSaver/          # 自建 checkpoint 索引
 │   │   │   └── FilesLoaders/             # 文件加载 + 大文件截断
 │   │   ├── ChatWorkflow/
-│   │   │   ├── core.py                   # 工作流定义，5 个 LLM 实例 + ReAct 流程压缩
-│   │   │   ├── decorators.py             # node_guard 装饰器：所有节点异常统一捕获
+│   │   │   ├── core.py                   # 工作流定义，5 个 LLM 实例 + ReAct 压缩
+│   │   │   ├── decorators.py             # node_guard 装饰器
 │   │   │   ├── config/
-│   │   │   │   ├── graph_config.py       # prompts 和模型配置（含 react_compact）
+│   │   │   │   ├── graph_config.py       # prompts 与模型配置
 │   │   │   │   └── models.py             # ChatStateCore2 / FileParseState
 │   │   │   ├── mcps/
 │   │   │   │   ├── server.py             # FastMCP 工具入口
 │   │   │   │   └── CodeSandboxPool.py    # Docker 容器池
-│   │   │   └── Memory/                   # 长期记忆（per-thread Lock + 原子写）
-│   │   ├── LoggingManager/               # 异步日志（QueueHandler + QueueListener）
+│   │   │   └── Memory/                   # 长期记忆
+│   │   ├── LoggingManager/               # 异步日志
 │   │   └── test/
-│   ├── skills/                           # 技能包（Python 模块）
+│   ├── skills/                           # 技能包
 │   ├── .chatme/
 │   ├── pyproject.toml
 │   └── main.py
@@ -320,26 +304,18 @@ ChatMe/
 
 ## 代码沙盒
 
-`backend/ChatMe/ChatWorkflow/mcps/CodeSandboxPool.py` 提供基于 Docker 容器的安全代码执行能力：
+`backend/ChatMe/ChatWorkflow/mcps/CodeSandboxPool.py` 提供基于 Docker 容器的安全代码执行：
 
 - **预启动容器池**：默认 2 个常驻容器（`sleep infinity`），按需取用 / 归还
-- **隔离环境**：使用 tmpfs 限制 `/tmp`、`/sandbox`（各 64m，noexec）
-- **预装库**：numpy、pandas、scipy、scikit-learn、sympy、matplotlib、seaborn、plotly、bokeh、altair、pygal、pyecharts、folium、networkx、requests、bs4、lxml、openpyxl、xlrd、pillow、jinja2、markupsafe（阿里云 PyPI 镜像）
-- **执行流程**：`docker cp` 注入代码 → `docker exec` 运行 → 清空沙盒目录 → 归还容器
+- **隔离环境**：tmpfs 限制 `/tmp`、`/sandbox`（各 64m，noexec）
+- **预装库**：numpy / pandas / scipy / scikit-learn / sympy / matplotlib / seaborn / plotly / bokeh / altair / pygal / pyecharts / folium / networkx / requests / bs4 / lxml / openpyxl / xlrd / pillow / jinja2 / markupsafe（阿里云 PyPI 镜像）
 - **两个执行入口**：
-  - `execute(code, lang)` —— code 工具：写 `/code.<py|js>` → `python /code.<py|js>` → `rm -f`（避免敏感信息残留）
-  - `execute_command(cmd)` —— cmd 工具：直接 `docker exec -w / sh -c <cmd>`，命令里可含管道 / 重定向 / glob
-- **池锁结构**：`pop → exec → append` 整段在 `with self.lock:` 内串行化，避免 N+1 并发撞空池报 `No available containers in pool`
+  - `execute(code, lang)` —— code 工具：写 `/code.<py|js>` → 运行 → `rm -f`（避免敏感信息残留）
+  - `execute_command(cmd)` —— cmd 工具：直接 `docker exec sh -c <cmd>`，可含管道 / 重定向 / glob
 - **超时保护**：单次执行 30s 超时
 - **自动恢复**：检测到容器未运行时自动重建
 
-容器池大小可在 `SandboxPool(size=N)` 调整。
-
-### 沙盒 vs 本地 venv 语义对齐
-
-- **沙盒**：容器内 cwd=`/`，挂载点 `/cached` / `/skills`；AI 写代码用相对路径 `cached/xxx` / `skills/xxx`。
-- **本地 venv 降级**（`mcps/server.py:_execute_code_in_local`）：宿主机 cwd=`backend/`，`backend/cached/` / `backend/skills/` 真实存在；PYTHONPATH 同时包含 `backend/` + `skills/`，让 `import Exa` / `from ChatMe.xxx import xxx` 都能解析；临时文件写到 `/tmp/code.<py|js>`。
-- 两边写代码时统一使用相对路径，AI 不需要感知运行在沙盒还是本地。
+容器池大小可在 `SandboxPool(size=N)` 调整。沙盒不可用时降级到本机 venv（`backend/cached/` / `backend/skills/`）。
 
 ## MCP 工具
 
@@ -348,17 +324,11 @@ MCP 服务器（`mcps/server.py`，FastMCP 3.x）暴露以下核心工具：
 | 工具 | 说明 |
 |------|------|
 | `execute_code` | 默认在 Docker 沙盒中执行 Python / Node.js 代码（`use_sandbox=False` 降级到本机 venv） |
-| `execute_command` | 默认在 Docker 沙盒中执行白名单内的 shell 命令（`use_sandbox=False` 降级到本机 subprocess.run）；带危险命令检测 |
+| `execute_command` | 默认在 Docker 沙盒中执行白名单内的 shell 命令（`use_sandbox=False` 降级到本机）；带危险命令检测 |
 | `interrupt` | 中断当前对话 |
 | `get_current_datetime` | 获取当前日期时间 |
 
 每个 tool 函数都带 `session_id` 参数。
-
-**沙盒执行入口**（`mcps/CodeSandboxPool.py`）：
-- `execute(code, lang)` — code 工具用，先把 code 写到容器 `/code.<py\|js>` 再跑，跑完立即删（避免敏感信息残留）
-- `execute_command(cmd)` — cmd 工具用，直接 `docker exec sh -c <cmd>`，命令里可含管道 / 重定向 / glob
-
-两者共享同一池（默认 2 容器），`pop → exec → append` 整段走 `self.lock`，避免 N+1 并发撞空池。
 
 ## 设计文档
 
@@ -423,8 +393,6 @@ npm run electron:build:linux    # Linux AppImage（x64）
 
 桌面端通过 `electron-builder` 打包，应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.0.1）在 `frontend/electron/electron.config.js` 中配置。
 
-**图标路径双形态**：`build/`（`icon.icns` / `icon.ico` / `icon.png`）通过 `package.json` 的 `extraResources` 复制到 `app/Contents/Resources/build/`，运行时用 `process.resourcesPath` 读取；`nativeImage` 不能读 asar 内文件，所以必须放包外。
-
 **输出位置**：`../release/electron-builder/`（项目根，与 Vite 的 `dist/` / `frontend/` 区分开）：
 - `mac-arm64/灵析.app` — 直接打开
 - `mac/` — x64 .app
@@ -443,27 +411,23 @@ npm run electron:build:linux    # Linux AppImage（x64）
 
 ## 开发注意事项
 
+### 启动与依赖
+
 1. **MCP 服务器**必须单独启动，首次启动会自动检查 Redis 并清理残留沙盒容器
 2. **Redis** 通过 `docker-compose up -d redis` 启动，端口 6024，密码 `123456`
 3. **代码沙盒**需要先 `docker-compose build sandbox` 构建镜像
-4. **思考内容过滤**：后端 `_filter_thinking_content` 过滤 AI 输出中的 `<thinking>` 等思考标签
-5. **流式响应**：前端通过 SSE 实时接收 `content` / `reasoning` / `tool_call_*` / `memory_wait_*` / `error` 事件；`memory_wait_start` / `memory_wait_done` 在新请求发起 / 中断续接 且上一轮记忆任务仍在后台时插入；`interrupt` / `done` 事件携带 `memory_status` 字段（`idle` / `pending` / `done` / `failed`）
-6. **配置脱敏**：`backend/.chatme/config.json` 包含真实 API key，提交时务必脱敏
-7. **多 LLM Provider**：可通过 `llm_providers` 切换 openai / deepseek / vl（本地 VL）；`react_compact` 共用活动 provider，可通过 `REACT_COMPACT_TEMPERATURE` / `REACT_COMPACT_MAX_TOKENS` 单独配参
-8. **OSS**：图片 / 文件上传后通过 OSS URL 访问，缓存目录在 `cached/`
-9. **环境探索模式**：当文件被截断时（提示中含 `[文件过大已截断]`），AI 应走 `execute_command(ls cached/...)` + `cat cached/.../filename` 流程读全量
-10. **unstructured 首次使用**：CSV / MD / XML 解析会自动下载 NLTK 数据（punkt、averaged_perceptron_tagger 等），需外网环境
-11. **ReAct 流程压缩**：`context_assembly_node` 按"完整工具 loop 节拍"自动压缩（前 N-keep 轮被摘要，最近 2 轮原文保留）；`REACT_COMPACT_LOOPS=5` / `REACT_KEEP_LOOPS=2` / `REACT_COMPACT_MIN_CHARS=2000` / 摘要上限 `4000` 字 / `REACT_COMPACT_MAX_TOKENS=5120`；压缩失败不 raise；`_filter_thinking_content` 已带 MiniMax-M3 wrapper 正则（`[</tool_call>]` / `[<]tool_call[>]` 等）+ `_try_compact_react` 孤立标点兜底，react_compact prompt 显式禁止 tool_call 块
-12. **Memory 并发安全**：`MemoryManager` 内部 per-thread `asyncio.Lock` 串行化；新加 memory 方法必须继承 `async with self._get_thread_lock(thread_id)`；写盘走 `_atomic_write_text`（`*.tmp` + `fsync` + `os.replace`）
-13. **ChatService 记忆任务串行**：每会话只有一个后台 `_update_memory_bg` 任务（`_memory_update_tasks[session_id]`），新请求 / 删除 / 回溯前会先 `_wait_previous_memory_update` 等待；新入口必须先等待，避免读到旧记忆或与后台 task 写竞争
-14. **异步日志**：`LoggingManager` 用 `QueueHandler` + `QueueListener` 写文件，业务线程不入 IO；`atexit` 统一 `listener.stop()` 清理，新增 logger 走 `set_logger`
-15. **imp_ipt 唯一标识**：`input_parse_node` 输出的 `imp_ipt` 身份是 `additional_kwargs.imp_ipt == True`；ReAct 压缩 / final_node 注入 / 后续扩展都靠这个标志定位本轮意图
-16. **节点异常统一兜底**：所有 LangGraph 节点（含 ChatWorkflow 5 个主节点 + 文件图 3 个节点 + sub_agent agent_node）都通过 `@node_guard("<name>")` 装饰；新加节点必须继承这个约定，否则异常会穿透到 LangGraph 内核造成不可预期行为
-17. **前端错误气泡保护**：App.vue 维护 `_sessionHadError: Set<session_id>`，SSE 出现 `error` 时把 `message.error=true` 渲染为红色错误框（避免报错堆栈被当 markdown），同时把 session 标记为保护态；保护态下 `done` 事件不会复活 AI 内容，`refreshConversation` / `updateTitleAndRefresh` 跳过 messages 重拉只更新侧边栏；用户主动发起新一轮请求或续接时清掉保护态
-18. **SandboxPool 池锁必须包整段**：池默认 2 容器，新加 `execute_*` 方法时必须把 `pop → exec → append` 整段放在 `with self.lock:` 内；不能像最初 `execute()` 那样把 pop 放锁外只锁 exec——并发 N+1 会撞空池报 `No available containers in pool`
-18. **Electron `file://` 协议拦截**：`protocol.handle('file', ...)` 在 `app.whenReady()` 内注册（必须 ready 才能拿到 `session.defaultSession`），`/chat/*` + `/static/*` 转发到后端（等价 Vite dev proxy），其他走白名单校验后从 asar 内 `dist/` 读盘；API 转发必须显式带 `method/headers/body + duplex:'half'`（POST `/chat/` 的 body 否则被丢），SSE 流必须显式 `new Response(upstream.body, ...)` 透传避免被 buffer
-19. **Electron 图标必须放包外**：`nativeImage` 不能读 asar 内文件，所以 `build/` 通过 `extraResources` 复制到 `app/Contents/Resources/build/`，运行时用 `process.resourcesPath` 取；`app.dock.setIcon` / `BrowserWindow.icon` 都必须是 PNG，不认 `.icns`（打包后的 `.icns` 由 `package.json` 的 `build.mac.icon` 给 OS 用）
-20. **可滚动侧栏/面板 CSS**：所有可滚动列表（Sidebar / DataAnalysisTree / WebPreviewPanel / CheckpointPanel 等）必须按以下 7 条点写——① 数据全量入 DOM，禁止 `slice(0, N)` / `displayCount` 切片（CSS overflow 自己负责滚动）；② 侧栏 `height: 100vh; flex-shrink: 0; overflow: hidden`，外层不被内容撑大；③ 固定头部 `flex-shrink: 0` 锁尺寸；④ 滚动区用 `height: calc(100vh - X)` **不走** `flex: 1 + min-height: 0`（flex 子项 `min-height: auto` 会让 overflow 失效）；⑤ **`overflow-y: auto`**——浏览器默认；禁止用 `overflow-y: scroll`（始终空占位，列表短时也碍眼）或 `overflow-y: hidden`（用户感知不到还有内容）；⑥ **CSS-only 没法做到「溢出时才显示」**：`App.vue` 全局 `::-webkit-scrollbar { width: 8px; ... }` 会强制 macOS 自动隐藏失效。要做到溢出时才出现必须 JS + class：mounted 用 `ResizeObserver` 监听 list；`el.scrollHeight > el.clientHeight + 1` 判定溢出；挂 `.has-overflow` class；CSS：`::-webkit-scrollbar { width: 0 }` 默认隐藏，`.has-overflow::-webkit-scrollbar { width: 6px }` 才显出，滑块 `var(--border-color)` + `min-height: 30px`，hover `var(--text-secondary)`；⑦ `@scroll="handleScroll"` 直接绑在 `.list`。同时监听 conversations 增删 / collapsed 切换 / window resize，触发 `checkOverflow()` 重新挂载 class。
+4. **unstructured 首次使用**：CSV / MD / XML 解析会自动下载 NLTK 数据（punkt、averaged_perceptron_tagger 等），需外网环境
+5. **配置脱敏**：`backend/.chatme/config.json` 包含真实 API key，提交时务必脱敏
+
+### 流式响应
+
+前端通过 SSE 实时接收 `content` / `reasoning` / `tool_call_*` / `memory_wait_*` / `error` 事件：
+- `memory_wait_start` / `memory_wait_done` 在新请求发起 / 中断续接 且上一轮记忆任务仍在后台时插入
+- `interrupt` / `done` 事件携带 `memory_status` 字段（`idle` / `pending` / `done` / `failed`）
+
+### AI 协作者约定
+
+工作流实现细节（`imp_ipt` 锚点、ReAct 压缩剥离 AIMessage、`@node_guard` 装饰器、`_filter_thinking_content` MiniMax-M3 wrapper、`MemoryManager` per-thread Lock、SandboxPool 池锁整段、Electron `file://` 三件套与图标包外、侧栏 CSS 7 条、流式会话快照 19 条等）见 [`CLAUDE.md`](CLAUDE.md)。新增节点 / 流式 SSE 入口 / 执行方法前必须先读对应章节。
 
 ## 许可证
 

@@ -33,7 +33,6 @@ ChatMe/
 ├── backend/
 │   ├── ChatMe/
 │   │   ├── APIRouter/                    # /chat /static /api /admin 4 个 Router
-│   │   ├── ChatDataAnalysis/             # 数据分析规范（ChatDataAnalysisFormat）
 │   │   ├── ChatMeConfig/                 # 配置加载器
 │   │   ├── ChatService/                  # 聊天服务层（SSE 流式）
 │   │   │   └── FilesLoaders/             # 文件加载 + 大文件截断
@@ -92,9 +91,9 @@ State 定义在 [`backend/ChatMe/ChatWorkflow/config/models.py`](backend/ChatMe/
 - **触发条件**：完整工具 loop 数 ≥ `REACT_COMPACT_LOOPS`（默认 5）+ `REACT_KEEP_LOOPS`（默认 2）= 7 轮，**且** draft 字符数 ≥ `REACT_COMPACT_MIN_CHARS`（默认 2000），**且** `tool_call_times != last_compact_at_tool_calls`（防 state 恢复或失败后重复触发）。
 - **范围**：压缩前 N-keep 轮的 ReAct 轨迹，**最近 keep（默认 2）轮完整 loop 原文保留**（不被摘要覆盖），imp_ipt 之前的 memory / 其他 SystemMessage 整体保留。
 - **产物**：新摘要以 `【ReAct 摘要】` 标题的 SystemMessage 形式插入 imp_ipt 之后；写入 state 的 `context_summary_text` / `last_compact_at_tool_calls`。
-- **失败兜底**：长度 [80, 2500] 区间外 / 含残留标签 / LLM 异常一律 `return None`，context 保持不变。
+- **失败兜底**：长度 [80, 4000] 区间外 / 过滤后只剩孤立标点（filter 漏网的 MiniMax-M3 tool_call 残骸）/ 含残留标签 / LLM 异常一律 `return None`，context 保持不变。
 - **辅助方法**（`core.py`）：`_content_chars` / `_should_compact_react` / `_find_imp_ipt_idx` / `_find_complete_tool_loops` / `_build_compaction_draft` / `_try_compact_react`。**全程靠 content 特征扫描定位，不写死下标**。
-- **专用 LLM**：`get_react_compact_config()`，`REACT_COMPACT_TEMPERATURE=0.3` / `REACT_COMPACT_MAX_TOKENS=2048`（env 可覆盖），目标 ≤ 2000 字中文 markdown。
+- **专用 LLM**：`get_react_compact_config()`，`REACT_COMPACT_TEMPERATURE=0.3` / `REACT_COMPACT_MAX_TOKENS=5120`（env 可覆盖），目标 ≤ 4000 字中文 markdown。4000 字上限是因为多文件路径 / 技术栈细节压不下去时 2000 字太苛刻；5120 max_tokens 给中文 1 字≈1.5 token 最坏情况下留够余量。
 
 ### 工作流启动入口
 
@@ -111,7 +110,7 @@ uv run chatme_main
 | 组件 | 职责 |
 |------|------|
 | `App.vue` | 全局状态管理，SSE 事件分发；维护 `_sessionHadError` 集合做"错误气泡保护态"（出错后该 session 不再被右侧刷新覆盖）；`refreshPage()` 触发 `window.location.reload()` |
-| `Sidebar.vue` / `ConversationItem.vue` | 会话列表 |
+| `Sidebar.vue` / `ConversationItem.vue` | 会话列表（全量入 DOM + `overflow-y: scroll` + 自定义 webkit 滚动条） |
 | `MessageList.vue` | 消息列表容器 + 滚动控制 |
 | `MessageItem.vue` | 单条消息渲染（思考过程 / Markdown / 代码高亮），`message.error=true` 时渲染为红色错误框（避免报错堆栈被当 markdown） |
 | `MessageInput.vue` | 输入框 + 文件上传 + 语音输入 |
@@ -154,7 +153,7 @@ uv run chatme_main
 | `backend/ChatMe/ChatService/core.py` | 聊天服务，SSE 流式输出 + 记忆任务调度（`_memory_update_tasks` 串行队列 + `memory_wait_*` 事件） |
 | `backend/ChatMe/ChatService/FilesLoaders/core.py` | 文件加载 + `_maybe_truncate` 大文件截断 |
 | `backend/ChatMe/ChatService/FilesLoaders/config.py` | 文件大小/类型/截断阈值常量（`TEXT_TRUNCATE_LENGTH=4000`） |
-| `backend/ChatMe/ChatDataAnalysis/format.py` | 数据分析规范（`ChatDataAnalysisFormat` 类、generation 管理） |
+| `backend/skills/DataAnalysis/format.py` | 数据分析规范（`ChatDataAnalysisFormat` 类、generation 管理） |
 | `backend/ChatMe/ChatMeConfig/core.py` | 配置加载器 |
 | `backend/ChatMe/APIRouter/main.py` | `/chat` 前缀主对话路由 |
 | `backend/ChatMe/APIRouter/model_vl.py` | `/api` VL 模型路由 |
@@ -229,6 +228,7 @@ docker-compose up -d redis                            # 端口 6024，密码 123
 15. **Electron 图标必须放包外**：`nativeImage.createFromPath` 不读 asar 内文件；`build/` 通过 `package.json` 的 `extraResources` 复制到 `app/Contents/Resources/build/`（macOS）/ `app/resources/build/`（Win）/ `app/build/`（Linux），运行时用 `process.resourcesPath` 取真实路径；`paths.icon` / `paths.iconMac` 通过 `app.isPackaged` 切换 dev (`__dirname/build/icon.png`) vs packaged (`process.resourcesPath/build/icon.png`)；`app.dock.setIcon` 和 `BrowserWindow.icon` 都必须是 PNG，传 `.icns` 会得空 image 并 Promise reject
 16. **Electron `protocol.handle` 静态文件必须白名单校验**：`resolvedPath = path.resolve(pathname)` 后必须检查 `startsWith(distDir + path.sep)`，否则 `403 Forbidden`；不写这一行的话渲染层一句 `fetch('/etc/passwd')` 就能读任意磁盘路径
 17. **Electron 输出目录用 `release/electron-builder`**：`directories.output` 不要设 `dist/electron-builder`，否则会和 Vite 的 `dist/` 撞目录，且会被 `files` 模式误打进 asar；当前 `output: "release/electron-builder"` + `files: ["dist/**", "electron/**", "vite.config.js", "package.json"]` 是白名单显式列出，asar 体积 5.6MB（之前未优化时 419MB）
+18. **可滚动侧栏/面板 CSS 约定**：所有可滚动列表（Sidebar / DataAnalysisTree / WebPreviewPanel / CheckpointPanel 等）必须按以下 7 条点写：① 数据全量入 DOM，禁止 `slice(0, N)` / `displayCount` 切片（CSS overflow 自己负责滚动）；② 侧栏 `height: 100vh; flex-shrink: 0; overflow: hidden`，外层不被内容撑大；③ 固定头部 `flex-shrink: 0` 锁尺寸；④ 滚动区用 `height: calc(100vh - X)` **不走** `flex: 1 + min-height: 0`（flex 子项 `min-height: auto` 会让 overflow 失效）；⑤ **`overflow-y: auto`**——浏览器默认；**禁止**用 `overflow-y: scroll`（始终预留轨道，列表短时也空占位）、禁止 `overflow-y: hidden`（用户完全感知不到还有内容）；⑥ **CSS-only 没法做到「溢出时才显示滚动条」**：因为 `App.vue` 全局 `::-webkit-scrollbar { width: 8px; ... }` 会强制 macOS 自动隐藏失效，scrollbar 一直挂着。要做到「溢出时才出现」必须用 JS：用 `ResizeObserver` 监听 list 尺寸 / `scrollHeight > clientHeight + 1` 判断溢出，溢出时挂 `.has-overflow` class。CSS：`::-webkit-scrollbar { width: 0; }`，`.has-overflow::-webkit-scrollbar { width: 6px; }`、`.has-overflow::-webkit-scrollbar-thumb { background: var(--border-color); min-height: 30px; }`、hover 用 `var(--text-secondary)`；⑦ `@scroll="handleScroll"` 直接绑在 `.list`。**this**: mounted 用 `$nextTick` 等首次渲染完再 `checkOverflow()`；监听 conversations / collapsed watch + window resize，conversations 增删时同步重新检测。
 
 ### 代码 / 提交风格
 
@@ -246,6 +246,8 @@ docker-compose up -d redis                            # 端口 6024，密码 123
 5. **`imp_ipt` 是 draft 切分锚点**：`input_parse_node` 输出的 `imp_ipt` 唯一身份是 `additional_kwargs.imp_ipt == True`；ReAct 压缩 / final_node 注入 / 后续扩展都靠这个标志定位本轮意图，不要换成"最后一条 HumanMessage"这种隐式契约
 6. **final_node 不再走 `MessagesPlaceholder`**：imp_ipt 走 `_final_system_template.format(imp_ipt=...)` 注入到 system prompt 独占最高注意力位；context 中要先把 `imp_ipt` pop 出去再喂给 `llm_core`，避免重复注入
 7. **ReAct 压缩失败不要 raise**：`_try_compact_react` 一律返回 `None`，由 `context_assembly_node` 保持原 context 不变；不要让压缩异常把整轮回复炸掉
+7.1. **`_filter_thinking_content` MiniMax-M3 wrapper 正则**：filter 必须能吃掉 MiniMax-M3 输出的 `[</tool_call>]` / `[<]tool_call[>]` / `[<invoke name="cmd">][<command>...</command>]` 等方括号包装的伪 tool_call 块。**关键顺序**：combined regex（`<tool_call>.*?\[?</?tool_calls?>\]?`，兼容裸闭与方括号包裹闭）必须**先**跑；wrapper 正则放后做孤标记兜底。否则 wrapper 先剥 → tool_call 块找不到闭合 → 留下 78 字符半截垃圾。`_try_compact_react` 的"孤立标点兜底"（`re.fullmatch(r'[\[\]\s()（）.,;:!?。，；：、！？\-_]+', text)`）是双保险。新增 MiniMax-M3 输出格式时必须同步更新两处 filter（`ChatWorkflow/core.py` + `Memory/core.py`）。
+7.2. **react_compact prompt 显式禁止 tool_call**：prompt 的"明确禁止"段必须包含 `<tool_call>` / `[</tool_call>]` / `[<invoke name="cmd">][<command>...]` 等伪 tool_call 格式。**根因**：react_compact_llm 和 agent_llm 是同一个模型，weights 里"想调工具"的本能强；context 含文件路径时 M3 会倾向输出 `<tool_call>` 块；但 react_compact_llm **没绑工具**，`tool_calls` 字段为空，意图只能泄到 `content` 里。filter 是兜底，prompt 是源头。
 8. **Memory 操作加锁**：读写 / 删除 / 回溯全部走 `_get_thread_lock(thread_id).acquire()`，新方法（如新增的 `restore_memory`）必须继承这个约定
 9. **ChatService 记忆任务串行**：新入口（新建 / 中断续接 / 回溯 / 删除）必须先 `_wait_previous_memory_update(session_id)`，避免读到旧记忆或与后台 task 写竞争
 10. **节点异常统一打 `@node_guard`**：新加 LangGraph 节点必须 `@node_guard("<node_name>")`，禁止裸定义让异常穿透；`sub_agent` 这种嵌套调用外层再包一层 try/except 返回兜底字符串，主 agent 才能继续

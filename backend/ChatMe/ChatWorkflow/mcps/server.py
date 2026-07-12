@@ -152,18 +152,18 @@ def is_dangerous_command(command: Annotated[ str, "系统执行命令"]) -> tupl
             'passwd -d': '删除用户密码',
             'userdel -r': '删除用户及家目录',
             'vigr': '编辑组文件',
-            'vipw': '编辑密码文件',
-            'update-rc.d': '修改启动服务',
-            'systemctl disable': '禁用系统服务',
-            'mount -o remount,ro /': '重新挂载为只读',
-            'umount /': '卸载根目录',
+            'vipw': 'edit password file',
+            'update-rc.d': 'modify startup services',
+            'systemctl disable': 'disable system service',
+            'mount -o remount,ro /': 'remount as read-only',
+            'umount /': 'unmount root directory',
         }
         dangerous_patterns.update(unix_dangerous)
 
     # 检查是否包含危险模式
     for pattern, reason in dangerous_patterns.items():
         if pattern.lower() in command_lower:
-            return True, f"检测到危险命令：{pattern}（{reason}）"
+            return True, f"Dangerous command detected: {pattern} ({reason})"
 
     # 检查是否有重定向到设备文件
     device_patterns = [
@@ -174,17 +174,17 @@ def is_dangerous_command(command: Annotated[ str, "系统执行命令"]) -> tupl
     ]
     for pattern in device_patterns:
         if re.search(pattern, command):
-            return True, "检测到重定向到设备文件"
+            return True, "Redirecting to device file detected"
 
     # 检查 format 磁盘格式化（仅当作为独立命令 + 跟设备路径时才拦截）
     # 拦截: format c:、format /dev/sda1、format -f
     # 不拦截: cat format.py、python format.py、--format=json、format_string
     if re.search(r'(?:^|[\s;&|])format\s+(?:/dev/|[a-zA-Z]:|--?\w+)', command):
-        return True, "检测到危险命令：format（格式化磁盘）"
+        return True, "Dangerous command detected: format (disk format)"
 
     # 检查是否尝试提升权限
     if 'sudo' in command_lower and any(x in command_lower for x in ['rm', 'dd', 'mkfs', 'chmod', 'chown']):
-        return True, "检测到 sudo 执行危险操作"
+        return True, "sudo executing dangerous operation detected"
 
     return False, ""
 
@@ -260,7 +260,7 @@ def _is_allowed_command(command: str) -> tuple[bool, str]:
     if main_cmd in allowed:
         return True, ""
 
-    return False, f"命令「{main_cmd}」不在允许列表中，请使用白名单内的命令"
+    return False, f"Command \"{main_cmd}\" is not in the whitelist. Use a whitelisted command."
 
 
 def _execute_code_in_local(code: str, language: str) -> str:
@@ -334,7 +334,7 @@ def _execute_code_in_local(code: str, language: str) -> str:
         else:
             node_cmd = which("node")
             if not node_cmd:
-                return "Error: Node.js 未找到"
+                return "Error: Node.js not found"
             result = subprocess.run(
                 [node_cmd, temp_file],
                 cwd=str(project_root),
@@ -353,13 +353,13 @@ def _execute_code_in_local(code: str, language: str) -> str:
 
 @server.tool
 def code(
-    code: Annotated[str, "代码"],
-    language: Annotated[Literal["python", "nodejs", "javascript", "js"], "代码语言，默认 python"] = "python",
-    use_sandbox: Annotated[bool, "是否使用沙盒执行（默认 True）"] = True,
-    session_id: Annotated[str, "会话id"] = ""
+    code: Annotated[str, "Code to execute"],
+    language: Annotated[Literal["python", "nodejs", "javascript", "js"], "Code language, default python"] = "python",
+    use_sandbox: Annotated[bool, "Whether to execute in sandbox (default True)"] = True,
+    session_id: Annotated[str, "Session id"] = ""
 ) -> Optional[str]:
     """
-    执行代码（默认沙盒，宿主机开放skills/和cached/目录可直接操作；非需要时不降级到本地 venv）
+    Execute code (sandbox by default; sandbox exposes /skills (read-only) and /cached (read-write)).
     """
     # 沙盒执行
     if use_sandbox and _sandbox_pool is not None:
@@ -385,21 +385,21 @@ def code(
 
 @server.tool
 def cmd(
-        command: Annotated[str, "执行系统命令"],
-        use_sandbox: Annotated[bool, "是否使用沙盒执行（默认 True）"] = True,
-        session_id: Annotated[str,"会话id"] = ""
+        command: Annotated[str, "System command to execute"],
+        use_sandbox: Annotated[bool, "Whether to execute in sandbox (default True)"] = True,
+        session_id: Annotated[str,"Session id"] = ""
 ) -> str:
-    """在白名单内执行终端命令（默认沙盒，宿主机只开放 skills/ 和 cached/ 目录）"""
+    """Execute a shell command within the whitelist (sandbox by default; only skills/ and cached/ are exposed)."""
     is_dangerous, reason = is_dangerous_command(command=command)
     if is_dangerous:
         logger.warning(f"会话{session_id}中危险命令,已安全拦截")
-        return f"Error: 安全拦截：{reason}"
+        return f"Error: blocked: {reason}"
 
     # 检测脚本执行
     is_script, script_lang = _is_script_command(command)
     if is_script:
         logger.warning(f"会话{session_id}尝试用 cmd 执行{script_lang}")
-        return f"Error: cmd 不能执行{script_lang}脚本，请使用 code 工具"
+        return f"Error: cmd cannot execute {script_lang} scripts; use the code tool instead"
 
     # 白名单检查
     is_allowed, allow_reason = _is_allowed_command(command)
@@ -478,15 +478,15 @@ def cmd(
 
 @server.tool
 def interrupt(
-    message: Annotated[str,"中断原因/要询问用户的信息"],
-    session_id: Annotated[str,"会话id"] = ""
+    message: Annotated[str,"Reason for interrupting / message to ask the user"],
+    session_id: Annotated[str,"Session id"] = ""
 ):
       """
-      中断当前对话，向用户询问更多的信息
+      Interrupt the current conversation to ask the user for more information.
       """
       if not session_id:
           logger.warning(f"interrupt 工具调用缺少 session_id 参数")
-          return "Error: 缺少 session_id 参数"
+          return "Error: missing session_id parameter"
 
       try:
           _redis_client.hset(f"interrupt:{session_id}", mapping={
@@ -494,21 +494,21 @@ def interrupt(
           })
 
           logger.debug(f"会话 {session_id} 触发中断: {message}")
-          return f"已触发中断，等待用户输入: {message}"
+          return f"Interrupt triggered, waiting for user input: {message}"
       except Exception as e:
           logger.error(f"会话 {session_id} 中断操作失败")
-          return f"中断失败: {str(e)}"
+          return f"Interrupt failed: {str(e)}"
 
 
 @server.tool
 def ctime(
-        session_id: Annotated[str,"会话id"] = ""
+        session_id: Annotated[str,"Session id"] = ""
 ) -> str:
     """
-    获取当前的日期和时间（自动使用本机时区）
+    Get the current date and time (uses the local timezone).
 
     Returns:
-        JSON 格式：datetime（格式化时间）、weekday（星期几，中英文）
+        JSON with: datetime (formatted time), weekday_en (English weekday name).
     """
     now = datetime.now().astimezone()
 

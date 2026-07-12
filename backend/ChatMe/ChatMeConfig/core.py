@@ -382,6 +382,182 @@ class ChatMeConfig:
         """检查是否已加载配置"""
         return self._loaded
 
+    # ========================================================================
+    # 运行时配置读写（前端 SettingsDialog 用）
+    # ========================================================================
+
+    # 前端表单允许编辑的顶层 key 白名单；其他节点（app/redis/dirs/oss）禁止修改
+    EDITABLE_TOP_KEYS = ("llm_providers", "mcp_server", "skills")
+
+    # 修改后必须重启后端才能生效的字段（langchain client / mcp client 是常驻对象）
+    RESTART_REQUIRED = True
+
+    @staticmethod
+    def _mask_secret(value: Any) -> str:
+        """
+        密钥脱敏：保留前 4 后 4 字符，中间用 * 代替。
+        长度 ≤ 8 的直接全 *，空值原样返回。
+        """
+        if not isinstance(value, str) or not value:
+            return ""
+        if len(value) <= 8:
+            return "*" * len(value)
+        return f"{value[:4]}{'*' * max(4, len(value) - 8)}{value[-4:]}"
+
+    def get_public_config(self) -> dict:
+        """
+        返回前端可编辑的视图（密钥脱敏）
+
+        - llm_providers.*.api_key → 脱敏
+        - skills.*_api_key → 脱敏
+        - 其他字段原样返回
+        """
+        self._load()
+        result = {}
+
+        llm = self.get("llm_providers", {}) or {}
+        if isinstance(llm, dict):
+            llm_copy = {}
+            for name, cfg in llm.items():
+                if not isinstance(cfg, dict):
+                    llm_copy[name] = cfg
+                    continue
+                cfg_copy = dict(cfg)
+                if "api_key" in cfg_copy:
+                    cfg_copy["api_key"] = self._mask_secret(cfg_copy["api_key"])
+                llm_copy[name] = cfg_copy
+            result["llm_providers"] = llm_copy
+
+        mcp = self.get("mcp_server", {}) or {}
+        if isinstance(mcp, dict):
+            result["mcp_server"] = dict(mcp)
+
+        skills = self.get("skills", {}) or {}
+        if isinstance(skills, dict):
+            skills_copy = dict(skills)
+            for k in list(skills_copy.keys()):
+                if k.endswith("_api_key"):
+                    skills_copy[k] = self._mask_secret(skills_copy[k])
+            result["skills"] = skills_copy
+
+        return result
+
+    def save_config(self, updates: dict) -> dict:
+        """
+        原子写配置：仅允许更新白名单内的顶层 key，api_key 为空表示跳过该字段（不修改）。
+
+        Returns:
+            {"ok": bool, "applied": bool, "restart_required": True, "saved_keys": [...]}
+
+        Raises:
+            ValueError: 顶层 key 不在白名单 / payload 结构非法
+            RuntimeError: 写文件失败
+        """
+        self._load()
+        if not isinstance(updates, dict):
+            raise ValueError("updates 必须是 dict")
+
+        # 白名单校验：顶层 key 必须在 EDITABLE_TOP_KEYS 内
+        unknown_keys = [k for k in updates.keys() if k not in self.EDITABLE_TOP_KEYS]
+        if unknown_keys:
+            raise ValueError(
+                f"不允许编辑的字段: {unknown_keys}（白名单: {list(self.EDITABLE_TOP_KEYS)}）"
+            )
+
+        # 校验每个 section 的结构
+        for top_key, section in updates.items():
+            if not isinstance(section, dict):
+                raise ValueError(f"{top_key} 必须是 dict，实际是 {type(section).__name__}")
+
+        # 准备要写入的 merged 配置（不动内存中的 _config；只写文件，避免污染后续 _load()）
+        current = json.loads(json.dumps(self._config))  # 深拷贝
+
+        saved_keys = []
+        # === llm_providers ===
+        if "llm_providers" in updates:
+            current.setdefault("llm_providers", {})
+            for prov_name, prov_cfg in updates["llm_providers"].items():
+                if not isinstance(prov_cfg, dict):
+                    continue
+                current["llm_providers"].setdefault(prov_name, {})
+                for field, value in prov_cfg.items():
+                    # api_key 为空字符串表示不修改
+                    if field == "api_key" and (value is None or value == ""):
+                        continue
+                    current["llm_providers"][prov_name][field] = value
+                    saved_keys.append(f"llm_providers.{prov_name}.{field}")
+
+        # === mcp_server ===
+        if "mcp_server" in updates:
+            current.setdefault("mcp_server", {})
+            for field, value in updates["mcp_server"].items():
+                current["mcp_server"][field] = value
+                saved_keys.append(f"mcp_server.{field}")
+
+        # === skills ===
+        if "skills" in updates:
+            current.setdefault("skills", {})
+            for field, value in updates["skills"].items():
+                # api_key 为空表示不修改
+                if field.endswith("_api_key") and (value is None or value == ""):
+                    continue
+                current["skills"][field] = value
+                saved_keys.append(f"skills.{field}")
+
+        # 原子写：tmp + os.replace（不写 .bak 副本，避免污染用户配置目录 / git untracked 列表）
+        # 关键：tmp 文件名带进程 PID，避免与仓库里提交的 config.json.tmp 模板重名
+        # （之前用 with_suffix(".json.tmp") 会在首次保存时把模板覆盖掉）
+        config_file = self._find_config_file()
+        config_file.parent.mkdir(parents=True, exist_ok=True)
+
+        tmp_file = config_file.with_name(f"{config_file.name}.{os.getpid()}.tmp")
+        try:
+            tmp_file.write_text(
+                json.dumps(current, indent=4, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            os.replace(tmp_file, config_file)
+        except Exception as e:
+            # 写失败：清理残留的 tmp 文件（不影响旧 config.json）
+            try:
+                if tmp_file.exists():
+                    tmp_file.unlink()
+            except Exception:
+                pass
+            raise RuntimeError(f"写入 config.json 失败: {e}")
+
+        # 不调用 self._load(force=True)：所有运行时使用的对象都是启动时构造的，
+        # 热加载意义不大，让前端提示用户重启即可。
+
+        return {
+            "ok": True,
+            "applied": False,  # 不热加载
+            "restart_required": self.RESTART_REQUIRED,
+            "saved_keys": saved_keys,
+        }
+
+    def trigger_restart(self) -> None:
+        """
+        异步重启后端：通过 os.execv 替换当前进程为新的 main.py。
+        调用方应通过 FastAPI BackgroundTasks 调用，确保响应已 flush 到客户端再重启。
+        """
+        import sys
+        import time
+
+        # 写 marker 文件，让前端启动后能识别「这是重启恢复」的场景
+        marker = Path(self._get_global_config_dir()) / ".restart_pending"
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(str(int(time.time())), encoding="utf-8")
+        except Exception:
+            pass
+
+        # 给前端一点时间收响应（FastAPI BackgroundTasks 通常在响应发送后触发）
+        time.sleep(0.3)
+
+        # 用同样的 python 重启 main.py；uvicorn 单进程模式下整个服务都会被替换
+        os.execv(sys.executable, [sys.executable, "main.py"])
+
 
 config = ChatMeConfig()
 

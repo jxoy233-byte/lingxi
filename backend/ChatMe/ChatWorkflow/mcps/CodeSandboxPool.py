@@ -72,7 +72,8 @@ class SandboxPool:
         启动一个常驻容器：
         - mount skills(ro) + cached(rw) + sandbox-only config + logs
         - 容器内能看到：/skills, /cached, /.chatme/config.json（仅 skills 段）, /.chatme/logs
-        - ChatMeConfig / ChatDataAnalysis 已通过 Dockerfile COPY 进 site-packages
+        - ChatMeConfig / LoggingManager 已通过 Dockerfile COPY 进 site-packages
+        - DataAnalysis skill 已通过 Dockerfile COPY 进 site-packages/skills/DataAnalysis
         """
         try:
             self._generate_sandbox_config()

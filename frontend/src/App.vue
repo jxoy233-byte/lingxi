@@ -5,14 +5,12 @@
         :collapsed="sidebarCollapsed"
         :conversations="conversations"
         :active-session-id="currentSessionId"
-        :display-count="displayCount"
         :mobile-open="sidebarMobileOpen"
         @toggle="toggleSidebar"
         @new-chat="createNewChat"
         @select-conversation="loadConversation"
         @delete-conversation="deleteConversation"
         @update-title="updateConversationTitle"
-        @load-more="loadMoreConversations"
         @refresh-conversation="refreshConversation"
       />
 
@@ -25,9 +23,8 @@
 
       <main class="chat-area">
         <ChatHeader
-          :is-dark-theme="isDarkTheme"
           :has-session="!!currentSessionId"
-          @toggle-theme="toggleTheme"
+          @open-settings="settingsVisible = true"
           @toggle-checkpoints="toggleCheckpoints"
           @toggle-sidebar="toggleMobileSidebar"
           @refresh="refreshPage"
@@ -172,6 +169,14 @@
         </div>
       </div>
     </div>
+
+    <!-- 设置弹窗 -->
+    <SettingsDialog
+      :visible="settingsVisible"
+      :is-dark-theme="isDarkTheme"
+      @close="settingsVisible = false"
+      @theme-change="setTheme"
+    />
   </div>
 </template>
 
@@ -185,6 +190,7 @@ import CheckpointPanel from './components/CheckpointPanel.vue'
 import WebPreviewPanel from './components/WebPreviewPanel.vue'
 import FilePreviewPanel from './components/FilePreviewPanel.vue'
 import DataAnalysisTree from './components/DataAnalysisTree.vue'
+import SettingsDialog from './components/SettingsDialog.vue'
 import mermaid from 'mermaid'
 
 export default {
@@ -198,7 +204,8 @@ export default {
     CheckpointPanel,
     WebPreviewPanel,
     FilePreviewPanel,
-    DataAnalysisTree
+    DataAnalysisTree,
+    SettingsDialog
   },
   data() {
     return {
@@ -228,7 +235,6 @@ export default {
       responseTimerInterval: null,
       currentResponseTime: 0,
       currentAiMessageIndex: null,
-      displayCount: 10,
       isRestreaming: false,
       isInterrupted: false,  // 当前会话是否处于中断状态
       isInterruptedSessionId: null,  // 最近一次中断的会话ID
@@ -240,6 +246,7 @@ export default {
       showResumeInput: false,  // 显示续接输入框
       resumeInputText: '',  // 续接输入文本
       currentQuote: null,  // 当前引用内容：{ content: string }
+      settingsVisible: false,  // 设置弹窗可见性
       _sessionHadError: new Set()  // 处于「出错保护态」的 session_id 集合；保护态下不重拉 messages，避免覆盖错误气泡
     }
   },
@@ -277,8 +284,8 @@ export default {
     }
   },
   methods: {
-    toggleTheme() {
-      this.isDarkTheme = !this.isDarkTheme
+    setTheme(isDark) {
+      this.isDarkTheme = !!isDark
       localStorage.setItem('chatme-theme', this.isDarkTheme ? 'dark' : 'light')
     },
     refreshPage() {
@@ -633,6 +640,21 @@ export default {
         } else {
           this.filePreviewRenderedSvg = ''
         }
+        this.showFilePreview = true
+        return
+      }
+
+      // HTML 文件（.html / .htm）：走 FilePreviewPanel（同 mermaid 的处理路径），
+      // panel 内 isHtmlFile + viewTab='rendered' 自动渲染 iframe，「原文」tab 可看源码
+      if ((file.suffix || '').toLowerCase() === '.html' || (file.suffix || '').toLowerCase() === '.htm'
+          || (file.type || '').toLowerCase() === 'text/html'
+          || (file.file_type || '').toUpperCase() === 'HTML') {
+        const textContent = file.text_content || file.content || ''
+        const htmlUrl = file.url || file.preview || file.preview_url || file.iframe_url || ''
+        this.filePreviewName = file.name || 'file.html'
+        this.filePreviewContent = textContent
+        this.filePreviewUrl = htmlUrl
+        this.filePreviewRenderedSvg = ''
         this.showFilePreview = true
         return
       }
@@ -1116,16 +1138,12 @@ export default {
         const response = await fetch('/chat/conversations')
         if (response.ok) {
           const data = await response.json()
-          // 后端返回完整会话列表，前端进行冷加载处理
+          // 后端返回完整会话列表，前端一次性展示，CSS 溢出时显示滚动条
           this.conversations = data
         }
       } catch (error) {
         console.error('加载对话列表失败:', error)
       }
-    },
-    async loadMoreConversations() {
-      // 冷加载：每次滚动到底部时增加显示数量
-      this.displayCount += 10
     },
     createNewChat() {
       // 关闭 SSE 连接，停止接收任何流式事件

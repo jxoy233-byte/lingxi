@@ -17,9 +17,34 @@
       </div>
 
       <div class="modal-body">
+        <!-- HTML 文件：原文 / 渲染效果 tab 切换（与 FilePreviewPanel 同款） -->
+        <div v-if="isHtmlFile && (file.preview_url || file.iframe_url)" class="html-preview">
+          <div class="html-tabs">
+            <button
+              :class="['tab-btn', { active: htmlTab === 'raw' }]"
+              @click="htmlTab = 'raw'"
+            >原文</button>
+            <button
+              :class="['tab-btn', { active: htmlTab === 'rendered' }]"
+              @click="htmlTab = 'rendered'"
+            >渲染效果</button>
+          </div>
+          <iframe
+            v-if="htmlTab === 'rendered'"
+            :key="iframeKey"
+            :src="file.iframe_url || file.preview_url"
+            class="html-preview-iframe"
+            sandbox="allow-scripts allow-popups"
+            referrerpolicy="no-referrer"
+          />
+          <div v-else class="preview-text">
+            <pre>{{ htmlRawContent }}</pre>
+          </div>
+        </div>
+
         <!-- iframe 预览方式（PDF 和其他支持 iframe 预览的文件） -->
         <iframe
-          v-if="file.preview_method === 'iframe' && (file.preview_url || file.iframe_url) && !isImageFile(file)"
+          v-else-if="file.preview_method === 'iframe' && (file.preview_url || file.iframe_url) && !isImageFile(file)"
           :src="file.iframe_url || file.preview_url"
           class="preview-iframe"
           frameborder="0"
@@ -116,12 +141,40 @@ export default {
   emits: ['close'],
   data() {
     return {
-      mermaidTab: 'rendered' // 'raw' | 'rendered'
+      mermaidTab: 'rendered', // 'raw' | 'rendered'
+      htmlTab: 'rendered',    // 'raw' | 'rendered'
+      // HTML 原文（异步加载，data:text/html 直接解 / http 走 fetch）
+      htmlRawContent: '',
+      htmlRawLoading: false,
+      htmlRawError: '',
+      // iframe key：用于在切换文件时强制重新挂载（避免浏览器缓存 + 显示陈旧内容）
+      iframeKey: 0
     }
   },
   watch: {
     visible(val) {
-      if (val) this.mermaidTab = 'rendered'
+      if (val) {
+        this.mermaidTab = 'rendered'
+        this.htmlTab = 'rendered'
+        this.htmlRawContent = ''
+        this.htmlRawError = ''
+        this.iframeKey++
+      }
+    },
+    'file.preview_url': {
+      immediate: false,
+      handler() {
+        // 切换文件时强制重置原始 HTML 缓存，并刷新 iframe
+        this.htmlRawContent = ''
+        this.htmlRawError = ''
+        this.iframeKey++
+      }
+    },
+    htmlTab(val) {
+      // 切到原文 tab 时按需异步加载
+      if (val === 'raw' && this.isHtmlFile && !this.htmlRawContent && !this.htmlRawLoading) {
+        this.loadHtmlRawContent()
+      }
     }
   },
   methods: {
@@ -218,6 +271,48 @@ export default {
 
       // 兜底：原样打开
       window.open(url, '_blank')
+    },
+    // 异步加载 HTML 原文：http/https URL 走 fetch；data: URL 同步解码
+    async loadHtmlRawContent() {
+      if (!this.file) return
+      const url = this.file.preview_url || ''
+      if (!url) return
+      // data URL 直接同步解码
+      if (url.startsWith('data:text/html')) {
+        this.htmlRawContent = this._decodeDataHtml(url)
+        return
+      }
+      this.htmlRawLoading = true
+      this.htmlRawError = ''
+      try {
+        const resp = await fetch(url)
+        if (!resp.ok) throw new Error('HTTP ' + resp.status)
+        const text = await resp.text()
+        this.htmlRawContent = text
+      } catch (e) {
+        console.warn('[FilePreviewModal] fetch HTML 原文失败:', e)
+        this.htmlRawError = (e && e.message) || String(e)
+      } finally {
+        this.htmlRawLoading = false
+      }
+    },
+    _decodeDataHtml(url) {
+      const idx = url.indexOf(',')
+      if (idx < 0) return ''
+      const meta = url.slice(0, idx)
+      const payload = url.slice(idx + 1)
+      try {
+        if (meta.includes(';base64')) {
+          const bin = atob(payload)
+          const bytes = new Uint8Array(bin.length)
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+          return new TextDecoder('utf-8').decode(bytes)
+        }
+        return decodeURIComponent(payload)
+      } catch (e) {
+        console.warn('[FilePreviewModal] 解码 data: URL 失败:', e)
+        return ''
+      }
     }
   },
   computed: {
@@ -229,6 +324,31 @@ export default {
       if (method === 'mermaid') return !!this.file.preview_url
       if (this.isImageFile(this.file)) return !!this.file.preview_url
       return false
+    },
+    // 判断 HTML 文件：文件名后缀 / file_type / MIME，三处任意命中即可
+    isHtmlFile() {
+      if (!this.file) return false
+      const name = (this.file.name || '').toLowerCase()
+      if (name.endsWith('.html') || name.endsWith('.htm')) return true
+      const fileType = (this.file.file_type || '').toUpperCase()
+      if (fileType === 'HTML') return true
+      const mime = (this.file.type || '').toLowerCase()
+      if (mime === 'text/html') return true
+      return false
+    },
+    // 原文 tab 用的 HTML 源码：
+    //  - 优先用已 fetch 的 htmlRawContent（http URL 由 watch → loadHtmlRawContent 填充）
+    //  - data: text/html URL 同步解码
+    //  - 否则根据 loading/error 状态返回提示
+    rawHtmlContent() {
+      if (this.htmlRawContent) return this.htmlRawContent
+      const url = this.file && this.file.preview_url
+      if (url && url.startsWith('data:text/html')) {
+        return this._decodeDataHtml(url)
+      }
+      if (this.htmlRawError) return '[加载失败] ' + this.htmlRawError
+      if (this.htmlRawLoading) return '加载中...'
+      return ''
     }
   }
 }
@@ -353,6 +473,36 @@ export default {
   height: 70vh;
   border: none;
   border-radius: 8px;
+}
+
+/* HTML 文件预览（与 FilePreviewPanel 同款）：tabs + iframe + 原文 */
+.html-preview {
+  width: 100%;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.html-tabs {
+  display: flex;
+  gap: 4px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-color);
+  margin-bottom: 12px;
+  flex-shrink: 0;
+}
+.html-preview-iframe {
+  width: 100%;
+  flex: 1;
+  border: none;
+  border-radius: 8px;
+  background: var(--bg-primary);
+  /* 撑满 modal-body 剩余高度 */
+  min-height: 60vh;
+}
+.html-preview .preview-text {
+  flex: 1;
+  max-height: none;
 }
 
 .office-preview {

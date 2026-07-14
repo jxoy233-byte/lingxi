@@ -22,7 +22,8 @@ from .config.graph_config import get_agent_node_config, get_graph_final_node_con
 from .config.models import ChatStateCore2, AIMessageType, FileParseState
 from .Memory.core import MemoryManager
 from .mcps.tools import sub_agent
-from ..LoggingManager.logging_config import get_logger
+from .helpers import get_message_content_string, filter_thinking_content, format_thinking_chain
+from ..LoggingManager.logging_config import get_logger, get_thinking_chain_logger
 from .decorators import node_guard
 
 
@@ -34,6 +35,8 @@ class ChatWorkflow:
 
     def __init__(self):
         self.logger = get_logger(__class__.__name__)
+        # AI 思维链专用 logger（写独立 thinking_chain-YYYY-MM-DD.log）
+        self.thinking_logger = get_thinking_chain_logger()
 
         self._final_system_template = None
         self.llm_core = None
@@ -166,35 +169,6 @@ class ChatWorkflow:
         # self.graph = await self._create_graph_core()
         self.graph = await self._create_graph_core2()
         self.graph_process_files = await self._create_graph_process_files()
-
-    def _get_message_content_string(self, message: BaseMessage) -> str:
-        """提取消息内容为字符串"""
-        content_string = ""
-
-        if not message:
-            return content_string
-
-        message_content = message.content
-
-        if isinstance(message_content, str):
-            content_string = message_content
-        elif isinstance(message_content, list):
-            for item in message_content:
-                if isinstance(item, dict):
-                    item_type = item.get("type")
-                    if item_type == "text":
-                        content_string += item.get("text", "")
-                elif isinstance(item, str):
-                    content_string += item + "\n"
-        elif isinstance(message_content, dict):
-            msg_type = message_content.get("type")
-            if msg_type == "text":
-                content_string = message_content.get("text", "")
-            elif msg_type == "tool":
-                content_string = message_content.get("content", "")
-
-        return content_string
-
 
     def _parse_content_to_tool_calls(self, ai_message: AIMessage):
         """
@@ -414,53 +388,6 @@ class ChatWorkflow:
 
         return [files[i] for i in sorted(files.keys())]
 
-    async def _filter_thinking_content(self, ai_response: AIMessage) -> AIMessage:
-        """
-        过滤掉 AI 回复中的思考过程内容
-        支持格式:
-        - <thinking>...</thinking>
-        - <thought>...</thought>
-        - 等等
-        """
-        content = ai_response.content
-        if not content:
-            return ai_response
-
-        # 过滤标签内的思考内容（通用格式）
-        patterns = [
-            r'<thinking>.*?</thinking>',
-            r'<thought>.*?</thought>',
-            r'<reasoning>.*?</reasoning>',
-            r'<think>.*?</think>',
-            # ⚠️ MiniMax-M3 工具调用方括号包装：[</tool_call>] / [/tool_calls] / [<]tool_call[>] / [<]tool_calls[>]
-            # 两种位置会出现：① 作为孤立标记（下面的 wrapper pattern 直接清掉）；
-            # ② 跟在裸的 <tool_call> 开头后面当闭合（这种情况下 wrapper 必须被允许作为 </tool_call>
-            # 的可选外壳，否则会留下半截 tool_call 块）。
-            # 关键顺序：先跑 tool_call 块整匹配（含 wrapper 闭合），wrapper 正则放后面做兜底。
-            # 否则 wrapper 先剥 → tool_call 块找不到闭合 → 留下 <tool_call>\n<invoke>...</invoke> 这种半截垃圾。
-            r'<tool_call>.*?\[?</?tool_calls?>\]?',
-            r'\[</?tool_calls?>\]',
-            r'\[<\]tool_calls?\[>\]',
-            r'\]<]minimax\[[>]',
-            r'\[<invoke \w+>\]\[<(\w+)>(.*?)</\1>\]',
-            # M3 在 </tool_calls> 之后多余的左括号，不破坏合法的 <tool_calls> 块本身
-            r'(?<=</tool_calls>)\s*\[+',
-        ]
-
-        if isinstance(content, str):
-            for pattern in patterns:
-                content = re.sub(pattern, '', content, flags=re.DOTALL)
-
-        return AIMessage(
-            content=content,
-            additional_kwargs=ai_response.additional_kwargs,
-            response_metadata=ai_response.response_metadata,
-            id=ai_response.id,
-            usage_metadata=getattr(ai_response, "usage_metadata", None),
-            tool_calls=getattr(ai_response, "tool_calls", []) or [],
-        )
-
-
     async def check_and_trigger_interrupt(self, session_id):
         """
         检查当前session_id下的对话是否被中断
@@ -594,68 +521,79 @@ class ChatWorkflow:
 
     def _build_clean_compact_input(self, context: List[BaseMessage]) -> Optional[List[BaseMessage]]:
         """
-        重组 context 为"干净"格式喂给 react_compact_llm：
+        重组 context 为"尽量压缩 AIMessage"喂给 react_compact_llm：
 
         - Header 原文保留（imp_ipt 之前所有内容：含 memory_sys）
         - SystemMessage 原文保留（旧【ReAct 摘要】 / [Warning] / 中断原因等）
         - ToolMessage 原文保留（多段连续，不合并）
-        - AIMessage 全部丢弃（不再喂 tool_calls 字段给模型，避免诱导其生成 tool_call 块）
+        - AIMessage **必须保留**（M3 API 校验 ToolMessage.tool_call_id 必须配对
+          AIMessage.tool_calls.id，缺 AIMessage 直接 400 BadRequest），但**清空 content**
+          （去掉 AI 的思考过程 / 描述性文本，节省字符 + 削弱 M3 模仿"AI 想干什么"的描述性文本）。
+          保留 `tool_calls` 字段（API 必需）+ `additional_kwargs` + `id`。
         - 找不到 imp_ipt 时返回 None
 
-        返回一个不含 AIMessage 的 BaseMessage 列表。
+        为什么不能全剥离 AIMessage：实测 MiniMax-M3 和 gpt-5.1（OpenAI 兼容）API 在请求层
+        严格校验 tool_call_id 配对，缺 AIMessage 直接 400。所以只能"清空 content + 保留
+        tool_calls 字段"做最大化压缩。
         """
         imp_ipt_idx = self._find_imp_ipt_idx(context)
         if imp_ipt_idx is None:
             return None
 
-        # 重组：剥离 AIMessage，其他类型保留
         cleaned: List[BaseMessage] = []
         for i, msg in enumerate(context):
             if i <= imp_ipt_idx:
                 cleaned.append(msg)                       # 头部原文保留
             elif isinstance(msg, (SystemMessage, ToolMessage)):
                 cleaned.append(msg)                       # 元 SystemMessage / 多段 ToolMessage 原文保留
-            # AIMessage 全部丢弃（防 tool_calls 字段诱导）
+            elif isinstance(msg, AIMessage):
+                # 清空 content（去掉 AI 思考过程 / 描述性文本），但保留 tool_calls（API 必需）
+                cleaned.append(AIMessage(
+                    content="",
+                    tool_calls=msg.tool_calls or [],
+                    additional_kwargs=msg.additional_kwargs,
+                    id=msg.id,
+                ))
 
         return cleaned
 
     async def _try_compact_react(self, context: List[BaseMessage]) -> Optional[str]:
         """
-        把 context 重组为"干净"格式（剥离 AIMessage 结构）后喂给 react_compact_llm，
+        把 context 重组为"尽量压缩 AIMessage"格式后喂给 react_compact_llm，
         让它从用户意图 + 工具调用历史 + 元 SystemMessage 中产出 ≤4000 字中文摘要。
 
         整体覆盖式：返回新摘要后由 context_assembly_node 替换 context[imp_ipt+1] 位置
         （旧 summary + 中间 ReAct 历史一次性覆盖）。
         失败 / 输出异常一律返回 None，调用方保持 context 不变。
 
-        ⚠️ 关键：剥离 AIMessage 是为了避免 react_compact_llm 模仿 tool_call 结构。
-        即使没绑工具，M3 weights 看到 input 里的 tool_calls 字段也会在 content 里
-        模仿输出 `<tool_calls>...</tool_calls>` 块。剥离 AIMessage 后 input 里没有
-        tool_calls 结构，模仿概率显著降低，不需要再跑 filter。
+        清空 AIMessage.content 是为了压缩字符 + 削弱 模仿"AI 想干什么"的描述性文本。
         """
         if self.react_compact_llm is None:
             return None
         if len(context) < 4:
             return None
 
-        # 重组为干净输入（剥离 AIMessage）
+        # 重组为干净输入（AIMessage.content 清空，tool_calls 保留）
         clean_input = self._build_clean_compact_input(context)
         if clean_input is None:
             return None
 
-        timeout_sec = 30
+        timeout_sec = 45
         try:
             resp = await asyncio.wait_for(
                 self.react_compact_llm.ainvoke({"messages": clean_input}),
                 timeout=timeout_sec,
             )
-            text = self._get_message_content_string(resp).strip()
+            resp = filter_thinking_content(resp)
+            text = get_message_content_string(resp).strip()
 
             # 长度兜底（[80, 4000] 范围）
-            # 上限放宽到 4000：有时候内容密度实在压不下去（如多文件路径/技术栈细节），
-            # 留 2000 上限会导致 summary 不停被丢弃，state 永远不收敛。
             if not text or len(text) < 80 or len(text) > 4000:
                 self.logger.warning(f"ReAct 压缩结果长度异常: {len(text)}")
+                return None
+            # 残留标签兜底：filter 漏网时（边缘格式），防止半截 tool_call 块被当摘要
+            if re.search(r"<tool[_-]calls?>|<invoke", text):
+                self.logger.warning(f"ReAct 压缩结果含残留 tool_call 标签: {repr(text[:80])}")
                 return None
             return text
         except Exception as e:
@@ -728,7 +666,7 @@ class ChatWorkflow:
 
             resp = await self.llm_imp_ipt_vl.ainvoke([file_msg])
 
-            resp_str = self._get_message_content_string(resp)
+            resp_str = get_message_content_string(resp)
 
             return {"parsed_results": [resp_str]}
 
@@ -820,7 +758,7 @@ class ChatWorkflow:
 
             imp_ipt = await self.llm_imp_ipt.ainvoke({"messages": input_msg})
 
-            imp_ipt = await self._filter_thinking_content(imp_ipt)
+            imp_ipt = filter_thinking_content(imp_ipt)
 
             imp_ipt_content = imp_ipt.content
             imp_ipt_additional_kwargs = imp_ipt.additional_kwargs
@@ -835,7 +773,10 @@ class ChatWorkflow:
                 response_metadata=imp_ipt_response_metadata,
             )
 
-            self.logger.info(f"[imp_ipt_llm]:{imp_ipt}")
+            self.thinking_logger.info(f"--------------------------------------------")
+            # 思维链日志：imp_ipt 单独输出（input_parse_node 优化后的本轮用户意图）
+            self.thinking_logger.info(f"[imp_ipt]:\n{format_thinking_chain([imp_ipt])}")
+            self.logger.debug(f"[imp_ipt_llm]:{imp_ipt}")
 
             return {
                 "imp_ipt": imp_ipt,
@@ -871,8 +812,11 @@ class ChatWorkflow:
 
                 for msg in cycle_msg:
                     if isinstance(msg, ToolMessage):
-                        content_string = self._get_message_content_string(msg)
+                        content_string = get_message_content_string(msg)
                         tool_results.append(content_string)
+
+            # 思维链日志：react_context —— 当前组装好的 context（agent 即将拿到的输入）
+            self.thinking_logger.info(f"[react_context]:\n{format_thinking_chain(context)}")
 
             # ✨ ReAct 流程压缩：达到 compact + keep 个完整工具 loop 后，压缩前 compact 轮，保留最近 keep 轮原文
             tool_call_times = state.get("tool_call_times", 0)
@@ -901,7 +845,13 @@ class ChatWorkflow:
                     # 压缩输入排除最近保留的完整工具 loop，draft 再从原始 context 挂回最近 loop 原文，避免摘要与原文重复。
                     draft = self._build_compaction_draft(context, s_new, keep_loops)
                     if draft is not None:
-                        self.logger.debug(f"[react压缩]: compact_loops={len(complete_loops) - len(keep_loops)}, keep_loops={len(keep_loops)}, context={context}")
+                        # 思维链日志：每次压缩调用后的 context（覆盖式压缩后的新 context）
+                        self.thinking_logger.info(
+                            f"[react_context_after_compact]: "
+                            f"compact_loops={len(complete_loops) - len(keep_loops)}, "
+                            f"keep_loops={len(keep_loops)}\n"
+                            f"{format_thinking_chain(draft)}"
+                        )
                         return {
                             "context": draft,
                             "memory_tool_results": tool_results,
@@ -937,12 +887,18 @@ class ChatWorkflow:
                 interrupt_msg = SystemMessage(content=f"已超过{TOOL_CALL_TIMES}次调用工具次数，请停止工具调用提前结束对话")
                 input_msg.append(interrupt_msg)
 
+            # 思维链日志：agent_node 喂给 LLM 的 input
+            self.thinking_logger.info(f"[agent_node_in]:\n{format_thinking_chain(input_msg)}")
+
             response = await self.agent_llm.ainvoke({"messages": input_msg})
 
-            response = await self._filter_thinking_content(response)
+            response = filter_thinking_content(response)
 
             # 符合ToolNode节点的AIMessage(REASONING)
             format_response = self._parse_content_to_tool_calls(response)
+
+            # 思维链日志：agent_node 输出（带 tool_calls 的 AIMessage）
+            self.thinking_logger.info(f"[agent_node_out]:\n{format_thinking_chain([format_response])}")
 
             counts = 0
 
@@ -1000,10 +956,14 @@ class ChatWorkflow:
             response = await self.should_end_llm.ainvoke({"messages": [last_message]})
             content = str(response.content)
 
-            self.logger.debug(f"[should_end] response: {response.content}")
+            # 思维链日志：should_end 单独输出（决策点）
+            self.thinking_logger.info(f"[should_end_in]:\n{format_thinking_chain([last_message])}")
+
             decision = "end"
             if "retry" in content or "RETRY" in content:
                 decision = "retry"
+
+            self.logger.debug(f"[should_end] response: {response.content}")
 
             retry_times = state.get("should_end_retry_times", 0) or 0
 
@@ -1032,6 +992,8 @@ class ChatWorkflow:
             # imp_ipt 在 system 层独占最高注意力位；{imp_ipt} 占位由 _final_system_template.format() 注入。
             context = list(state["context"])
 
+            # 思维链日志：final_node 输入 context（imp_ipt 被 pop 之前的完整 context）
+            self.thinking_logger.info(f"[final_node_in_context]:\n{format_thinking_chain(context)}")
             self.logger.debug(f"[final_context]: {context}")
 
             imp_ipt_idx = self._find_imp_ipt_idx(context)
@@ -1051,8 +1013,11 @@ class ChatWorkflow:
                 ]
             )
 
-            response = await self._filter_thinking_content( response)
+            response = filter_thinking_content( response)
 
+            # 思维链日志：final_node 输出（最终回复）
+            self.thinking_logger.info(f"[final_node_out]:\n{format_thinking_chain([response])}")
+            self.thinking_logger.info(f"--------------------------------------------")
             self.logger.debug(f"[final_node]: {response}")
 
             # AIMessage字段支持解包复制
@@ -1062,7 +1027,7 @@ class ChatWorkflow:
             response_better = AIMessage(**response_dict)
 
             # 提取AI回复内容用于memory
-            memory_ai_response = self._get_message_content_string(response_better)
+            memory_ai_response = get_message_content_string(response_better)
 
             return {
                 "messages": [response_better],

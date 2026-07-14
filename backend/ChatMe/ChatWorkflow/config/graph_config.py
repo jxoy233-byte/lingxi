@@ -58,8 +58,11 @@ Task arrives → Is there a skill for this?
 │
 ├─ Matching skill? (see examples below)
 │   YES → **FIRST**: cat skills/skills.md for overview
-│         → Then read the specific skill file
+│         → Then directly call the skill (from skills.xxx import ...) per skills.md
 │         ⚠️ NEVER read individual skill files without reading skills.md first
+│         ⚠️ skills.md already lists each skill's functions/signatures — cat the
+│            .py source ONLY when you need implementation details not in skills.md
+│            (rare). Default: skip reading individual skill files, call directly.
 │
 ├─ Uncertain? → ls skills/ to explore (it's free and safe)
 │
@@ -99,7 +102,7 @@ Task arrives → Is there a skill for this?
 
 ## Project Operation Dir
 skills/ — Skill library (read only)
-cached/ — Cached files operation dir (read and write)
+cached/'sid'/ — Your Own Sid Cached files operation dir (read and write)
 
 ## Good Chain Examples
 
@@ -196,7 +199,7 @@ Task assigned → Follow the execution steps provided
 
 ## Project Operation Dir
 skills/ — Skill library (read only)
-cached/ — Cached files operation dir (read and write)
+cached/'sid'/ — Your Own Sid Cached files operation dir (read and write)
 """
 
 # ----- TOOLS: 工具定义模块（按 agent 类型拆分）-----
@@ -557,11 +560,11 @@ Use the most relevant messages in the context (preferred choice), or your own ex
 - Include any thinking, reasoning, or self-reference in your output
 
 ## Response Structure
-[Direct Answer] ← Always first. No preamble.
-[Supporting Content] ← Brief explanation if needed
-[Structured Data] ← Tables/code blocks, only when 2+ data items exist
-[Action Items/Warnings] ← Only when relevant
-[Source References] ← Always inline with content, not at bottom
+Direct Answer ← Always first. No preamble.
+Supporting Content ← Brief explanation if needed
+Structured Data ← Tables/code blocks, only when 2+ data items exist
+Action Items/Warnings ← Only when relevant
+Source References ← Always inline with content, not at bottom
 
 ## Format Selection
 | Scenario | Format | Example |
@@ -949,8 +952,10 @@ def get_react_compact_config():
 
 # Input
 
-调用方已**剥离所有 AIMessage**（含 tool_calls）。你看到的是：
-- `HumanMessage`（用户意图）+ `SystemMessage`（旧摘要 / warning / 中断原因）+ `ToolMessage`（多段工具结果）
+调用方**清空所有 AIMessage 的 content**（去掉 AI 思考过程），但保留 `tool_calls` 字段（API 强校验需要）。所以你看到的是：
+- `HumanMessage`（用户意图）+ `SystemMessage`（旧摘要 / warning / 中断原因）+ `ToolMessage`（多段工具结果）+ `AIMessage`（content 为空，仅 tool_calls 占位）
+
+你**看不到** AI 想干什么的描述文本，只能从 `ToolMessage` 的内容反推"做了什么、拿到了什么"。
 
 旧【ReAct 摘要】会被本次整体覆盖，只取结论，不再重复展开。
 

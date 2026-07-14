@@ -232,7 +232,7 @@ class FilesLoaders:
         kept_count = len(kept_lines)
         hint = (
             f"[文件过大已截断] \n"
-            f"[完整文件路径] {file_path or '未知'}\n"
+            f"[完整文件路径] {os.path.relpath(file_path) if file_path else '未知'}\n"
             f"[提示] 如需分析完整文件内容，请进行文件所在环境探索\n\n"
         )
         return hint + '\n'.join(kept_lines)

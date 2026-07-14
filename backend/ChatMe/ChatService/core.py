@@ -808,6 +808,10 @@ class ChatService:
         彻底删除Redis中的会话数据：包含检查点+历史状态+索引
         """
         try:
+            # 清除中断状态，确保流式响应正常
+            if await self._judge_is_interrupted(session_id):
+                await self.redis_client.delete(f"interrupt:{session_id}")
+
             await self._wait_previous_memory_update(session_id)
 
             await self.state_saver.delete_thread(session_id)

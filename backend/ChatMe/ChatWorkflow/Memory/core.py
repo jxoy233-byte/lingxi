@@ -43,6 +43,10 @@ async def _filter_thinking_content(ai_response: AIMessage) -> AIMessage:
         r'\[<invoke \w+>\]\[<(\w+)>(.*?)</\1>\]',
         # M3 在 </tool_calls> 之后多余的左括号，不破坏合法的 <tool_calls> 块本身
         r'(?<=</tool_calls>)\s*\[+',
+        # 孤立开标签（无闭合）—— M3 第一次调用工具时 content 里只剩开标签的场景。
+        # 整块 pattern 因为找不到 `</tool_calls?>` 的 `<` 会整体匹配失败；这条兜底。
+        # 放在最后跑：整块 pattern 先吃掉完整块，剩下的孤立开标签由这条兜底。
+        r'<tool_calls?>\s*\n?',
     ]
 
     if isinstance(content, str):
@@ -480,7 +484,7 @@ class MemoryManager:
 暂无
 
 ## 缓存文件目录
-- cached/
+- cached/{thread_id}
 """
 
 

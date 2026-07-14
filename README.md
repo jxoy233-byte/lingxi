@@ -297,10 +297,25 @@ ChatMe/
 
 | 接口 | 方法 | 说明 |
 |------|------|------|
-| `/static/cached/{file_path:path}` | GET | 访问 cached 目录静态文件 |
+| `/static/cached/{file_path:path}` | GET | 访问 cached 目录静态文件；详见 [静态文件 fallback](#静态文件-fallback) |
 | `/api/v1/chat/completions` | POST | 视觉语言模型服务（本地 Qwen3-VL） |
 | `/admin/cleanup` | POST | 手动触发清理任务 |
 | `/admin/cleanup/status` | GET | 获取清理状态 |
+
+#### 静态文件 fallback
+
+`serve_cached_file` 在精确路径命中失败时按以下规则走 fallback：
+
+1. **带 sid 路径（`cached/{32-hex}/...` 或 `{32-hex}/...`）找不到 → 直接 404**：不去跨会话命中同名文件，避免误把别人 session 的产物当成本会话的图。
+2. **无 sid 路径找不到 → 双层 fallback**：
+   - **第一层（primary）**：从 `Referer` header 提取 32hex sid（如 `http://localhost:5173/{sid}` 或 `http://localhost:5173/{sid}/foo`），优先在 `cached/{referer_sid}/` 下递归找同名文件
+   - **第二层（兜底）**：跨 `cached/*/` 所有 session 子目录递归查找同名文件（`rglob("**/*")`），按 `st_mtime` 降序排序，**最新修改时间**的文件胜出
+   - Referer 缺失（隐私模式 / `no-referrer` 策略）/ 不含 sid / 异常格式 → 自动跳过第一层直接走第二层
+3. **都无命中 → 404**。
+
+**为什么用 Referer 推断 sid 而不是 `X-Session-Id` 自定义 header**：浏览器 `<img>` 标签加载 markdown 图片（fallback 主要场景）**不能**加自定义 header（浏览器规范限制），EventSource 也不能；只有 fetch 类 API 请求能加。所以 fallback 服务的核心场景（`<img>` 加载裸文件）只能靠浏览器自动带的 `Referer` 拿当前会话 sid，让 fallback 优先返回当前会话的产物。
+
+**适用场景**：AI agent 输出的 markdown 图片用 `./data_analysis/foo.png` 这种**无 sid** 的相对路径时（前端会拼成 `/static/data_analysis/foo.png`），浏览器从当前会话页面发起请求时 Referer 自带 sid，fallback 会优先返回当前会话产物；找不到再跨 sid 取最新同名文件兜底。
 
 ## 代码沙盒
 
@@ -427,7 +442,7 @@ npm run electron:build:linux    # Linux AppImage（x64）
 
 ### AI 协作者约定
 
-工作流实现细节（`imp_ipt` 锚点、ReAct 压缩剥离 AIMessage、`@node_guard` 装饰器、`_filter_thinking_content` MiniMax-M3 wrapper、`MemoryManager` per-thread Lock、SandboxPool 池锁整段、Electron `file://` 三件套与图标包外、侧栏 CSS 7 条、流式会话快照 19 条等）见 [`CLAUDE.md`](CLAUDE.md)。新增节点 / 流式 SSE 入口 / 执行方法前必须先读对应章节。
+工作流实现细节（`imp_ipt` 锚点、ReAct 压缩清空 AIMessage.content + filter 兜底、`@node_guard` 装饰器、`_filter_thinking_content` MiniMax-M3 wrapper（含 `<tool_calls>` / `[<invoke name="cmd">][<command>...]` 7 个变体）、`MemoryManager` per-thread Lock、SandboxPool 池锁整段、Electron `file://` 三件套与图标包外、侧栏 CSS 7 条、流式会话快照 19 条等）见 [`CLAUDE.md`](CLAUDE.md)。新增节点 / 流式 SSE 入口 / 执行方法前必须先读对应章节。
 
 ## 许可证
 

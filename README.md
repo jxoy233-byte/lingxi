@@ -143,7 +143,7 @@ docker-compose up -d redis
 cd backend
 uv sync                                          # 安装依赖
 
-# 启动 MCP 服务器（端口 18080）
+# 启动 MCP 服务器（端口 28211）
 # 首次启动会自动：1) 检查 Redis  2) 清理残留沙盒容器  3) 初始化沙盒池
 uv run chatme_mcp                                # 等价于 uv run python -m ChatMe.ChatWorkflow.mcps.server
 
@@ -156,7 +156,7 @@ uv run chatme_main                               # 等价于 uv run python main.
 ```bash
 cd frontend
 npm install
-npm run dev  # 访问 http://localhost:5173
+npm run dev  # 访问 http://localhost:18211
 ```
 
 #### Electron 桌面端开发
@@ -208,7 +208,7 @@ OPENAI_PRESENCE_PENALTY=0.0
     "port": 8211
   },
   "mcp_server": {
-    "url": "http://127.0.0.1:18080/streamable",
+    "url": "http://127.0.0.1:28211/streamable",
     "transport": "streamable_http"
   },
   "redis": {
@@ -308,7 +308,7 @@ ChatMe/
 
 1. **带 sid 路径（`cached/{32-hex}/...` 或 `{32-hex}/...`）找不到 → 直接 404**：不去跨会话命中同名文件，避免误把别人 session 的产物当成本会话的图。
 2. **无 sid 路径找不到 → 双层 fallback**：
-   - **第一层（primary）**：从 `Referer` header 提取 32hex sid（如 `http://localhost:5173/{sid}` 或 `http://localhost:5173/{sid}/foo`），优先在 `cached/{referer_sid}/` 下递归找同名文件
+   - **第一层（primary）**：从 `Referer` header 提取 32hex sid（如 `http://localhost:18211/{sid}` 或 `http://localhost:18211/{sid}/foo`），优先在 `cached/{referer_sid}/` 下递归找同名文件
    - **第二层（兜底）**：跨 `cached/*/` 所有 session 子目录递归查找同名文件（`rglob("**/*")`），按 `st_mtime` 降序排序，**最新修改时间**的文件胜出
    - Referer 缺失（隐私模式 / `no-referrer` 策略）/ 不含 sid / 异常格式 → 自动跳过第一层直接走第二层
 3. **都无命中 → 404**。

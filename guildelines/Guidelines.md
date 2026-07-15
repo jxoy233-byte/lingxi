@@ -19,7 +19,7 @@
 | Electron appId | `com.chatme.app` |
 | productName | `灵析` |
 | 默认 favicon | `/favicon.ico` |
-| 主服务端口 | 8211（FastAPI） / 18080（MCP） / 5173（Vite dev） |
+| 主服务端口 | 8211（FastAPI） / 28211（MCP） / 18211（Vite dev） |
 
 ---
 

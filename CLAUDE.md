@@ -19,7 +19,7 @@ ChatMe（产品名「灵析」Lingxi）是一个基于 LangGraph 的多智能体
 - **包管理**: uv
 
 ### 前端
-- **Web**: Vue 3 + Vite（端口 5173）
+- **Web**: Vue 3 + Vite（端口 18211）
 - **桌面端**: Electron 41 + electron-builder 26
 - **样式**: CSS Variables + 原生 CSS
 - **Markdown / 数学**: marked + highlight.js + katex
@@ -101,7 +101,7 @@ State 定义在 [`backend/ChatMe/ChatWorkflow/config/models.py`](backend/ChatMe/
 ### 工作流启动入口
 
 ```bash
-# MCP 服务（端口 18080）
+# MCP 服务（端口 28211）
 uv run chatme_mcp
 
 # 主服务（端口 8211）
@@ -184,7 +184,7 @@ uv run chatme_main
 
 ```bash
 chatme_main         # 启动后端主服务（端口 8211）
-chatme_mcp          # 启动 MCP 服务（端口 18080）
+chatme_mcp          # 启动 MCP 服务（端口 28211）
 ```
 
 开发模式（不进 wheel）：

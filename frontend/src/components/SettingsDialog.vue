@@ -107,7 +107,7 @@
               <div class="group">
                 <div class="field">
                   <label>URL</label>
-                  <input v-model="formConfig.mcp_server.url" type="text" placeholder="http://127.0.0.1:18080/streamable" />
+                  <input v-model="formConfig.mcp_server.url" type="text" placeholder="http://127.0.0.1:28211/streamable" />
                 </div>
                 <div class="field">
                   <label>Transport</label>

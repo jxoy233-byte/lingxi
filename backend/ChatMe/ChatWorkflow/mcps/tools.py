@@ -61,7 +61,7 @@ def _get_sub_agent_tools():
 
         mcp_config = get_mcp_config()
         core_mcp_config = {
-            'url': mcp_config.get('url', 'http://127.0.0.1:18080/streamable'),
+            'url': mcp_config.get('url', 'http://127.0.0.1:28211/streamable'),
             'transport': mcp_config.get('transport', 'streamable_http')
         }
 

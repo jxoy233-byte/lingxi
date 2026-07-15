@@ -8,7 +8,7 @@ const __dirname = path.dirname(__filename)
 
 export const viteServerConfig = {
   host:'0.0.0.0',
-  port: 5173,
+  port: 18211,
   strictPort: true,
   proxy: {
     '/chat': {

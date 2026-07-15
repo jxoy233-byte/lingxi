@@ -85,7 +85,7 @@ class ChatMeConfig:
                 "state_saver_url": "redis://localhost:6388",
             },
             "mcp_server": {
-                "url": "http://127.0.0.1:18080/streamable",
+                "url": "http://127.0.0.1:28211/streamable",
                 "transport": "streamable_http",
             },
             "directories": {

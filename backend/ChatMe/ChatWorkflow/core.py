@@ -67,12 +67,12 @@ class ChatWorkflow:
             from ChatMe.ChatMeConfig import get_mcp_config
             mcp_config = get_mcp_config()
             core_mcp_config = {
-                'url': mcp_config.get('url', 'http://127.0.0.1:18080/streamable'),
+                'url': mcp_config.get('url', 'http://127.0.0.1:28211/streamable'),
                 'transport': mcp_config.get('transport', 'streamable_http')
             }
         except Exception:
             core_mcp_config = {
-                'url': 'http://127.0.0.1:18080/streamable',
+                'url': 'http://127.0.0.1:28211/streamable',
                 'transport': 'streamable_http'
             }
 

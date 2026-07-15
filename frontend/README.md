@@ -55,7 +55,7 @@ Vue 3 + Vite 单页应用，提供 **Web 端** 和 **Electron 桌面端** 两种
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Web 端：浏览器访问 http://localhost:5173                     │
+│  Web 端：浏览器访问 http://localhost:18211                    │
 │  ─────────                                                 │
 │  npm run dev          启动 Vite dev server                   │
 │  npm run build        输出到 dist/                          │
@@ -79,7 +79,7 @@ Web 端走 Vite dev server，Electron 端在窗口内嵌同一个 URL 或 `file:
 # 启动 Redis（端口 6024，密码 123456）
 docker-compose up -d redis
 
-# 启动 MCP 服务器（端口 18080）
+# 启动 MCP 服务器（端口 28211）
 cd backend
 uv run chatme_mcp
 
@@ -100,7 +100,7 @@ npm install
 
 | 场景 | 命令 |
 |------|------|
-| 仅浏览器调试 | `npm run dev` → 访问 `http://localhost:5173` |
+| 仅浏览器调试 | `npm run dev` → 访问 `http://localhost:18211` |
 | Electron 联调（含热更新） | `npm run electron:dev:all` |
 | 桌面端预览构建产物 | `npm run build && npm run electron:prod` |
 | 打包安装包 | `npm run electron:build` 或 `electron:build:mac` / `:win` / `:linux` |
@@ -258,12 +258,12 @@ Vite dev server 通过代理把 `/chat` 和 `/static` 转发到 `http://127.0.0.
 
 | 命令 | 等价操作 | 用途 |
 |------|----------|------|
-| `npm run dev` | `vite` | 仅启动 Vite dev server（端口 5173），浏览器访问 |
+| `npm run dev` | `vite` | 仅启动 Vite dev server（端口 18211），浏览器访问 |
 | `npm run electron:dev` | `NODE_ENV=development electron .` | 仅启动 Electron 主进程，要求 Vite 已先起 |
-| `npm run electron:dev:all` | concurrently 起 vite + 等 5173 起来后再 electron | 联调推荐入口，一行命令搞定 Vite + Electron |
+| `npm run electron:dev:all` | concurrently 起 vite + 等 18211 起来后再 electron | 联调推荐入口，一行命令搞定 Vite + Electron |
 | `npm run preview` | `vite preview` | 本地预览 `dist/` 产物（不走 Electron） |
 
-> `electron:dev` 模式下：Electron 加载 `http://localhost:5173`，DevTools 自动开启，菜单栏出现「开发」子菜单。
+> `electron:dev` 模式下：Electron 加载 `http://localhost:18211`，DevTools 自动开启，菜单栏出现「开发」子菜单。
 
 ### 正式构建 / 打包
 
@@ -280,8 +280,8 @@ Vite dev server 通过代理把 `/chat` 和 `/static` 转发到 `http://127.0.0.
 
 | 环境 | `NODE_ENV` | 加载内容 | DevTools | 菜单栏「开发」 | 危险快捷键拦截 |
 |------|-----------|----------|----------|---------------|---------------|
-| 开发 | `development` | `http://localhost:5173`（Vite dev） | 开启（启动时自动打开） | 显示 | 不拦截 |
-| 测试 | `test` | `http://localhost:5173`（Vite dev） | 开启 | 显示 | 不拦截 |
+| 开发 | `development` | `http://localhost:18211`（Vite dev） | 开启（启动时自动打开） | 显示 | 不拦截 |
+| 测试 | `test` | `http://localhost:18211`（Vite dev） | 开启 | 显示 | 不拦截 |
 | 正式 | `production` 或未设 | `dist/index.html`（本地文件） | 关闭 | 隐藏 | 拦截 `F12` / `CmdOrCtrl+Shift+I/C/J` |
 
 > `getEnvironmentConfig()` 内部还计算了 `label`（`DEV` / `TEST`）和 `color`（红 / 黄）字段，但当前 `main.js` 没有把它们显示到窗口标题栏上（仅「关于」弹窗展示 `mode`），属于预留位。如需在标题栏显示徽章，需要在 `createWindow` 里改写 `title` 字段。
@@ -297,8 +297,8 @@ const isTest = process.env.NODE_ENV === 'test'
 
 完全按 `NODE_ENV` 严格走，**不再**被 `!app.isPackaged` 拖累。三种模式的实际行为：
 
-- `NODE_ENV=development`（`electron:dev` / `electron:dev:all`）：加载 `http://localhost:5173`，自动开 DevTools，显示「开发」菜单
-- `NODE_ENV=test`（手动 `NODE_ENV=test electron .`）：加载 `http://localhost:5173`，DevTools 开启但不自动打开，显示「开发」菜单
+- `NODE_ENV=development`（`electron:dev` / `electron:dev:all`）：加载 `http://localhost:18211`，自动开 DevTools，显示「开发」菜单
+- `NODE_ENV=test`（手动 `NODE_ENV=test electron .`）：加载 `http://localhost:18211`，DevTools 开启但不自动打开，显示「开发」菜单
 - `NODE_ENV=production` 或未设（`electron:prod` / 打包后运行）：加载 `dist/index.html`，关闭 DevTools，拦截危险快捷键
 
 ## Electron 配置
@@ -313,7 +313,7 @@ const isTest = process.env.NODE_ENV === 'test'
 | `app.version` | `0.0.1` | 同步后端版本号 |
 | `window.width × height` | `1100 × 720` | 主窗口尺寸 |
 | `window.minWidth × minHeight` | `650 × 480` | 最小尺寸 |
-| `devServer.url` | 从 Vite 导入的 `http://localhost:5173` | Electron 开发时加载的 URL |
+| `devServer.url` | 从 Vite 导入的 `http://localhost:18211` | Electron 开发时加载的 URL |
 | `backend.apiUrl` | `http://127.0.0.1:8211`（从 Vite 代理读取） | 后端地址 |
 | `paths.indexHtml` | `dist/index.html`（asar 内） | Electron 正式模式加载的入口 HTML |
 | `paths.preload` | `electron/preload.js`（asar 内） | preload 脚本路径 |
@@ -468,7 +468,7 @@ open ~/Downloads/灵析.app
 ### 1. Electron 启动后窗口是空白的
 
 - 检查后端 Redis 是否启动（端口 6024）
-- 检查 MCP 服务器是否启动（端口 18080）
+- 检查 MCP 服务器是否启动（端口 28211）
 - 检查主服务是否启动（端口 8211）
 - Vite 代理 `/chat` 和 `/static` 到 8211；如改了后端端口，需同步 `vite.config.js` 的 `proxy`
 

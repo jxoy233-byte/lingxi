@@ -26,7 +26,11 @@
       />
     </div>
     <div class="conv-time">{{ formattedTime }}</div>
-    <button @click.stop="$emit('delete')" class="delete-btn">×</button>
+    <button
+      @click.stop="handleDeleteClick"
+      :class="['delete-btn', { 'confirming': isConfirmingDelete }]"
+      :title="isConfirmingDelete ? '再次点击确认删除' : '删除'"
+    >×</button>
   </div>
 </template>
 
@@ -52,7 +56,10 @@ export default {
     return {
       isEditing: false,
       editTitle: '',
-      currentTime: Date.now()
+      currentTime: Date.now(),
+      // 行内二次确认：第一次点 × 进入 confirming 态（按钮变红），
+      // 第二次点同一按钮才真正 emit delete；点别处 / Esc 取消。
+      isConfirmingDelete: false
     }
   },
   computed: {
@@ -82,11 +89,16 @@ export default {
     this.timeInterval = setInterval(() => {
       this.currentTime = Date.now()
     }, 60000)
+    // 行内二次确认取消：点别处 / Esc 都重置 confirming 态
+    document.addEventListener('click', this.cancelDeleteConfirm)
+    document.addEventListener('keydown', this.onKeydown)
   },
   beforeUnmount() {
     if (this.timeInterval) {
       clearInterval(this.timeInterval)
     }
+    document.removeEventListener('click', this.cancelDeleteConfirm)
+    document.removeEventListener('keydown', this.onKeydown)
   },
   methods: {
     startEdit() {
@@ -112,6 +124,33 @@ export default {
     cancelEdit() {
       this.isEditing = false
       this.editTitle = ''
+    },
+    handleDeleteClick() {
+      if (this.isConfirmingDelete) {
+        // 第二次点：立刻重置 confirming（防止 document click 收到事件后再 cancel 一次），
+        // 然后 emit delete，让 App.vue 真正调 DELETE 接口。
+        // 删除成功 → ConversationItem unmount → 监听自动清理。
+        // 删除失败 → isConfirmingDelete 已是 false，用户可重新点一次。
+        this.isConfirmingDelete = false
+        this.$emit('delete')
+      } else {
+        // 第一次点：进入确认态，按钮变红一直显
+        this.isConfirmingDelete = true
+      }
+    },
+    cancelDeleteConfirm(e) {
+      // 仅在 confirming 态取消；按钮自身的 click 在 handleDeleteClick 里处理，
+      // 但 document click 仍会冒泡到这里——此时 isConfirmingDelete 已是 false（被 handleDeleteClick 重置），
+      // 所以这个分支只针对"点别处"的情况生效。
+      // 同时检查事件源是否在本组件内（防御性，避免 button click 被二次处理）
+      if (this.isConfirmingDelete && this.$el && !this.$el.contains(e?.target)) {
+        this.isConfirmingDelete = false
+      }
+    },
+    onKeydown(e) {
+      if (e.key === 'Escape' && this.isConfirmingDelete) {
+        this.isConfirmingDelete = false
+      }
     }
   }
 }
@@ -209,5 +248,17 @@ export default {
 .delete-btn:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
+}
+
+/* 行内二次确认：confirming 态按钮变红且一直显（不再依赖 hover） */
+.delete-btn.confirming {
+  opacity: 1;
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.delete-btn.confirming:hover {
+  color: #dc2626;
+  background: rgba(239, 68, 68, 0.22);
 }
 </style>

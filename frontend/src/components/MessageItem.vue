@@ -368,14 +368,15 @@ marked.use({
 
       if (!src) return alt || ''
 
-      // 处理相对路径，拼接服务器基础 URL
+      // 处理相对路径，转成 /static/ 开头的绝对路径（不带 origin）。
+// 不带 origin 是关键：vite dev 下浏览器解析成 http://localhost:18211/static/...
+// 走 vite proxy → 8211；Electron file:// 下解析成 file:///static/... → file:// 协议
+// 拦截器命中 pathname.startsWith('/static/') → net.fetch 转 backend。
+// 若带 window.location.origin（file:// 时为 "null"），浏览器把 "null/..." 视作无效 URL
+// 直接静默失败，<img> 不发请求——mmd/html 没这问题是因为它们直接用相对路径
+// fetch/iframe src。
       if (src.startsWith('./')) {
-        src = `${window.location.origin}/chat/static/${src.slice(2)}`
-      } else if (src.startsWith('/Users/jx')) {
-        src = src.replace('/Users/jx/coding/projects/ChatMe/backend', '/chat/static')
-        src = `${window.location.origin}${src}`
-      } else if (src.startsWith('/')) {
-        src = `${window.location.origin}${src}`
+        src = `/static/${src.slice(2)}`
       }
 
       const titleAttr = title ? ` title="${title}"` : ''

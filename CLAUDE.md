@@ -113,7 +113,7 @@ uv run chatme_main
 | 组件 | 职责 |
 |------|------|
 | `App.vue` | 全局状态管理，SSE 事件分发；维护 `_sessionHadError` 集合做"错误气泡保护态"（出错后该 session 不再被右侧刷新覆盖）；`refreshPage()` 触发 `window.location.reload()` |
-| `Sidebar.vue` / `ConversationItem.vue` | 会话列表（全量入 DOM + `overflow-y: scroll` + 自定义 webkit 滚动条） |
+| `Sidebar.vue` / `ConversationItem.vue` | 会话列表（全量入 DOM + `overflow-y: scroll` + 自定义 webkit 滚动条）；ConversationItem 维护删除会话行内二次确认状态机（小红叉，见偏好 21） |
 | `MessageList.vue` | 消息列表容器 + 滚动控制 |
 | `MessageItem.vue` | 单条消息渲染（思考过程 / Markdown / 代码高亮），`message.error=true` 时渲染为红色错误框（避免报错堆栈被当 markdown） |
 | `MessageInput.vue` | 输入框 + 文件上传 + 语音输入 |
@@ -207,6 +207,56 @@ docker-compose build sandbox                          # 镜像名 chatme-python-
 docker-compose up -d redis                            # 端口 6024，密码 123456
 ```
 
+## AI 自动化工具
+
+### 测试 Agent（多轮对话测试）
+
+项目根目录下 `.test_agent/test_agent.md` 是给后续 AI 协作者（Codex / Claude agent）跑多轮对话测试的完整指南——硬约束、工具链、DOM 节点 selector、单 batch 完整流程代码、报告生成代码、已确认的真实后端缺陷都在那。**任何接手的 AI agent 在做端到端测试前必须先读这个文件**，不要凭直觉写 Playwright 脚本。
+
+简要摘要（细节全在 `.test_agent/test_agent.md`）：
+
+- **硬约束**：MCP 单调用 ≤280s；单 batch ≤12 轮（超过必卡）；IAB 同会话 22+ 轮 R2 后必然 timeout，必须分多 batch 重开会话
+- **首选工具链**：Codex IAB 浏览器（经 `mcp__node_repl__js` 调 Playwright API）；备选本地 Chrome + CDP（`chrome --remote-debugging-port=9222`）
+- **已验证脚本**：`/Users/jx/Documents/Codex/2026-07-13/da/work/test_runner_v3.mjs`（getTab / sendAndWait / extractConversation / newChat）+ `long_chat_helpers.mjs`（sendOne / snap / getFullAi / loadState-saveState）
+- **5 个必踩陷阱**：
+  1. 同会话 22+ 轮 IAB 卡死 → ≤12 轮/batch 重开会话
+  2. send-btn 反应延迟 → `await waitForTimeout(500)` + `click({force: true})` 跳 disabled 校验
+  3. URL 漂移 → 新会话 URL 从 `/` → `/<hash>` 是正常，不是切换 bug
+  4. 完成判定 → 用"AI 文本长度稳定 1.5-2.5s"，不要用"中断按钮消失"
+  5. MCP 边界丢 Vue 状态 → 每 batch 必须 `getTab()` + `evaluate()` 重读 DOM
+- **已确认的真实后端缺陷**（测试时遇到是已知问题，不是新 bug）：
+  1. 跨多轮记忆上限：19+ 轮 R12/R17 失败（IAB 状态丢失，非 LLM 真实缺陷）
+  2. 优化输入无效：`POST /chat/improve_input` 返回的 `improved_text` 与原文完全相同
+  3. 业务复杂题卡死：复杂业务题（T08 类）触发 20+ 分钟无限工具调用循环
+  4. IAB 路由状态不稳：新会话 URL 在 R1 后从 `/` 跳到 `/<hash>`，可丢失前端历史
+
+### 定时优化 Agent（cron job）
+
+`~/.claude/scheduled_tasks.json` 里有 1 个持久化 cron job `a09d41ec`，**每小时 :23 自动触发** ChatMe 项目后端优化 Agent（durable，跨 session 持续；7 天后自动过期，需要时续期）。目的：扫思维链日志 + 自动修复 prompt / AI 配置问题，不依赖人手。
+
+行为：
+
+- **读 `.chatme/logs/thinking_chain-YYYY-MM-DD.log`**（CLAUDE.md 偏好 10.1 提到的独立思维链日志）
+- **9 个 call site 扫一遍**：`imp_ipt` / `react_context` / `react_context_after_compact` / `agent_node_in` / `agent_node_out` / `should_end_in` / `should_end_decision` / `final_node_in_context` / `final_node_out`
+- **判定尺度**：只看思维链方向 + 输出方向合不合适；不纠结日志末尾"截断"（那是日志显示被截，不是 LLM 输出被截）；max_tokens 触发的截断不当 bug
+- **✅ 可自主改**：prompt 删冗段加 few-shot 锚定、加 `_filter_thinking_content` regex、env 拆分、改 `format_thinking_chain` 的 max_chars、改 `PROMPT_MAIN_FLOW` 反冗余约束
+- **❌ 不做**：调 max_tokens / temperature、大范围 prompt 重写、加新工具 / 节点、改 ReAct 流程、改 should_end_node 决策逻辑、改前端 / Electron、不主动 git commit
+- **多文件改动要先列出来**：跨 5+ 文件的 LLM 配置改动不一次性下，先汇报再改
+
+管理命令：
+
+```bash
+# 查看当前 cron job
+claude --cron-list                   # 或在 Claude Code 内用 CronList
+
+# 取消定时任务
+claude --cron-delete a09d41ec
+
+# 7 天后自动过期前续期：在 Claude Code 内用 CronCreate 重建
+```
+
+**接手时的注意点**：如果你接手这个项目发现 `~/.claude/scheduled_tasks.json` 里还有 `a09d41ec`，说明定时优化 Agent 在跑；如果文件被清掉（比如换机器 / 清理过 `~/.claude`），需要重新挂上。完整 prompt 与 ✅/❌ 清单见 cron job 本身的 prompt 字段。
+
 ## AI 协作偏好
 
 > 这些偏好从用户对话中沉淀，存于 `/Users/jx/.claude/projects/-Users-jx-coding-projects-ChatMe/memory/`。改前先读 `MEMORY.md` 看完整索引。
@@ -235,6 +285,12 @@ docker-compose up -d redis                            # 端口 6024，密码 123
 18. **可滚动侧栏/面板 CSS 约定**：所有可滚动列表（Sidebar / DataAnalysisTree / WebPreviewPanel / CheckpointPanel 等）必须按以下 7 条点写：① 数据全量入 DOM，禁止 `slice(0, N)` / `displayCount` 切片（CSS overflow 自己负责滚动）；② 侧栏 `height: 100vh; flex-shrink: 0; overflow: hidden`，外层不被内容撑大；③ 固定头部 `flex-shrink: 0` 锁尺寸；④ 滚动区用 `height: calc(100vh - X)` **不走** `flex: 1 + min-height: 0`（flex 子项 `min-height: auto` 会让 overflow 失效）；⑤ **`overflow-y: auto`**——浏览器默认；**禁止**用 `overflow-y: scroll`（始终预留轨道，列表短时也空占位）、禁止 `overflow-y: hidden`（用户完全感知不到还有内容）；⑥ **CSS-only 没法做到「溢出时才显示滚动条」**：因为 `App.vue` 全局 `::-webkit-scrollbar { width: 8px; ... }` 会强制 macOS 自动隐藏失效，scrollbar 一直挂着。要做到「溢出时才出现」必须用 JS：用 `ResizeObserver` 监听 list 尺寸 / `scrollHeight > clientHeight + 1` 判断溢出，溢出时挂 `.has-overflow` class。CSS：`::-webkit-scrollbar { width: 0; }`，`.has-overflow::-webkit-scrollbar { width: 6px; }`、`.has-overflow::-webkit-scrollbar-thumb { background: var(--border-color); min-height: 30px; }`、hover 用 `var(--text-secondary)`；⑦ `@scroll="handleScroll"` 直接绑在 `.list`。**this**: mounted 用 `$nextTick` 等首次渲染完再 `checkOverflow()`；监听 conversations / collapsed watch + window resize，conversations 增删时同步重新检测。
 19. **流式响应会话保存（per-session 快照 + 切走保留 in-progress）**：用户流式期间切到别的会话，原会话的 SSE 增量不能丢；切回时显示该会话的实时 in-progress 状态；侧栏该会话处显示闪烁小点；流式完成所触发的 `refreshSession` 不能影响用户当前所在会话的视图。**实现三件套**：`App.vue` data 里维护 `_activeStreamingSessions: new Set()`（驱动侧栏小点 + `loadConversation` 分支判断）、`_streamingMessages: new Map()`（session_id → 当前 messages 数组的**引用**，与 `this.messages` 同源，不深拷贝——SSE 改 `this.messages[aiIndex]` 时自动同步到 snapshot）、`_streamingMeta: new Map()`（session_id → `{ aiIndex, responseStartTime, userMessage, lastUserMessage }`）。**SSE 循环必有 `sessionChanged` 分支**：`if (this.currentSessionId !== requestSessionId)` 时把所有 content / reasoning / tool_call_name / tool_call_result / done / error / interrupt 事件增量**只写到 snapshot**（`snap[meta.aiIndex] = {...}`），不碰 `this.messages`；非切走分支维持原 `this.messages[aiIndex] = {...}` 路径（引用同源自动同步 snapshot）。**每个 done / error / interrupt 必清三件套**（不管 sessionChanged 分支还是本地分支）：`this._activeStreamingSessions.delete(requestSessionId)` + `this._streamingMessages.delete(requestSessionId)` + `this._streamingMeta.delete(requestSessionId)` + `await this.refreshSession(requestSessionId)`（只动侧栏，不动 `this.messages`）。**Vue 2 Set 响应式陷阱**：`.add` / `.delete` 不触发子组件重渲染，必须整 Set 替换：`this._activeStreamingSessions = new Set(this._activeStreamingSessions)`；`.delete` 后同理。Map 同样问题但只在 SSE handler 内部读写，无所谓。**`loadConversation` 分流式 / 非流式两条分支**：流式分支直接 `this.messages = snapshot` + `this.isLoading = true` + `this.responseStartTime = meta.responseStartTime` + `this.startResponseTimer()`，**不调** `get_conversation`（否则会覆盖 in-progress）；非流式走原 `get_conversation`。**`cleanupLoadingState` 绝不能 pop 流式 AI 消息**：snapshot 与 `this.messages` 引用同源，pop 会污染 snapshot 导致后续 SSE 切走分支写到错位 aiIndex。**`startResponseTimer` 不要写 `this.messages`**：用户切走后 `this.messages` 是别的会话数组，`currentAiMessageIndex` 仍指原会话下标，会把别人消息 responseTime 写脏；改成只更新 `this.currentResponseTime`，由 SSE handler 在每个 content/reasoning/tool_call 事件里同步写到正确的 `this.messages[aiIndex]` 或 `snap[meta.aiIndex]`。**`requestSessionId` 必须在 SSE 循环开始前锁定**（`handleResume` / `handleRestream` 容易漏）：`const requestSessionId = this.currentSessionId`，后续用 `requestSessionId` 而非 `this.currentSessionId`，否则用户切走后 `this.currentSessionId` 会变。**右键 refresh 保护**：流式中会话不能调 `get_conversation` 重拉 messages，只调 `refreshSession` 刷侧栏。**删除会话清理**：`confirmDelete` finally 块里也清三件套。**侧栏小点实现**：`ConversationItem` 加 `isStreaming: Boolean` prop；title 前置 8×8 圆点 + `@keyframes blink { 0%,100% { opacity: 0.3 } 50% { opacity: 1 } }` 1.2s 循环；Sidebar 把 `:is-streaming="activeStreamingSessions.has(conv.session_id)"` 下发即可。**新增流式 SSE 入口必须按上述 19 条点对点实现**（sendMessage / handleResume / handleRestream 三种已知模式）；页面刷新（F5）恢复不在本约定范围——需要后端 `/chat/streaming_sessions` 接口 + 恢复 SSE 协议。
 20. **静态文件 fallback（无 sid 才跨会话找 + Referer 推断 sid 优先）**：`APIRouter/static_file.py` `serve_cached_file` 在精确路径命中失败时按以下规则处理：① **带 sid 路径**（第一段为 32 位 hex，即 `uuid.uuid4().hex`）找不到 → **直接 404**，不去跨会话命中同名文件（避免误把别人 session 的产物显示在当前 session）；② **无 sid 路径**找不到 → 双层 fallback：先从 `Referer` header 正则提取 32hex sid 作为 **primary_sid**，在 `cached/{primary_sid}/**` 下递归找；没命中再跨 `cached/*/` 所有 sid 找（按 `st_mtime` 最新返回）。**为什么只无 sid 才 fallback**：实际请求 URL（前端 markdown 图片、Electron 转发、Vite proxy）都带 sid，所以 fallback 是少数兜底路径，不需要复杂 cache；带 sid 还 fallback 会把"我自己这个 session 缺文件"悄悄变成"别人 session 的同名图"，违背预期。**为什么用 Referer 推断 primary_sid**：浏览器 `<img>` 标签加载 markdown 图片（fallback 主要触发场景）**不能**加自定义 header（浏览器规范限制），EventSource 也不能，所以"前端主动加 `X-Session-Id` header"方案对 fallback 核心场景无效。Referer 是浏览器自动带的，URL 格式如 `http://host/{sid}` 或 `http://host/{sid}/foo` 都能用 32hex 正则全局匹配第一个 sid 拿到；隐私模式 / `referrer-policy: no-referrer` 时 Referer 缺失，自动降级到跨 sid 兜底（按 mtime 最新），不影响基本功能。**为什么不用 X-Session-Id 自定义 header**：① `<img>` 不能加；② EventSource 不能加；③ 前端每个 fetch 都要改 N 处，ROI 低。新加静态文件路由必须沿用 sid-vs-nonsid 分流 + Referer 推断两层优先级。
+21. **删除会话行内二次确认（小红叉状态机）**：去除 ConfirmDialog 弹窗，`ConversationItem.vue` 维护 `isConfirmingDelete` 状态机：
+   - **第一次点 ×** → `isConfirmingDelete = true`，按钮加 `confirming` class（变红 `color: #ef4444` + `rgba(239,68,68,0.12)` 底 + `opacity: 1` 一直显，不再依赖 hover）
+   - **第二次点红 ×** → **立刻** `isConfirmingDelete = false` 再 `$emit('delete')`（先重置是为了防止 document click 冒泡再触发 cancel）；App.vue 收到 `delete-conversation` 后直接 `fetch DELETE /chat/${sessionId}/clear`，不再弹 `ConfirmDialog`
+   - **点别处 / Esc 取消**：`mounted` 绑 `document.addEventListener('click', this.cancelDeleteConfirm)` + `('keydown', this.onKeydown)`；`cancelDeleteConfirm` 用 `!this.$el.contains(e.target)` 防御（避免 button click 被二次处理），`onKeydown` 只在 `Escape` 且 confirming 态才重置；`beforeUnmount` 记得 `removeEventListener` 解绑
+   - **App.vue 必保留逻辑**：`deleteConversation(sessionId)` 直接执行的版本**必须**保留 finally 块的三件套清理（`stopStreamTimer` + `_activeStreamingSessions.delete` + `_streamingMessages.delete` + `_streamingMeta.delete` + `new Set(...)` 触发响应式）+ 当前会话切换（关 SSE + `cleanupLoadingState()` + `createNewChat()`）；不要因为去掉弹窗就把 finally 一并删了
+   - **emit 契约不变**：Sidebar 的 `@delete-conversation="deleteConversation"`、ConversationItem 的 `emits: ['delete']` 都不用动，只有 App.vue 的 `deleteConversation` 内部从"弹窗 + 确认"变成"直接执行"
 
 ### 代码 / 提交风格
 

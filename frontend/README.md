@@ -451,10 +451,10 @@ release/electron-builder/
 打开方式：
 ```bash
 # Finder 双击
-open /Users/jx/coding/projects/ChatMe/release/electron-builder/mac-arm64/灵析.app
+open ~/coding/projects/ChatMe/release/electron-builder/mac-arm64/灵析.app
 
 # 命令行（直接执行）
-"/Users/jx/coding/projects/ChatMe/release/electron-builder/mac-arm64/灵析.app/Contents/MacOS/灵析"
+"~/coding/projects/ChatMe/release/electron-builder/mac-arm64/灵析.app/Contents/MacOS/灵析"
 
 # 解压 zip 后再打开
 unzip 灵析-0.0.1-arm64-mac.zip -d ~/Downloads

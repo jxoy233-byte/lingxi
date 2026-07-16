@@ -134,16 +134,6 @@
     </div>
 
     <ConfirmDialog
-      :visible="showDeleteConfirm"
-      title="灵析——数据分析智能助手"
-      message="确定要删除这个对话吗？"
-      confirm-text="确定"
-      cancel-text="取消"
-      @confirm="confirmDelete"
-      @cancel="cancelDelete"
-    />
-
-    <ConfirmDialog
       :visible="showRestoreConfirm"
       title="恢复历史版本"
       message="恢复到此版本后，之后的消息将被删除，确定要继续吗？"
@@ -216,8 +206,6 @@ export default {
       currentSessionId: null,
       messages: [],
       isLoading: false,
-      showDeleteConfirm: false,
-      deleteTargetId: null,
       showCheckpoints: false,
       showRestoreConfirm: false,
       restoreTargetId: null,
@@ -1746,13 +1734,9 @@ export default {
       }
     },
     async deleteConversation(sessionId) {
-      this.deleteTargetId = sessionId
-      this.showDeleteConfirm = true
-    },
-    async confirmDelete() {
-      if (!this.deleteTargetId) return
+      if (!sessionId) return
 
-      const isDeletingCurrent = this.currentSessionId === this.deleteTargetId
+      const isDeletingCurrent = this.currentSessionId === sessionId
 
       // 只有删除当前会话时才关闭 SSE 和清理加载状态
       if (isDeletingCurrent) {
@@ -1765,28 +1749,22 @@ export default {
       }
 
       try {
-        const response = await fetch(`/chat/${this.deleteTargetId}/clear`, {
+        const response = await fetch(`/chat/${sessionId}/clear`, {
           method: 'DELETE'
         })
         if (response.ok) {
-          this.conversations = this.conversations.filter(c => c.session_id !== this.deleteTargetId)
+          this.conversations = this.conversations.filter(c => c.session_id !== sessionId)
         }
       } catch (error) {
         console.error('删除对话失败:', error)
       } finally {
         // 清理 snapshot 引用 + 读秒 timer（无论后端删除是否成功，前端不再持有该 session 的状态）
-        this.stopStreamTimer(this.deleteTargetId)
-        this._activeStreamingSessions.delete(this.deleteTargetId)
-        this._streamingMessages.delete(this.deleteTargetId)
-        this._streamingMeta.delete(this.deleteTargetId)
+        this.stopStreamTimer(sessionId)
+        this._activeStreamingSessions.delete(sessionId)
+        this._streamingMessages.delete(sessionId)
+        this._streamingMeta.delete(sessionId)
         this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-        this.showDeleteConfirm = false
-        this.deleteTargetId = null
       }
-    },
-    cancelDelete() {
-      this.showDeleteConfirm = false
-      this.deleteTargetId = null
     },
     async updateConversationTitle({ sessionId, title }) {
       try {

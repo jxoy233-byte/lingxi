@@ -32,7 +32,7 @@ def _upload_local_image_to_oss(local_path: str, original_filename: str = None) -
     上传本地图片到 OSS，返回 OSS URL
 
     Args:
-        local_path: 本地文件路径（如 /Users/jx/.../Image_10.png）
+        local_path: 本地文件路径（如 ~/.../Image_10.png）
         original_filename: 原始文件名，用于生成 OSS key
 
     Returns:

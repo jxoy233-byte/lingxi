@@ -252,7 +252,8 @@ export default {
       // —— 流式会话状态保存（用户切走后 SSE 继续推进 + 切回时恢复 in-progress）——
       _activeStreamingSessions: new Set(),  // 正在流式的 session_id 集合；驱动侧栏小点 + loadConversation 分支判断
       _streamingMessages: new Map(),       // session_id -> 当前 messages 数组引用（与 this.messages 同源）
-      _streamingMeta: new Map()            // session_id -> { aiIndex, responseStartTime, userMessage, lastUserMessage }
+      _streamingMeta: new Map(),           // session_id -> { aiIndex, responseStartTime, userMessage, lastUserMessage }
+      _streamTimers: new Map()             // session_id -> setInterval id；本地读秒（每 250ms 重算 elapsedMs），让 SSE 事件间隙数字也能跳
     }
   },
   mounted() {
@@ -297,6 +298,56 @@ export default {
       // 浏览器/Electron 通用：location.reload() 会重新走 protocol.handle 拦截器，
       // 把 /chat/* 重新代理到后端，所有 Vue state 重置
       window.location.reload()
+    },
+    /**
+     * 把后端流式事件携带的 elapsed_ms / token_usage 写到 AI 消息上（in-place，Vue 2 响应式）。
+     * 适用于 this.messages[aiIndex] 和 snap[meta.aiIndex] 两种场景；调用前确保目标 message 引用已替换。
+     * 同时把权威 elapsed_ms 同步到 responseTime 字段，让 UI 展示/历史回放都拿到后端 wall-clock。
+     */
+    writeStreamMetrics(msg, data) {
+      if (!msg || !data) return
+      if (data.elapsed_ms !== undefined && data.elapsed_ms !== null) {
+        msg.elapsedMs = data.elapsed_ms
+        msg.responseTime = data.elapsed_ms / 1000
+      }
+      if (data.token_usage !== undefined && data.token_usage !== null) {
+        msg.tokenUsage = data.token_usage
+      }
+    },
+    /**
+     * 启动本地读秒 interval，每 250ms 用前端 Date.now() 重算 msg.elapsedMs，
+     * 让数字在 SSE 事件间隙也能跳（不依赖后端事件频率）。
+     * 同一 session 只允许一个活跃 timer，先 stopStreamTimer 防重复。
+     * 后端 done/error/interrupt 给的权威 elapsed_ms 会在终态事件里通过 writeStreamMetrics 覆盖。
+     *
+     * 注意：SSE 事件用 spread 写法 `this.messages[i] = { ...this.messages[i], ... }` 会替换数组里的
+     * message 对象为新 plain 对象。Vue 2 数组索引 setter 拦截新值时会自动 observe 新对象，
+     * 所以 spread 出去的"新对象"仍是响应式的；但旧对象引用已被替换，timer 必须动态取最新对象
+     * 才能持续触发重渲染，否则会写到已脱离 Vue 树的对象上。
+     */
+    startStreamTimer(sessionId, msg) {
+      this.stopStreamTimer(sessionId)
+      if (!msg) return
+      msg.startTs = Date.now()
+      const meta = this._streamingMeta.get(sessionId)
+      const timer = setInterval(() => {
+        const arr = this._streamingMessages.get(sessionId)
+        const cur = arr && meta && arr[meta.aiIndex]
+        if (cur && cur.startTs) {
+          cur.elapsedMs = Date.now() - cur.startTs
+        }
+      }, 250)
+      this._streamTimers.set(sessionId, timer)
+    },
+    /**
+     * 清除本地读秒 timer。SSE 循环异常断开（abort / 网络断开）场景由 done/error/interrupt 三处兜底。
+     */
+    stopStreamTimer(sessionId) {
+      const timer = this._streamTimers.get(sessionId)
+      if (timer !== undefined) {
+        clearInterval(timer)
+        this._streamTimers.delete(sessionId)
+      }
     },
     toggleSidebar() {
       this.sidebarCollapsed = !this.sidebarCollapsed
@@ -441,6 +492,7 @@ export default {
           userMessage: lastUserMessage,
           lastUserMessage
         })
+        this.startStreamTimer(this.currentSessionId, this.messages[aiMessageIndex])
         this._activeStreamingSessions = new Set(this._activeStreamingSessions)
         let buffer = ''
         while (true) {
@@ -468,21 +520,25 @@ export default {
                       thinkingDone: true,
                       responseTime: this.currentResponseTime
                     }
+                    this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'reasoning') {
                     snap[meta.aiIndex] = {
                       ...snap[meta.aiIndex],
                       reasoning: snap[meta.aiIndex].reasoning + data.content,
                       responseTime: this.currentResponseTime
                     }
+                    this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_name') {
                     const toolCalls = [...(snap[meta.aiIndex].toolCalls || [])]
                     toolCalls.push({ name: data.content.name, args: data.content.args, id: data.id, result: null })
                     snap[meta.aiIndex] = { ...snap[meta.aiIndex], toolCalls, responseTime: this.currentResponseTime }
+                    this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_result') {
                     const toolCalls = [...(snap[meta.aiIndex].toolCalls || [])]
                     const idx = toolCalls.findIndex(tc => tc.id === data.id)
                     if (idx !== -1) toolCalls[idx] = { ...toolCalls[idx], result: data.content }
                     snap[meta.aiIndex] = { ...snap[meta.aiIndex], toolCalls, responseTime: this.currentResponseTime }
+                    this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'done') {
                     this.stopResponseTimer()
                     const wasError = snap[meta.aiIndex]?.error === true
@@ -498,6 +554,8 @@ export default {
                       checkpointId: data.checkpoint_id || null,
                       error: wasError || undefined
                     }
+                    this.writeStreamMetrics(snap[meta.aiIndex], data)
+                    this.stopStreamTimer(requestSessionId)
                     this._activeStreamingSessions.delete(requestSessionId)
                     this._streamingMessages.delete(requestSessionId)
                     this._streamingMeta.delete(requestSessionId)
@@ -516,6 +574,8 @@ export default {
                       thinkingDone: true,
                       responseTime: this.currentResponseTime
                     }
+                    this.writeStreamMetrics(snap[meta.aiIndex], data)
+                    this.stopStreamTimer(requestSessionId)
                     this._activeStreamingSessions.delete(requestSessionId)
                     this._streamingMessages.delete(requestSessionId)
                     this._streamingMeta.delete(requestSessionId)
@@ -527,6 +587,8 @@ export default {
                     this.stopResponseTimer()
                     const reason = data.reason || '用户主动中断'
                     snap[meta.aiIndex] = { ...snap[meta.aiIndex], streaming: false, interruptReason: reason }
+                    this.writeStreamMetrics(snap[meta.aiIndex], data)
+                    this.stopStreamTimer(requestSessionId)
                     this._activeStreamingSessions.delete(requestSessionId)
                     this._streamingMessages.delete(requestSessionId)
                     this._streamingMeta.delete(requestSessionId)
@@ -551,21 +613,25 @@ export default {
                   thinkingDone: true,
                   responseTime: this.currentResponseTime
                 }
+                this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'reasoning') {
                 this.messages[aiMessageIndex] = {
                   ...this.messages[aiMessageIndex],
                   reasoning: this.messages[aiMessageIndex].reasoning + data.content,
                   responseTime: this.currentResponseTime
                 }
+                this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_name') {
                 const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
                 toolCalls.push({ name: data.content.name, args: data.content.args, id: data.id, result: null })
                 this.messages[aiMessageIndex] = { ...this.messages[aiMessageIndex], toolCalls, responseTime: this.currentResponseTime }
+                this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_result') {
                 const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
                 const idx = toolCalls.findIndex(tc => tc.id === data.id)
                 if (idx !== -1) toolCalls[idx] = { ...toolCalls[idx], result: data.content }
                 this.messages[aiMessageIndex] = { ...this.messages[aiMessageIndex], toolCalls, responseTime: this.currentResponseTime }
+                this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'done') {
                 this.stopResponseTimer()
                 this.messages[aiMessageIndex] = {
@@ -578,9 +644,11 @@ export default {
                   responseTime: this.currentResponseTime,
                   checkpointId: data.checkpoint_id || null
                 }
+                this.writeStreamMetrics(this.messages[aiMessageIndex], data)
                 // lastUserMessage 已在 SSE 循环前预先取出
                 await this.updateTitleAndRefresh(this.currentSessionId, lastUserMessage)
                 // 清理快照
+                this.stopStreamTimer(requestSessionId)
                 this._activeStreamingSessions.delete(requestSessionId)
                 this._streamingMessages.delete(requestSessionId)
                 this._streamingMeta.delete(requestSessionId)
@@ -596,11 +664,13 @@ export default {
                   streaming: false,
                   thinkingDone: true
                 }
+                this.writeStreamMetrics(this.messages[aiMessageIndex], data)
                 // 仅更新标题，不重拉 messages
                 if (this.currentSessionId) {
                   await this.updateTitleOnly(this.currentSessionId, lastUserMessage)
                 }
                 // 清理快照
+                this.stopStreamTimer(requestSessionId)
                 this._activeStreamingSessions.delete(requestSessionId)
                 this._streamingMessages.delete(requestSessionId)
                 this._streamingMeta.delete(requestSessionId)
@@ -609,10 +679,12 @@ export default {
                 this.stopResponseTimer()
                 const reason = data.reason || '用户主动中断'
                 this.messages[aiMessageIndex] = { ...this.messages[aiMessageIndex], streaming: false, interruptReason: reason }
+                this.writeStreamMetrics(this.messages[aiMessageIndex], data)
                 this.isInterrupted = true
                 this.isInterruptedSessionId = data.session_id || this.currentSessionId || this._pendingInterruptSessionId
                 this.interruptReason = reason
                 // 清理快照
+                this.stopStreamTimer(requestSessionId)
                 this._activeStreamingSessions.delete(requestSessionId)
                 this._streamingMessages.delete(requestSessionId)
                 this._streamingMeta.delete(requestSessionId)
@@ -638,12 +710,14 @@ export default {
                     thinkingDone: true,
                     responseTime: this.currentResponseTime
                   }
+                  this.writeStreamMetrics(snap[meta.aiIndex], data)
                 } else if (data.type === 'reasoning') {
                   snap[meta.aiIndex] = {
                     ...snap[meta.aiIndex],
                     reasoning: snap[meta.aiIndex].reasoning + data.content,
                     responseTime: this.currentResponseTime
                   }
+                  this.writeStreamMetrics(snap[meta.aiIndex], data)
                 } else if (data.type === 'done') {
                   this.stopResponseTimer()
                   const wasError = snap[meta.aiIndex]?.error === true
@@ -659,6 +733,8 @@ export default {
                     checkpointId: data.checkpoint_id || null,
                     error: wasError || undefined
                   }
+                  this.writeStreamMetrics(snap[meta.aiIndex], data)
+                  this.stopStreamTimer(requestSessionId)
                   this._activeStreamingSessions.delete(requestSessionId)
                   this._streamingMessages.delete(requestSessionId)
                   this._streamingMeta.delete(requestSessionId)
@@ -677,6 +753,8 @@ export default {
                     thinkingDone: true,
                     responseTime: this.currentResponseTime
                   }
+                  this.writeStreamMetrics(snap[meta.aiIndex], data)
+                  this.stopStreamTimer(requestSessionId)
                   this._activeStreamingSessions.delete(requestSessionId)
                   this._streamingMessages.delete(requestSessionId)
                   this._streamingMeta.delete(requestSessionId)
@@ -692,6 +770,7 @@ export default {
                 reasoning: this.messages[aiMessageIndex].reasoning + data.content,
                 responseTime: this.currentResponseTime
               }
+              this.writeStreamMetrics(this.messages[aiMessageIndex], data)
             } else if (data.type === 'tool_call_name') {
               const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
               toolCalls.push({ name: data.content.name, args: data.content.args, id: data.id, result: null })
@@ -700,6 +779,7 @@ export default {
                 toolCalls,
                 responseTime: this.currentResponseTime
               }
+              this.writeStreamMetrics(this.messages[aiMessageIndex], data)
             } else if (data.type === 'tool_call_result') {
               const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
               const idx = toolCalls.findIndex(tc => tc.id === data.id)
@@ -709,6 +789,7 @@ export default {
                 toolCalls,
                 responseTime: this.currentResponseTime
               }
+              this.writeStreamMetrics(this.messages[aiMessageIndex], data)
             } else if (data.type === 'content') {
               this.messages[aiMessageIndex] = {
                 ...this.messages[aiMessageIndex],
@@ -716,6 +797,7 @@ export default {
                 thinkingDone: true,
                 responseTime: this.currentResponseTime
               }
+              this.writeStreamMetrics(this.messages[aiMessageIndex], data)
             } else if (data.type === 'done') {
               this.stopResponseTimer()
               this.messages[aiMessageIndex] = {
@@ -728,7 +810,9 @@ export default {
                 responseTime: this.currentResponseTime,
                 checkpointId: data.checkpoint_id || null
               }
+              this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               // 清理快照
+              this.stopStreamTimer(requestSessionId)
               this._activeStreamingSessions.delete(requestSessionId)
               this._streamingMessages.delete(requestSessionId)
               this._streamingMeta.delete(requestSessionId)
@@ -737,10 +821,12 @@ export default {
               this.stopResponseTimer()
               const reason = data.reason || '用户主动中断'
               this.messages[aiMessageIndex] = { ...this.messages[aiMessageIndex], streaming: false, interruptReason: reason }
+              this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               this.isInterrupted = true
               this.isInterruptedSessionId = data.session_id || this.currentSessionId || this._pendingInterruptSessionId
               this.interruptReason = reason
               // 清理快照
+              this.stopStreamTimer(requestSessionId)
               this._activeStreamingSessions.delete(requestSessionId)
               this._streamingMessages.delete(requestSessionId)
               this._streamingMeta.delete(requestSessionId)
@@ -1165,6 +1251,7 @@ export default {
           userMessage: restreamMessage,
           lastUserMessage: restreamMessage
         })
+        this.startStreamTimer(this.currentSessionId, this.messages[aiMessageIndex])
         this._activeStreamingSessions = new Set(this._activeStreamingSessions)
 
         // 5. 调用 message_stream
@@ -1216,21 +1303,25 @@ export default {
                       thinkingDone: true,
                       responseTime: this.currentResponseTime
                     }
+                    this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'reasoning') {
                     snap[meta.aiIndex] = {
                       ...snap[meta.aiIndex],
                       reasoning: snap[meta.aiIndex].reasoning + data.content,
                       responseTime: this.currentResponseTime
                     }
+                    this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_name') {
                     const toolCalls = [...(snap[meta.aiIndex].toolCalls || [])]
                     toolCalls.push({ name: data.content.name, args: data.content.args, id: data.id, result: null })
                     snap[meta.aiIndex] = { ...snap[meta.aiIndex], toolCalls, responseTime: this.currentResponseTime }
+                    this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_result') {
                     const toolCalls = [...(snap[meta.aiIndex].toolCalls || [])]
                     const idx = toolCalls.findIndex(tc => tc.id === data.id)
                     if (idx !== -1) toolCalls[idx] = { ...toolCalls[idx], result: data.content }
                     snap[meta.aiIndex] = { ...snap[meta.aiIndex], toolCalls, responseTime: this.currentResponseTime }
+                    this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'done') {
                     this.stopResponseTimer()
                     const wasError = snap[meta.aiIndex]?.error === true
@@ -1246,6 +1337,8 @@ export default {
                       checkpointId: data.checkpoint_id || null,
                       error: wasError || undefined
                     }
+                    this.writeStreamMetrics(snap[meta.aiIndex], data)
+                    this.stopStreamTimer(requestSessionId)
                     this._activeStreamingSessions.delete(requestSessionId)
                     this._streamingMessages.delete(requestSessionId)
                     this._streamingMeta.delete(requestSessionId)
@@ -1264,6 +1357,8 @@ export default {
                       thinkingDone: true,
                       responseTime: this.currentResponseTime
                     }
+                    this.writeStreamMetrics(snap[meta.aiIndex], data)
+                    this.stopStreamTimer(requestSessionId)
                     this._activeStreamingSessions.delete(requestSessionId)
                     this._streamingMessages.delete(requestSessionId)
                     this._streamingMeta.delete(requestSessionId)
@@ -1275,6 +1370,8 @@ export default {
                     this.stopResponseTimer()
                     const reason = data.reason || '用户主动中断'
                     snap[meta.aiIndex] = { ...snap[meta.aiIndex], streaming: false, interruptReason: reason }
+                    this.writeStreamMetrics(snap[meta.aiIndex], data)
+                    this.stopStreamTimer(requestSessionId)
                     this._activeStreamingSessions.delete(requestSessionId)
                     this._streamingMessages.delete(requestSessionId)
                     this._streamingMeta.delete(requestSessionId)
@@ -1299,12 +1396,14 @@ export default {
                   thinkingDone: true,
                   responseTime: this.currentResponseTime
                 }
+                this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'reasoning') {
                 this.messages[aiMessageIndex] = {
                   ...this.messages[aiMessageIndex],
                   reasoning: this.messages[aiMessageIndex].reasoning + data.content,
                   responseTime: this.currentResponseTime
                 }
+                this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_name') {
                 const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
                 toolCalls.push({ name: data.content.name, args: data.content.args, id: data.id, result: null })
@@ -1313,6 +1412,7 @@ export default {
                   toolCalls,
                   responseTime: this.currentResponseTime
                 }
+                this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_result') {
                 const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
                 const idx = toolCalls.findIndex(tc => tc.id === data.id)
@@ -1322,6 +1422,7 @@ export default {
                   toolCalls,
                   responseTime: this.currentResponseTime
                 }
+                this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'done') {
                 this.stopResponseTimer()
                 this.messages[aiMessageIndex] = {
@@ -1334,6 +1435,7 @@ export default {
                   responseTime: this.currentResponseTime,
                   checkpointId: data.checkpoint_id || null
                 }
+                this.writeStreamMetrics(this.messages[aiMessageIndex], data)
 
                 // 恢复标题
                 if (currentTitle && currentTitle !== '新对话' && requestSessionId) {
@@ -1343,6 +1445,7 @@ export default {
                 // 4. 最后刷新会话
                 await this.refreshCurrentConversation()
                 // 清理快照
+                this.stopStreamTimer(requestSessionId)
                 this._activeStreamingSessions.delete(requestSessionId)
                 this._streamingMessages.delete(requestSessionId)
                 this._streamingMeta.delete(requestSessionId)
@@ -1351,10 +1454,12 @@ export default {
                 this.stopResponseTimer()
                 const reason = data.reason || '用户主动中断'
                 this.messages[aiMessageIndex] = { ...this.messages[aiMessageIndex], streaming: false, interruptReason: reason }
+                this.writeStreamMetrics(this.messages[aiMessageIndex], data)
                 this.isInterrupted = true
                 this.isInterruptedSessionId = data.session_id || requestSessionId || this._pendingInterruptSessionId
                 this.interruptReason = reason
                 // 清理快照
+                this.stopStreamTimer(requestSessionId)
                 this._activeStreamingSessions.delete(requestSessionId)
                 this._streamingMessages.delete(requestSessionId)
                 this._streamingMeta.delete(requestSessionId)
@@ -1669,7 +1774,8 @@ export default {
       } catch (error) {
         console.error('删除对话失败:', error)
       } finally {
-        // 清理 snapshot 引用（无论后端删除是否成功，前端不再持有该 session 的状态）
+        // 清理 snapshot 引用 + 读秒 timer（无论后端删除是否成功，前端不再持有该 session 的状态）
+        this.stopStreamTimer(this.deleteTargetId)
         this._activeStreamingSessions.delete(this.deleteTargetId)
         this._streamingMessages.delete(this.deleteTargetId)
         this._streamingMeta.delete(this.deleteTargetId)
@@ -1849,6 +1955,7 @@ export default {
           lastUserMessage: message
         })
         // 整 Set 替换一次触发子组件响应式（Vue 2 不监听 Set 内部变化）
+        this.startStreamTimer(this.currentSessionId, this.messages[aiMessageIndex])
         this._activeStreamingSessions = new Set(this._activeStreamingSessions)
 
         let buffer = ''
@@ -1887,21 +1994,25 @@ export default {
                       thinkingDone: true,
                       responseTime: this.currentResponseTime
                     }
+                    this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'reasoning') {
                     snap[meta.aiIndex] = {
                       ...snap[meta.aiIndex],
                       reasoning: snap[meta.aiIndex].reasoning + data.content,
                       responseTime: this.currentResponseTime
                     }
+                    this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_name') {
                     const toolCalls = [...(snap[meta.aiIndex].toolCalls || [])]
                     toolCalls.push({ name: data.content.name, args: data.content.args, id: data.id, result: null })
                     snap[meta.aiIndex] = { ...snap[meta.aiIndex], toolCalls, responseTime: this.currentResponseTime }
+                    this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_result') {
                     const toolCalls = [...(snap[meta.aiIndex].toolCalls || [])]
                     const idx = toolCalls.findIndex(tc => tc.id === data.id)
                     if (idx !== -1) toolCalls[idx] = { ...toolCalls[idx], result: data.content }
                     snap[meta.aiIndex] = { ...snap[meta.aiIndex], toolCalls, responseTime: this.currentResponseTime }
+                    this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'done') {
                     this.stopResponseTimer()
                     const wasError = snap[meta.aiIndex]?.error === true
@@ -1917,7 +2028,9 @@ export default {
                       checkpointId: data.checkpoint_id || null,
                       error: wasError || undefined
                     }
+                    this.writeStreamMetrics(snap[meta.aiIndex], data)
                     // 清理快照：小点消失；后续切回该会话走 get_conversation 拿后端最终态
+                    this.stopStreamTimer(requestSessionId)
                     this._activeStreamingSessions.delete(requestSessionId)
                     this._streamingMessages.delete(requestSessionId)
                     this._streamingMeta.delete(requestSessionId)
@@ -1937,6 +2050,8 @@ export default {
                       thinkingDone: true,
                       responseTime: this.currentResponseTime
                     }
+                    this.writeStreamMetrics(snap[meta.aiIndex], data)
+                    this.stopStreamTimer(requestSessionId)
                     this._activeStreamingSessions.delete(requestSessionId)
                     this._streamingMessages.delete(requestSessionId)
                     this._streamingMeta.delete(requestSessionId)
@@ -1952,6 +2067,8 @@ export default {
                       streaming: false,
                       interruptReason: reason
                     }
+                    this.writeStreamMetrics(snap[meta.aiIndex], data)
+                    this.stopStreamTimer(requestSessionId)
                     this._activeStreamingSessions.delete(requestSessionId)
                     this._streamingMessages.delete(requestSessionId)
                     this._streamingMeta.delete(requestSessionId)
@@ -1978,12 +2095,14 @@ export default {
                   thinkingDone: true,
                   responseTime: this.currentResponseTime
                 }
+                this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'reasoning') {
                 this.messages[aiMessageIndex] = {
                   ...this.messages[aiMessageIndex],
                   reasoning: this.messages[aiMessageIndex].reasoning + data.content,
                   responseTime: this.currentResponseTime
                 }
+                this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_name') {
                 const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
                 toolCalls.push({ name: data.content.name, args: data.content.args, id: data.id, result: null })
@@ -1992,6 +2111,7 @@ export default {
                   toolCalls,
                   responseTime: this.currentResponseTime
                 }
+                this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_result') {
                 const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
                 const idx = toolCalls.findIndex(tc => tc.id === data.id)
@@ -2001,6 +2121,7 @@ export default {
                   toolCalls,
                   responseTime: this.currentResponseTime
                 }
+                this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'done') {
                 this.stopResponseTimer()
                 const responseTime = this.currentResponseTime
@@ -2026,7 +2147,9 @@ export default {
                   checkpointId: data.checkpoint_id || null,
                   error: wasError || undefined
                 }
+                this.writeStreamMetrics(this.messages[aiMessageIndex], data)
                 // 流式结束：清理快照（this.messages 与 snapshot 同源，下一次切换走 get_conversation）
+                this.stopStreamTimer(requestSessionId)
                 this._activeStreamingSessions.delete(requestSessionId)
                 this._streamingMessages.delete(requestSessionId)
                 this._streamingMeta.delete(requestSessionId)
@@ -2071,8 +2194,10 @@ export default {
                     thinkingDone: true,
                     responseTime: this.currentResponseTime
                   }
+                  this.writeStreamMetrics(this.messages[aiMessageIndex], data)
                 }
                 // 流式结束：清理快照
+                this.stopStreamTimer(requestSessionId)
                 this._activeStreamingSessions.delete(requestSessionId)
                 this._streamingMessages.delete(requestSessionId)
                 this._streamingMeta.delete(requestSessionId)
@@ -2089,10 +2214,12 @@ export default {
                   streaming: false,
                   interruptReason: reason
                 }
+                this.writeStreamMetrics(this.messages[aiMessageIndex], data)
                 this.isInterrupted = true
                 this.isInterruptedSessionId = data.session_id || this.currentSessionId || this._pendingInterruptSessionId
                 this.interruptReason = reason
                 // 中断：清理快照（后端已落中断状态，下次切回走 get_conversation 看到完整中断态）
+                this.stopStreamTimer(requestSessionId)
                 this._activeStreamingSessions.delete(requestSessionId)
                 this._streamingMessages.delete(requestSessionId)
                 this._streamingMeta.delete(requestSessionId)
@@ -2121,12 +2248,14 @@ export default {
                     thinkingDone: true,
                     responseTime: this.currentResponseTime
                   }
+                  this.writeStreamMetrics(snap[meta.aiIndex], data)
                 } else if (data.type === 'reasoning') {
                   snap[meta.aiIndex] = {
                     ...snap[meta.aiIndex],
                     reasoning: snap[meta.aiIndex].reasoning + data.content,
                     responseTime: this.currentResponseTime
                   }
+                  this.writeStreamMetrics(snap[meta.aiIndex], data)
                 } else if (data.type === 'done') {
                   const wasError = snap[meta.aiIndex]?.error === true
                   snap[meta.aiIndex] = {
@@ -2141,6 +2270,8 @@ export default {
                     checkpointId: data.checkpoint_id || null,
                     error: wasError || undefined
                   }
+                  this.writeStreamMetrics(snap[meta.aiIndex], data)
+                  this.stopStreamTimer(requestSessionId)
                   this._activeStreamingSessions.delete(requestSessionId)
                   this._streamingMessages.delete(requestSessionId)
                   this._streamingMeta.delete(requestSessionId)
@@ -2160,6 +2291,8 @@ export default {
                     thinkingDone: true,
                     responseTime: this.currentResponseTime
                   }
+                  this.writeStreamMetrics(snap[meta.aiIndex], data)
+                  this.stopStreamTimer(requestSessionId)
                   this._activeStreamingSessions.delete(requestSessionId)
                   this._streamingMessages.delete(requestSessionId)
                   this._streamingMeta.delete(requestSessionId)
@@ -2176,6 +2309,7 @@ export default {
                   reasoning: this.messages[aiMessageIndex].reasoning + data.content,
                   responseTime: this.currentResponseTime
                 }
+                this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_name') {
                 const toolCall = { name: data.content.name, args: data.content.args, id: data.id, result: null }
                 // 如果是 sub_agent 工具，特殊处理
@@ -2193,12 +2327,14 @@ export default {
                   toolCalls,
                   responseTime: this.currentResponseTime
                 }
+                this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'content') {
                 this.messages[aiMessageIndex] = {
                   ...this.messages[aiMessageIndex],
                   content: this.messages[aiMessageIndex].content + data.content,
                   thinkingDone: true
                 }
+                this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'done') {
                 this.stopResponseTimer()
                 const responseTime = this.currentResponseTime
@@ -2217,6 +2353,7 @@ export default {
                   checkpointId: data.checkpoint_id || null,
                   error: wasError || undefined
                 }
+                this.writeStreamMetrics(this.messages[aiMessageIndex], data)
 
                 if (!this.currentSessionId && data.session_id) {
                   this.currentSessionId = data.session_id
@@ -2230,6 +2367,7 @@ export default {
                   await this.updateTitleAndRefresh(this.currentSessionId, message)
                 }
                 // 清理快照
+                this.stopStreamTimer(requestSessionId)
                 this._activeStreamingSessions.delete(requestSessionId)
                 this._streamingMessages.delete(requestSessionId)
                 this._streamingMeta.delete(requestSessionId)
@@ -2498,6 +2636,17 @@ export default {
               // 保存完整的 additional_kwargs（包含 last_checkpoint_id）
               if (aiMsg.additional_kwargs) {
                 aiTurn.additional_kwargs = aiMsg.additional_kwargs
+              }
+              // 2.1 提取历史指标（后端落盘在 SUMMARY 的 additional_kwargs 上）：
+              //     elapsed_ms / token_usage — 刷新页面后仍可见
+              if (aiMsg.additional_kwargs?.elapsed_ms !== undefined) {
+                aiTurn.elapsedMs = aiMsg.additional_kwargs.elapsed_ms
+                if (!aiTurn.responseTime) {
+                  aiTurn.responseTime = aiMsg.additional_kwargs.elapsed_ms / 1000
+                }
+              }
+              if (aiMsg.additional_kwargs?.token_usage) {
+                aiTurn.tokenUsage = aiMsg.additional_kwargs.token_usage
               }
             } else if (msgType === 'REASONING') {
               if (isTool) {

@@ -50,8 +50,8 @@ Exa 是一个**深度语义搜索**引擎
 **适用关键词**：研究、原理、对比、分析、详解、类似、相关
 
 **函数**：
-- `exa_search(query, num_results, type, maxCharacters)` — 语义搜索
-- `exa_find_similar(ids, ...)` — 根据 URL 查找相似内容
+- `exa_search(query, num_results=3)` — 语义搜索
+- `exa_find_similar(ids)` — 根据 URL 查找相似内容
 
 ---
 
@@ -71,7 +71,7 @@ Tavily 是一个**快速实时搜索**引擎，带 AI 答案摘要
 **适用关键词**：是什么、怎么做、怎么写、最新、今天、最近
 
 **函数**：
-- `tavily_search(query, search_depth, max_results, include_answer)` — 搜索
+- `tavily_search(query, search_depth='basic', max_results=3)` — 搜索
 
 ---
 
@@ -91,7 +91,7 @@ Bocha 是一个**新闻/时效性**搜索引擎，支持按时间范围筛选
 **适用关键词**：新闻、动态、消息、发布、近期、最新
 
 **函数**：
-- `search_web(query, freshness, count)` — 搜索，`freshness` 可选 `oneDay`/`oneWeek`/`oneMonth`
+- `search_web(query, freshness, count=3)` — 搜索，`freshness` 可选 `oneDay`/`oneWeek`/`oneMonth`
 
 ---
 

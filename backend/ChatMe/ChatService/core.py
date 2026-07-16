@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import time
 import traceback
 import uuid
 from dataclasses import asdict
@@ -268,11 +269,17 @@ class ChatService:
         return files_content
 
 
-    async def _save_round_checkpoint(self, session_id: str)-> Optional[str]:
+    async def _save_round_checkpoint(
+        self,
+        session_id: str,
+        metrics: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
         """
         获取指定会话的所有 checkpoint_id 列表
 
         更新状态使得带有最新一轮的checkpoint_id写入state_saver和记忆文件
+        metrics 可选：传入 {"elapsed_ms": int, "token_usage": dict} 时同步写入最后一条 AIMessage.additional_kwargs
+        供刷新会话后回放展示用。
 
         :return 保存成功返回对应checkpoint_id
         """
@@ -289,6 +296,11 @@ class ChatService:
                 if isinstance(state.values["messages"][-1], AIMessage):
                     last_ai_message = list(state.values["messages"])[-1]
                     last_ai_message.additional_kwargs["checkpoint_id"] = checkpoint_id
+                    if metrics:
+                        if "elapsed_ms" in metrics and metrics["elapsed_ms"] is not None:
+                            last_ai_message.additional_kwargs["elapsed_ms"] = int(metrics["elapsed_ms"])
+                        if "token_usage" in metrics and metrics["token_usage"] is not None:
+                            last_ai_message.additional_kwargs["token_usage"] = metrics["token_usage"]
 
                     state.values["messages"][-1] = last_ai_message
                     await self.graph.aupdate_state(
@@ -465,6 +477,51 @@ class ChatService:
             content = str(content)
         return content
 
+    _WORKFLOW_TOKEN_NODES = ("input_parse_node", "agent_node", "should_end_node", "final_node")
+
+    @staticmethod
+    def _new_workflow_token_usage() -> Dict[str, Any]:
+        """每个请求内的 token 聚合对象；不入 Redis，避免 checkpoint 回放重复累计。"""
+        empty_bucket = {"prompt": 0, "completion": 0, "total": 0, "calls": 0}
+        return {
+            "prompt": 0,
+            "completion": 0,
+            "total": 0,
+            "calls": 0,
+            "by_node": {name: dict(empty_bucket) for name in ChatService._WORKFLOW_TOKEN_NODES},
+        }
+
+    @staticmethod
+    def _accumulate_workflow_tokens(usage: Dict[str, Any], node_name: Optional[str], output: Any) -> bool:
+        """
+        从 on_chat_model_end 投递的 AIMessage 中读取 usage_metadata，按 langgraph_node 入桶。
+        只统计 4 个工作流主节点；非工作流 LLM（react_compact_llm / file_process_node / sub-agent）跳过。
+        """
+        if node_name not in ChatService._WORKFLOW_TOKEN_NODES or output is None:
+            return False
+        meta = getattr(output, "usage_metadata", None) or {}
+        if not isinstance(meta, dict):
+            return False
+        prompt = int(meta.get("input_tokens", 0) or 0)
+        completion = int(meta.get("output_tokens", 0) or 0)
+        total = int(meta.get("total_tokens", 0) or 0)
+        if not (prompt or completion or total):
+            return False
+        usage["prompt"] += prompt
+        usage["completion"] += completion
+        usage["total"] += total
+        usage["calls"] += 1
+        bucket = usage["by_node"][node_name]
+        bucket["prompt"] += prompt
+        bucket["completion"] += completion
+        bucket["total"] += total
+        bucket["calls"] += 1
+        return True
+
+    @staticmethod
+    def _elapsed_ms_since(start: float) -> int:
+        return int((time.monotonic() - start) * 1000)
+
     async def message_stream(
         self,
         message: str,
@@ -516,10 +573,14 @@ class ChatService:
         if await self._judge_is_interrupted(session_id):
             await self.redis_client.delete(f"interrupt:{session_id}")
 
+        # 后端指标聚合：本回合 start_monotonic + 累计 token_usage；仅覆盖 4 个工作流主节点
+        start_mono = time.monotonic()
+        token_usage = self._new_workflow_token_usage()
+        elapsed_ms = self._elapsed_ms_since(start_mono)
         full_response = ""
         try:
             yield json.dumps(
-                {"type": "init", "session_id": session_id, "true_input": messages},
+                {"type": "init", "session_id": session_id, "true_input": messages, "elapsed_ms": elapsed_ms, "token_usage": token_usage},
                 ensure_ascii=False,
                 default=str
             ) + "\n\n"
@@ -527,7 +588,7 @@ class ChatService:
             memory_status = self._get_memory_update_status(session_id)
             if memory_status == "pending":
                 yield json.dumps(
-                    {"type": "memory_wait_start", "session_id": session_id},
+                    {"type": "memory_wait_start", "session_id": session_id, "elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
                     ensure_ascii=False,
                     default=str
                 ) + "\n\n"
@@ -535,7 +596,7 @@ class ChatService:
                 memory_status = await self._wait_previous_memory_update(session_id)
 
                 yield json.dumps(
-                    {"type": "memory_wait_done", "session_id": session_id, "status": memory_status or "done"},
+                    {"type": "memory_wait_done", "session_id": session_id, "status": memory_status or "done", "elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
                     ensure_ascii=False,
                     default=str
                 ) + "\n\n"
@@ -547,31 +608,38 @@ class ChatService:
                         content = await self._switch_chunk_to_str(chunk['data']['chunk'].content)
                         full_response += content
                         yield json.dumps(
-                            {"type": "content", "content": content},
+                            {"type": "content", "content": content, "elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
                             ensure_ascii=False,
                             default=str
                         ) + "\n\n"
                     elif chunk['metadata']['langgraph_node'] and chunk['metadata']['langgraph_node'] == 'input_parse_node':
                         content = await self._switch_chunk_to_str(chunk['data']['chunk'].content)
                         yield json.dumps(
-                            {"type": "reasoning", "content": content},
+                            {"type": "reasoning", "content": content, "elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
                             ensure_ascii=False,
                             default=str
                         ) + "\n\n"
                     elif chunk['metadata']['langgraph_node'] and chunk['metadata']['langgraph_node'] == 'agent_node':
                         content = await self._switch_chunk_to_str(chunk['data']['chunk'].content)
                         yield json.dumps(
-                            {"type": "reasoning", "content": content},
+                            {"type": "reasoning", "content": content, "elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
                             ensure_ascii=False,
                             default=str
                         ) + "\n\n"
                     else:
                         continue
+                elif chunk['event'] == 'on_chat_model_end':
+                    # 流末聚合 usage_metadata；只统计 4 个工作流主节点
+                    self._accumulate_workflow_tokens(
+                        token_usage,
+                        (chunk.get('metadata') or {}).get('langgraph_node'),
+                        (chunk.get('data') or {}).get('output'),
+                    )
                 elif chunk['event'] == 'on_tool_start':
                     tool_call_args = chunk['data'].get('input', {})
                     tool_call_name = chunk['name']
                     yield json.dumps(
-                        {"type": "tool_call_name", "id": chunk["run_id"], "content": {'args': tool_call_args, 'name': tool_call_name}},
+                        {"type": "tool_call_name", "id": chunk["run_id"], "content": {'args': tool_call_args, 'name': tool_call_name}, "elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
                         ensure_ascii=False,
                         default=str
                     ) + "\n\n"
@@ -580,7 +648,7 @@ class ChatService:
                     if output_content:
                         content = await self._switch_chunk_to_str(output_content)
                         yield json.dumps(
-                            {"type": "tool_call_result", "id": chunk["run_id"], "content": content},
+                            {"type": "tool_call_result", "id": chunk["run_id"], "content": content, "elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
                             ensure_ascii=False,
                             default=str
                         ) + "\n\n"
@@ -589,7 +657,7 @@ class ChatService:
             self.logger.error(f"流式响应异常(session_id:{session_id}): {error_detail}")
             # 异常返回错误信息 + 双换行符。yield 后立即 return，
             yield json.dumps(
-                {"type": "error", "error": str(e)},
+                {"type": "error", "error": str(e), "elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
                 ensure_ascii=False,
                 default=str
             ) + "\n\n"
@@ -603,7 +671,10 @@ class ChatService:
 
             self.logger.info(f"会话{session_id}被中断: {reason}")
 
-            checkpoint_id = await self._save_round_checkpoint(session_id)
+            checkpoint_id = await self._save_round_checkpoint(
+                session_id,
+                metrics={"elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
+            )
 
             # 补充checkpoint_id字段进去
             await self.redis_client.hset(
@@ -621,6 +692,8 @@ class ChatService:
                     "checkpoint_id": checkpoint_id,
                     "memory_status": self._get_memory_update_status(session_id),
                     "reason": reason,
+                    "elapsed_ms": self._elapsed_ms_since(start_mono),
+                    "token_usage": token_usage,
                 },
                 ensure_ascii=False,
                 default=str
@@ -628,9 +701,12 @@ class ChatService:
 
             return
 
-        checkpoint_id = await self._save_round_checkpoint(session_id)
+        checkpoint_id = await self._save_round_checkpoint(
+            session_id,
+            metrics={"elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
+        )
 
-        self.logger.info(f"会话 {session_id} 对话完成 (checkpoint: {checkpoint_id})")
+        self.logger.info(f"会话 {session_id} 对话完成 (checkpoint: {checkpoint_id}) elapsed_ms={self._elapsed_ms_since(start_mono)} token_total={token_usage['total']}")
 
         # 返回最终完整结果
         yield json.dumps({
@@ -639,6 +715,8 @@ class ChatService:
             "session_id": session_id,
             "checkpoint_id": checkpoint_id,
             "memory_status": self._get_memory_update_status(session_id),
+            "elapsed_ms": self._elapsed_ms_since(start_mono),
+            "token_usage": token_usage,
         }) + "\n\n"
 
     async def get_conversation(self, session_id: str) ->Conversation:
@@ -1084,8 +1162,13 @@ class ChatService:
                 key_value = await self._get_interrupted_info(session_id)
                 reinvoke_message = [SystemMessage(content=f"中断原因:{key_value['reason']}\n用户进行中断续接,要求为: {message}")]
 
+            # 续接流的指标聚合：与 message_stream 同构
+            start_mono = time.monotonic()
+            token_usage = self._new_workflow_token_usage()
+            elapsed_ms = self._elapsed_ms_since(start_mono)
+
             yield json.dumps(
-                {"type": "init", "session_id": session_id},
+                {"type": "init", "session_id": session_id, "elapsed_ms": elapsed_ms, "token_usage": token_usage},
                 ensure_ascii=False,
                 default=str
             ) + "\n\n"
@@ -1093,7 +1176,7 @@ class ChatService:
             memory_status = self._get_memory_update_status(session_id)
             if memory_status == "pending":
                 yield json.dumps(
-                    {"type": "memory_wait_start", "session_id": session_id},
+                    {"type": "memory_wait_start", "session_id": session_id, "elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
                     ensure_ascii=False,
                     default=str
                 ) + "\n\n"
@@ -1101,7 +1184,7 @@ class ChatService:
                 memory_status = await self._wait_previous_memory_update(session_id)
 
                 yield json.dumps(
-                    {"type": "memory_wait_done", "session_id": session_id, "status": memory_status or "done"},
+                    {"type": "memory_wait_done", "session_id": session_id, "status": memory_status or "done", "elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
                     ensure_ascii=False,
                     default=str
                 ) + "\n\n"
@@ -1119,24 +1202,31 @@ class ChatService:
                     if chunk['metadata']['langgraph_node'] and chunk['metadata']['langgraph_node'] == 'final_node':
                         content = await self._switch_chunk_to_str(chunk['data']['chunk'].content)
                         yield json.dumps(
-                            {"type": "content", "content": content},
+                            {"type": "content", "content": content, "elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
                             ensure_ascii=False,
                             default=str
                         ) + "\n\n"
                     elif chunk['metadata']['langgraph_node'] and chunk['metadata']['langgraph_node'] == 'agent_node':
                         content = await self._switch_chunk_to_str(chunk['data']['chunk'].content)
                         yield json.dumps(
-                            {"type": "reasoning", "content": content},
+                            {"type": "reasoning", "content": content, "elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
                             ensure_ascii=False,
                             default=str
                         ) + "\n\n"
                     else:
                         continue
+                elif chunk['event'] == 'on_chat_model_end':
+                    # 续接流也按 4 个主节点聚合
+                    self._accumulate_workflow_tokens(
+                        token_usage,
+                        (chunk.get('metadata') or {}).get('langgraph_node'),
+                        (chunk.get('data') or {}).get('output'),
+                    )
                 elif chunk['event'] == 'on_tool_start':
                     tool_call_args = chunk['data'].get('input', {})
                     tool_call_name = chunk['name']
                     yield json.dumps(
-                        {"type": "tool_call_name", "id": chunk["run_id"], "content": {'args': tool_call_args, 'name': tool_call_name}},
+                        {"type": "tool_call_name", "id": chunk["run_id"], "content": {'args': tool_call_args, 'name': tool_call_name}, "elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
                         ensure_ascii=False,
                         default=str
                     ) + "\n\n"
@@ -1145,7 +1235,7 @@ class ChatService:
                     if output_content:
                         content = await self._switch_chunk_to_str(output_content)
                         yield json.dumps(
-                            {"type": "tool_call_result", "id": chunk["run_id"], "content": content},
+                            {"type": "tool_call_result", "id": chunk["run_id"], "content": content, "elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
                             ensure_ascii=False,
                             default=str
                         ) + "\n\n"
@@ -1154,7 +1244,7 @@ class ChatService:
             self.logger.error(f"流式响应异常(session_id:{session_id}): {error_detail}")
             # 异常返回错误信息 + 双换行符。yield 后立即 return，
             yield json.dumps(
-                {"type": "error", "error": str(e)},
+                {"type": "error", "error": str(e), "elapsed_ms": self._elapsed_ms_since(start_mono) if 'start_mono' in locals() else 0, "token_usage": token_usage if 'token_usage' in locals() else self._new_workflow_token_usage()},
                 ensure_ascii=False,
                 default=str
             ) + "\n\n"
@@ -1167,7 +1257,10 @@ class ChatService:
 
             self.logger.info(f"会话{session_id}被中断: {reason}")
 
-            checkpoint_id = await self._save_round_checkpoint(session_id)
+            checkpoint_id = await self._save_round_checkpoint(
+                session_id,
+                metrics={"elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
+            )
 
             # 补充checkpoint_id字段进去
             await self.redis_client.hset(
@@ -1185,6 +1278,8 @@ class ChatService:
                     "checkpoint_id": checkpoint_id,
                     "memory_status": self._get_memory_update_status(session_id),
                     "reason": reason,
+                    "elapsed_ms": self._elapsed_ms_since(start_mono),
+                    "token_usage": token_usage,
                 },
                 ensure_ascii=False,
                 default=str
@@ -1192,9 +1287,12 @@ class ChatService:
 
             return
 
-        checkpoint_id = await self._save_round_checkpoint(session_id)
+        checkpoint_id = await self._save_round_checkpoint(
+            session_id,
+            metrics={"elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
+        )
 
-        self.logger.info(f"会话 {session_id} 对话完成 (checkpoint: {checkpoint_id})")
+        self.logger.info(f"会话 {session_id} 续接对话完成 (checkpoint: {checkpoint_id}) elapsed_ms={self._elapsed_ms_since(start_mono)} token_total={token_usage['total']}")
 
         # 返回最终完整结果
         yield json.dumps({
@@ -1202,5 +1300,7 @@ class ChatService:
             "session_id": session_id,
             "checkpoint_id": checkpoint_id,
             "memory_status": self._get_memory_update_status(session_id),
-            "interrupted_before": True
+            "interrupted_before": True,
+            "elapsed_ms": self._elapsed_ms_since(start_mono),
+            "token_usage": token_usage,
         }) + "\n\n"

@@ -162,6 +162,9 @@
                 {{ message.toolCalls.length }} 个工具调用
               </span>
             </div>
+            <span v-if="showMetrics" class="thinking-header-metrics">
+              {{ formatElapsed(metricsElapsedSec) }} · {{ formatTokenCount(metricsTokenTotal) }}
+            </span>
             <svg class="thinking-chevron" :class="{ rotated: !effectiveThinkingCollapsed }" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <polyline points="9 18 15 12 9 6"/>
             </svg>
@@ -485,6 +488,26 @@ export default {
     document.removeEventListener('selectionchange', this.handleSelectionChange)
   },
   computed: {
+    /**
+     * 是否展示 metrics 指标条：仅 AI 消息 + 非 error + 非中断 + 有任一指标
+     * 流式中（streaming=true）也会展示，让数字随事件跳
+     */
+    showMetrics() {
+      if (!this.message || this.message.role !== 'ai') return false
+      if (this.message.error) return false
+      return this.metricsElapsedSec > 0 || this.metricsTokenTotal > 0
+    },
+    metricsElapsedSec() {
+      // 优先用后端权威 elapsedMs（毫秒）；fallback 到 responseTime（秒）
+      if (this.message?.elapsedMs !== undefined && this.message.elapsedMs !== null) {
+        return this.message.elapsedMs / 1000
+      }
+      if (this.message?.responseTime) return this.message.responseTime
+      return 0
+    },
+    metricsTokenTotal() {
+      return Number(this.message?.tokenUsage?.total || 0)
+    },
     renderedContent() {
       if (!this.message.content) return ''
       if (this.message.role === 'ai') {
@@ -649,6 +672,26 @@ export default {
     }
   },
   methods: {
+    /**
+     * 耗时格式化：< 60s 显示 X.Xs，>= 60s 显示 Xm Ys
+     * 与 Claude Code 风格一致，便于实时跟踪
+     */
+    formatElapsed(sec) {
+      if (!sec || sec <= 0) return '0.0s'
+      if (sec < 60) return `${sec.toFixed(1)}s`
+      const m = Math.floor(sec / 60)
+      const s = Math.floor(sec % 60)
+      return `${m}m ${s}s`
+    },
+    /**
+     * tokens 格式化：< 1k 直接显示，>= 1k 显示 X.Xk
+     */
+    formatTokenCount(n) {
+      if (!n || n <= 0) return '0'
+      if (n < 1000) return String(n)
+      if (n < 10000) return `${(n / 1000).toFixed(2)}k`
+      return `${Math.round(n / 1000)}k`
+    },
     // 预处理原始文本 - 处理 [[ ]] 本地文件引用语法、MD 链接渲染和裸 URL
     preprocessContent(content) {
       if (typeof content !== 'string') return content
@@ -2635,6 +2678,18 @@ export default {
 .action-buttons:hover,
 .action-buttons.show-interrupt {
   opacity: 1;
+}
+
+/* 耗时 + Tokens 指标：紧贴 thinking-header 右侧 chevron 左边，简洁小字（实时跳数字） */
+.thinking-header-metrics {
+  margin-left: auto;
+  margin-right: 8px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.1px;
+  cursor: default;
+  white-space: nowrap;
 }
 
 .action-button {

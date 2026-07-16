@@ -57,12 +57,8 @@ Task arrives → Is there a skill for this?
 │   YES → ctime FIRST, then proceed
 │
 ├─ Matching skill? (see examples below)
-│   YES → **FIRST**: cat skills/skills.md for overview
-│         → Then directly call the skill (from skills.xxx import ...) per skills.md
-│         ⚠️ NEVER read individual skill files without reading skills.md first
-│         ⚠️ skills.md already lists each skill's functions/signatures — cat the
-│            .py source ONLY when you need implementation details not in skills.md
-│            (rare). Default: skip reading individual skill files, call directly.
+│   YES → cat skills/skills.md first; call per the packaged usage guide
+│         ⚠️ Use the skill's exposed functions/methods first — do NOT cat the skills source. Read them only when you don't know how to use skills 
 │
 ├─ Uncertain? → ls skills/ to explore (it's free and safe)
 │
@@ -85,7 +81,7 @@ Task arrives → Is there a skill for this?
 ```
 
 **Skill examples** (→ go to skills.md first):
-- "latest AI news" / "recent prices" / "search for X" → Tavily/Exa skill
+- "latest AI news" / "recent prices" / "search for X" /"search relevant info"→ Tavily/Exa skill
 - "analyze this CSV" / "generate a chart" / "visualize this" → DataAnalysis skill
 - "ER diagram" / "mermaid" / "flowchart" → DataAnalysis skill
 - "parse this image" / "what's in this screenshot" → ImageParser skill
@@ -98,7 +94,7 @@ Task arrives → Is there a skill for this?
 - A single cmd / code call is enough → call cmd / code directly (don't use sub_agent for the sake of it)
 - Do NOT pass the entire large task to one sub_agent — mid-task failure wastes everything done so far
 
-**Skill-first rule**: When in doubt whether a skill exists → explore skills/ first. It's always safer to check than to assume.
+**Skill-first rule**: When in doubt whether a skill exists → explore skills/ first.
 
 ## Project Operation Dir
 skills/ — Skill library (read only)
@@ -471,6 +467,7 @@ def get_should_end_node_config():
         "top_p": top_p,
         "timeout": timeout,
         "max_retries": max_retries,
+        "model_kwargs": {"stream_options": {"include_usage": True}},
         "extra_body": distinguish_extra_body(model_name),
     }
 
@@ -536,11 +533,13 @@ def get_graph_final_node_config():
         "top_p": top_p,
         "timeout": timeout,
         "max_retries": max_retries,
+        "model_kwargs": {"stream_options": {"include_usage": True}},
         "extra_body": distinguish_extra_body(model_name),
     }
 
     # Final Node prompt
-    prompt = """# Final Node — Response Generation
+    prompt = """# Your Role
+You are `灵析 (Lingxi)`.To produce the user-facing final reply.
 
 ## Your Task
 Answer the optimized user's input: `{imp_ipt}`
@@ -722,6 +721,7 @@ def get_agent_node_config():
         "top_p": top_p,
         "timeout": timeout,
         "max_retries": max_retries,
+        "model_kwargs": {"stream_options": {"include_usage": True}},
         "extra_body": distinguish_extra_body(model_name),
     }
 
@@ -760,6 +760,7 @@ def get_history_summary_node_config():
         "top_p": top_p,
         "timeout": timeout,
         "max_retries": max_retries,
+        "model_kwargs": {"stream_options": {"include_usage": True}},
         "extra_body": distinguish_extra_body(model_name),
     }
 
@@ -943,6 +944,7 @@ def get_react_compact_config():
         "top_p": top_p,
         "timeout": timeout,
         "max_retries": max_retries,
+        "model_kwargs": {"stream_options": {"include_usage": True}},
         "extra_body": distinguish_extra_body(model_name),
     }
 
@@ -1031,6 +1033,7 @@ def get_imp_ipt_config():
         "top_p": top_p,
         "timeout": timeout,
         "max_retries": max_retries,
+        "model_kwargs": {"stream_options": {"include_usage": True}},
         "extra_body": distinguish_extra_body(model_name),
     }
 

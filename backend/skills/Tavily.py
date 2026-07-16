@@ -25,7 +25,7 @@ class TavilySearch:
         self,
         query: str,
         search_depth: Literal["basic", "advanced"] = "basic",
-        max_results: int = 5,
+        max_results: int = 3,
         include_answer: bool = False,
         include_raw_content: bool = False,
         include_images: bool = False,

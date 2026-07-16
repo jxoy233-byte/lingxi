@@ -67,6 +67,9 @@ cached/
 cache/
 *.cache
 
+# VL model local directory (avoid uploading 4GB model binaries to git)
+.model/
+
 # Logs
 logs/
 *.log.*

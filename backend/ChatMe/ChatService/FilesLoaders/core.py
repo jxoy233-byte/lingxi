@@ -449,7 +449,7 @@ class FilesLoaders:
         pipeline_options.do_table_structure = True  # 启用表格结构识别
         pipeline_options.generate_page_images = True  # 生成页面图片
         pipeline_options.generate_picture_images = True  # 提取文档中的图片
-        pipeline_options.images_scale = 1.5  # 图片缩放比例，提高质量
+        pipeline_options.images_scale = 1.0  # 图片缩放比例，提高质量
         pipeline_options.do_ocr = False  # ❌ 不启用 OCR，避免下载模型
 
         converter = DocumentConverter(

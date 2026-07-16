@@ -9,7 +9,7 @@ from ChatMe.ChatMeConfig import get_skills_config
 def search_web(query: str,
                freshness: Literal["noLimit", "oneDay", "oneWeek", "oneMonth", "oneYear"] = "noLimit",
                summary: bool = True,
-               count: int = 5,
+               count: int = 3,
                **kwargs
                ):
     """

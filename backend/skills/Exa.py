@@ -20,13 +20,13 @@ class ExaSearch:
         if not self.api_key:
             raise ValueError("EXA_API_KEY 未配置（config.json 的 skills.exa_api_key 或环境变量）")
 
-    def search(self, query: str, num_results: int = 5, type: Literal["instant","fast","auto","deep"] = "auto", maxCharacters:int =2000, **metadata) -> List[Dict[str, Any]]:
+    def search(self, query: str, num_results: int = 3, type: Literal["instant","fast","auto","deep"] = "auto", maxCharacters:int =2000, **metadata) -> List[Dict[str, Any]]:
         """
         语义搜索
 
         Args:
             query: 搜索查询
-            num_results: 返回结果数量 (默认 10，一般最大100)
+            num_results: 返回结果数量 (默认 3，最大10)
             type: 查询精细方式的不同(instant:200ms, fast:400ms, auto:1s, deep:4~12s)
             maxCharacters: 页面摘要的最大返回字体数
             metadata:

@@ -60,6 +60,37 @@ def list_data_analysis_files(data_analysis_dir: Path, base_rel: str) -> List[dic
     return files
 
 
+def list_session_files(session_dir: Path) -> List[dict]:
+    """
+    列出整个 session 目录下所有文件（扁平列表），范围比 list_data_analysis_files 广：
+    包含 data_analysis/ 子目录 + 用户上传文件 + AI 中间产物等任何位置的文件。
+    供前端 "工作树" 面板构树展示当前会话的全部产物。
+
+    Args:
+        session_dir: session 绝对路径 (cached/{session_id})
+
+    Returns:
+        [{"path": "cached/.../xxx", "size": int, "modified_at": str}, ...]
+    """
+    files = []
+    if not session_dir.exists() or not session_dir.is_dir():
+        return files
+    for f in session_dir.rglob("*"):
+        # 跳过隐藏文件 + 跳目录（虽然 rglob 也走文件，但 is_file 二次过滤）
+        if not f.is_file() or f.name.startswith("."):
+            continue
+        # 相对 BACKEND_DIR 取，保证 path 含 "cached/" 前缀，与 /static/cached/ 路由一致
+        rel = f.relative_to(BACKEND_DIR).as_posix()
+        stat = f.stat()
+        files.append({
+            "path": rel,
+            "size": stat.st_size,
+            "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+        })
+    files.sort(key=lambda x: x["path"])
+    return files
+
+
 @static_file_router.put("/{file_path:path}", summary="写入文件内容")
 async def write_cached_file(
     file_path: str,

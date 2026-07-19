@@ -209,6 +209,43 @@ async def get_data_analysis_tree(
     }
 
 
+@ChatMe_app.get("/{session_id}/tree", summary="检测会话的全部产物目录结构")
+async def get_session_tree(
+    session_id: str = Path(..., description="会话ID")
+):
+    """
+    检测会话 cached 目录下所有文件（工作树用）。
+    返回扁平文件列表，供前端自行构树 + 动态加载文件预览。
+
+    与 /{session_id}/data-analysis/tree 的区别：本接口范围更广，
+    返回 session 下全部文件（包括 data_analysis/、用户上传文件、
+    AI 中间产物等），用于"工作树"展示当前会话的全部产物。
+
+    返回:
+        exists: bool - session 是否有任何文件
+        root_path: str - 根路径（相对 cached/），形如 "cached/{session_id}"
+        files: list[dict] - 扁平文件列表，每项含 path / size / modified_at
+    """
+    from ChatMe.APIRouter.static_file import CACHED_DIR, list_session_files
+
+    session_dir = CACHED_DIR / session_id
+    base_rel = f"cached/{session_id}"
+
+    if not session_dir.exists() or not session_dir.is_dir():
+        return {
+            "exists": False,
+            "root_path": base_rel,
+            "files": [],
+        }
+
+    files = list_session_files(session_dir)
+    return {
+        "exists": len(files) > 0,
+        "root_path": base_rel,
+        "files": files,
+    }
+
+
 @ChatMe_app.post("/{session_id}/backtrack", summary="会话回溯")
 async def backtrack_checkpoint(
     session_id: str = Path(..., description="会话唯一ID"),

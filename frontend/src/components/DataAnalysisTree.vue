@@ -17,7 +17,7 @@
     <transition name="da-fade">
       <div v-if="showTree" class="da-panel">
         <div class="da-panel-header">
-          <span class="da-panel-title">📁 数据分析产物</span>
+          <span class="da-panel-title">📁 会话文件</span>
           <div class="da-panel-actions">
             <button class="da-icon-btn" @click="reload" title="刷新">
               <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -111,7 +111,9 @@ export default {
     async check() {
       this.loading = true
       try {
-        const resp = await fetch(`/chat/${this.sessionId}/data-analysis/tree`)
+        // 工作树：拉取当前 session_id 下全部文件（data_analysis 子目录 + 上传文件 + AI 中间产物等），
+        // 比 /data-analysis/tree 范围广。旧接口保留供 FilePreviewPanel 内嵌文件列表用。
+        const resp = await fetch(`/chat/${this.sessionId}/tree`)
         if (!resp.ok) {
           this.reset()
           return
@@ -140,7 +142,10 @@ export default {
       this.loading = false
     },
     buildTree() {
-      const root = { name: 'data_analysis', type: 'directory', children: [] }
+      // 根节点：用 sessionId 前 8 位做显示名（替代旧的 'data_analysis'，
+      // 因为现在展示的是整个 session 下的文件，不再只是 data_analysis 子目录）
+      const rootName = this.sessionId ? this.sessionId.slice(0, 8) : 'session'
+      const root = { name: rootName, type: 'directory', children: [] }
       const basePrefix = this.rootPath.endsWith('/') ? this.rootPath : this.rootPath + '/'
       for (const file of this.files) {
         const rel = file.path.startsWith(basePrefix)

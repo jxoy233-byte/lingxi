@@ -95,12 +95,16 @@ export default {
       rafId: null,              // requestAnimationFrame id
       // 内容更新前用户是否处于底部（beforeUpdate 钩子捕获，用于跨过大块内容更新）
       _userAtBottomBeforeUpdate: true,
+      // 用户主动 wheel/touch 过：置位后 watcher 一律不接管，直至他们滚回底部（含容差）清掉
+      // ——对应 CLAUDE.md 偏好 4「wheel/touch 立即让出控制权」；
+      // 单纯靠 isAtBottom() 的 50px 容差判定会被小幅上滚 + 内容撑高误导
+      _userScrolledAway: false,
 
       // —— 滚动状态机 ——
-      // 'entry'   会话入场/刷新：easeInOut 滑到底
-      // 'ramp'    流式刚启动：双阶段（先慢后快）下滑
-      // 'locked'  已锁定跟随：每次 append snappy 跟上
-      // 'idle'    默认：stick-to-bottom
+      // 'entry'    会话入场/刷新：easeInOut 滑到底
+      // 'ramping'  流式刚启动：双阶段（先慢后快）下滑
+      // 'locked'   已锁定跟随：每次 append snappy 跟上
+      // 'idle'     默认：stick-to-bottom
       scrollMode: 'idle',
       _rampStartedAt: 0,
       _suppressScroll: false,
@@ -362,6 +366,10 @@ export default {
     handleScrollEvent() {
       if (this.isAutoScrolling) return
       this._handleUserIntent()
+      // 用户滚回底部（含 50px 容差）→ 清掉「已离开跟随」标记，watcher 恢复接管
+      if (this.isAtBottom()) {
+        this._userScrolledAway = false
+      }
     },
 
     // 2. wheel / touchstart 事件：明确是用户输入
@@ -373,6 +381,11 @@ export default {
 
     // 统一的用户意图分发：按当前 scrollMode 决定处理
     _handleUserIntent() {
+      // 任何 wheel/touch 都先打「用户已离开跟随」标记。
+      // ——单单 gate isAtBottom() 不够：50px 容差里小幅上滚 + 大段内容追加
+      // 仍会被 beforeUpdate 误判为「用户在底部」；sticky flag 才兜得住。
+      this._userScrolledAway = true
+
       if (this.scrollMode === 'ramping') {
         // ramp 启动 < 100ms 的 wheel 视为触摸板惯性，吞掉不中断
         if (performance.now() - this._rampStartedAt < INTERRUPT_DEBOUNCE_MS) return
@@ -381,16 +394,11 @@ export default {
       }
 
       if (this.scrollMode === 'locked') {
-        // 取消 in-flight follow 动画，避免和用户的手指打架
-        if (this.rafId) {
-          cancelAnimationFrame(this.rafId)
-          this.rafId = null
-        }
-        this.isAutoScrolling = false
-        // 检测离开底部：直接退 idle（简化的语义；不回锁）
-        if (!this.isAtBottom()) {
-          this._setMode('idle')
-        }
+        // 任何 wheel/touch 立即让出控制权（CLAUDE.md 偏好 4）：
+        // ——不再 gate isAtBottom() 的 50px 容差；小幅上滚意图也尊重。
+        // ——后续 watcher 看到 _userScrolledAway=true 自动不再强制跟。
+        this._cancelRaf()
+        this._setMode('idle')
         return
       }
 
@@ -428,6 +436,13 @@ export default {
         }
         // ramping / entry：让当前动画接管，watcher 不动
         if (this.scrollMode === 'ramping' || this.scrollMode === 'entry') return
+        // 用户已主动离开跟随：locked 让出，idle 也不接管
+        if (this._userScrolledAway) {
+          if (this.scrollMode === 'locked') {
+            this._setMode('idle')
+          }
+          return
+        }
         // locked：每次新消息 snappy 跟上
         if (this.scrollMode === 'locked') {
           this._scheduleLockedFollow()
@@ -451,6 +466,9 @@ export default {
         // 流式刚启动：总是开 ramp，给"自动往下滑"的趋势
         // 用户的控制权由 ramp 中的 wheel/touch 打断机制保证
         // 即使之前用户已滚开（上一轮流式时主动离开过底部），新一轮流式也要重新 ramp 一次
+        // ——发新消息/重新生成 就是"用户想跟"的强信号，清掉 _userScrolledAway
+        //   否则沿用旧 flag 会让首段 locked follow 被吞，跟不上
+        this._userScrolledAway = false
         this.$nextTick(() => {
           this._setMode('ramping')
           this._startRamp()

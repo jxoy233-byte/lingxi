@@ -571,10 +571,12 @@ export default {
 
       // 检查是否需要创建新会话
       // 如果当前 URL 没有 sessionId（即在新会话页面），则创建新会话
-      const urlPath = window.location.pathname
-      const urlHasSessionId = urlPath && urlPath !== '/' && urlPath !== ''
+      // 必须读 hash 不用 pathname：vue-router 已切到 hash 模式（file:// + reload 兼容），
+      // pathname 始终是 index.html 的磁盘路径，从来没有 sid 信息。
+      const urlHash = window.location.hash  // 例: "#/<sid>" / "#/" / ""
+      const urlHasSessionId = urlHash && urlHash !== '#/' && urlHash !== '#'
 
-      console.log('[addFiles] urlPath:', urlPath, 'urlHasSessionId:', urlHasSessionId)
+      console.log('[addFiles] urlHash:', urlHash, 'urlHasSessionId:', urlHasSessionId)
 
       if (!urlHasSessionId) {
         // 生成新的 session_id
@@ -694,15 +696,16 @@ export default {
 
       // 构建上传 URL（确保有 sessionId）
       // 优先从 URL 直接获取 sessionId，这是最可靠的（路由已完成导航）
-      const pathParts = window.location.pathname.split('/')
-      const urlSessionId = pathParts.length > 2 ? pathParts[2] : pathParts[1]
+      // 改读 hash：hash 模式下 pathname 是 index.html，永远没有 sid
+      const hashParts = window.location.hash.split('/')  // 例: ["#", "<sid>"] 或 ["", ""]
+      const urlSessionId = hashParts.length >= 2 && hashParts[1] ? hashParts[1] : null
       // 尝试多种方式获取 sessionId：prop > URL > localStorage
       const currentSid = this.currentSessionId || urlSessionId || localStorage.getItem('pendingSessionId') || localStorage.getItem('currentSessionId')
       const uploadUrl = currentSid
         ? `/chat/${currentSid}/upload_file`
         : '/chat/upload_file'  // 兜底
 
-      console.log('[uploadFilesBatch] pathname:', window.location.pathname, 'pathParts:', pathParts, 'urlSessionId:', urlSessionId, 'currentSid:', currentSid, 'this.currentSessionId:', this.currentSessionId)
+      console.log('[uploadFilesBatch] hash:', window.location.hash, 'hashParts:', hashParts, 'urlSessionId:', urlSessionId, 'currentSid:', currentSid, 'this.currentSessionId:', this.currentSessionId)
 
       console.log('上传文件批次:', {
         fileCount: fileObjs.length,

@@ -151,7 +151,7 @@ ImageParser 是一个**图片解析**技能，使用 VL 模型（Qwen3-VL）来�
 同时调用多个引擎的例子：
 ```python
 tavily_result = tavily_search("某话题", search_depth="basic", max_results=3)
-exa_result = exa_search("某话题深度分析", num_results=5)
+exa_result = exa_search("某话题深度分析", num_results=3)
 ```
 
 ---

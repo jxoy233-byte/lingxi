@@ -2425,7 +2425,7 @@ export default {
           // 静默刷新消息，不触发自动滚动
           this.$refs.messageList?.suppressNextScroll()
           this.messages = this.processConversationMessages(conversation.messages)
-          // 同步文件树（AI 跑完一轮可能新写文件到 cached/data_analysis/）
+          // 同步工作树（AI 跑完一轮可能新写文件到 cached/{sid}/ 任意位置，包括 data_analysis/ 子目录之外的中间产物）
           this.$refs.dataAnalysisTree?.reload()
           // 同步侧边栏标题和更新时间
           const conv = this.conversations.find(c => c.session_id === sessionId)

@@ -87,7 +87,11 @@ _FILTER_PATTERNS = [
     # 关键顺序：先跑 tool_call 块整匹配（含 wrapper 闭合），wrapper 正则放后面做兜底。
     # 否则 wrapper 先剥 → tool_call 块找不到闭合 → 留下 <tool_call>\n<invoke>...</invoke> 这种半截垃圾。
     # 单/复数都吃：`<tool_call>` / `<tool_calls>` 都允许作为开闭标签（实测 M3 两种都会输出）。
-    r'<tool_calls?>.*?\[?</?tool_calls?>\]?',
+    # ⛔ (?!\s*<invoke) 跳过含真 <invoke> 的块：M3 偶发只把 tool_call 序列化到 content、不填结构化 tool_calls 字段，
+    # 此时若 filter 把整块剥光 → _parse_content_to_tool_calls 拿到空 content → AIMessage.content='' & tool_calls=[]
+    # → 路由进 should_end_node 后陷入 retry 空转。保留含 <invoke> 的真块让 parse 提 tool_calls，wrapper-only 碎块（deb
+    # ris）继续由这条 pattern 兜底清掉。 [\s\S]*? 替代 .*? 以跨行匹配（M3 输出 <tool_calls> 与 </tool_calls> 之间常含 \n）。
+    r'<tool_calls?>(?!\s*<invoke)[\s\S]*?\[?</?tool_calls?>\]?',
     # 方括号包装的孤标记（裸的 <tool_call> 块吃不到这些）
     r'\[</?tool_calls?>\]',
     r'\[<\]tool_calls?\[>\]',

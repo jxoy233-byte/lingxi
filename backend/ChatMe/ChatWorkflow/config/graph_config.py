@@ -518,7 +518,7 @@ def get_graph_final_node_config():
     base_url = active.get("base_url")
 
     temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.9"))
-    max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "8192"))
+    max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "16384"))
     top_p = float(os.getenv("OPENAI_TOP_P", "1.0"))
     timeout = int(os.getenv("OPENAI_TIMEOUT", "60"))
     max_retries = 3

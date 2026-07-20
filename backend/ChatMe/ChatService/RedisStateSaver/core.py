@@ -1,7 +1,7 @@
 import json
 import traceback
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 import redis.asyncio as redis
 
@@ -35,11 +35,24 @@ class RedisStateSaver:
         """
         return f"{self.redis_prefix}:{thread_id}:checkpoints"
 
-    async def write_checkpoint(self, thread_id: str, checkpoint_id: str) -> bool:
+    async def write_checkpoint(
+        self,
+        thread_id: str,
+        checkpoint_id: str,
+        *,
+        elapsed_ms: Optional[int] = None,
+        token_usage: Optional[Dict[str, Any]] = None,
+        status: str = "completed",
+    ) -> bool:
         """
         写入 checkpoint 检查点到指定 thread_id 下
+
         :param thread_id: 会话id
         :param checkpoint_id: 检查点id
+        :param elapsed_ms: 本轮耗时（毫秒）。可选，正常完成时为整轮时长，中断时为已耗时（部分）。
+        :param token_usage: 本轮 token 用量统计。可选，dict 形如 {"prompt": N, "completion": N, "total": N}。
+        :param status: 本轮收尾状态。"completed" = 正常完成；"interrupted" = 用户中断。
+                       通过 status 区分两类条目，便于排查 / 前端展示。
         :return: 写入状态
         """
         key = self._build_key(thread_id)
@@ -47,12 +60,22 @@ class RedisStateSaver:
         value_data = {
             "ts": ts,
             "checkpoint_id": checkpoint_id,
+            "status": status,
         }
+        # 仅写入非空字段，避免老数据 / 调用方不传时被 None 污染（前端 cp_meta.get(...) 会拿到 None）
+        if elapsed_ms is not None:
+            value_data["elapsed_ms"] = elapsed_ms
+        if token_usage is not None:
+            value_data["token_usage"] = token_usage
+
         value = json.dumps(value_data, ensure_ascii=False, default=str)
 
         try:
             await self.redis_client.hset(key, checkpoint_id, value)
-            self.logger.debug(f"写入checkpoint成功(thread_id={thread_id}, checkpoint_id={checkpoint_id})")
+            self.logger.debug(
+                f"写入checkpoint成功(thread_id={thread_id}, checkpoint_id={checkpoint_id}, "
+                f"status={status}, elapsed_ms={elapsed_ms})"
+            )
             return True
         except Exception as e:
             self.logger.error(f"写入checkpoint失败(thread_id={thread_id}): {e}\n{traceback.format_exc()}")

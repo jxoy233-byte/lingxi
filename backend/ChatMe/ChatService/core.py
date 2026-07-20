@@ -9,9 +9,8 @@ from datetime import datetime
 from typing import AsyncGenerator, Set, List, Any, Optional, Dict
 
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
-from langgraph.types import StateSnapshot
+from langgraph.types import StateSnapshot, Command
 from langgraph_sdk.auth.exceptions import HTTPException
-from openai import conversations
 from redisvl.query import FilterQuery
 from langgraph.checkpoint.redis.util import from_storage_safe_id
 
@@ -273,13 +272,29 @@ class ChatService:
         self,
         session_id: str,
         metrics: Optional[Dict[str, Any]] = None,
+        *,
+        status: str = "completed",
     ) -> Optional[str]:
         """
-        获取指定会话的所有 checkpoint_id 列表
+        保存每轮检查点。
 
-        更新状态使得带有最新一轮的checkpoint_id写入state_saver和记忆文件
-        metrics 可选：传入 {"elapsed_ms": int, "token_usage": dict} 时同步写入最后一条 AIMessage.additional_kwargs
-        供刷新会话后回放展示用。
+        职责：
+        - 写 checkpoint 元数据（checkpoint_id / elapsed_ms / token_usage / status）到 RedisStateSaver
+          （app 层 Redis hash），**不再**通过 `graph.aupdate_state` 写回 LangGraph runtime state。
+        - 调度本轮 memory 后台更新任务。
+
+        为什么去掉 aupdate_state：
+        每次 `aupdate_state` 都会在 LangGraph runtime 里生成一个新 checkpoint，把 runtime 指针往前推一格。
+        在 interrupt+resume 场景下，这会导致 resume 时 runtime 已经站在"已完成上一轮"的位置，
+        续接的 ainvoke 只能从入口重新跑，而不是从中断点继续。把 metadata 全部归 RedisStateSaver
+        后，LangGraph state 不再被 metadata 写入污染，resume 就能从中断点继续。
+
+        metrics 可选：传入 {"elapsed_ms": int, "token_usage": dict} 时同步写入 RedisStateSaver。
+        get_conversation 时会按 checkpoint_index 顺序回填到对应 SUMMARY AIMessage.additional_kwargs，
+        供前端回放展示用。
+
+        status: 本轮收尾状态。"completed" = 正常完成；"interrupted" = 用户中断。
+        默认 "completed"，中断分支调用时显式传 "interrupted"。
 
         :return 保存成功返回对应checkpoint_id
         """
@@ -290,35 +305,35 @@ class ChatService:
 
             checkpoint_id = state.config["configurable"]["checkpoint_id"]
 
-            status = await self.state_saver.write_checkpoint(session_id, checkpoint_id)
+            # 仅把非空 metrics 透传给 RedisStateSaver；老数据 / 调用方不传时字段不入 value_data
+            elapsed_ms = int(metrics["elapsed_ms"]) if metrics and metrics.get("elapsed_ms") is not None else None
+            token_usage = metrics.get("token_usage") if metrics else None
 
-            if status:
-                if isinstance(state.values["messages"][-1], AIMessage):
-                    last_ai_message = list(state.values["messages"])[-1]
-                    last_ai_message.additional_kwargs["checkpoint_id"] = checkpoint_id
-                    if metrics:
-                        if "elapsed_ms" in metrics and metrics["elapsed_ms"] is not None:
-                            last_ai_message.additional_kwargs["elapsed_ms"] = int(metrics["elapsed_ms"])
-                        if "token_usage" in metrics and metrics["token_usage"] is not None:
-                            last_ai_message.additional_kwargs["token_usage"] = metrics["token_usage"]
+            ok = await self.state_saver.write_checkpoint(
+                thread_id=session_id,
+                checkpoint_id=checkpoint_id,
+                elapsed_ms=elapsed_ms,
+                token_usage=token_usage,
+                status=status,
+            )
 
-                    state.values["messages"][-1] = last_ai_message
-                    await self.graph.aupdate_state(
-                        config=config,
-                        values=state.values,  # 把修改后的完整state值更新回去
-                    )
+            if not ok:
+                self.logger.warning(
+                    f"写入 checkpoint 失败(session_id={session_id}, cid={checkpoint_id})，跳过本轮 memory 调度"
+                )
+                return None
 
-                try: # 更新每轮记忆文件 — 后台静默执行，不阻塞返回
-                    self._schedule_memory_update(
-                        session_id=session_id,
-                        checkpoint_id=checkpoint_id,
-                        state=state,
-                    )
+            # 更新每轮记忆文件 — 后台静默执行，不阻塞返回
+            try:
+                self._schedule_memory_update(
+                    session_id=session_id,
+                    checkpoint_id=checkpoint_id,
+                    state=state,
+                )
+            except Exception as e:
+                self.logger.error(f"更新记忆文件失败(thread_id={session_id}): {str(e)}")
 
-                except Exception as e:
-                    self.logger.error(f"更新记忆文件失败(thread_id={session_id}): {str(e)}")
-
-                return checkpoint_id
+            return checkpoint_id
 
         except Exception as e:
             self.logger.error(f"保存每轮检查点失败(session_id:{session_id}): {str(e)}")
@@ -674,6 +689,7 @@ class ChatService:
             checkpoint_id = await self._save_round_checkpoint(
                 session_id,
                 metrics={"elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
+                status="interrupted",
             )
 
             # 补充checkpoint_id字段进去
@@ -736,6 +752,7 @@ class ChatService:
 
         try:
             state = await self.graph.aget_state(config=config)
+            print(state)
             interrupted_info = await self._get_interrupted_info(session_id)
         except HTTPException as e:
             self.logger.error(f"获取会话状态异常(session_id:{session_id})：{str(e)}")
@@ -772,12 +789,22 @@ class ChatService:
                     if msg.additional_kwargs.get("type") == AIMessageType.SUMMARY.value:
                         # 添加边界检查，避免数组越界
                         if checkpoint_index < len(checkpoints):
-                            msg.additional_kwargs["checkpoint_id"] = checkpoints[checkpoint_index]["checkpoint_id"]
+                            cp_meta = checkpoints[checkpoint_index]
+                            msg.additional_kwargs["checkpoint_id"] = cp_meta["checkpoint_id"]
                             # 第一个 SUMMARY 消息的 last_checkpoint_id 为空
                             if checkpoint_index > 0:
                                 msg.additional_kwargs["last_checkpoint_id"] = checkpoints[checkpoint_index - 1].get("checkpoint_id", "")
                             else:
                                 msg.additional_kwargs["last_checkpoint_id"] = ""
+
+                            # 注入计时和tokens消耗
+                            if cp_meta.get("elapsed_ms") is not None:
+                                msg.additional_kwargs["elapsed_ms"] = int(cp_meta["elapsed_ms"])
+                            if cp_meta.get("token_usage"):
+                                msg.additional_kwargs["token_usage"] = cp_meta["token_usage"]
+                            # status 透出（"completed" / "interrupted"），便于排查 + 前端未来按需展示
+                            # if cp_meta.get("status"):
+                            #     msg.additional_kwargs["status"] = cp_meta["status"]
                         else:
                             self.logger.warning(f"checkpoint_index({checkpoint_index}) >= len(checkpoints)({len(checkpoints)})")
                             msg.additional_kwargs["checkpoint_id"] = None
@@ -1157,7 +1184,7 @@ class ChatService:
             key = f"interrupt:{session_id}"
 
             if message == "CONTINUE" or not message or message.strip() == "":
-                reinvoke_message = []
+                reinvoke_message = [SystemMessage(content="CONTINUE")]
             else:
                 key_value = await self._get_interrupted_info(session_id)
                 reinvoke_message = [SystemMessage(content=f"中断原因:{key_value['reason']}\n用户进行中断续接,要求为: {message}")]
@@ -1188,14 +1215,22 @@ class ChatService:
                     ensure_ascii=False,
                     default=str
                 ) + "\n\n"
-
             # 清除中断时留下的状态
             await self.redis_client.delete(key)
             await self._delete_last_round_checkpoint(session_id)
 
+            # context 续接的时候不是追加逻辑，是覆盖逻辑
+            config = {"configurable": {"thread_id": session_id}}
+            state = await self.graph.aget_state(config=config)
+            pre_context = state.values.get("context",[]) or []
+            merged_context = list(pre_context) + list(reinvoke_message)
+
             async for chunk in self.chat_workflow.astream(
-                reinvoke_message,
-                config={"configurable": {"thread_id": session_id}},
+                Command(update={
+                    "messages": reinvoke_message,
+                    "context": merged_context,
+                }),
+                config=config,
             ):
                 if chunk['event'] == 'on_chat_model_stream':
                     # 最终返回的chunk
@@ -1260,6 +1295,7 @@ class ChatService:
             checkpoint_id = await self._save_round_checkpoint(
                 session_id,
                 metrics={"elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
+                status="interrupted",
             )
 
             # 补充checkpoint_id字段进去

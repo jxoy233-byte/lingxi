@@ -1,6 +1,5 @@
 import asyncio
 import json
-import os
 import re
 from collections import defaultdict
 from pathlib import Path
@@ -677,9 +676,9 @@ class ChatWorkflow:
             """
             parsed_results = state["parsed_results"]
 
-            combined_content = "\n".join(parsed_results) if parsed_results else "无文件传入"
+            combined_content = "\n".join(parsed_results) if parsed_results else ""
             if not combined_content.strip():
-                combined_content = "无文件传入"
+                combined_content = ""
 
             combined_result = HumanMessage(content=combined_content)
 
@@ -1111,24 +1110,47 @@ class ChatWorkflow:
         result = await self.graph.ainvoke({"messages": messages}, config=config)
         return result
 
-    async def astream(self, messages: Optional[list[BaseMessage]], config: Optional[Dict[str, Any]] = None) -> AsyncGenerator[Any, None]:
+    async def astream(
+        self,
+        messages: Optional[Any] = None,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> AsyncGenerator[Any, None]:
         """
-        Stream workflow execution
+        Stream workflow execution.
 
         Args:
-            messages: List of messages
+            messages: 三种类型都支持：
+                - list[BaseMessage] / BaseMessage：包成 {"messages": ...} 喂给 graph（新对话入口）
+                - dict：已是 state update 格式，直接喂给 graph
+                  （如 {"messages": [...]} / {"context": [...]} 等任意字段更新）
+                - Command：透传给底层 graph（中断续接 / 跨节点跳转等场景用）
             config: Optional configuration
 
         Yields:
             Workflow execution chunks
+
+        为什么不能强制包成 {"messages": ...}：
+        Command 会被 add_messages reducer 当 message 处理，触发
+        _convert_to_message(Command) → NotImplementedError。
         """
+        from langgraph.types import Command as _Command
+
         config = {
             **config,
             "recursion_limit": 1000,
         }
 
-        async for e in self.graph.astream_events({
-            "messages": messages},
-            config=config,
-        ):
+        if isinstance(messages, _Command):
+            # Command 直接透传，langgraph 内部会按 update/resume/goto 等指令处理
+            payload = messages
+        elif isinstance(messages, dict):
+            # 已是 state update dict，直接传；不重复包成 {"messages": ...}
+            payload = messages
+        elif messages is None:
+            payload = None
+        else:
+            # BaseMessage list / 单个 message，包成 messages 字段
+            payload = {"messages": messages}
+
+        async for e in self.graph.astream_events(payload, config=config):
             yield e

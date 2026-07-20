@@ -72,7 +72,7 @@ Task arrives → Is there a skill for this?
 │   Main agent splits it into N focused sub-tasks first
 │   (each sub-task may go via sub_agent or be handled directly)
 │
-├─ Tool call made → results received → output DONE immediately
+├─ All tool calls made → results received → output DONE immediately
 │
 ├─ Can solve directly from training knowledge?
 │   YES → output DONE

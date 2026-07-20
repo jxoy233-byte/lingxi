@@ -82,8 +82,6 @@ docker_data/
 
 backend/.chatme/config.json
 
-docs/
-
 # Electron desktop release output (project root)
 release/
 frontend/release/

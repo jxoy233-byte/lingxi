@@ -211,7 +211,7 @@ OPENAI_PRESENCE_PENALTY=0.0
 {
   "app": {
     "name": "ChatMe",
-    "version": "v0.0.2",
+    "version": "v0.0.3",
     "host": "127.0.0.1",
     "port": 8211
   },

@@ -54,27 +54,25 @@ def _get_llm_config():
 
 
 def _get_sub_agent_tools():
-    """获取 sub-agent 可用的工具列表（不含 interrupt），async tools 转 sync"""
+    """获取 sub-agent 可用的工具列表（不含 interrupt）。
+
+    复用 core.py 模块级共享 MCP client（同一连接 + 同一 _inject_session_header interceptor），
+    sid 通过 X-Session-Id header 自动传递，无需在 tool_call args 里手动注入。
+    """
     try:
-        from langchain_mcp_adapters.client import MultiServerMCPClient
-        from ChatMe.ChatMeConfig import get_mcp_config
+        from ChatMe.ChatWorkflow.core import get_mcp_tools
 
-        mcp_config = get_mcp_config()
-        core_mcp_config = {
-            'url': mcp_config.get('url', 'http://127.0.0.1:28211/streamable'),
-            'transport': mcp_config.get('transport', 'streamable_http')
-        }
+        # 触发 lazy init（如果 ChatWorkflow.ainit 还没跑过）
+        # 这里直接拿已 init 的 tools；如果 ChatWorkflow 还没起来，子进程调用会拿到空（不会崩）
+        try:
+            all_tools = get_mcp_tools()
+        except RuntimeError:
+            # 共享 client 还没初始化（MCP server 独立于 ChatWorkflow 启动的场景）
+            logger.warning("MCP 共享 client 未初始化，sub-agent 暂无可用工具")
+            return []
 
-        client = MultiServerMCPClient({'core_mcp': core_mcp_config})
-        async_tools = asyncio.run(client.get_tools())
-
-        # 过滤掉 interrupt 并转换
-        tools = []
-        for t in async_tools:
-            if getattr(t, 'name', None) == 'interrupt':
-                continue
-            tools.append(t)
-
+        # 过滤掉 interrupt（主 agent 才有权中断）
+        tools = [t for t in all_tools if getattr(t, 'name', None) != 'interrupt']
         return tools
     except Exception as e:
         logger.error(f"无法从 MCP server 获取工具列表: {e}")
@@ -142,11 +140,10 @@ def _create_sub_agent_graph(prompt):
         response.content = cleaned
         response_text = cleaned
 
-        # 解析 tool_calls 并注入 session_id
+        # 解析 tool_calls：不再手动注入 session_id（走 interceptor → X-Session-Id header）
         tool_calls = _parse_tool_calls(response_text)
         if tool_calls:
             for tc in tool_calls:
-                tc["args"]["session_id"] = session_id
                 # code 必须有 code 参数
                 if tc["name"] == "code" and "code" not in tc["args"]:
                     warning = _generate_tool_param_warning("code", ["code"])
@@ -157,13 +154,6 @@ def _create_sub_agent_graph(prompt):
                     warning = _generate_tool_param_warning("cmd", ["command"])
                     tc["args"]["command"] = warning
                     logger.warning(f"会话 {session_id} cmd 缺少 command 参数: {tc['args']}")
-                # ctime 保底：ctime 不接受任何参数（除 framework 注入的 session_id）。
-                # 如果 LLM 错误地传了其它字段，清空 args 防止 MCP server 校验失败。
-                if tc["name"] == "ctime":
-                    extra = {k: v for k, v in tc["args"].items() if k != "session_id"}
-                    if extra:
-                        logger.warning(f"会话 {session_id} ctime 不应有除 session_id 外的参数，已清空: extra={extra}")
-                        tc["args"] = {}
             response.tool_calls = tool_calls
 
         return {"messages": [response]}
@@ -278,7 +268,9 @@ def sub_agent(
 
         logger.info(f"[sub_agent] 会话 {session_id} task={task[:50]}...")
 
-        config = {"configurable": {"session_id": session_id}}
+        # 用 thread_id 统一主 agent / sub_agent 的 session 标识
+        # MCP interceptor 优先读 thread_id（与 LangGraph runtime 惯例一致）
+        config = {"configurable": {"thread_id": session_id}}
         result = asyncio.run(graph.ainvoke({"messages": []}, config=config))
     except Exception as e:
         error_text = f"{type(e).__name__}: {e}"

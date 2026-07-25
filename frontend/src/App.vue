@@ -548,8 +548,9 @@ export default {
                     this._streamingMessages.delete(requestSessionId)
                     this._streamingMeta.delete(requestSessionId)
                     this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                    // 会话已切换：只 PUT 标题 + 同步侧栏，不调 get_conversation（避免并发 N 个 done 时反复重拉）
                     if (requestSessionId) {
-                      await this.refreshSession(requestSessionId)
+                      await this.updateTitleOnly(requestSessionId, lastUserMessage)
                     }
                   } else if (data.type === 'error') {
                     this._sessionHadError.add(requestSessionId)
@@ -581,8 +582,9 @@ export default {
                     this._streamingMessages.delete(requestSessionId)
                     this._streamingMeta.delete(requestSessionId)
                     this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                    // 会话已切换：只 PUT 标题 + 同步侧栏，不调 get_conversation（避免并发 N 个 done 时反复重拉）
                     if (requestSessionId) {
-                      await this.refreshSession(requestSessionId)
+                      await this.updateTitleOnly(requestSessionId, lastUserMessage)
                     }
                   }
                 }
@@ -727,8 +729,9 @@ export default {
                   this._streamingMessages.delete(requestSessionId)
                   this._streamingMeta.delete(requestSessionId)
                   this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                  // 会话已切换：只 PUT 标题 + 同步侧栏，不调 get_conversation
                   if (requestSessionId) {
-                    await this.refreshSession(requestSessionId)
+                    await this.updateTitleOnly(requestSessionId, lastUserMessage)
                   }
                 } else if (data.type === 'error') {
                   this._sessionHadError.add(requestSessionId)
@@ -1331,8 +1334,9 @@ export default {
                     this._streamingMessages.delete(requestSessionId)
                     this._streamingMeta.delete(requestSessionId)
                     this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                    // 会话已切换：只 PUT 标题 + 同步侧栏，不调 get_conversation
                     if (requestSessionId) {
-                      await this.refreshSession(requestSessionId)
+                      await this.updateTitleOnly(requestSessionId, restreamMessage)
                     }
                   } else if (data.type === 'error') {
                     this._sessionHadError.add(requestSessionId)
@@ -1364,8 +1368,9 @@ export default {
                     this._streamingMessages.delete(requestSessionId)
                     this._streamingMeta.delete(requestSessionId)
                     this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                    // 会话已切换：只 PUT 标题 + 同步侧栏，不调 get_conversation
                     if (requestSessionId) {
-                      await this.refreshSession(requestSessionId)
+                      await this.updateTitleOnly(requestSessionId, restreamMessage)
                     }
                   }
                 }
@@ -2013,8 +2018,9 @@ export default {
                     this._streamingMessages.delete(requestSessionId)
                     this._streamingMeta.delete(requestSessionId)
                     this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                    // 会话已切换：只 PUT 标题 + 同步侧栏，不调 get_conversation（避免并发 N 个 done 时反复重拉）
                     if (requestSessionId) {
-                      await this.refreshSession(requestSessionId)
+                      await this.updateTitleOnly(requestSessionId, message)
                     }
                   } else if (data.type === 'error') {
                     console.error('AI响应错误（原会话）:', data.error)
@@ -2051,9 +2057,9 @@ export default {
                     this._streamingMessages.delete(requestSessionId)
                     this._streamingMeta.delete(requestSessionId)
                     this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-                    // 仍调 refreshSession 更新侧栏（后端已完成中断落库）
+                    // 会话已切换：只 PUT 标题 + 同步侧栏，不调 get_conversation
                     if (requestSessionId) {
-                      await this.refreshSession(requestSessionId)
+                      await this.updateTitleOnly(requestSessionId, message)
                     }
                   }
                 }
@@ -2154,10 +2160,10 @@ export default {
                   // 会话未切换，正常更新
                   await this.updateTitleAndRefresh(this.currentSessionId, message)
                 } else if (sessionChanged && requestSessionId) {
-                  // 会话已切换，刷新原会话但不更新当前显示的消息
-                  console.log('刷新请求归属的会话:', requestSessionId)
-                  // 静默刷新原会话（不更新 this.messages）
-                  await this.refreshSession(requestSessionId)
+                  // 会话已切换：只 PUT 标题到 server + 同步侧栏，不调 get_conversation
+                  // （避免并发 N 个 done 时反复重拉，且确保 title 已落库）
+                  console.log('更新请求归属的会话标题:', requestSessionId)
+                  await this.updateTitleOnly(requestSessionId, message)
                 }
               } else if (data.type === 'error') {
                 console.error('AI响应错误:', data.error)
@@ -2254,8 +2260,9 @@ export default {
                   this._streamingMessages.delete(requestSessionId)
                   this._streamingMeta.delete(requestSessionId)
                   this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                  // 会话已切换：只 PUT 标题 + 同步侧栏，不调 get_conversation
                   if (requestSessionId) {
-                    await this.refreshSession(requestSessionId)
+                    await this.updateTitleOnly(requestSessionId, message)
                   }
                 } else if (data.type === 'error') {
                   console.error('AI响应错误（buffer，原会话）:', data.error)

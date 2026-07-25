@@ -21,7 +21,10 @@ from ChatMe.ChatService.config.models import MessageRole, Message, Conversation,
 from ChatMe.ChatService.FilesLoaders.core import FilesLoaders, OutputFormat
 from ChatMe.ChatWorkflow import ChatWorkflow, MemoryUpdateFormat
 from ChatMe.ChatWorkflow.config.models import AIMessageType
-from ChatMe.LoggingManager.logging_config import get_logger
+from ChatMe.LoggingManager.logging_config import (
+    get_logger,
+    flush_pending_thinking_for_session,
+)
 
 
 class ChatService:
@@ -677,6 +680,8 @@ class ChatService:
                 default=str
             ) + "\n\n"
 
+            # thinking_chain 收尾：flush per-session 临时文件到主文件（best-effort，失败不抛）
+            flush_pending_thinking_for_session(session_id)
             return
 
         if await self._judge_is_interrupted(session_id):
@@ -715,6 +720,8 @@ class ChatService:
                 default=str
             ) + "\n\n"
 
+            # thinking_chain 收尾：中断路径也 flush（保留中断前的思考过程）
+            flush_pending_thinking_for_session(session_id)
             return
 
         checkpoint_id = await self._save_round_checkpoint(
@@ -735,6 +742,9 @@ class ChatService:
             "token_usage": token_usage,
         }) + "\n\n"
 
+        # thinking_chain 收尾：正常完成路径 flush
+        flush_pending_thinking_for_session(session_id)
+
     async def get_conversation(self, session_id: str) ->Conversation:
         """
         获取会话内容
@@ -752,7 +762,7 @@ class ChatService:
 
         try:
             state = await self.graph.aget_state(config=config)
-            print(state)
+            # print(state)
             interrupted_info = await self._get_interrupted_info(session_id)
         except HTTPException as e:
             self.logger.error(f"获取会话状态异常(session_id:{session_id})：{str(e)}")
@@ -1229,7 +1239,9 @@ class ChatService:
                 Command(update={
                     "messages": reinvoke_message,
                     "context": merged_context,
-                }),
+                },
+                    resume=True
+                ),
                 config=config,
             ):
                 if chunk['event'] == 'on_chat_model_stream':
@@ -1284,6 +1296,8 @@ class ChatService:
                 default=str
             ) + "\n\n"
 
+            # thinking_chain 收尾：flush per-session 临时文件到主文件（best-effort，失败不抛）
+            flush_pending_thinking_for_session(session_id)
             return
 
         if await self._judge_is_interrupted(session_id):
@@ -1321,6 +1335,8 @@ class ChatService:
                 default=str
             ) + "\n\n"
 
+            # thinking_chain 收尾：中断路径也 flush（保留中断前的思考过程）
+            flush_pending_thinking_for_session(session_id)
             return
 
         checkpoint_id = await self._save_round_checkpoint(
@@ -1340,3 +1356,6 @@ class ChatService:
             "elapsed_ms": self._elapsed_ms_since(start_mono),
             "token_usage": token_usage,
         }) + "\n\n"
+
+        # thinking_chain 收尾：续接完成路径 flush
+        flush_pending_thinking_for_session(session_id)

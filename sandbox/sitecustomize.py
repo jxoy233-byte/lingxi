@@ -33,7 +33,7 @@ def _is_hidden(name):
 
     - 以 . 开头 → .DS_Store（macOS Finder 垃圾）等
     - 以 __ 开头 → __pycache__/（Python 缓存目录）、__init__.py（包标记）等
-    - 以单 _ 开头 → 不过滤（_meta.json 是 DataAnalysis skill 的生成计数器，模型要能看到）
+    - 以单 _ 开头 → 不过滤（_meta.json 是 DataAnalysis skill.md 的生成计数器，模型要能看到）
     """
     return isinstance(name, str) and (name.startswith(".") or name.startswith("__"))
 

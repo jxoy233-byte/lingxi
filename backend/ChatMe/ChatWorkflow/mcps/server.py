@@ -4,9 +4,13 @@
 FASTMCP 实现
 
 tips:
-每个tool函数构建都需要带上session_id参数
+- session_id 不再作为 MCP 工具的 schema 参数（避免 LLM 误传 / 漏传）
+- session_id 由 client 端通过 HTTP header X-Session-Id 注入
+- SessionHeaderMiddleware 从 header 读取并写入 ContextVar
+- 工具函数从 current_session_id.get() 取 sid（仅用于日志 / 沙盒归属）
 """
 
+from contextvars import ContextVar
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from shutil import which
@@ -14,6 +18,7 @@ from typing import Annotated, Literal, Optional
 
 import redis
 from fastmcp import FastMCP
+from fastmcp.server.middleware import Middleware, MiddlewareContext
 import subprocess
 import tempfile
 import os
@@ -35,6 +40,47 @@ _redis_client = redis.from_url(redis_url)
 
 # 沙盒容器池
 _sandbox_pool = None
+
+# =========================================================================
+# Session 归属：HTTP header → ContextVar → 工具函数
+# =========================================================================
+
+# 模块级 ContextVar：每个 MCP 请求在自己的 asyncio task 里独享
+# 工具函数通过 current_session_id.get() 拿到 sid（用于日志 / 沙盒 cwd / 等）
+current_session_id: ContextVar[str] = ContextVar("current_session_id", default="")
+
+
+class SessionHeaderMiddleware(Middleware):
+    """每个 MCP 工具调用请求进来时，从 header 取 X-Session-Id 塞进 ContextVar。
+
+    链路：
+    - client 端 interceptor 从 LangGraph runtime 拿 thread_id → X-Session-Id header
+    - FastMCP transport 把 header 透传到 server
+    - 本中间件读 header → current_session_id.set(sid)
+    - 工具函数 current_session_id.get() 取 sid
+    - finally reset token 清理，避免泄漏
+
+    sid 缺失场景（如裸调 / 调试）：session_id 为空串，工具仍可工作但日志无 session 归属。
+    """
+
+    async def on_call_tool(self, context: MiddlewareContext, call_next):
+        sid = ""
+        try:
+            from fastmcp.server.dependencies import get_http_request
+            request = get_http_request()
+            sid = request.headers.get("x-session-id", "")
+        except Exception:
+            sid = ""
+
+        token = current_session_id.set(sid)
+        try:
+            return await call_next(context)
+        finally:
+            current_session_id.reset(token)
+
+
+# 注册中间件（FastMCP 3.x add_middleware）
+server.add_middleware(SessionHeaderMiddleware())
 
 def _cleanup_existing_containers():
     """清理残留的沙盒容器（不删除 redis）"""
@@ -72,7 +118,7 @@ def _init_sandbox_pool():
     global _sandbox_pool
     try:
         from ChatMe.ChatWorkflow.mcps.CodeSandboxPool import SandboxPool
-        _sandbox_pool = SandboxPool(size=2)
+        _sandbox_pool = SandboxPool()  # 默认 size=1（min_size=1, max_size=3, per_container_concurrency=8）
         logger.info("沙盒容器池初始化成功")
     except Exception as e:
         logger.warning(f"沙盒容器池初始化失败: {e}，将使用本地虚拟环境")
@@ -356,11 +402,11 @@ def code(
     code: Annotated[str, "Code to execute"],
     language: Annotated[Literal["python", "nodejs", "javascript", "js"], "Code language, default python"] = "python",
     use_sandbox: Annotated[bool, "Whether to execute in sandbox (default True)"] = True,
-    session_id: Annotated[str, "Session id"] = ""
 ) -> Optional[str]:
     """
     Execute code (sandbox by default; sandbox exposes /skills (read-only) and /cached (read-write)).
     """
+    session_id = current_session_id.get()
     # 沙盒执行
     if use_sandbox and _sandbox_pool is not None:
         logger.debug(f"会话 {session_id} 使用[沙盒容器]执行代码")
@@ -387,9 +433,9 @@ def code(
 def cmd(
         command: Annotated[str, "System command to execute"],
         use_sandbox: Annotated[bool, "Whether to execute in sandbox (default True)"] = True,
-        session_id: Annotated[str,"Session id"] = ""
 ) -> str:
     """Execute a shell command within the whitelist (sandbox by default; only skills/ and cached/ are exposed)."""
+    session_id = current_session_id.get()
     is_dangerous, reason = is_dangerous_command(command=command)
     if is_dangerous:
         logger.warning(f"会话{session_id}中危险命令,已安全拦截")
@@ -479,14 +525,14 @@ def cmd(
 @server.tool
 def interrupt(
     message: Annotated[str,"Reason for interrupting / message to ask the user"],
-    session_id: Annotated[str,"Session id"] = ""
 ):
       """
       Interrupt the current conversation to ask the user for more information.
       """
+      session_id = current_session_id.get()
       if not session_id:
-          logger.warning(f"interrupt 工具调用缺少 session_id 参数")
-          return "Error: missing session_id parameter"
+          logger.warning(f"interrupt 工具调用缺少 session_id（HTTP header 未带 X-Session-Id）")
+          return "Error: missing session_id (X-Session-Id header not set)"
 
       try:
           _redis_client.hset(f"interrupt:{session_id}", mapping={
@@ -501,9 +547,7 @@ def interrupt(
 
 
 @server.tool
-def ctime(
-        session_id: Annotated[str,"Session id"] = ""
-) -> str:
+def ctime() -> str:
     """
     Get the current date and time (uses the local timezone).
 
@@ -518,7 +562,7 @@ def ctime(
         "weekday_en": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][now.weekday()]
     }
 
-    logger.debug(f"会话{session_id}中获取当前时间成功")
+    logger.debug(f"会话{current_session_id.get() or 'unknown'}中获取当前时间成功")
     return json.dumps(result, ensure_ascii=False)
 
 def _stop_redis():

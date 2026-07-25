@@ -62,6 +62,11 @@ def _setup_file_logger(
 
     logger.addHandler(queue_handler)
 
+    # 关闭向父 logger 的冒泡：避免子 logger（如 ChatMe.thinking_chain）写到主日志。
+    # Python logging 默认 propagate=True，子 logger 的日志会沿层级链冒泡到祖先 logger 的 handler。
+    # 不关掉的话，所有 thinking_chain 日志会同时进 YYYY-MM-DD.log，与按文件维度隔离的设计相违背。
+    logger.propagate = False
+
     return logger
 
 
@@ -146,3 +151,66 @@ def get_thinking_chain_logger(name: str = "ChatMe.thinking_chain", path=None) ->
     if path:
         return set_thinking_chain_logger(name=name, log_dir=path)
     return set_thinking_chain_logger(name=name)
+
+
+# 思维链 per-session 临时缓冲：流式期间每会话单独写一个临时文件，
+# 完成 / 中断 / 错误收尾时 merge 进当天主文件并删除。详见 plan：fluffy-greeting-babbage.md
+_THINKING_PENDING_DIR_NAME = "thinking_chain-pending"
+
+
+def get_pending_thinking_dir() -> Path:
+    """返回 thinking_chain-pending 临时目录路径，自动创建。"""
+    pending_dir = Path.cwd() / ".chatme" / "logs" / _THINKING_PENDING_DIR_NAME
+    pending_dir.mkdir(parents=True, exist_ok=True)
+    return pending_dir
+
+
+def flush_pending_thinking_for_session(sid: str) -> bool:
+    """
+    完成收尾时调用：merge sid 对应临时文件到当天主 thinking_chain 文件 + 删除临时。
+
+    best-effort：失败仅记录 warn，不 raise（避免收尾异常影响 SSE done 路径）。
+
+    Returns:
+        True if a pending file was found and merged, False otherwise.
+    """
+    if not sid:
+        return False
+
+    pending_file = get_pending_thinking_dir() / f"{sid}.log"
+
+    if not pending_file.exists():
+        return False
+
+    try:
+        content = pending_file.read_text(encoding="utf-8")
+        if content:
+            # 按临时文件 mtime 决定 merge 目标日期文件（主文件按天切分）
+            date_str = datetime.fromtimestamp(pending_file.stat().st_mtime).strftime("%Y-%m-%d")
+            main_file = Path.cwd() / ".chatme" / "logs" / f"thinking_chain-{date_str}.log"
+            with main_file.open("a", encoding="utf-8") as f:
+                f.write(content)
+
+        pending_file.unlink()
+        return True
+    except Exception as e:
+        logging.getLogger("ChatMe").warning(f"[thinking_chain] flush {sid} 失败: {e}")
+        return False
+
+
+def sweep_pending_thinking_files() -> int:
+    """
+    启动时调用：sweep 所有残留临时文件 merge 进主文件 + 清理。
+
+    兜底场景：进程被 kill -9 崩溃时流式未收尾 → 残留临时文件 → 重启时 merge 补回历史。
+
+    Returns:
+        已 merge 的文件数。
+    """
+    pending_dir = get_pending_thinking_dir()
+    count = 0
+    # 按 mtime 排序，merge 顺序与写入时间顺序一致
+    for pending_file in sorted(pending_dir.glob("*.log"), key=lambda p: p.stat().st_mtime):
+        if flush_pending_thinking_for_session(pending_file.stem):
+            count += 1
+    return count

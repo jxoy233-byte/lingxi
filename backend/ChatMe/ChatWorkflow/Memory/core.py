@@ -467,8 +467,6 @@ class MemoryManager:
     def _get_empty_memory_template(self, thread_id: str = "") -> str:
         """获取空记忆模板"""
         return f"""# 对话记忆
-
-> 会话ID: {thread_id}
 > 最后更新：暂无
 
 ## 核心摘要

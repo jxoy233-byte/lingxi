@@ -84,18 +84,36 @@ ChatMe/
 
 State 定义在 [`backend/ChatMe/ChatWorkflow/config/models.py`](backend/ChatMe/ChatWorkflow/config/models.py)（`ChatStateCore2` / `FileParseState`），用 LangGraph TypedDict + `add_messages` reducer。
 
-### ReAct 流程压缩
+### ReAct 流程压缩（4 阶段循环 + 后台异步）
 
-`context_assembly_node` 在每轮组装时按"完整工具 loop 节拍"触发一次整体覆盖式压缩，避免长 ReAct 轨迹把 prompt 撑爆：
+`context_assembly_node` 在每轮组装时按"4 阶段循环"推进 ReAct 整体覆盖式压缩，**LLM 调用走 asyncio.create_task 后台静默推进，不阻塞主工作流**：
 
-- **触发条件**：完整工具 loop 数 ≥ `REACT_COMPACT_LOOPS`（默认 5）+ `REACT_KEEP_LOOPS`（默认 2）= 7 轮，**且** draft 字符数 ≥ `REACT_COMPACT_MIN_CHARS`（默认 2000），**且** `tool_call_times != last_compact_at_tool_calls`（防 state 恢复或失败后重复触发）。
-- **范围**：压缩前 N-keep 轮的 ReAct 轨迹，**最近 keep（默认 2）轮完整 loop 原文保留**（不被摘要覆盖），imp_ipt 之前的 memory / 其他 SystemMessage 整体保留。
-- **产物**：新摘要以 `【ReAct 摘要】` 标题的 SystemMessage 形式插入 imp_ipt 之后；写入 state 的 `context_summary_text` / `last_compact_at_tool_calls`。
+**4 阶段循环**（一次完整的压缩周期；阶段 4 完成后回到阶段 1 重新检测，循环往复）：
+
+1. **阶段 1 检测**（每次 context_assembly_node 进入时）：`_should_detect_compact` 返回 True 时进入阶段 2。
+   - `(tool_call_times - last_compact_at) >= REACT_COMPACT_DETECTION_MIN_ROUNDS`（默认 **4** 轮）：cool-down 机制——距上次压缩至少 4 轮才再次触发；首次压缩时 last_compact_at=0，等价于 tool_call_times >= 4。**4 轮前不打扰**，agent 在轻负载时不被压缩逻辑介入。
+   - `has_pending_compaction is False`：已有 pending 时不重复触发，一次只跑一个压缩周期。
+   - **最近 4 轮的 chars** ≥ `REACT_COMPACT_MIN_CHARS`（默认 10000）：字符总量才是压缩价值的真实信号；10000 字符以下压缩没意义——等于原文塞回去还多花 LLM 调用。
+   - `complete_loop_count >= 1`：软底，无可摘要内容不调 LLM。
+
+2. **阶段 2 后台压缩**：`asyncio.create_task(self._background_compact_react(thread_id, compact_context))` 启动后台 LLM 任务。**主流程立即返回，不 await**（这是关键的"不阻塞工作流"——LLM 5-10s 完全在后台跑）。任务完成后 result 写入 `_background_compaction_results[thread_id]`，同时设 `pending_compaction_replace_at = tool_call_times + REACT_COMPACT_REPLACE_AFTER`（默认 +2）。
+
+3. **阶段 3 等待**：agent 继续用**旧 context** 推进，x=2 轮 tool_calls 内不打扰。每次 context_assembly_node 进入先消费 `pending_compaction_summary`，再检查是否到 `replace_at`。
+
+4. **阶段 4 替换**：当 `tool_call_times >= pending_compaction_replace_at` 时，调 `_build_compaction_draft(context, summary, keep_loops)` 重组 context：
+   - 新结构：`[memory前段 + imp_ipt] + [ReAct 摘要 SystemMessage] + [最近 REACT_KEEP_LOOPS=2 轮原文]`
+   - 清掉 pending 字段；更新 `last_compact_at_tool_calls = tool_call_times`（cool-down 锚点）；写入 `last_compacted_loops_count`
+   - 回到阶段 1，重新检测（循环）
+
+- **后台任务管理**（`ChatWorkflow.__init__`）：`_background_compaction_tasks: Dict[str, asyncio.Task]` + `_background_compaction_results: Dict[str, Optional[str]]` per-thread。任务 finally 块 pop 自己避免引用泄漏；result 可能为 None（LLM 失败 / 长度兜底），下次 context_assembly_node 看到 None 不写 pending，保持原 context。
+- **范围**：压缩范围是**除最近 REACT_KEEP_LOOPS=2 轮之外的所有 loop**；imp_ipt 之前的所有内容（含 memory_sys 等）整体保留。
+- **产物**：新摘要以 `【ReAct 摘要】` 标题的 SystemMessage 形式插入 imp_ipt 之后；state 字段 `context_summary_text` / `last_compact_at_tool_calls` / `pending_compaction_summary` / `pending_compaction_replace_at` / `last_compacted_loops_count`。
 - **输入净化**：`_try_compact_react` 调用前先走 `_build_clean_compact_input(context)`：**清空所有 AIMessage 的 `content`**（去掉 AI 思考过程 / 描述性文本，节省字符 + 削弱 M3 模仿"AI 想干什么"），但保留 `tool_calls` 字段（API 强校验需要）。SystemMessage / ToolMessage / HumanMessage 原文保留。
-- **失败兜底**：长度 [80, 4000] 区间外 / `_filter_thinking_content` 清不干净的 tool_call 残留 / LLM 异常一律 `return None`，context 保持不变。
+- **失败兜底**：长度 [250, 4096] 字符区间外 / `_filter_thinking_content` 清不干净的 tool_call 残留 / LLM 异常一律 `return None`，context 保持不变。下限 250 是有效压缩的最低门槛——低于这个值说明 LLM 没有充分压缩（要么是 prompt 没理解，要么是输出被 tool_call 残留污染），这种"无效压缩"应该跳过本轮而不是写进 context_assembly（保留原 context 等下次重试）。后台任务 result 为 None 时同样不写 pending。
+- **末尾 HumanMessage 触发**：`_try_compact_react` 在 `clean_input` 末尾追加一条 `HumanMessage("Compact thinking chain")`，用最简形式触发 LLM 回忆起 system prompt 的完整指令（≤4096 tokens 中文 markdown / 禁止 tool_call 块等）。为什么要追加：LLM 看到 input 里的 `tool_calls` 字段会模仿输出半截 tool_call 块，把字符预算花在 tool_call JSON 上，**导致压缩出来的摘要字符数远低于目标**。最简 hint 而非长指令，是为了让 LLM 自己回到 prompt 找约束（prompt 已有详细规则）。
 - **filter 兜底主力**：M3 weights 看到 input 里的 `tool_calls` 字段几乎 100% 会模仿输出 `<tool_call>` 块（裸闭 / 复数 `<tool_calls>` / 方括号包装 `[<invoke name="cmd">][<command>...</command>]` / 孤 wrapper 标记都可能出现），所以 `_try_compact_react` 必须调 `_filter_thinking_content` 清理。filter regex 7 个变体已覆盖；新增 M3 输出格式时必须同步更新两处 filter（`ChatWorkflow/core.py` + `Memory/core.py`）。
-- **辅助方法**（`core.py`）：`_content_chars` / `_should_compact_react` / `_find_imp_ipt_idx` / `_find_complete_tool_loops` / `_build_compaction_draft` / `_build_clean_compact_input` / `_try_compact_react`。**全程靠 content 特征扫描定位，不写死下标**。
-- **专用 LLM**：`get_react_compact_config()`，`REACT_COMPACT_TEMPERATURE=0.3` / `REACT_COMPACT_MAX_TOKENS=5120`（env 可覆盖），目标 ≤ 4000 字中文 markdown。4000 字上限是因为多文件路径 / 技术栈细节压不下去时 2000 字太苛刻；5120 max_tokens 给中文 1 字≈1.5 token 最坏情况下留够余量。
+- **辅助方法**（`core.py`）：`_content_chars` / `_should_detect_compact` / `_find_imp_ipt_idx` / `_find_complete_tool_loops` / `_build_compaction_draft` / `_build_clean_compact_input` / `_try_compact_react` / `_background_compact_react`。**全程靠 content 特征扫描定位，不写死下标**。
+- **专用 LLM**：`get_react_compact_config()`，`REACT_COMPACT_TEMPERATURE=0.3` / `REACT_COMPACT_MAX_TOKENS=4096`（env 可覆盖），目标 ≤ 4096 tokens 中文 markdown。max_tokens=4096 与 prompt 目标对齐作为 LLM 输出的硬上限；中文 1 字≈1.5 token，最坏 4096 tokens ≈ 2700 字，ASCII 密集 ≈ 4096 字。
 - **Prompt 工程**：`react_compact` prompt 走"高质量、低重复"原则——Role + Input + Output 四段结构 + Few-shot 对照（1 个好例子 + 1 个反例 + 一行点错在哪）+ 精简禁止清单。few-shot 锚定是核心约束，单纯禁止清单不告诉 LLM "好"长什么样。
 
 ### 工作流启动入口
@@ -269,7 +287,13 @@ claude --cron-delete a09d41ec
 4. **流式响应滚动 UX**：入场 `easeInOut`；流式 ramp（慢→快）+ 100ms 打断防抖；用户 wheel / touch 立即让出控制权。
 5. **MCP 工具参数前缀被剥**：Python `use_sandbox` 在 MCP schema 里是 `sandbox`；过滤 / 判断要查实际 args key，兼容新旧两种。
 6. **`should_end_node` 设计偏好**：LLM 决策节点的单条喂入 / 完整写回、低频字面量子串匹配、独立 `max_tokens` env、prompt / 解析兜底一致。
-7. **ReAct 流程压缩节拍**：`REACT_COMPACT_LOOPS=5` + `REACT_KEEP_LOOPS=2`（≥ 7 个完整工具 loop 才触发），压缩前 N-keep 轮，**最近 keep 轮原文保留不被摘要覆盖**；imp_ipt 是唯一 draft 切分锚点（`additional_kwargs.imp_ipt=True`），全程不写死下标。
+7. **ReAct 流程压缩 4 阶段循环**：**后台异步 + 不阻塞工作流**——
+   - 阶段 1 检测：`(tool_call_times - last_compact_at) >= REACT_COMPACT_DETECTION_MIN_ROUNDS=4`（cool-down，距上次压至少 4 轮）+ 最近 4 轮 chars ≥ `REACT_COMPACT_MIN_CHARS=10000`（主驱动）+ 无 pending + ≥ 1 完整 loop（软底）
+   - 阶段 2 后台压缩：`asyncio.create_task` 启动 `_background_compact_react`（**不 await，主流程立即返回**），LLM 5-10s 不阻塞 agent 推进；完成后 result 写 `_background_compaction_results[thread_id]` + 设 `pending_compaction_replace_at = tool_call_times + REACT_COMPACT_REPLACE_AFTER=2`
+   - 阶段 3 等待：x=2 轮 tool_calls 内 agent 用旧 context 推进，不打扰
+   - 阶段 4 替换：`tool_call_times >= pending_compaction_replace_at` 时调 `_build_compaction_draft` 重组 = `[memory+imp_ipt] + [ReAct 摘要] + [最近 REACT_KEEP_LOOPS=2 轮原文]`；清 pending + 更新 last_compact_at → 回到阶段 1 循环
+   - imp_ipt 是唯一 draft 切分锚点（`additional_kwargs.imp_ipt=True`），全程不写死下标
+   - 后台任务 finally 块 pop 自己；result 为 None（LLM 失败 / 长度兜底）时不写 pending
 8. **Memory 并发安全**：`MemoryManager` 内部维护 `_thread_locks[thread_id]`，`update_memory` / `delete_memory` / `backtrack_memory` / `delete_latest_backup_memory` 全部走 `async with self._get_thread_lock(thread_id)`；文件写入走 `_atomic_write_text`（写 `*.tmp` + `fsync` + `os.replace`）。
 9. **ChatService 记忆任务串行**：每会话在 `_memory_update_tasks[session_id]` 里只保留一个 asyncio.Task，新任务通过 `asyncio.shield` 串接上一轮；新请求发起 / 删除会话 / 回溯 前会先 `_wait_previous_memory_update` 等待；SSE 暴露 `memory_wait_start` / `memory_wait_done` 事件，`interrupt` / `done` 事件携带 `memory_status` 字段。
 10. **异步日志**：写文件走 `QueueHandler` + `QueueListener` 模式，业务线程不入 IO；`atexit` 统一 `listener.stop()` 清理。

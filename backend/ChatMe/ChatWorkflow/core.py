@@ -2,6 +2,7 @@ import asyncio
 import json
 import re
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, AsyncGenerator, List
 
@@ -22,8 +23,79 @@ from .config.models import ChatStateCore2, AIMessageType, FileParseState
 from .Memory.core import MemoryManager
 from .mcps.tools import sub_agent
 from .helpers import get_message_content_string, filter_thinking_content, format_thinking_chain
-from ..LoggingManager.logging_config import get_logger, get_thinking_chain_logger
+from ..LoggingManager.logging_config import (
+    get_logger,
+    get_thinking_chain_logger,
+    get_pending_thinking_dir,
+    sweep_pending_thinking_files,
+)
 from .decorators import node_guard
+
+
+async def _inject_session_header(request, handler):
+    """
+    MCP tool call interceptor：从 LangGraph runtime.config 拿 thread_id（或 fallback session_id），
+    注入到 X-Session-Id header。MCP server 端 middleware 读这个 header → ContextVar → 工具日志归属。
+
+    单 client 全局共享 + interceptor per-call 注入，无需 per-session client 缓存。
+    """
+    sid = ""
+    runtime = getattr(request, "runtime", None)
+    if runtime is not None:
+        cfg = getattr(runtime, "config", None)
+        if cfg:
+            configurable = cfg.get("configurable", {}) if isinstance(cfg, dict) else {}
+            sid = configurable.get("thread_id") or configurable.get("session_id") or ""
+
+    if sid:
+        # override() 返回新实例，不修改原 request（interceptor 协议要求不可变）
+        request = request.override(headers={"X-Session-Id": sid})
+    return await handler(request)
+
+
+# =========================================================================
+# 共享 MCP client + tools（模块级单例）
+# =========================================================================
+# 为什么模块级：sub_agent 在 tools.py 里独立构建 LangGraph，
+# 需要复用 main agent 同一个 MCP client（同一连接 + 同一 interceptor）。
+# 单条 entry，不是 per-session，永远 1 条 → 不需要 LRU / TTL 清理。
+_mcp_client = None
+_mcp_tools_cache: Optional[List[Any]] = None
+
+
+async def _init_mcp_singleton():
+    """惰性初始化共享 MCP client + tools。ChatWorkflow.ainit 和 tools._get_sub_agent_tools 都调。"""
+    global _mcp_client, _mcp_tools_cache
+    if _mcp_client is not None:
+        return
+
+    try:
+        from ChatMe.ChatMeConfig import get_mcp_config
+        mcp_config = get_mcp_config()
+        core_mcp_config = {
+            'url': mcp_config.get('url', 'http://127.0.0.1:28211/streamable'),
+            'transport': mcp_config.get('transport', 'streamable_http')
+        }
+    except Exception:
+        core_mcp_config = {
+            'url': 'http://127.0.0.1:28211/streamable',
+            'transport': 'streamable_http'
+        }
+
+    _mcp_client = MultiServerMCPClient(
+        {'core_mcp': core_mcp_config},
+        tool_interceptors=[_inject_session_header],
+    )
+    tools = await _mcp_client.get_tools()
+    tools.append(sub_agent)
+    _mcp_tools_cache = tools
+
+
+def get_mcp_tools() -> List[Any]:
+    """返回已初始化的 MCP tools 列表（懒加载）。"""
+    if _mcp_tools_cache is None:
+        raise RuntimeError("MCP tools not initialized yet; call ainit() first or _init_mcp_singleton()")
+    return _mcp_tools_cache
 
 
 class ChatWorkflow:
@@ -36,6 +108,11 @@ class ChatWorkflow:
         self.logger = get_logger(__class__.__name__)
         # AI 思维链专用 logger（写独立 thinking_chain-YYYY-MM-DD.log）
         self.thinking_logger = get_thinking_chain_logger()
+
+        # 启动 sweep：merge 上次进程崩溃残留的 thinking_chain 临时文件 → 主文件后清理
+        swept = sweep_pending_thinking_files()
+        if swept:
+            self.logger.info(f"[启动 sweep] 已 merge {swept} 个残留 thinking_chain 临时文件")
 
         self._final_system_template = None
         self.llm_core = None
@@ -55,6 +132,31 @@ class ChatWorkflow:
         self.memory_manager = None
         self.files_cached_dir = None
 
+        # ReAct 压缩后台任务管理（per-thread）
+        self._background_compaction_tasks: Dict[str, asyncio.Task] = {}
+        self._background_compaction_results: Dict[str, Optional[str]] = {}
+
+    def _write_thinking(self, sid: str, message: str) -> None:
+        """
+        思维链日志写入 per-session 临时文件（流式期间缓冲）。
+
+        为什么走临时文件而不是直接写主 thinking_chain 日志：
+        多会话并发时主文件会物理交错，同一会话的 9 个节点写入会跟其他会话混在一起。
+        临时文件按 sid 隔离 → 流式收尾（done / interrupt / error）由 ChatService 调
+        flush_pending_thinking_for_session(sid) merge 进当天主文件并清理临时。
+        """
+        if not sid:
+            return
+        try:
+            pending_file = get_pending_thinking_dir() / f"{sid}.log"
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            line = f"{timestamp} - ChatMe.thinking_chain - INFO - {message}\n"
+            with pending_file.open("a", encoding="utf-8") as f:
+                f.write(line)
+        except Exception as e:
+            # 兜底：临时文件写入失败不能影响流式主流程
+            self.logger.warning(f"[thinking_chain] 写入 {sid} 失败: {e}")
+
     def _generate_tool_param_warning(self, tool_name: str, missing_params: List[str]) -> str:
         """生成工具参数缺失的警告信息"""
         param_list = ", ".join(missing_params)
@@ -62,28 +164,10 @@ class ChatWorkflow:
         return f"[工具参数错误] {tool_name} 缺少必需参数: {param_list}，请检查格式后重试"
 
     async def init_mcps(self):
-        try:
-            from ChatMe.ChatMeConfig import get_mcp_config
-            mcp_config = get_mcp_config()
-            core_mcp_config = {
-                'url': mcp_config.get('url', 'http://127.0.0.1:28211/streamable'),
-                'transport': mcp_config.get('transport', 'streamable_http')
-            }
-        except Exception:
-            core_mcp_config = {
-                'url': 'http://127.0.0.1:28211/streamable',
-                'transport': 'streamable_http'
-            }
-
-        self.mcp_client = MultiServerMCPClient(
-            {
-                'core_mcp': core_mcp_config
-            }
-        )
-
-        tools = await self.mcp_client.get_tools()
-        tools.append(sub_agent)
-        self.tools = tools
+        # 走模块级共享 singleton（sub_agent 也复用同一 client / tools）
+        await _init_mcp_singleton()
+        self.mcp_client = _mcp_client
+        self.tools = _mcp_tools_cache or []
 
     async def init_memory_manager(self):
         llm_memory_config, llm_memory_prompt = get_llm_memory_config()
@@ -424,25 +508,34 @@ class ChatWorkflow:
         return total
 
     @staticmethod
-    def _should_compact_react(
-        complete_loop_count: int,
-        compact_loops: int,
-        keep_loops: int,
+    def _should_detect_compact(
         tool_call_times: int,
         last_compact_at: int,
-        draft_chars: int,
+        has_pending_compaction: bool,
+        recent_chars: int,
         min_chars: int,
+        detection_min_rounds: int,
+        complete_loop_count: int,
     ) -> bool:
         """
-        触发判断：
-        - 至少存在 compact_loops + keep_loops 个完整工具 loop
-        - 不是同一次压缩内重复触发（tool_call_times != last_compact_at 防 state 恢复）
-        - draft_chars 不少于 min_chars（防短 context 空压）
+        阶段 1 检测判断（4 阶段循环的入口）：
+        - (tool_call_times - last_compact_at) >= detection_min_rounds（默认 4）：
+          cool-down 机制——距上次压缩至少 4 轮才再次触发，避免短时间反复压缩；
+          首次压缩时 last_compact_at=0，等价于 tool_call_times >= 4
+        - has_pending_compaction is False：已有 pending 时不重复触发（一次只跑一个
+          压缩周期，避免堆积）
+        - recent_chars >= min_chars（默认 10000）：最近 4 轮的字符数是主驱动信号；
+          字符太少压缩等于把没多少字符再压一次，丢信息且浪费 LLM 调用
+        - complete_loop_count >= 1（软底）：必须有完整 loop 才值得摘要，否则压缩
+          无可摘要内容，徒增 LLM 调用
+
+        返回 True 表示进入阶段 2（触发后台 LLM 压缩）。
         """
         return (
-            complete_loop_count >= compact_loops + keep_loops
-            and tool_call_times != last_compact_at
-            and draft_chars >= min_chars
+            (tool_call_times - last_compact_at) >= detection_min_rounds
+            and not has_pending_compaction
+            and recent_chars >= min_chars
+            and complete_loop_count >= 1
         )
 
     @staticmethod
@@ -559,13 +652,21 @@ class ChatWorkflow:
     async def _try_compact_react(self, context: List[BaseMessage]) -> Optional[str]:
         """
         把 context 重组为"尽量压缩 AIMessage"格式后喂给 react_compact_llm，
-        让它从用户意图 + 工具调用历史 + 元 SystemMessage 中产出 ≤4000 字中文摘要。
+        让它从用户意图 + 工具调用历史 + 元 SystemMessage 中产出 ≤4096 tokens 中文摘要。
 
         整体覆盖式：返回新摘要后由 context_assembly_node 替换 context[imp_ipt+1] 位置
         （旧 summary + 中间 ReAct 历史一次性覆盖）。
         失败 / 输出异常一律返回 None，调用方保持 context 不变。
 
         清空 AIMessage.content 是为了压缩字符 + 削弱 模仿"AI 想干什么"的描述性文本。
+
+        为什么末尾追加 HumanMessage("Compact thinking chain")：
+        LLM（M3 / agent_llm 共用 weights）看到 input 里的 tool_calls 字段会模仿输出 tool_call 块，
+        即使 prompt 已禁 + filter 兜底，仍可能输出"半截"内容把字符预算花在 tool_call JSON 上，
+        导致压缩出来的摘要字符数远低于目标（"无效压缩"）。
+        末尾追加 HumanMessage 用最简形式触发 LLM 回忆起 system prompt 的完整指令
+        （≤4096 tokens 中文 markdown 摘要 / 禁止 tool_call 块等），让 prompt 真正生效，
+        强化压缩执行效果。
         """
         if self.react_compact_llm is None:
             return None
@@ -577,17 +678,24 @@ class ChatWorkflow:
         if clean_input is None:
             return None
 
+        # 末尾追加 HumanMessage 触发 LLM 回忆起 system prompt 的指令（强化执行效果）
+        clean_input_with_hint = list(clean_input) + [
+            HumanMessage(content="Compact thinking chain")
+        ]
+
         timeout_sec = 45
         try:
             resp = await asyncio.wait_for(
-                self.react_compact_llm.ainvoke({"messages": clean_input}),
+                self.react_compact_llm.ainvoke({"messages": clean_input_with_hint}),
                 timeout=timeout_sec,
             )
             resp = filter_thinking_content(resp)
             text = get_message_content_string(resp).strip()
 
-            # 长度兜底（[80, 4000] 范围）
-            if not text or len(text) < 80 or len(text) > 4000:
+            # 长度兜底：[250, 4096] 字符范围。下限 250 是有效压缩的最低门槛——
+            # 低于这个值说明 LLM 没有充分压缩（要么是 prompt 没理解，要么是输出被 tool_call 残留污染），
+            # 这种"无效压缩"应该跳过本轮而不是写进 context_assembly（保留原 context 等下次重试）
+            if not text or len(text) < 250 or len(text) > 4096:
                 self.logger.warning(f"ReAct 压缩结果长度异常: {len(text)}")
                 return None
             # 残留标签兜底：filter 漏网时（边缘格式），防止半截 tool_call 块被当摘要
@@ -598,6 +706,39 @@ class ChatWorkflow:
         except Exception as e:
             self.logger.warning(f"ReAct 压缩失败: {e}")
             return None
+
+    async def _background_compact_react(
+        self,
+        thread_id: str,
+        compact_context: List[BaseMessage],
+    ) -> None:
+        """
+        后台静默推进 ReAct 压缩 LLM 调用，**不阻塞主工作流**。
+
+        阶段 2 由 context_assembly_node 用 asyncio.create_task 触发本方法；本方法
+        同步 await LLM（5-10s），完成后把结果写入
+        `self._background_compaction_results[thread_id]`（可能是 None）。
+
+        下次 context_assembly_node 进入阶段 1+2 时会读取这个 result 并写 state。
+
+        finally 清掉 _background_compaction_tasks[thread_id] 引用，防止泄漏。
+        异常被 catch 后写 None，下次检测看到 None 会跳过（不写 pending，保持原 context）。
+        """
+        try:
+            s_new = await self._try_compact_react(compact_context)
+            self._background_compaction_results[thread_id] = s_new
+            if s_new:
+                # 阶段 2 完成后立即把 summary 内容写到 thinking_chain，
+                # 便于排查 LLM 实际产出的摘要质量（不依赖阶段 4 是否触发）
+                self._write_thinking(
+                    thread_id,
+                    f"[react_compact_summary]: chars={len(s_new)}\n{s_new}"
+                )
+        except Exception as e:
+            self.logger.warning(f"[后台 ReAct 压缩] {thread_id} 失败: {e}")
+            self._background_compaction_results[thread_id] = None
+        finally:
+            self._background_compaction_tasks.pop(thread_id, None)
 
     async def _create_graph_process_files(self):
         """
@@ -719,9 +860,21 @@ class ChatWorkflow:
         """
         TOOL_CALL_TIMES = 50
         RETRY_TIMES = 3
-        REACT_COMPACT_LOOPS = 5
+
+        # ReAct 流程压缩节拍：4 阶段循环
+        #   阶段 1 检测：tool_call_times >= DETECTION_MIN_ROUNDS（默认 4）且
+        #     最近 4 轮的 chars >= MIN_CHARS（默认 10000）
+        #   阶段 2 压缩：同步 await LLM，结果存 state（不立即替换）
+        #   阶段 3 等待：等 REPLACE_AFTER（默认 2）轮 tool_calls，
+        #     agent 继续用旧 context 推进（不打断工作流）
+        #   阶段 4 替换：tool_call_times 达到 replace_at 时重组 context =
+        #     memory + imp_ipt + summary + 最近 KEEP_LOOPS（默认 2）轮原文；
+        #     清 pending 字段后回到阶段 1 重新检测（循环）
         REACT_KEEP_LOOPS = 2
-        REACT_COMPACT_MIN_CHARS = 2000
+        REACT_COMPACT_DETECTION_MIN_ROUNDS = 4
+        REACT_COMPACT_REPLACE_AFTER = 2
+        # 10000 → ≤4096 tokens
+        REACT_COMPACT_MIN_CHARS = 10000
 
 
         workflow = StateGraph(ChatStateCore2)
@@ -754,6 +907,8 @@ class ChatWorkflow:
             # input_msg.extend(history_messages)
             input_msg.append(files_input)
             input_msg.extend(user_input)
+            self.logger.debug(f"会话 {thread_id} 文件输入:{files_input}")
+            self.logger.debug(f"会话 {thread_id} 用户输入:{user_input}")
 
             imp_ipt = await self.llm_imp_ipt.ainvoke({"messages": input_msg})
 
@@ -772,10 +927,9 @@ class ChatWorkflow:
                 response_metadata=imp_ipt_response_metadata,
             )
 
-            self.thinking_logger.info(f"--------------------------------------------")
+            self._write_thinking(thread_id, f"--------------------------------------------")
             # 思维链日志：imp_ipt 单独输出（input_parse_node 优化后的本轮用户意图）
-            self.thinking_logger.info(f"[imp_ipt]:\n{format_thinking_chain([imp_ipt])}")
-            self.logger.debug(f"[imp_ipt_llm]:{imp_ipt}")
+            self._write_thinking(thread_id, f"[imp_ipt]:\n{format_thinking_chain([imp_ipt])}")
 
             return {
                 "imp_ipt": imp_ipt,
@@ -798,70 +952,127 @@ class ChatWorkflow:
             tool_results = state["memory_tool_results"] if state["memory_tool_results"] else []
 
             if not state["context"]:
+                # 新会话：组装 memory + imp_ipt，逐条打印（不一次性 dump 整段 context）
                 memory_message :SystemMessage = self.memory_manager.get_relevant_memory(thread_id)
                 context.append(memory_message)
+                self._write_thinking(thread_id, f"[react_context] +memory:\n{format_thinking_chain([memory_message])}")
 
                 imp_ipt_msg: HumanMessage = state["imp_ipt"]
                 context.append(imp_ipt_msg)
+                self._write_thinking(thread_id, f"[react_context] +imp_ipt:\n{format_thinking_chain([imp_ipt_msg])}")
             else:
+                # 续接：state["context"] 已存在（之前已逐条打印过），只打印新增的 cycle_msg
                 context = state["context"]
 
                 cycle_msg = await self._get_current_round_conversation_cycling(state["messages"])
-                context.extend(cycle_msg,)
-
                 for msg in cycle_msg:
+                    context.append(msg)
+                    # 逐条打印：随着 context 更新，每条 AIMessage / ToolMessage / HumanMessage 单独写入一行
+                    self._write_thinking(thread_id, f"[react_context] +msg:\n{format_thinking_chain([msg])}")
+
                     if isinstance(msg, ToolMessage):
                         content_string = get_message_content_string(msg)
                         tool_results.append(content_string)
 
-            # 思维链日志：react_context —— 当前组装好的 context（agent 即将拿到的输入）
-            self.thinking_logger.info(f"[react_context]:\n{format_thinking_chain(context)}")
+            # 不再一次性 dump 整个 context（已逐条打印）
 
-            # ✨ ReAct 流程压缩：达到 compact + keep 个完整工具 loop 后，压缩前 compact 轮，保留最近 keep 轮原文
+            # ✨ ReAct 流程压缩（4 阶段循环）：
+            #   阶段 4：替换 pending 的压缩摘要 → 清 pending → 更新 last_compact_at
+            #   阶段 1+2：检测 → 同步 LLM 压缩 → 存 pending（不立即替换）
+            #   阶段 3：什么都不做（agent 继续用旧 context 推进，x 轮不打扰）
+            # 阶段 4 完成后回到阶段 1 重启循环
             tool_call_times = state.get("tool_call_times", 0)
             last_compact_at = state.get("last_compact_at_tool_calls", 0)
-            draft_chars = self._content_chars(context)
-            complete_loops = self._find_complete_tool_loops(context)
+            pending_summary = state.get("pending_compaction_summary")
+            pending_replace_at = state.get("pending_compaction_replace_at")
 
-            if self._should_compact_react(
-                len(complete_loops),
-                REACT_COMPACT_LOOPS,
-                REACT_KEEP_LOOPS,
-                tool_call_times,
-                last_compact_at,
-                draft_chars,
-                REACT_COMPACT_MIN_CHARS,
-            ):
-                keep_loops = complete_loops[-REACT_KEEP_LOOPS:]
-                keep_indices = {idx for loop in keep_loops for idx in loop}
-                compact_context = [
-                    msg for i, msg in enumerate(context)
-                    if i not in keep_indices
-                ]
-
-                s_new = await self._try_compact_react(compact_context)
-                if s_new is not None:
-                    # 压缩输入排除最近保留的完整工具 loop，draft 再从原始 context 挂回最近 loop 原文，避免摘要与原文重复。
-                    draft = self._build_compaction_draft(context, s_new, keep_loops)
-                    if draft is not None:
-                        # 思维链日志：每次压缩调用后的 context（覆盖式压缩后的新 context）
-                        self.thinking_logger.info(
-                            f"[react_context_after_compact]: "
-                            f"compact_loops={len(complete_loops) - len(keep_loops)}, "
-                            f"keep_loops={len(keep_loops)}\n"
-                            f"{format_thinking_chain(draft)}"
-                        )
-                        return {
-                            "context": draft,
-                            "memory_tool_results": tool_results,
-                            "context_summary_text": s_new,
-                            "last_compact_at_tool_calls": tool_call_times,
-                        }
-                # 压缩失败 / 定位失败：不改 context，原样返回
-            return {
+            updates: Dict[str, Any] = {
                 "context": context,
-                "memory_tool_results": tool_results
+                "memory_tool_results": tool_results,
             }
+
+            # ============ 阶段 4：替换 pending 压缩 ============
+            if (
+                pending_summary is not None
+                and pending_replace_at is not None
+                and tool_call_times >= pending_replace_at
+            ):
+                complete_loops = self._find_complete_tool_loops(context)
+                keep_loops = (
+                    complete_loops[-REACT_KEEP_LOOPS:]
+                    if len(complete_loops) >= REACT_KEEP_LOOPS
+                    else complete_loops
+                )
+                new_context = self._build_compaction_draft(context, pending_summary, keep_loops)
+                if new_context is not None:
+                    self._write_thinking(
+                        thread_id,
+                        f"[react_context_after_compact]: "
+                        f"compact_loops={len(complete_loops) - len(keep_loops)}, "
+                        f"keep_loops={len(keep_loops)}, "
+                        f"replace_after={REACT_COMPACT_REPLACE_AFTER}\n"
+                        f"{format_thinking_chain(new_context)}"
+                    )
+                    updates["context"] = new_context
+                    updates["last_compact_at_tool_calls"] = tool_call_times
+                    updates["last_compacted_loops_count"] = len(complete_loops) - len(keep_loops)
+                    updates["pending_compaction_summary"] = None
+                    updates["pending_compaction_replace_at"] = None
+                    updates["context_summary_text"] = pending_summary
+                    # 更新 last_compact_at 后重新计算上下文，供阶段 1 使用
+                    last_compact_at = tool_call_times
+                    context = new_context
+
+            # ============ 阶段 1+2：检测 + 触发后台 LLM 压缩 ============
+            # 仅在无 pending 时触发（一次只跑一个压缩周期，避免堆积）
+            # 后台 LLM 调用的 5-10s 不阻塞主工作流推进（asyncio.create_task）
+            if updates.get("pending_compaction_summary") is None and pending_summary is None:
+                # 优先消费已完成的后台任务结果（之前 iteration 触发的后台压缩）
+                if thread_id in self._background_compaction_results:
+                    s_new = self._background_compaction_results.pop(thread_id)
+                    if s_new is not None:
+                        updates["pending_compaction_summary"] = s_new
+                        updates["pending_compaction_replace_at"] = (
+                            tool_call_times + REACT_COMPACT_REPLACE_AFTER
+                        )
+                elif thread_id not in self._background_compaction_tasks:
+                    # 无 running 任务 → 阶段 1 检测
+                    complete_loops = self._find_complete_tool_loops(context)
+                    if len(complete_loops) >= REACT_COMPACT_DETECTION_MIN_ROUNDS:
+                        recent_n = complete_loops[-REACT_COMPACT_DETECTION_MIN_ROUNDS:]
+                        recent_n_indices = {idx for loop in recent_n for idx in loop}
+                        recent_n_msgs = [m for i, m in enumerate(context) if i in recent_n_indices]
+                        recent_chars = self._content_chars(recent_n_msgs)
+                    else:
+                        recent_chars = 0
+
+                    if self._should_detect_compact(
+                        tool_call_times=tool_call_times,
+                        last_compact_at=last_compact_at,
+                        has_pending_compaction=False,
+                        recent_chars=recent_chars,
+                        min_chars=REACT_COMPACT_MIN_CHARS,
+                        detection_min_rounds=REACT_COMPACT_DETECTION_MIN_ROUNDS,
+                        complete_loop_count=len(complete_loops),
+                    ):
+                        keep_loops = (
+                            complete_loops[-REACT_KEEP_LOOPS:]
+                            if len(complete_loops) >= REACT_KEEP_LOOPS
+                            else complete_loops
+                        )
+                        keep_indices = {idx for loop in keep_loops for idx in loop}
+                        compact_context = [
+                            msg for i, msg in enumerate(context)
+                            if i not in keep_indices
+                        ]
+
+                        # 阶段 2：触发后台 LLM 压缩（asyncio.create_task 不阻塞当前 iteration）
+                        task = asyncio.create_task(
+                            self._background_compact_react(thread_id, compact_context)
+                        )
+                        self._background_compaction_tasks[thread_id] = task
+
+            return updates
 
         @node_guard("agent_node", logger=self.logger)
         async def agent_node(state: ChatStateCore2, config: RunnableConfig):
@@ -886,9 +1097,6 @@ class ChatWorkflow:
                 interrupt_msg = SystemMessage(content=f"已超过{TOOL_CALL_TIMES}次调用工具次数，请停止工具调用提前结束对话")
                 input_msg.append(interrupt_msg)
 
-            # 思维链日志：agent_node 喂给 LLM 的 input
-            self.thinking_logger.info(f"[agent_node_in]:\n{format_thinking_chain(input_msg)}")
-
             response = await self.agent_llm.ainvoke({"messages": input_msg})
 
             response = filter_thinking_content(response)
@@ -897,7 +1105,7 @@ class ChatWorkflow:
             format_response = self._parse_content_to_tool_calls(response)
 
             # 思维链日志：agent_node 输出（带 tool_calls 的 AIMessage）
-            self.thinking_logger.info(f"[agent_node_out]:\n{format_thinking_chain([format_response])}")
+            self._write_thinking(thread_id, f"[agent_node_out]:\n{format_thinking_chain([format_response])}")
 
             counts = 0
 
@@ -922,14 +1130,15 @@ class ChatWorkflow:
                     tool_call["args"]["command"] = warning_results
                     self.logger.warning(f"cmd 缺少 command 参数: {args}")
 
-                # ctime 保底：ctime 不接受任何参数（除 framework 注入的 session_id）。
+                # ctime 保底：ctime 不接受任何参数。
                 if tool_name == "ctime":
-                    extra = {k: v for k, v in args.items() if k != "session_id"}
+                    extra = dict(args)
                     if extra:
-                        self.logger.warning(f"ctime 不应有除 session_id 外的参数，已清空: extra={extra}")
+                        self.logger.warning(f"ctime 不应有任何参数，已清空: extra={extra}")
                         tool_call["args"] = {}
 
-                tool_call["args"]["session_id"] = thread_id or ""
+                # 不再注入 session_id 到 args（sid 走 X-Session-Id header 透传；
+                # 注入 args 会污染 tool_call 历史，让 LLM 误以为 cmd/code 接受 session_id）
                 tool_calls.append(tool_call)
 
                 counts += 1
@@ -956,13 +1165,11 @@ class ChatWorkflow:
             content = str(response.content)
 
             # 思维链日志：should_end 单独输出（决策点）
-            self.thinking_logger.info(f"[should_end_in]:\n{format_thinking_chain([last_message])}")
+            self._write_thinking(thread_id, f"[should_end_in]:\n{format_thinking_chain([last_message])}")
 
             decision = "end"
             if "retry" in content or "RETRY" in content:
                 decision = "retry"
-
-            self.logger.debug(f"[should_end] response: {response.content}")
 
             retry_times = state.get("should_end_retry_times", 0) or 0
 
@@ -986,14 +1193,16 @@ class ChatWorkflow:
         @node_guard("final_node", logger=self.logger)
         async def final_node(state: ChatStateCore2, config: RunnableConfig):
             thread_id = config["configurable"]["thread_id"]
+
+            self.logger.debug(f"会话 {thread_id} 思维链打回重试次数 {state["should_end_retry_times"]}")
+
             await self.check_and_trigger_interrupt(thread_id)
 
             # imp_ipt 在 system 层独占最高注意力位；{imp_ipt} 占位由 _final_system_template.format() 注入。
             context = list(state["context"])
 
             # 思维链日志：final_node 输入 context（imp_ipt 被 pop 之前的完整 context）
-            self.thinking_logger.info(f"[final_node_in_context]:\n{format_thinking_chain(context)}")
-            self.logger.debug(f"[final_context]: {context}")
+            self._write_thinking(thread_id, f"[final_node_in_context]:\n{format_thinking_chain(context)}")
 
             imp_ipt_idx = self._find_imp_ipt_idx(context)
             if imp_ipt_idx is not None:
@@ -1015,9 +1224,10 @@ class ChatWorkflow:
             response = filter_thinking_content( response)
 
             # 思维链日志：final_node 输出（最终回复）
-            self.thinking_logger.info(f"[final_node_out]:\n{format_thinking_chain([response])}")
-            self.thinking_logger.info(f"--------------------------------------------")
-            self.logger.debug(f"[final_node]: {response}")
+            self._write_thinking(thread_id, f"[final_node_out]:\n{format_thinking_chain([response])}")
+            self._write_thinking(thread_id, f"--------------------------------------------")
+
+            self.logger.debug(f"会话 {thread_id} 最终回复: {response}")
 
             # AIMessage字段支持解包复制
             response_dict = dict(response)

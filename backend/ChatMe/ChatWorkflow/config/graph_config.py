@@ -51,14 +51,14 @@ Note: Double braces `{{}}` are escape sequences — AI should output single brac
 PROMPT_MAIN_FLOW = """
 ## Decision Flow
 ```
-Task arrives → Is there a skill for this?
+Task arrives → Is there a skill.md for this?
 │
 ├─ Time references (today/tomorrow/now/this week/current date)?
 │   YES → ctime FIRST, then proceed
 │
-├─ Matching skill? (see examples below)
+├─ Matching skill.md? (see examples below)
 │   YES → cat skills/skills.md first; call per the packaged usage guide
-│         ⚠️ Use the skill's exposed functions/methods first — do NOT cat the skills source. Read them only when you don't know how to use skills 
+│         ⚠️ Use the skill.md's exposed functions/methods first — do NOT cat the skills source. Read them only when you don't know how to use skills 
 │
 ├─ Uncertain? → ls skills/ to explore (it's free and safe)
 │
@@ -81,10 +81,10 @@ Task arrives → Is there a skill for this?
 ```
 
 **Skill examples** (→ go to skills.md first):
-- "latest AI news" / "recent prices" / "search for X" /"search relevant info"→ Tavily/Exa skill
-- "analyze this CSV" / "generate a chart" / "visualize this" → DataAnalysis skill
-- "ER diagram" / "mermaid" / "flowchart" → DataAnalysis skill
-- "parse this image" / "what's in this screenshot" → ImageParser skill
+- "latest AI news" / "recent prices" / "search for X" /"search relevant info"→ Tavily/Exa skill.md
+- "analyze this CSV" / "generate a chart" / "visualize this" → DataAnalysis skill.md
+- "ER diagram" / "mermaid" / "flowchart" → DataAnalysis skill.md
+- "parse this image" / "what's in this screenshot" → ImageParser skill.md
 
 **When to use sub_agent**:
 - Small task (single goal, single deliverable, ≤ ~5 tool calls) → call sub_agent directly; gives you an isolated ReAct context that does not pollute the main loop
@@ -94,7 +94,7 @@ Task arrives → Is there a skill for this?
 - A single cmd / code call is enough → call cmd / code directly (don't use sub_agent for the sake of it)
 - Do NOT pass the entire large task to one sub_agent — mid-task failure wastes everything done so far
 
-**Skill-first rule**: When in doubt whether a skill exists → explore skills/ first.
+**Skill-first rule**: When in doubt whether a skill.md exists → explore skills/ first.
 
 ## Project Operation Dir
 skills/ — Skill library (read only)
@@ -102,14 +102,14 @@ cached/'sid'/ — Your Own Sid Cached files operation dir (read and write)
 
 ## Good Chain Examples
 
-Good (skill found):
-cmd("ls skills/") → Found Sum skill
+Good (skill.md found):
+cmd("ls skills/") → Found Sum skill.md
 cmd("cat skills/skills.md") → Read Sum MD File
 cmd("cat skills/Exa.py")
 code("python","from Exa import ...")
 
 Good (environment exploration):
-cmd("ls skills/") → No relevant skill
+cmd("ls skills/") → No relevant skill.md
 cmd("ls cached/") → Check if needed
 ... → execute commands to find files dir
 ---
@@ -182,7 +182,7 @@ Task assigned → Follow the execution steps provided
 ## Execution Principles
 - Follow the prompt_addon execution chain strictly when provided
 - Focus solely on the assigned sub-task — do NOT expand scope to the original task
-- Do not attempt to route to other skills — you are the skill executor
+- Do not attempt to route to other skills — you are the skill.md executor
 - Do not try to spawn further sub-agents — sub_agent tool is NOT available to you
 - Do not stall or repeat failed attempts — stop and report
 
@@ -282,8 +282,6 @@ Important for cmd && code:
 Use when: Task involves any time reference including "today", "tomorrow", "now", "this week", "current date/time", "what time is it", etc.
 Must call this FIRST before any other time-related operations.
 Parameters: none
-
-NOTE: The `sub_agent` tool is intentionally NOT exposed to you. You are the executor; do not spawn further sub-agents.
 """
 
 # ----- MAIN_SPECIFIC: 主 agent 专属模块 -----
@@ -928,9 +926,7 @@ def get_react_compact_config():
     base_url = active.get("base_url")
 
     temperature = float(os.getenv("REACT_COMPACT_TEMPERATURE", "0.3"))
-    # 默认 5120：摘要上限放宽到 4000 字后，中文 1 字≈1.5 token 的最坏情况下需要 ~6000 token 输出；
-    # 给到 5120 让"接近上限但还有余量"的产出能写完，不会中途被截断。
-    max_tokens = int(os.getenv("REACT_COMPACT_MAX_TOKENS", "5120"))
+    max_tokens = int(os.getenv("REACT_COMPACT_MAX_TOKENS", "4096"))
     top_p = float(os.getenv("OPENAI_TOP_P", "1.0"))
     timeout = int(os.getenv("OPENAI_TIMEOUT", "60"))
     max_retries = 3
@@ -948,37 +944,28 @@ def get_react_compact_config():
         "extra_body": distinguish_extra_body(model_name),
     }
 
-    prompt = """# Role
+    prompt = """# Task
 
-你是 ChatMe 的 ReAct 流程压缩助手，被 context_assembly_node 调用一次：把对话 context 压缩成 ≤4000 字中文 markdown 摘要，目的是让后续 agent_node 能从摘要里继续推进，无需复读前 N 轮 ToolMessage 原文。
+把对话 context 压缩成 4000 字以内中文摘要，让后续 agent 能从继续基于之前的思维和核心内容点来推进，无需复读前 N 轮 ToolMessage 原文。
 
 # Input
 
-调用方**清空所有 AIMessage 的 content**（去掉 AI 思考过程），但保留 `tool_calls` 字段（API 强校验需要）。所以你看到的是：
-- `HumanMessage`（用户意图）+ `SystemMessage`（旧摘要 / warning / 中断原因）+ `ToolMessage`（多段工具结果）+ `AIMessage`（content 为空，仅 tool_calls 占位）
+- `HumanMessage`（用户意图）+ `SystemMessage`（旧摘要 / warning / 中断原因）+ (`AIMessage`（**content 已清空**，仅 `tool_calls` 占位）+ `ToolMessage`)* n 轮工具调用思维链
 
-你**看不到** AI 想干什么的描述文本，只能从 `ToolMessage` 的内容反推"做了什么、拿到了什么"。
-
-旧【ReAct 摘要】会被本次整体覆盖，只取结论，不再重复展开。
+所以你**看不到** AI 描述文本，只能从 `ToolMessage` 反推"做了什么、拿到了什么"。旧【ReAct 摘要】会被整体覆盖，只取结论。
 
 # Output
 
-一段连续的中文 markdown 摘要，**正文 ≤ 4000 字**。建议四段（每段可空、可一句）：
+一段连续的中文 markdown 摘要，建议四段（每段可空、可一句）：
 
 ```
-[目标] 一句话点出本轮意图 + 与历史的关联
+[目标] 一句话本轮意图 + 与历史的关联
 [执行摘要] 关键工具调用及产物（成功 + 失败重试各列）
 [事实状态] 当前最新事实（文件 / 数据 / 路径）
 [风险/悬疑] 未解决的不一致 / 下次需注意
 ```
+# Few-shot
 
-四段全空时输出单句："本轮暂无 ReAct 进展"。
-
-# Few-shot（直接对照）
-
-**输入**：imp_ipt="分析 sales.csv 月度趋势"；旧摘要="已加载 5 万行 DataFrame"；ToolMessages=[ls cached/, read_csv(50000,8), groupby 月 sum, plot saved]。
-
-**好**：
 ```
 [目标] 分析 sales.csv 月度销售趋势并生成图表。
 [执行摘要] cmd ls 找到 sales.csv；code read_csv 加载 5 万行 × 8 列；code groupby 月聚合 + matplotlib plot，保存到 cached/sales/output/monthly_trend.png。
@@ -987,6 +974,7 @@ def get_react_compact_config():
 ```
 
 **坏**（不要这样写）：
+
 ```
 下面是摘要：
 ### 摘要
@@ -995,14 +983,12 @@ def get_react_compact_config():
 
 错在：开场白 + 多余 markdown 包装 + 复读意图 + 模仿 tool_call 块 + 没有按四段结构组织。
 
-# 禁止
+# Constraints
 
-- 开场白 / 收尾词 / 多余 markdown 包装（"### 摘要"、"以上为..."、"好的我来..."）
-- JSON 块、stray `{{` `}}`、tool_call XML/方括号块（<tool_call> / [</tool_call>] / [<invoke name="cmd">][<command>...</command>]）
-- 复读 imp_ipt 原文、复制旧摘要细节、dump 工具结果全文
-- <thinking>/<thought>/<reasoning> 残留、客套语（"好的"、"让我试试"）
+- JSON 块、stray `{{` `}}`、tool_call XML/方括号块（`<tool_call>` / `[</tool_call>]` / `[<invoke name="cmd">]`）
+- `<thinking>` / `<reasoning>` 残留
+- 客套语（"好的"、"让我试试"）
 - 臆测未发生的事件；不确定的标"未明确"，不自行补全
-- 末尾不收句号（必须以句号收尾）
 """
     return llm_config, prompt
 

@@ -181,16 +181,26 @@ export default {
       this.check()
     },
     onFileClick(node) {
-      // 点文件后直接跳转到文件预览，树自动关闭
-      this.showTree = false
+      // 点文件后不折叠树：保留树状态让用户继续浏览其他文件，
+      // 树面板的关闭交给 click-outside 处理
       this.$emit('file-click', node)
+    },
+    onOutsideClick(e) {
+      // 树没开就不处理
+      if (!this.showTree) return
+      // 点中树内部 → 不折叠（用户可能在点节点 toggle / 滚动等）
+      if (this.$el && this.$el.contains(e.target)) return
+      // 其他位置（包括文件预览栏 / overlay）→ 折叠
+      this.showTree = false
     }
   },
   mounted() {
     document.addEventListener('keydown', this.onKeyDown)
+    document.addEventListener('click', this.onOutsideClick)
   },
   beforeDestroy() {
     document.removeEventListener('keydown', this.onKeyDown)
+    document.removeEventListener('click', this.onOutsideClick)
   }
 }
 </script>

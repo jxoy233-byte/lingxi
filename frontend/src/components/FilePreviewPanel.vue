@@ -17,7 +17,7 @@
           <!-- 文件列表切换：仅在有 session 时显示 -->
           <button
             v-if="sessionId"
-            @click="toggleFileTree"
+            @click.stop="toggleFileTree"
             class="tool-btn"
             :class="{ active: showFileTree }"
             title="文件列表"
@@ -75,7 +75,7 @@
       <div class="content-container">
         <!-- 内部文件树浮层下拉（toggleable） -->
         <transition name="tree-fade">
-          <div v-if="showFileTree" class="inner-file-tree" @click.stop>
+          <div v-if="showFileTree" ref="innerFileTree" class="inner-file-tree" @click.stop>
             <div class="inner-tree-header">
               <span class="inner-tree-title">📁 文件列表</span>
               <button class="tool-btn tool-btn-mini" @click="showFileTree = false" title="关闭">×</button>
@@ -452,6 +452,12 @@ export default {
       // 内部文件树点击：保持侧栏打开，方便连续切换预览文件
       this.$emit('file-select', node)
     },
+    onInnerTreeOutsideClick(e) {
+      if (!this.showFileTree) return
+      const tree = this.$refs.innerFileTree
+      if (tree && tree.contains(e.target)) return
+      this.showFileTree = false
+    },
     reload() {
       // 强制重新渲染
       this.$forceUpdate()
@@ -551,6 +557,12 @@ export default {
       document.body.style.userSelect = ''
       document.body.style.pointerEvents = ''
     }
+  },
+  mounted() {
+    document.addEventListener('click', this.onInnerTreeOutsideClick)
+  },
+  beforeUnmount() {
+    document.removeEventListener('click', this.onInnerTreeOutsideClick)
   }
 }
 </script>

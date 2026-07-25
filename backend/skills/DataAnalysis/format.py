@@ -1,8 +1,4 @@
-"""
-数据分析技能规范模块
-- 提供在数据分析目录下操作所需要进行的*操作规范*
-- 提供数据分析所需要相关的*配置规范*
-"""
+"""数据分析落盘与校验入口（详见 SKILL.md）。"""
 import fcntl
 import json
 import os
@@ -26,11 +22,7 @@ def _is_sandbox() -> bool:
 
 
 def _format_check_error(status_code, exception, path, url, port) -> str:
-    """统一 AI-friendly 错误信息格式：`[类型] 描述 | 建议`
-
-    - HTTP 访问层错误（400/403/404）→ 额外附带 path 字符串语法诊断
-    - 网络层 / 服务端错误 → 维持通用建议
-    """
+    """统一错误信息格式：`[类型] 描述 | 建议`（AI-friendly）。"""
     if exception is not None:
         exc_name = type(exception).__name__
         exc_msg = str(exception)
@@ -71,21 +63,10 @@ def _format_check_error(status_code, exception, path, url, port) -> str:
 
 
 class ChatDataAnalysisFormat:
-    """
-    数据分析技能（DataAnalysis）会话级落盘与校验入口。
-
-    *默认执行路径工作目录就可以了 '/'*
-
-    详见 `backend/skills/DataAnalysis/SKILL.md`。
-    """
+    """详见 `backend/skills/DataAnalysis/SKILL.md`。"""
 
     def __init__(self, session_id: str):
-        """
-        初始化数据分析配置
-
-        Args:
-            session_id: 会话 ID，用于组织输出目录
-        """
+        """session_id: 会话 ID，用于组织输出目录。"""
         self.session_id = session_id
         self._base_dir: Optional[Path] = None
         self._generation: Optional[str] = None
@@ -96,7 +77,7 @@ class ChatDataAnalysisFormat:
 
     @property
     def base_dir(self) -> Path:
-        """获取输出根目录（Path）"""
+        """输出根目录（Path）：`cached/{session_id}/data_analysis`。"""
         if self._base_dir is None:
             self._base_dir = Path.cwd() / "cached" / self.session_id / "data_analysis"
         return self._base_dir
@@ -107,13 +88,7 @@ class ChatDataAnalysisFormat:
 
     @contextmanager
     def _meta_file_locked(self):
-        """
-        以独占 fcntl 锁打开 _meta.json。
-
-        ⚠️ read + write 必须在同一个 `with` 块内完成（不要拆出 _read_meta /
-        _write_meta 两个方法），否则多进程并发自增时两个调用之间会引入
-        TOCTOU 窗口，导致丢更新。
-        """
+        """独占 fcntl 锁打开 _meta.json —— read+write 必须在同一 `with` 内完成，避免 TOCTOU。"""
         self.base_dir.mkdir(parents=True, exist_ok=True)
         f = open(self.meta_path, "a+")
         try:
@@ -124,10 +99,7 @@ class ChatDataAnalysisFormat:
             f.close()
 
     def _init_gen_if_needed(self) -> int:
-        """
-        若 _meta.json 不存在或 gen<=0 则写入 1；返回当前 gen（>=1）。
-        同一把 fcntl 锁内完成 read+write，原子。
-        """
+        """meta 不存在或 gen<=0 时初始化为 1，返回当前 gen。"""
         with self._meta_file_locked() as f:
             f.seek(0)
             content = f.read()
@@ -140,15 +112,7 @@ class ChatDataAnalysisFormat:
             return current
 
     def new_generation(self) -> str:
-        """
-        开启新的一次分析调用（自增并写回 _meta.json），返回 generation_id。
-
-        Returns:
-            "gen_001", "gen_002" ...
-
-        同一把 fcntl 锁内完成 read+modify+write，原子；
-        多进程并发不会丢更新。
-        """
+        """自增 generation 计数器，返回 "gen_001" / "gen_002" / ...。"""
         with self._meta_file_locked() as f:
             f.seek(0)
             content = f.read()
@@ -161,7 +125,7 @@ class ChatDataAnalysisFormat:
 
     @property
     def generation(self) -> str:
-        """获取当前 generation，懒加载（首次访问时获取或创建 gen_001，不自增计数器）"""
+        """懒加载当前 generation（首次访问时获取或创建 gen_001，不自增）。"""
         if self._generation is None:
             self._generation = f"gen_{self._init_gen_if_needed():03d}"
         return self._generation
@@ -172,13 +136,7 @@ class ChatDataAnalysisFormat:
 
     @property
     def output_dir(self) -> str:
-        """当前 generation 目录路径（str）。
-
-        首次访问时若 meta 不存在则初始化为 gen_001，不自增。
-        替代旧的 `get_config()["output_dir"]` 用法：
-
-            OUTPUT_DIR = da.output_dir
-        """
+        """当前 generation 目录路径（str），首次访问时初始化为 gen_001，不自增。"""
         return str(self.get_current_generation_dir())
 
     def get_current_generation_dir(self) -> Path:
@@ -190,51 +148,21 @@ class ChatDataAnalysisFormat:
 
     @staticmethod
     def get_file_dir(path: str | Path) -> Path:
-        """
-        获取文件的路径
-
-        规则:
-        - 路径存在：直接返回
-        - 路径不存在：在 backend/cached/ 下递归搜索文件名
-
-        Args:
-            path: 文件路径（绝对路径或文件名）
-
-        Returns:
-            文件路径
-        """
+        """路径存在则直接返回；否则在 `cached/` 下按文件名递归查找。"""
         if isinstance(path, str):
             path = Path(path)
 
         if path.exists():
             return path
 
-        # 路径不存在，递归搜索文件名
-        backend_dir = Path.cwd() / "cached"
-
-        for match in backend_dir.rglob(path.name):
+        for match in (Path.cwd() / "cached").rglob(path.name):
             return match
 
         raise FileNotFoundError(f"找不到文件: {path.name}")
 
     @staticmethod
     def get_data_analysis_header() -> str:
-        """
-        获取数据分析代码的通用 header 字符串
-
-        在 AI 生成的代码字符串顶部拼接此 header，可抑制常见的
-        FutureWarning / DeprecationWarning / UserWarning / RuntimeWarning
-        等无关紧要的警告。这些警告在 pandas / numpy / matplotlib / sklearn
-        等库执行时频繁出现，会污染 stdout、挤占 token 预算。
-
-        Returns:
-            可直接 prepend 到 code() 入参代码串的 Python header（不含末尾换行）
-
-        示例：
-            from skills.DataAnalysis import ChatDataAnalysisFormat
-            header = ChatDataAnalysisFormat.get_data_analysis_header()
-            code = header + "\\n" + user_code
-        """
+        """warning 抑制 header（prepend 到 code() 入参顶部，省 token）。"""
         return (
             "import warnings\n"
             "warnings.filterwarnings('ignore', category=FutureWarning)\n"
@@ -244,27 +172,55 @@ class ChatDataAnalysisFormat:
         )
 
     @staticmethod
+    def get_fonts_setup_header() -> str:
+        """字体注册 header —— matplotlib / seaborn / pandas 绘图前自动加载字体。
+
+        seaborn / pandas 都走 matplotlib backend，`rcParams['font.sans-serif']` 对三者都生效。
+
+        同时尝试两个路径（沙盒 + 本地 venv 降级，二选一即可）：
+          - `/cached/.fonts`（沙盒挂载点）
+          - `<cwd>/cached/.fonts`（本地 venv，cwd=backend/）
+        把字体文件放到 host `backend/cached/.fonts/`，两种模式都自动注册。
+
+        推荐单文件 `NotoSansSC-Regular.otf`（~5-7MB，SIL OFL，无授权商用）：
+          https://github.com/notofonts/noto-cjk/tree/main/Sans/SubsetOTF/SC
+
+        ⚠️ 不要装 MiSans / HarmonyOS Sans SC / OPPO Sans / 阿里普惠体（商用需单独授权）。
+
+        字体目录不存在时 no-op，不影响绘图。
+        """
+        return (
+            "import os\n"
+            "import matplotlib\n"
+            "import matplotlib.pyplot as plt\n"
+            "try:\n"
+            "    import matplotlib.font_manager as fm\n"
+            "    _font_dirs = ['/cached/.fonts', os.path.join(os.getcwd(), 'cached', '.fonts')]\n"
+            "    for _font_dir in dict.fromkeys(_font_dirs):\n"
+            "        if not os.path.isdir(_font_dir):\n"
+            "            continue\n"
+            "        for _f in os.listdir(_font_dir):\n"
+            "            if _f.lower().endswith(('.ttf', '.otf', '.ttc')):\n"
+            "                try:\n"
+                    "                    fm.fontManager.addfont(os.path.join(_font_dir, _f))\n"
+                    "                except Exception:\n"
+                    "                    pass\n"
+            "    plt.rcParams['font.sans-serif'] = ['Noto Sans SC', 'DejaVu Sans']\n"
+            "    plt.rcParams['font.family'] = 'sans-serif'\n"
+            "    plt.rcParams['axes.unicode_minus'] = False\n"
+            "except Exception:\n"
+            "    pass\n"
+        )
+
+    @staticmethod
     def check_static_file(path: str) -> dict:
+        """验证 path 是否可通过 /static/ 接口访问（防止 AI 写错路径 / 服务端未启动）。
+
+        path: 相对 /static/ 的路径，如 `cached/{sid}/data_analysis/gen_001/charts/xxx.png`。
+        返回 dict 含 `url / accessible / status_code / content_type / error`。
+        `error` 失败时统一为 `[类型] 描述 | 建议`，AI 可直接 parse。
         """
-        校验文件是否可通过 /static/ 接口正常访问
-
-        在沙盒内发送 HTTP 请求到后端静态文件服务，验证 AI 生成的文件
-        （图表 / 数据 / 报告 / Mermaid 等）已被正确保存并可被前端访问。
-        用于防止 AI 写错路径、文件未实际生成、服务端未启动等异常。
-
-        Args:
-            path: 相对于 /static/ 的路径，格式如
-                  "cached/{session_id}/data_analysis/gen_001/charts/xxx.png"
-
-        Returns:
-            dict 包含 url / accessible / status_code / content_type / error
-
-        error 字段格式（AI 可直接 parse）：
-            成功时为 None；失败时统一为 `[类型] 描述 | 建议`
-            - [后端未连通] / [请求超时] / [网络异常]
-            - [文件不存在] / [服务端异常] / [HTTP 错误]
-        """
-        # 环境检测：沙盒用 host.docker.internal，本机用 127.0.0.1
+        # 沙盒用 host.docker.internal，本机用 127.0.0.1
         host = os.getenv("CHATME_BACKEND_HOST", "host.docker.internal" if _is_sandbox() else "127.0.0.1")
         port = os.getenv("CHATME_BACKEND_PORT", "8211")
         url = f"http://{host}:{port}/static/{path}"
@@ -305,13 +261,7 @@ class ChatDataAnalysisFormat:
     # --------------------------------------------------------
 
     def save_script(self, code: str, filename: str | None = None) -> str:
-        """
-        保存分析脚本到 scripts/ 目录
-
-        Args:
-            code: Python 代码
-            filename: 文件名，默认用时间戳生成
-        """
+        """保存脚本到 `scripts/`，filename 默认按时间戳生成。"""
         scripts_dir = self.base_dir / self.generation / "scripts"
         scripts_dir.mkdir(parents=True, exist_ok=True)
 
@@ -325,16 +275,7 @@ class ChatDataAnalysisFormat:
         return str(script_path)
 
     def save_data(self, content: str, filename: str) -> str:
-        """
-        保存数据文件到 data/ 目录
-
-        Args:
-            content: 文件内容（文本格式，如 CSV、JSON、TXT 等）
-            filename: 文件名（需含后缀，如 data.csv、result.json）
-
-        Returns:
-            保存后的文件绝对路径
-        """
+        """保存文本数据到 `data/`，filename 需含后缀（.csv / .json / .txt ...）。"""
         data_dir = self.get_current_generation_dir() / "data"
         data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -345,24 +286,11 @@ class ChatDataAnalysisFormat:
         return str(data_path)
 
     def save_report(self, content: str, filename: str, mode: str = "w") -> str:
-        """
-        保存报告文件到 reports/ 目录
+        """保存 Markdown / 文本到 `reports/`，`mode="a"` 续写。
 
-        Args:
-            content: 报告内容（Markdown 或纯文本）
-            filename: 文件名（需含后缀，如 report.md、summary.txt）
-            mode: 写入模式，"w" 覆盖（默认），"a" 追加到末尾
-
-        Returns:
-            保存后的文件绝对路径
-
-        用法提示：
-            长报告建议分块写，避免单次 code() 调用超过 LLM max_tokens：
-            da.save_report(intro, "report.md")                # mode="w" 创建文件
-            da.save_report(section1, "report.md", mode="a")   # 续写
-            da.save_report(section2, "report.md", mode="a")   # 续写
-
-            Markdown 段落分隔建议在 content 末尾留 \\n\\n。
+        长报告分块写入避免超 LLM max_tokens：
+            da.save_report(intro, "report.md")                # mode="w"
+            da.save_report(section, "report.md", mode="a")   # 续写
         """
         if mode not in ("w", "a"):
             raise ValueError(f"save_report mode 必须是 'w' 或 'a'，收到: {mode}")
@@ -382,15 +310,7 @@ class ChatDataAnalysisFormat:
 
     @staticmethod
     def validate_mermaid(code: str) -> tuple[bool, str]:
-        """
-        校验 mermaid 语法，返回 (是否合法, 错误信息)
-
-        Args:
-            code: mermaid 语法字符串
-
-        Returns:
-            (是否合法, 错误信息)
-        """
+        """校验 mermaid 语法，返回 (是否合法, 错误信息)。"""
         if not code or not code.strip():
             return False, "Mermaid 代码为空"
 
@@ -399,7 +319,6 @@ class ChatDataAnalysisFormat:
         code = re.sub(r'^```(?:mermaid)?\s*', '', code, flags=re.IGNORECASE)
         code = re.sub(r'\s*```$', '', code)
 
-        # 检查图类型声明
         graph_types = [
             'graph', 'flowchart', 'flowchart-v2',
             'stateDiagram', 'stateDiagram-v2',
@@ -413,15 +332,13 @@ class ChatDataAnalysisFormat:
         if not has_graph_type:
             return False, "缺少图类型声明（如 graph, flowchart, erDiagram...）"
 
-        # erDiagram 的 { } 是实体属性定义语法，不需要校验括号配对
-        # 其他图类型的 { } 才需要校验
+        # erDiagram 的 { } 是实体属性定义语法，不校验；其他图类型才校验括号配对
         is_erdiagram = any(f"{gt} " in code or f"{gt}\n" in code for gt in ['erDiagram'])
         bracket_pairs = [('{', '}'), ('[', ']'), ('(', ')')] if not is_erdiagram else [('[', ']'), ('(', ')')]
         for open_, close in bracket_pairs:
             if code.count(open_) != code.count(close):
                 return False, f"{open_}{close} 括号不匹配"
 
-        # 检查节点ID重复定义（简单校验）
         nodes = re.findall(r'\b([A-Za-z0-9_]+)\[', code)
         if len(nodes) != len(set(nodes)):
             return False, "节点ID重复定义"
@@ -429,19 +346,7 @@ class ChatDataAnalysisFormat:
         return True, "语法合格"
 
     def save_mermaid(self, code: str, filename: str) -> str:
-        """
-        保存 mermaid 语法文件到 charts/ 目录
-
-        Args:
-            code: mermaid 语法字符串
-            filename: 文件名（应含 .mmd 后缀）
-
-        Returns:
-            保存后的文件绝对路径
-
-        Raises:
-            ValueError: 语法校验失败时抛出
-        """
+        """保存 mermaid 到 `charts/`，filename 缺 `.mmd` 后缀自动补；语法校验失败抛 ValueError。"""
         ok, msg = self.validate_mermaid(code)
         if not ok:
             raise ValueError(f"Mermaid 语法错误: {msg}")
@@ -449,7 +354,6 @@ class ChatDataAnalysisFormat:
         charts_dir = self.get_current_generation_dir() / "charts"
         charts_dir.mkdir(parents=True, exist_ok=True)
 
-        # 确保文件名含 .mmd 后缀
         if not filename.endswith('.mmd'):
             filename += '.mmd'
 
@@ -462,14 +366,7 @@ class ChatDataAnalysisFormat:
     # --------------------------------------------------------
 
     def remove_dir(self, generation: str) -> None:
-        """
-        删除指定 generation 的分析结果目录
-
-        Args:
-           generation: generation ID (示例："gen_001" / "gen_002")
-        """
+        """删除指定 generation 目录（如 `"gen_001"`），不存在则 no-op。"""
         remove_generated_dir = self.base_dir / generation
         if remove_generated_dir.exists():
             shutil.rmtree(remove_generated_dir)
-        else:
-            pass

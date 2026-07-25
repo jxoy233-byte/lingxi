@@ -17,7 +17,23 @@
     <transition name="da-fade">
       <div v-if="showTree" class="da-panel">
         <div class="da-panel-header">
-          <span class="da-panel-title">📁 会话文件</span>
+          <span class="da-panel-title">
+            <span class="da-panel-title-text">📁 会话文件</span>
+            <button
+              ref="tipsTrigger"
+              type="button"
+              class="da-tips-trigger"
+              :class="{ active: tipsPinned }"
+              :aria-label="tipsVisible ? '收起使用提示' : '展开使用提示'"
+              :aria-expanded="tipsVisible ? 'true' : 'false'"
+              title="使用提示"
+              @click.stop="toggleTipsPin"
+              @mouseenter="onTipsHoverEnter"
+              @mouseleave="scheduleTipsHoverEnd"
+              @focus="onTipsHoverEnter"
+              @blur="scheduleTipsHoverEnd"
+            >ⓘ</button>
+          </span>
           <div class="da-panel-actions">
             <button class="da-icon-btn" @click="reload" title="刷新">
               <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -25,9 +41,37 @@
                 <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
               </svg>
             </button>
-            <button class="da-icon-btn" @click.stop="showTree = false" title="关闭">×</button>
+            <button class="da-icon-btn" @click.stop="closePanel" title="关闭">×</button>
           </div>
         </div>
+
+        <transition name="da-fade">
+          <div
+            v-if="tipsVisible"
+            ref="tipsPopover"
+            class="da-tips-popover"
+            role="tooltip"
+            @click.stop
+            @mouseenter="onTipsHoverEnter"
+            @mouseleave="scheduleTipsHoverEnd"
+          >
+            <div class="da-tips-header">
+              <span class="da-tips-title">💡 使用提示</span>
+              <button
+                type="button"
+                class="da-icon-btn"
+                aria-label="关闭提示"
+                title="关闭"
+                @click.stop="closeTips"
+              >×</button>
+            </div>
+            <div class="da-tips-body">
+              <p>把想上传的文件放到本地工作空间对应子目录：</p>
+              <p class="da-tips-path-line"><code class="da-tips-code">cached/{{ tipsSessionIdShort }}/...</code></p>
+              <p class="da-tips-step">AI <code class="da-tips-code">ls</code> 该路径即可找到。</p>
+            </div>
+          </div>
+        </transition>
         <div class="da-panel-body">
           <div v-if="loading" class="da-empty">加载中…</div>
           <div v-else-if="!rootNode || !rootNode.children || rootNode.children.length === 0" class="da-empty">
@@ -69,12 +113,23 @@ export default {
       files: [],
       showTree: false,
       rootNode: null,
-      loading: false
+      loading: false,
+      tipsHovered: false,
+      tipsPinned: false,
+      _tipsHoverEndTimer: null
     }
   },
   computed: {
     fileCount() {
       return this.files.length
+    },
+    // 浮标显隐：悬浮 = 临时显；点击 = 钉住
+    tipsVisible() {
+      return this.tipsPinned || this.tipsHovered
+    },
+    // 8 位短 SID —— 与 buildTree 根节点显示名一致
+    tipsSessionIdShort() {
+      return this.sessionId ? this.sessionId.slice(0, 8) : 'session'
     },
     sortedRootChildren() {
       if (!this.rootNode || !this.rootNode.children) return []
@@ -102,6 +157,36 @@ export default {
   methods: {
     togglePanel() {
       this.showTree = !this.showTree
+      if (!this.showTree) this.tipsPinned = false
+    },
+    closePanel() {
+      this.showTree = false
+      this.tipsPinned = false
+    },
+    toggleTipsPin() {
+      this.tipsPinned = !this.tipsPinned
+    },
+    closeTips() {
+      this.tipsPinned = false
+      this.tipsHovered = false
+      this.clearTipsHoverEndTimer()
+    },
+    onTipsHoverEnter() {
+      this.clearTipsHoverEndTimer()
+      this.tipsHovered = true
+    },
+    scheduleTipsHoverEnd() {
+      this.clearTipsHoverEndTimer()
+      // 鼠标从 trigger 移到 popover 之间有个空隙，给 150ms 容忍让 popover 别瞬闪
+      this._tipsHoverEndTimer = setTimeout(() => {
+        this.tipsHovered = false
+      }, 150)
+    },
+    clearTipsHoverEndTimer() {
+      if (this._tipsHoverEndTimer) {
+        clearTimeout(this._tipsHoverEndTimer)
+        this._tipsHoverEndTimer = null
+      }
     },
     onKeyDown(e) {
       if (e.key === 'Escape' && this.showTree) {
@@ -188,10 +273,17 @@ export default {
     onOutsideClick(e) {
       // 树没开就不处理
       if (!this.showTree) return
-      // 点中树内部 → 不折叠（用户可能在点节点 toggle / 滚动等）
-      if (this.$el && this.$el.contains(e.target)) return
+      // 点中 wrapper 内：先判是不是 tips 区（trigger / popover），不是就解钉 tips
+      if (this.$el && this.$el.contains(e.target)) {
+        const inTips =
+          (this.$refs.tipsTrigger && this.$refs.tipsTrigger.contains(e.target)) ||
+          (this.$refs.tipsPopover && this.$refs.tipsPopover.contains(e.target))
+        if (!inTips) this.tipsPinned = false
+        return
+      }
       // 其他位置（包括文件预览栏 / overlay）→ 折叠
       this.showTree = false
+      this.tipsPinned = false
     }
   },
   mounted() {
@@ -201,6 +293,7 @@ export default {
   beforeDestroy() {
     document.removeEventListener('keydown', this.onKeyDown)
     document.removeEventListener('click', this.onOutsideClick)
+    this.clearTipsHoverEndTimer()
   }
 }
 </script>
@@ -269,6 +362,103 @@ export default {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+/* —— 使用提示 ⓘ 触发按钮 —— 跟标题同行，可悬浮预览，点击钉住 —— */
+.da-panel-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+.da-panel-title-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 1;
+  min-width: 0;
+}
+.da-tips-trigger {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-secondary, #9ca3af);
+  cursor: help;
+  font-size: 12px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
+}
+.da-tips-trigger:hover,
+.da-tips-trigger:focus {
+  background: var(--bg-hover, #e5e7eb);
+  color: var(--text-primary, #111);
+  outline: none;
+}
+.da-tips-trigger.active {
+  background: var(--primary-color, #3b82f6);
+  color: #fff;
+}
+
+/* —— Tips 浮层 —— 浮在 header 下方，覆盖 body 顶部 —— */
+.da-tips-popover {
+  position: absolute;
+  top: 44px;
+  left: 8px;
+  right: 8px;
+  z-index: 5; /* 高于 panel body，避免被 .da-tree 节点遮住 */
+  background: var(--bg-primary, #fff);
+  border: 1px solid var(--border-color, #e5e7eb);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  padding: 0;
+  overflow: hidden;
+}
+.da-tips-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color, #e5e7eb);
+  background: var(--bg-secondary, #f9fafb);
+}
+.da-tips-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary, #111);
+}
+.da-tips-body {
+  padding: 10px 12px 12px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-primary, #111);
+}
+.da-tips-body p {
+  margin: 0 0 6px;
+}
+.da-tips-path-line {
+  margin: 4px 0 !important;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  word-break: break-all;
+}
+.da-tips-step {
+  color: var(--text-secondary, #4b5563);
+}
+.da-tips-code {
+  background: var(--bg-hover, #f3f4f6);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 11.5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-primary, #111);
+  word-break: break-all;
 }
 
 .da-panel-header {

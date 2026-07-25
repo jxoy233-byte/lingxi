@@ -31,6 +31,10 @@ from ..LoggingManager.logging_config import get_logger
 # 调度器单例
 _scheduler: Optional[AsyncIOScheduler] = None
 
+# cached/ 根目录下的保留目录名：定时清理任务永远不删这些（无论是孤立会话扫描
+# 还是顶层文件清理）。`.fonts/` 是字体目录，删了就丢失 matplotlib 字体注册。
+PRESERVED_TOP_DIRS: frozenset[str] = frozenset({".fonts"})
+
 
 # ============================================================
 # 核心清理函数
@@ -180,6 +184,9 @@ async def clean_orphaned_sessions() -> tuple[int, list[str]]:
     white_id = {}
     removed_names = []
     for item in cache_dir.iterdir():
+        # 保留目录（如 .fonts/）永远不删，无论是不是孤立
+        if item.name in PRESERVED_TOP_DIRS:
+            continue
         if item.is_dir() and item.name not in active_ids:
             shutil.rmtree(item)
             removed_names.append(item.name)
@@ -298,8 +305,11 @@ async def get_cleanup_status():
     cache_count = sum(1 for f in cache_dir.iterdir() if f.is_file()) if cache_dir.exists() else 0
     log_count = sum(1 for f in log_dir.iterdir() if f.is_file() and f.suffix == ".log") if log_dir.exists() else 0
 
-    # 统计 session 目录数量
-    session_count = sum(1 for d in cache_dir.iterdir() if d.is_dir()) if cache_dir.exists() else 0
+    # 统计 session 目录数量（排除保留目录 .fonts/ 等）
+    session_count = sum(
+        1 for d in cache_dir.iterdir()
+        if d.is_dir() and d.name not in PRESERVED_TOP_DIRS
+    ) if cache_dir.exists() else 0
 
     return {
         "cache_dir": str(cache_dir),

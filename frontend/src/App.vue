@@ -108,12 +108,12 @@
       <!-- 文件预览面板 -->
       <FilePreviewPanel
         :visible="showFilePreview"
-        :file-name="filePreviewName"
-        :content="filePreviewContent"
-        :file-url="filePreviewUrl"
-        :rendered-svg="filePreviewRenderedSvg"
+        :tabs="filePreviewTabs"
+        :active-tab-id="activeFilePreviewTabId"
         :session-id="currentSessionId"
         @close="showFilePreview = false"
+        @activate-tab="activateFilePreviewTab"
+        @close-tab="closeFilePreviewTab"
         @reload="reloadPreview"
         @file-select="onDataAnalysisFileClick"
       />
@@ -183,6 +183,16 @@ import FilePreviewPanel from './components/FilePreviewPanel.vue'
 import DataAnalysisTree from './components/DataAnalysisTree.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import mermaid from 'mermaid'
+import {
+  MAX_TEXT_PREVIEW_BYTES,
+  buildFilePreviewSourceKey,
+  fetchTextPreview,
+  getFileSuffix,
+  isHtmlPreviewFile,
+  isImagePreviewFile,
+  isOfficePreviewFile,
+  truncateTextToBytes
+} from './utils/filePreview.js'
 
 export default {
   name: 'App',
@@ -215,11 +225,10 @@ export default {
       showImagePreview: false,
       imagePreviewUrl: '',
       showFilePreview: false,
-      filePreviewName: '',
-      filePreviewContent: '',
-      filePreviewUrl: '',
-      filePreviewRenderedSvg: '',
-      currentPreviewFile: null,
+      filePreviewTabs: [],
+      activeFilePreviewTabId: null,
+      _previewLoadControllers: new Map(),
+      _previewTabSequence: 0,
       responseStartTime: null,
       responseTimerInterval: null,
       currentResponseTime: 0,
@@ -856,182 +865,196 @@ export default {
       }
     },
     async previewFile(file) {
-      console.log('[previewFile] 收到文件:', file)
-      console.log('[previewFile] preview字段:', file.preview)
-      console.log('[previewFile] url字段:', file.url)
-      this.currentPreviewFile = file
-      // 根据文件类型决定预览方式
-      const fileType = (file.file_type || file.type || '').toUpperCase()
-      const suffix = (file.suffix || (file.name ? '.' + file.name.split('.').pop().toLowerCase() : '')).toLowerCase()
+      const suffix = getFileSuffix(file)
+      let url = file.url || file.preview || file.preview_url || file.iframe_url || ''
 
-      // 图片文件：使用专用图片预览
-      if (fileType === 'IMAGE' || (file.type && file.type.startsWith('image/'))) {
-        // 图片URL优先从preview_url获取，其次是image_content
-        let imageUrl = file.preview_url || ''
-        if (!imageUrl && file.image_content) {
+      if (isImagePreviewFile(file)) {
+        if (!url && file.image_content) {
           if (typeof file.image_content === 'string') {
-            imageUrl = file.image_content
+            url = file.image_content
           } else if (Array.isArray(file.image_content) && file.image_content.length > 0) {
             const first = file.image_content[0]
-            if (typeof first === 'string') {
-              imageUrl = first
-            } else if (typeof first === 'object' && first.url) {
-              imageUrl = first.url
-            }
+            url = typeof first === 'string' ? first : (first?.url || '')
           }
         }
-        if (imageUrl) {
-          this.imagePreviewUrl = imageUrl
-          this.showImagePreview = true
-        }
+        if (!url) return
+        await this.openFilePreviewTab({ file, url, suffix, kind: 'image' })
         return
       }
 
-      // Mermaid 文件（.mmd）：传入原文 + 渲染 SVG，FilePreviewPanel 内切换
-      if ((file.suffix || '').toLowerCase() === '.mmd' || (file.type || '').includes('mermaid')) {
-        const textContent = file.text_content || ''
-        this.filePreviewName = file.name || 'diagram.mmd'
-        this.filePreviewContent = textContent
-        this.filePreviewUrl = file.url || file.preview || ''
-        // 异步渲染 SVG
-        if (textContent) {
-          try {
-            const id = 'panel-' + Date.now()
-            const { svg } = await mermaid.render(id, textContent)
-            this.filePreviewRenderedSvg = svg
-          } catch (e) {
-            this.filePreviewRenderedSvg = '<p style="color:red;">渲染失败: ' + e.message + '</p>'
-          }
-        } else {
-          this.filePreviewRenderedSvg = ''
-        }
-        this.showFilePreview = true
+      if (isOfficePreviewFile(file)) {
+        const content = '此文件类型暂不支持在线预览。\n\n文件名：' + (file.name || '未知') + '\n文件大小：' + (file.size_human || '未知') + '\n\n请下载后使用本地应用程序查看。'
+        await this.openFilePreviewTab({ file, url, suffix, kind: 'unsupported', content })
         return
       }
 
-      // HTML 文件（.html / .htm）：走 FilePreviewPanel（同 mermaid 的处理路径），
-      // panel 内 isHtmlFile + viewTab='rendered' 自动渲染 iframe，「原文」tab 可看源码
-      if ((file.suffix || '').toLowerCase() === '.html' || (file.suffix || '').toLowerCase() === '.htm'
-          || (file.type || '').toLowerCase() === 'text/html'
-          || (file.file_type || '').toUpperCase() === 'HTML') {
-        const textContent = file.text_content || file.content || ''
-        const htmlUrl = file.url || file.preview || file.preview_url || file.iframe_url || ''
-        this.filePreviewName = file.name || 'file.html'
-        this.filePreviewContent = textContent
-        this.filePreviewUrl = htmlUrl
-        this.filePreviewRenderedSvg = ''
-        this.showFilePreview = true
+      const suppliedContent = file.text_content || file.content || ''
+      const isMermaid = suffix === '.mmd' || String(file.type || '').includes('mermaid')
+      if (isHtmlPreviewFile(file)) {
+        await this.openFilePreviewTab({ file, url, suffix, kind: 'html', content: suppliedContent })
         return
       }
 
-      // 如果文件有 text_content 或 content，优先使用文件预览面板展示
-      const textContent = file.text_content || file.content || ''
-      if (typeof textContent === 'string' && textContent.length > 0) {
-        this.filePreviewName = file.name || '文件预览'
-        this.filePreviewContent = textContent
-        // preview 字段是 base64 data URL，可用于下载
-        this.filePreviewUrl = file.preview || file.url || ''
-        this.showFilePreview = true
+      if (suppliedContent || isMermaid || String(file.file_type || '').toUpperCase() === 'TEXT') {
+        await this.openFilePreviewTab({ file, url, suffix, kind: 'text', content: suppliedContent })
         return
       }
 
-      // Office 文档（docx, doc, pptx, ppt, xlsx, xls）：显示下载提示面板
-      if (['.docx', '.doc', '.pptx', '.ppt', '.xlsx', '.xls'].includes(suffix)) {
-        this.filePreviewName = file.name || '文件预览'
-        this.filePreviewContent = '此文件类型暂不支持在线预览。\n\n文件名：' + (file.name || '未知') + '\n文件大小：' + (file.size_human || '未知') + '\n\n请下载后使用本地应用程序查看。'
-        this.filePreviewUrl = file.url || file.preview || ''
-        this.showFilePreview = true
-        return
-      }
-
-      // 其他文件：有 preview_url 则使用 iframe 预览
       const otherPreviewUrl = file.preview_url || file.iframe_url
       if (otherPreviewUrl) {
         this.webPreviewUrl = otherPreviewUrl
         this.showWebPreview = true
-      } else {
-        // 没有 preview_url，显示友好提示
-        this.filePreviewName = file.name || '文件预览'
-        this.filePreviewContent = '无法预览此文件。\n\n文件名：' + (file.name || '未知') + '\n文件类型：' + (suffix ? suffix.replace('.', '') : '未知') + '\n\n请下载后查看。'
-        this.filePreviewUrl = file.url || file.preview || ''
-        this.showFilePreview = true
-      }
-    },
-    async onDataAnalysisFileClick(fileNode) {
-      // fileNode: { name, type, path, size, modified_at }
-      // path 形如 cached/{session_id}/data_analysis/gen_001/...
-      const url = `/static/${fileNode.path}`
-      const name = fileNode.name || ''
-      const dotIdx = name.lastIndexOf('.')
-      const ext = dotIdx >= 0 ? name.slice(dotIdx + 1).toLowerCase() : ''
-      const suffix = dotIdx >= 0 ? name.slice(dotIdx) : ''
-      const isImage = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext)
-
-      // 公共状态先填好，面板打开即可见
-      this.filePreviewName = name
-      this.filePreviewUrl = url
-      this.filePreviewRenderedSvg = ''
-      this.currentPreviewFile = { name, suffix, url, preview: url }
-
-      if (isImage) {
-        // 图片：不取文本（避免把二进制塞 content），由 FilePreviewPanel 直接 <img> 渲染
-        this.filePreviewContent = ''
-        this.showFilePreview = true
         return
       }
 
-      // 文本类：fetch 内容 + 用 FilePreviewPanel 打开（支持渲染/编辑）
-      try {
-        const resp = await fetch(url)
-        if (!resp.ok) {
-          console.error('[DataAnalysis] fetch failed:', resp.status, url)
-          return
-        }
-        const text = await resp.text()
-        this.filePreviewContent = text
+      const content = '无法预览此文件。\n\n文件名：' + (file.name || '未知') + '\n文件类型：' + (suffix ? suffix.replace('.', '') : '未知') + '\n\n请下载后查看。'
+      await this.openFilePreviewTab({ file, url, suffix, kind: 'unsupported', content })
+    },
+    async onDataAnalysisFileClick(fileNode) {
+      const url = `/static/${fileNode.path}`
+      const suffix = getFileSuffix(fileNode)
+      let kind = 'text'
+      if (isImagePreviewFile(fileNode)) kind = 'image'
+      else if (isHtmlPreviewFile(fileNode)) kind = 'html'
+      else if (isOfficePreviewFile(fileNode)) kind = 'unsupported'
 
-        // mermaid 文件：渲染 SVG 供 FilePreviewPanel 的"渲染效果" tab
-        if (ext === 'mmd' && text) {
-          try {
-            const id = 'panel-' + Date.now()
-            const { svg } = await mermaid.render(id, text)
-            this.filePreviewRenderedSvg = svg
-          } catch (e) {
-            console.warn('[DataAnalysis] mermaid render failed:', e)
-            this.filePreviewRenderedSvg =
-              '<p style="color:red;padding:12px;">渲染失败: ' + (e.message || e) + '</p>'
-          }
-        }
-
+      const content = kind === 'unsupported'
+        ? '此文件类型暂不支持在线预览。\n\n文件名：' + (fileNode.name || '未知') + '\n\n请下载后使用本地应用程序查看。'
+        : ''
+      await this.openFilePreviewTab({ file: fileNode, url, suffix, kind, content })
+    },
+    async openFilePreviewTab({ file, url = '', suffix = '', kind = 'text', content = '' }) {
+      const sourceKey = buildFilePreviewSourceKey(file, this.currentSessionId || '', url)
+      const existing = this.filePreviewTabs.find(tab => tab.sourceKey === sourceKey)
+      if (existing) {
+        this.activeFilePreviewTabId = existing.id
         this.showFilePreview = true
+        return existing
+      }
+
+      const id = `file-preview-${++this._previewTabSequence}`
+      const size = Number(file.size ?? file.file_size ?? 0) || 0
+      const initialText = truncateTextToBytes(content)
+      const tab = {
+        id,
+        sourceKey,
+        sessionId: this.currentSessionId || '',
+        name: file.name || '文件预览',
+        suffix: suffix || getFileSuffix(file),
+        fileType: file.file_type || file.type || '',
+        kind,
+        url,
+        sourceFile: file,
+        size,
+        content: initialText.text,
+        renderedSvg: '',
+        renderVersion: 0,
+        loading: false,
+        error: '',
+        truncated: initialText.truncated || (!!content && size > MAX_TEXT_PREVIEW_BYTES),
+        totalBytes: size || initialText.totalBytes
+      }
+
+      this.filePreviewTabs.push(tab)
+      this.activeFilePreviewTabId = id
+      this.showFilePreview = true
+
+      if (kind === 'text' && (url || !content)) {
+        const shouldFetch = !content || size > MAX_TEXT_PREVIEW_BYTES
+        if (shouldFetch && url) await this.loadFilePreviewTab(id)
+        else if (tab.suffix === '.mmd' && tab.content) await this.renderMermaidPreview(tab.id)
+      }
+      return tab
+    },
+    activateFilePreviewTab(tabId) {
+      if (!this.filePreviewTabs.some(tab => tab.id === tabId)) return
+      this.activeFilePreviewTabId = tabId
+      this.showFilePreview = true
+    },
+    closeFilePreviewTab(tabId) {
+      const index = this.filePreviewTabs.findIndex(tab => tab.id === tabId)
+      if (index < 0) return
+      this._previewLoadControllers.get(tabId)?.abort()
+      this._previewLoadControllers.delete(tabId)
+      this.filePreviewTabs.splice(index, 1)
+
+      if (this.activeFilePreviewTabId === tabId) {
+        const next = this.filePreviewTabs[index] || this.filePreviewTabs[index - 1] || null
+        this.activeFilePreviewTabId = next?.id || null
+      }
+      if (this.filePreviewTabs.length === 0) this.showFilePreview = false
+    },
+    clearFilePreviewTabs() {
+      for (const controller of this._previewLoadControllers.values()) controller.abort()
+      this._previewLoadControllers.clear()
+      this.filePreviewTabs = []
+      this.activeFilePreviewTabId = null
+      this.showFilePreview = false
+    },
+    async reloadPreview(tabId = this.activeFilePreviewTabId) {
+      const tab = this.filePreviewTabs.find(item => item.id === tabId)
+      if (!tab) return
+      if (tab.kind === 'image' || tab.kind === 'unsupported') {
+        tab.error = ''
+        return
+      }
+      await this.loadFilePreviewTab(tabId, { loadHtmlSource: tab.kind === 'html' })
+    },
+    async loadFilePreviewTab(tabId, { loadHtmlSource = false } = {}) {
+      const tab = this.filePreviewTabs.find(item => item.id === tabId)
+      if (!tab || !tab.url || (tab.kind === 'html' && !loadHtmlSource)) return
+
+      this._previewLoadControllers.get(tabId)?.abort()
+      const controller = new AbortController()
+      this._previewLoadControllers.set(tabId, controller)
+      tab.loading = true
+      tab.error = ''
+
+      try {
+        const result = await fetchTextPreview(tab.url, {
+          signal: controller.signal,
+          sizeHint: tab.size
+        })
+        if (this._previewLoadControllers.get(tabId) !== controller) return
+        const currentTab = this.filePreviewTabs.find(item => item.id === tabId)
+        if (!currentTab) return
+        currentTab.content = result.text
+        currentTab.truncated = result.truncated
+        currentTab.totalBytes = result.totalBytes
+        if (currentTab.suffix === '.mmd' && currentTab.content) {
+          await this.renderMermaidPreview(tabId)
+        }
       } catch (e) {
-        console.error('[DataAnalysis] load error:', e)
+        if (e?.name !== 'AbortError') {
+          const currentTab = this.filePreviewTabs.find(item => item.id === tabId)
+          if (currentTab) currentTab.error = e?.message || String(e)
+        }
+      } finally {
+        if (this._previewLoadControllers.get(tabId) === controller) {
+          this._previewLoadControllers.delete(tabId)
+          const currentTab = this.filePreviewTabs.find(item => item.id === tabId)
+          if (currentTab) currentTab.loading = false
+        }
       }
     },
-    reloadPreview() {
-      if (!this.currentPreviewFile) return
-      const url = this.currentPreviewFile.url || this.currentPreviewFile.preview
-      if (!url) return
-      // 重新从后端获取文件内容
-      fetch(url)
-        .then(res => res.text())
-        .then(text => {
-          this.filePreviewContent = text
-          // 如果是 mermaid 文件，重新渲染 SVG
-          const suffix = (this.currentPreviewFile.suffix || '').toLowerCase()
-          if (suffix === '.mmd' && text) {
-            this.$nextTick(async () => {
-              try {
-                const id = 'panel-' + Date.now()
-                const { svg } = await mermaid.render(id, text)
-                this.filePreviewRenderedSvg = svg
-              } catch (e) {
-                this.filePreviewRenderedSvg = '<p style="color:red;">渲染失败</p>'
-              }
-            })
-          }
-        })
-        .catch(e => console.error('[reloadPreview] 获取文件内容失败:', e))
+    async renderMermaidPreview(tabId) {
+      const tab = this.filePreviewTabs.find(item => item.id === tabId)
+      if (!tab || !tab.content) return
+      const renderVersion = ++tab.renderVersion
+      const content = tab.content
+      try {
+        const renderId = `panel-${tabId}-${++this._previewTabSequence}`
+        const { svg } = await mermaid.render(renderId, content)
+        const currentTab = this.filePreviewTabs.find(item => item.id === tabId)
+        if (currentTab && currentTab.renderVersion === renderVersion) {
+          currentTab.renderedSvg = svg
+        }
+      } catch (e) {
+        const currentTab = this.filePreviewTabs.find(item => item.id === tabId)
+        if (currentTab && currentTab.renderVersion === renderVersion) {
+          currentTab.renderedSvg = '<p style="color:red;padding:12px;">渲染失败: ' + (e?.message || e) + '</p>'
+        }
+      }
     },
     async restoreCheckpoint(checkpointId) {
       this.restoreTargetId = checkpointId
@@ -1547,6 +1570,7 @@ export default {
       // 清理输入框和文件
       this.$refs.messageInput?.clearInput()
 
+      this.clearFilePreviewTabs()
       this.currentSessionId = null
       this.messages = []
       // 清理引用状态
@@ -1590,6 +1614,11 @@ export default {
       // 防止重复加载同一个会话
       if (sessionId === this.currentSessionId && this.messages.length > 0) {
         return
+      }
+
+      // 切换会话时清理旧会话文件标签，避免跨 session 混用路径和内容
+      if (this.currentSessionId && this.currentSessionId !== sessionId) {
+        this.clearFilePreviewTabs()
       }
 
       // —— 检查目标会话是否正在流式响应 —— 是的话走 snapshot 恢复分支
@@ -2693,6 +2722,11 @@ export default {
 
       return result
     }
+  },
+  beforeUnmount() {
+    window.removeEventListener('resize', this.handleResize)
+    for (const controller of this._previewLoadControllers.values()) controller.abort()
+    this._previewLoadControllers.clear()
   },
   watch: {
     isLoading(newVal) {

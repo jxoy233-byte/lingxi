@@ -1,123 +1,115 @@
 # 数据分析技能规范
 
-> 本文件是 DataAnalysis skill 的 AI 可读规范。完整方法签名 / 边界条件见
-> `skills.DataAnalysis.ChatDataAnalysisFormat` 的 docstring。
+> 方法签名 / 边界条件见 `ChatDataAnalysisFormat` docstring（`format.py`）。
 
-- *合理使用包装好的函数*
+## 技能索引
 
-## 导入
+| 场景 | 方法 |
+|---|---|
+| 初始化 | `da = ChatDataAnalysisFormat(session_id=session_id)` |
+| 输入文件（绝对路径） | `INPUT = ChatDataAnalysisFormat.get_file_dir("cached/{sid}/xxx.suffix/.../file.suffix")` |
+| 输出目录（首次自建 gen_001） | `OUTPUT_DIR = da.output_dir` |
+| 新一轮分析（自增批次） | `gen = da.new_generation(); OUTPUT_DIR = str(da.base_dir / gen)` |
+| 画图 header（抑制 warning） | `da.get_data_analysis_header()` |
+| 画图 header（注册字体） | `da.get_fonts_setup_header()` |
+| 保存数据 csv / json / txt | `da.save_data(content, "name.csv")` |
+| 保存报告 md（续写 mode="a"） | `da.save_report(content, "report.md", mode="w")` |
+| 保存脚本（可追溯） | `da.save_script(code)` |
+| 保存 Mermaid 流程图 / ER 图 | `da.save_mermaid(mmd_code, "flow.mmd")` |
+| 校验文件可访问 | `da.check_static_file(path)` → `{accessible, status_code, error}` |
+| 删除指定批次 | `da.remove_dir("gen_xxx")` |
+
+## 典型工作流
 
 ```python
-from skills.DataAnalysis import ChatDataAnalysisFormat
-```
-
-## 使用流程
-
-### Step 1: 初始化
-
-```python
+# 1) 初始化（每会话只调一次；重复 init 会复用同一 gen_001）
 da = ChatDataAnalysisFormat(session_id=session_id)
-```
 
-### Step 2: 获取输入文件
+# 2) 输入文件 → 绝对路径（不存在时在 cached/ 下按文件名递归搜）
+INPUT = ChatDataAnalysisFormat.get_file_dir("cached/{sid}/datasets/q1.csv")
 
-```python
-# 自动校验并获取输入文件路径（绝对路径）
-INPUT_FILE = ChatDataAnalysisFormat.get_file_dir("cached/{session_id}/xxx.suffix_xxx/xxx.suffix")
-```
-
-### Step 3: 获取输出目录
-
-```python
-OUTPUT_DIR = da.output_dir  # 例如: cached/{session_id}/data_analysis/gen_001/
-```
-
-### Step 4: 编写分析代码（重要）
-
-**⚠️ 同一个分析任务中，不要重复创建 ChatDataAnalysisFormat 实例或重复访问 `output_dir` 属性，多次访问会复用同一个 generation。**
-
-**数据分析可以选择包含mermaid图**：在分析过程中，同步生成数据处理流程图（graph）或 ER 关系图（erDiagram），用于可视化业务流程和数据关系，帮助理解分析逻辑。
-
-**Tip - 抑制无关警告**：代码顶部拼接 `ChatDataAnalysisFormat.get_data_analysis_header()`，静默 pandas / numpy / matplotlib 的常见 warning。
-
-```python
-# ✅ 正确写法 - 一次初始化，全程复用 OUTPUT_DIR
-da = ChatDataAnalysisFormat(session_id=session_id)
+# 3) 选 generation
+#    - 同会话连续多次分析：复用 output_dir（首次访问自建 gen_001，不自增）
+#    - 用户要"重做 / 换一批"：调 new_generation() 进 gen_002
 OUTPUT_DIR = da.output_dir
-# 后续所有代码全部使用 OUTPUT_DIR，不再访问 da.output_dir
+
+# 4) 拼 code() 入参（两个 header 顺序无关，都 prepend 到顶部）
+code = (
+    da.get_data_analysis_header()
+    + da.get_fonts_setup_header()
+    + f'''
+import pandas as pd
+df = pd.read_csv(r"{INPUT}")
+# ... 业务代码（save_* 调用可直接放在这里，返回路径供后续 [[path]] 引用）...
+'''
+)
+
+# 5) 落盘产物 —— save_* 返回的是绝对路径，自带 cached/{sid}/ 前缀
+csv_path = da.save_data(df.to_csv(index=False), "q1_summary.csv")
+md_path  = da.save_report("# 分析报告\n\n## 结论 ...", "report.md")
+mmd_path = da.save_mermaid("graph LR; A-->B", "flow.mmd")
+
+# 6) 校验文件可访问（防止路径错 / 服务端未启 / 文件未生成）
+result = da.check_static_file("cached/{sid}/data_analysis/gen_001/data/q1_summary.csv")
+if not result["accessible"]:
+    print(result["error"])  # `[类型] 描述 | 建议`，可直接 parse
+
+# 7) AI 回复用户前，把已运行的 code() 字符串存档（可追溯）
+da.save_script(code)
+
+# 8) 删除批次（清理 / 回滚旧结果）
+da.remove_dir("gen_001")
 ```
 
-**如果需要开启新一轮分析（新的一批图表/报告），显式调用 new_generation()：**
+## 长报告分块写入
+
+单次 `code()` 受 LLM max_tokens 限制，长报告必须分块：
+
 ```python
-gen = da.new_generation()  # 显式自增，返回新的 gen_xxx
-OUTPUT_DIR = str(da.base_dir / gen)
+da.save_report(intro,    "report.md")                # mode="w" 创建
+da.save_report(section1, "report.md", mode="a")     # 续写
+da.save_report(section2, "report.md", mode="a")     # 续写
 ```
 
-### Step 5: 保存分析文件（强制 da.save_*）
+Markdown 段落分隔建议在 content 末尾留 `\n\n`。
 
-**Core：保存文件必须使用 ChatDataAnalysisFormat 提供的方法**
+## Header 拼接
 
 ```python
-# 保存数据文件（如 CSV、JSON、TXT 等文本格式）
-data_path = da.save_data("id,name,value\n1,foo,100\n2,bar,200", "result.csv")
-# 保存报告文件（Markdown 或纯文本）
-# 长报告分块写入，避免单次 code() 调用超 max_tokens 导致 SyntaxError
-report_path = da.save_report("# 分析报告\n\n结论：...", "report.md")              # mode="w" 创建（默认）
-report_path = da.save_report("## 第二章\n\n...", "report.md", mode="a")            # 续写到末尾
-# Markdown 段落分隔建议在 content 末尾留 \n\n
-# 保存分析脚本（可追溯脚本执行）
-script_path = da.save_script("print('hello world')")
-# 保存 Mermaid 图表（.mmd 文件，前端可渲染）
-mmd_path = da.save_mermaid("graph TD\n    A --> B", "flow.mmd")
+code = da.get_data_analysis_header() + da.get_fonts_setup_header() + "<用户代码>"
 ```
 
-### Step 6: 确保文件路径符合 AI 后续自定义语法格式
-**路径格式**: cached/{session_id}/data_analysis/gen_xxx/...
+`get_data_analysis_header` 抑制 warning（省 token），`get_fonts_setup_header` 注册中英文字体（避免中文 tofu）。
+
+## 路径格式
+
+`da.save_*` 返回的路径形如 `/.../backend/cached/{sid}/data_analysis/gen_xxx/charts/xxx.png`。
+AI 在回复里引用产物时，用 `[[cached/{sid}/data_analysis/gen_xxx/...]]` 语法（去掉 `backend/` 前缀）：
 
 ```
 [[cached/{session_id}/data_analysis/gen_xxx/charts/xxx.png]]
 [[...(同上)/charts/xxx.html]]
-[[...(同上)/charts/xxx.mmd]]  # Mermaid 语法文件
-[[...(同上)/data/xxx.csv]]    # 数据文件
-[[...(同上)/reports/xxx.md]]   # 报告文件
-```
-**Tip - 验证文件可访问**：生成文件后调用 `ChatDataAnalysisFormat.check_static_file(path)` 校验。返回 `{accessible, status_code, error}`：`accessible=True` 即 OK；`accessible=False` 时读 `error`（ `[类型] 描述 | 建议`）。
-
-### Step 7: (可选) 删除不满意的结果
-
-```python
-da.remove_dir("gen_001")  # 删除指定批次
+[[...(同上)/charts/xxx.mmd]]
+[[...(同上)/data/xxx.csv]]
+[[...(同上)/reports/xxx.md]]
 ```
 
-### Step 8: 保存分析结果后下一轮分析复用（看需选择）
+`check_static_file` 的 `path` 参数也用同款格式（不带 `backend/` 前缀，相对 `/static/`）。
 
-分析完成后，确保所有结果都已通过 Step 5 的方法保存。若需复用上一轮脚本：
-
-```python
-# 读取上一轮的脚本
-with open("cached/{session_id}/data_analysis/gen_001/scripts/script_xxx.py") as f:
-    old_code = f.read()
-# 基于旧脚本继续分析
-```
+## 目录结构
 
 ```
-cached/
-└── {session_id}/
-    └── data_analysis/
-        ├── gen_001/
-        │   ├── charts/
-        │   ├── data/
-        │   ├── reports/
-        │   └── scripts/
-        ├── gen_002/
-        │   └── ...
-        └── _meta.json          # generation 计数器
+cached/{sid}/data_analysis/{gen_xxx}/
+├── charts/      ← .png / .html / .mmd
+├── data/        ← .csv / .json / .txt
+├── reports/     ← .md
+└── scripts/     ← 保存的可执行脚本
+└── _meta.json   ← generation 计数
 ```
 
-## 注意事项
+## ⚠️ 不要做
 
-- `output_dir` 属性在首次访问时自动获取或创建 gen_001，后续访问复用同一个目录，**不会自增**
-- 如果需要开启新一轮分析（新的一批图表/报告），调用 `da.new_generation()` 显式创建新 gen
-- 删除操作通过 `da.remove_dir("gen_xxx")` 进行
-- AI 根据场景自行决定输出格式（png/svg/html/pdf）和图表参数
-- 对于流程图/ER图要使用`da.save_mermaid(code)`来保存mmd文件来后续调用
+- **不要重复 `ChatDataAnalysisFormat(session_id)`** 或重复访问 `da.output_dir`（会复用同一 `gen_001`，不自增）
+- **不要绕过 `da.save_*` 直接 `open()` 写文件**（绕过 generation 管理 + 路径校验）
+- **不要**装 MiSans / HarmonyOS Sans SC / OPPO Sans / 阿里普惠体（商用需单独授权）
+- **不要**在 `check_static_file` 报错时仍引用 `[[path]]`（用户会看到 broken image）

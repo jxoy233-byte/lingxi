@@ -773,7 +773,7 @@ export default {
       if (file.size > this.maxFileSize) {
         return {
           valid: false,
-          error: `文件大小超过 ${this.formatFileSize(this.maxFileSize)} 限制`
+          error: `文件超过 ${this.formatFileSize(this.maxFileSize)} 限制，到文件树处查看指引来上传`
         }
       }
 

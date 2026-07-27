@@ -14,7 +14,29 @@ contextBridge.exposeInMainWorld('electronAPI', {
   isDevelopment: () => process.env.NODE_ENV === 'development',
 
   // 检查是否为测试环境
-  isTest: () => process.env.NODE_ENV === 'test'
+  isTest: () => process.env.NODE_ENV === 'test',
+
+  // ===== 启动引导相关（SetUpView 用）=====
+  // 探测全部 6 项环境（python/uv/docker/redis/sandbox/venv）
+  probeAll: () => ipcRenderer.invoke('startup:probe-all'),
+
+  // 单项修复（uv/redis/sandbox/venv），返回 { ok, error? }；日志通过 onStartupLog 推流
+  fixItem: (item) => ipcRenderer.invoke('startup:fix-item', item),
+
+  // 启动后端（MCP 先 → backend 后），返回 { ok, error? }；成功后会触发 onStartupReady
+  launch: () => ipcRenderer.invoke('startup:launch'),
+
+  // 订阅实时日志（fix 期间 stdout/stderr 流）
+  onStartupLog: (callback) => {
+    const handler = (_event, data) => callback(data)
+    ipcRenderer.on('startup:log', handler)
+  },
+
+  // 订阅启动完成事件（main 进程后端 ready 后触发，App.vue 切到主界面）
+  onStartupReady: (callback) => {
+    const handler = () => callback()
+    ipcRenderer.on('startup:ready', handler)
+  }
 })
 
 // 暴露 Electron 相关功能

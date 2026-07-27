@@ -32,12 +32,7 @@
       "local": true
     }
   },
-  "directories": {
-    "skills_dir": "./skills",
-    "cached_dir": "./cached"
-  },
   "skills": {
-    "bocha_api_key": "sk-2442",
     "exa_api_key": "241f5e-d-4xx4e-ax7-xx90x",
     "tavily_api_key": "tvly-dev-xxT"
   },

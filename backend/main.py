@@ -130,6 +130,11 @@ async def root():
         "version": version,
     }
 
+@app.get("/health")
+async def health():
+    """Electron 启动时轮询此端点判断后端是否就绪。"""
+    return {"status": "ok"}
+
 def main():
     # 确保全局配置存在
     ensure_global_config()

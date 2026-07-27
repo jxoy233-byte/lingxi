@@ -35,6 +35,39 @@
       {
         "from": "build",
         "to": "build"
+      },
+      {
+        "from": "../docker-compose.yml",
+        "to": "docker-compose.yml"
+      },
+      {
+        "from": "../sandbox",
+        "to": "sandbox",
+        "filter": [
+          "Dockerfile",
+          "requirements.txt",
+          "sitecustomize.py",
+          ".sandbox-config.json"
+        ]
+      },
+      {
+        "from": "../backend",
+        "to": "backend",
+        "filter": [
+          "**/*.py",
+          "pyproject.toml",
+          "uv.lock",
+          "!**/.venv/**",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!**/cached/**",
+          "!**/.chatme/**",
+          "!**/dist/**",
+          "!**/test/**",
+          "!**/*.egg-info/**",
+          "!**/deprecated/**",
+          "!**/.test_agent/**"
+        ]
       }
     ],
     "mac": {

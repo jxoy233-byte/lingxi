@@ -1,5 +1,14 @@
 <template>
-  <div :class="['app-container', { 'dark-theme': isDarkTheme }]">
+  <!--
+    启动引导页：Electron 主进程检测到后端未启动时，会创建 SetUpView 窗口，
+    引导用户完成环境配置；用户点击"启动应用"且后端就绪后，主进程通过
+    'startup:ready' 事件通知渲染层切换到主界面。
+  -->
+  <SetUpView v-if="!appReady" />
+  <div
+    v-else
+    :class="['app-container', { 'dark-theme': isDarkTheme }]"
+  >
     <div class="main-layout">
       <Sidebar
         :collapsed="sidebarCollapsed"
@@ -177,6 +186,7 @@ import ChatHeader from './components/ChatHeader.vue'
 import MessageList from './components/MessageList.vue'
 import MessageInput from './components/MessageInput.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
+import SetUpView from './components/SetUpView.vue'
 import CheckpointPanel from './components/CheckpointPanel.vue'
 import WebPreviewPanel from './components/WebPreviewPanel.vue'
 import FilePreviewPanel from './components/FilePreviewPanel.vue'
@@ -202,6 +212,7 @@ export default {
     MessageList,
     MessageInput,
     ConfirmDialog,
+    SetUpView,
     CheckpointPanel,
     WebPreviewPanel,
     FilePreviewPanel,
@@ -213,6 +224,8 @@ export default {
       isDarkTheme: false,
       sidebarCollapsed: false,
       conversations: [],
+      // 启动引导完成标志；为 false 时显示 SetUpView，true 时显示主界面
+      appReady: false,
       currentSessionId: null,
       messages: [],
       isLoading: false,
@@ -254,6 +267,19 @@ export default {
     }
   },
   mounted() {
+    // 订阅启动完成事件：Electron 主进程检测到后端 ready 后触发
+    // dev 模式下 electronAPI.onStartupReady 不存在（直接进入主界面），用 typeof 守卫
+    if (typeof window.electronAPI?.onStartupReady === 'function') {
+      window.electronAPI.onStartupReady(() => {
+        this.appReady = true
+        // 重新加载会话列表（之前引导页期间用户没法操作）
+        this.loadConversations()
+      })
+    } else {
+      // 没有引导流程（dev 或后端已在跑）→ 直接进入主界面
+      this.appReady = true
+    }
+
     const savedTheme = localStorage.getItem('chatme-theme')
     if (savedTheme) {
       this.isDarkTheme = savedTheme === 'dark'

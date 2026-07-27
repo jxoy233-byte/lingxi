@@ -600,7 +600,16 @@ def main():
     # 3. 初始化沙盒池
     _init_sandbox_pool()
 
-    # 4. 启动 MCP 服务
+    # 4. 写入 ready 标记文件（Electron 检测此文件判断 MCP 完全就绪）
+    # 系统临时目录
+    _ready_file = Path(tempfile.gettempdir()) / "chatme-mcp.ready"
+    try:
+        _ready_file.touch()
+        get_logger("mcps").info(f"MCP ready 文件已写入: {_ready_file}")
+    except Exception as e:
+        get_logger("mcps").warning(f"MCP ready 文件写入失败（不影响启动）: {e}")
+
+    # 5. 启动 MCP 服务
     server.run(host="127.0.0.1", port=28211, transport="streamable-http", path="/streamable")
 
 if __name__ == "__main__":

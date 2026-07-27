@@ -41,7 +41,8 @@ export default {
 
   backend: {
     apiUrl: VITE_PROXY_BACKEND,
-    proxyPath: '/chat'
+    proxyPath: '/chat',
+    mcpUrl: 'http://127.0.0.1:28211'
   },
 
   // 路径配置

@@ -228,10 +228,6 @@ OPENAI_PRESENCE_PENALTY=0.0
     "deepseek": { "model_name": "deepseek-chat", "api_key": "...", "base_url": "https://api.deepseek.com/" },
     "vl":       { "model_name": "Qwen3-VL-2B", "base_url": "http://127.0.0.1:8211/api/v1", "local": true }
   },
-  "directories": {
-    "skills_dir": "./skills",
-    "cached_dir": "./cached"
-  },
   "oss": {
     "access_key_id": "...",
     "access_key_secret": "...",

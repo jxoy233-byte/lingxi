@@ -71,7 +71,7 @@ class ChatMeConfig:
                 "version": "v0.0.3",
                 "description": "ChatMe LangGraph Workflow",
                 "host": "127.0.0.1",
-                "port": 8111,
+                "port": 8211,
             },
             "llm_providers": {
                 "openai": {
@@ -81,16 +81,12 @@ class ChatMeConfig:
                 }
             },
             "redis": {
-                "checkpointer_url": "redis://localhost:6388",
-                "state_saver_url": "redis://localhost:6388",
+                "checkpointer_url": "redis://:123456@localhost:6024/0",
+                "state_saver_url": "redis://:123456@localhost:6024/1",
             },
             "mcp_server": {
                 "url": "http://127.0.0.1:28211/streamable",
                 "transport": "streamable_http",
-            },
-            "directories": {
-                "skills_dir": "./skills",
-                "cached_dir": "./cached"
             },
             "oss": {
                 "access_key_id": os.getenv("OSS_ACCESS_KEY_ID", ""),
@@ -321,10 +317,6 @@ class ChatMeConfig:
     def get_redis_state_saver_url(self) -> str:
         """获取 Redis state saver URL"""
         return self.get("redis.state_saver_url", fallback_env="REDIS_STATE_SAVER_URL")
-
-    def get_directory(self, name: str) -> str:
-        """获取目录配置"""
-        return self.get(f"directories.{name}", fallback_env=f"{name.upper()}_DIR")
 
     def get_oss_config(self) -> dict:
         """获取 OSS 配置"""
@@ -580,11 +572,6 @@ def get_redis_checkpointer_url() -> str:
 def get_redis_state_saver_url() -> str:
     """获取 Redis state saver URL"""
     return config.get_redis_state_saver_url()
-
-
-def get_directory(name: str) -> str:
-    """获取目录配置"""
-    return config.get_directory(name)
 
 
 def get_oss_config() -> dict:

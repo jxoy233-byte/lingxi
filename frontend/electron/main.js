@@ -2,6 +2,17 @@ import { app, BrowserWindow, Menu, shell, ipcMain, protocol, net } from 'electro
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { promises as fs } from 'fs'
+import { spawn, exec } from 'child_process'
+import { promisify } from 'util'
+import netLib from 'net'
+import fsSync from 'fs'
+import os from 'os'
+import http from 'http'
+
+import {
+  IS_WIN, IS_MAC, ARCH,
+  venvPythonPath, getProjectRoot, getShellCmd, mcpReadyFilePath
+} from './platform.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -11,6 +22,12 @@ const config = configModule.default
 
 let mainWindow
 let previewWindow = null
+
+// 后端 / MCP 子进程引用（用于退出清理）
+let backendProcess = null
+let mcpProcess = null
+// 项目根（app.whenReady 时算，因为 app.isPackaged 需要 ready）
+let PROJECT_ROOT = null
 
 // 判断是否为开发环境：严格按 NODE_ENV 判定（去掉 || !app.isPackaged，
 // 否则 electron . 永远走 dev 分支，导致 electron:prod 加载不到 dist/）
@@ -419,6 +436,309 @@ function setupSecurityPolicies() {
   })
 }
 
+// ==================== 启动流程：探测 + 修复 + 启动后端 ====================
+
+/**
+ * 端口检测：返回 true 表示端口被占用（说明服务在跑）
+ */
+function isPortInUse(port) {
+  return new Promise(resolve => {
+    const server = netLib.createServer()
+    server.once('error', () => resolve(true))
+    server.once('listening', () => { server.close(); resolve(false) })
+    server.listen(port, '127.0.0.1')
+  })
+}
+
+/**
+ * 流式 exec：把 stdout/stderr 实时回调给渲染层
+ */
+function execStream(cmd, opts = {}) {
+  return new Promise((resolve, reject) => {
+    const child = exec(cmd, { ...opts, maxBuffer: 10 * 1024 * 1024 })
+    if (opts.onLog) {
+      child.stdout?.on('data', d => opts.onLog(d.toString()))
+      child.stderr?.on('data', d => opts.onLog(d.toString()))
+    }
+    child.on('close', code => code === 0 ? resolve() : reject(new Error(`exit ${code}: ${cmd}`)))
+    child.on('error', reject)
+  })
+}
+
+const execAsync = promisify(exec)
+
+// ---------- 单项探测 ----------
+async function probePython() {
+  // win 上 `python3` 不存在，用 `python`
+  const cmd = getShellCmd('python3')
+  try {
+    const { stdout } = await execAsync(`${cmd} --version`)
+    const m = stdout.match(/Python (\d+)\.(\d+)/)
+    if (m && Number(m[1]) >= 3 && Number(m[2]) >= 12) {
+      return { ok: true, detail: stdout.trim() }
+    }
+    return { ok: false, detail: `需要 Python 3.12+（当前 ${stdout.trim()}）` }
+  } catch {
+    return { ok: false, detail: 'Python 未安装' }
+  }
+}
+
+async function probeUv() {
+  try {
+    const { stdout } = await execAsync('uv --version')
+    return { ok: true, detail: stdout.trim() }
+  } catch {
+    return { ok: false, detail: 'uv 未安装' }
+  }
+}
+
+async function probeDocker() {
+  try {
+    // `docker --version` 不验证 daemon；用 `docker info` 真正探测
+    await execAsync('docker info', { timeout: 5000 })
+    return { ok: true, detail: 'Docker daemon 运行中' }
+  } catch {
+    return { ok: false, detail: 'Docker 未启动或未安装' }
+  }
+}
+
+async function probeRedisContainer() {
+  try {
+    const { stdout } = await execAsync(
+      `docker ps --filter name=chatme-redis --format "{{.Names}}"`
+    )
+    const running = stdout.trim() === 'chatme-redis'
+    return { ok: running, detail: running ? '运行中' : '容器未启动' }
+  } catch {
+    return { ok: false, detail: 'Docker 不可用' }
+  }
+}
+
+async function probeSandboxImage() {
+  try {
+    const { stdout } = await execAsync(
+      `docker images chatme-python-sandbox:latest -q`
+    )
+    return { ok: !!stdout.trim(), detail: stdout.trim() ? '镜像就绪' : '镜像未构建' }
+  } catch {
+    return { ok: false, detail: 'Docker 不可用' }
+  }
+}
+
+async function probeVenv() {
+  if (!PROJECT_ROOT) return { ok: false, detail: '项目根未初始化' }
+  const pyPath = venvPythonPath(PROJECT_ROOT)
+  try {
+    await fsSync.promises.access(pyPath)
+    return { ok: true, detail: '依赖已安装' }
+  } catch {
+    return { ok: false, detail: '需运行 uv sync' }
+  }
+}
+
+// ---------- 修复动作（带 onLog 流） ----------
+async function fixUv(onLog) {
+  if (IS_WIN) {
+    // win 装到 %USERPROFILE%\.cargo\bin
+    await execStream(
+      'powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"',
+      { onLog, shell: true }
+    )
+    const cargoBin = path.join(os.homedir(), '.cargo', 'bin')
+    process.env.PATH = `${cargoBin}${path.delimiter}${process.env.PATH}`
+  } else {
+    // mac/linux 装到 ~/.local/bin
+    await execStream(
+      'sh -c "curl -LsSf https://astral.sh/uv/install.sh | sh"',
+      { onLog, shell: true }
+    )
+    const localBin = path.join(os.homedir(), '.local', 'bin')
+    process.env.PATH = `${localBin}${path.delimiter}${process.env.PATH}`
+  }
+}
+
+async function fixRedis(onLog) {
+  await execStream(
+    `docker compose -f "${path.join(PROJECT_ROOT, 'docker-compose.yml')}" up -d redis`,
+    { cwd: PROJECT_ROOT, onLog }
+  )
+}
+
+async function fixSandbox(onLog) {
+  await execStream(
+    `docker compose -f "${path.join(PROJECT_ROOT, 'docker-compose.yml')}" build sandbox`,
+    { cwd: PROJECT_ROOT, onLog }
+  )
+}
+
+async function fixVenv(onLog) {
+  await execStream(
+    'uv sync --frozen',
+    { cwd: path.join(PROJECT_ROOT, 'backend'), onLog, shell: true }
+  )
+}
+
+// ---------- 启动后端 + MCP ----------
+async function startMCP() {
+  const pythonPath = venvPythonPath(PROJECT_ROOT)
+  const backendDir = path.join(PROJECT_ROOT, 'backend')
+
+  // 清理旧的 ready 文件
+  try { fsSync.unlinkSync(mcpReadyFilePath()) } catch {}
+
+  console.log('[mcp] starting:', pythonPath, '-m ChatMe.ChatWorkflow.mcps.server')
+
+  mcpProcess = spawn(pythonPath, ['-m', 'ChatMe.ChatWorkflow.mcps.server'], {
+    cwd: backendDir,
+    env: {
+      ...process.env,
+      PYTHONUNBUFFERED: '1',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+
+  mcpProcess.stdout?.on('data', d => console.log('[mcp]', d.toString().trimEnd()))
+  mcpProcess.stderr?.on('data', d => console.error('[mcp]', d.toString().trimEnd()))
+  mcpProcess.on('exit', (code) => {
+    console.log('[mcp] exited:', code)
+    mcpProcess = null
+  })
+
+  // 等 ready 文件（最多 60s；Redis 起 + 沙盒池初始化可能慢）
+  const deadline = Date.now() + 60_000
+  while (Date.now() < deadline) {
+    if (fsSync.existsSync(mcpReadyFilePath())) {
+      console.log('[mcp] ready 文件已写入:', mcpReadyFilePath())
+      return
+    }
+    if (mcpProcess === null) {
+      throw new Error('MCP 进程已退出，未生成 ready 文件')
+    }
+    await new Promise(r => setTimeout(r, 500))
+  }
+  throw new Error('MCP 启动超时（60s）')
+}
+
+async function startBackend() {
+  const pythonPath = venvPythonPath(PROJECT_ROOT)
+  const backendDir = path.join(PROJECT_ROOT, 'backend')
+
+  console.log('[backend] starting:', pythonPath, 'main.py')
+
+  backendProcess = spawn(pythonPath, ['main.py'], {
+    cwd: backendDir,
+    env: { ...process.env, PYTHONUNBUFFERED: '1' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+
+  backendProcess.stdout?.on('data', d => console.log('[backend]', d.toString().trimEnd()))
+  backendProcess.stderr?.on('data', d => console.error('[backend]', d.toString().trimEnd()))
+  backendProcess.on('exit', (code) => {
+    console.log('[backend] exited:', code)
+    backendProcess = null
+  })
+
+  // 轮询 /health（最多 90s；docling + QwenVL 首次加载可能慢）
+  const deadline = Date.now() + 90_000
+  while (Date.now() < deadline) {
+    try {
+      await new Promise((resolve, reject) => {
+        const req = http.get('http://127.0.0.1:8211/health', res => {
+          res.resume()
+          resolve(res.statusCode === 200)
+        })
+        req.on('error', reject)
+        req.setTimeout(1500, () => req.destroy(new Error('timeout')))
+      })
+      console.log('[backend] /health OK')
+      return
+    } catch {
+      if (backendProcess === null) {
+        throw new Error('后端进程已退出，未通过 /health 检查')
+      }
+      await new Promise(r => setTimeout(r, 1000))
+    }
+  }
+  throw new Error('后端启动超时（90s）/health 未通过')
+}
+
+// ---------- 引导窗口 ----------
+function createSetupWindow() {
+  const win = new BrowserWindow({
+    width: 720,
+    height: 560,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    title: '灵析 启动',
+    backgroundColor: '#ffffff',
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      devTools: isDev,
+      preload: path.join(__dirname, 'preload.js'),
+    },
+  })
+
+  // 引导页路由：dev 走 Vite，prod 走 file:// dist/
+  const envConfig = getEnvironmentConfig()
+  if (envConfig.loadUrl) {
+    // dev/test: Vite dev server，加载根路径，SetUpView 由 App.vue 条件渲染
+    win.loadURL(envConfig.loadUrl)
+  } else {
+    // prod: 直接加载 dist/index.html，SetUpView 由 App.vue 条件渲染
+    win.loadFile(path.join(__dirname, '../dist/index.html'))
+  }
+
+  return win
+}
+
+// ---------- 注册 startup IPC ----------
+function registerStartupIpc(setupWin) {
+  ipcMain.handle('startup:probe-all', async () => {
+    return {
+      python: await probePython(),
+      uv: await probeUv(),
+      docker: await probeDocker(),
+      redis: await probeRedisContainer(),
+      sandbox: await probeSandboxImage(),
+      venv: await probeVenv(),
+    }
+  })
+
+  ipcMain.handle('startup:fix-item', async (e, item) => {
+    const onLog = (msg) => e.sender.send('startup:log', { item, msg })
+    try {
+      switch (item) {
+        case 'uv': await fixUv(onLog); break
+        case 'redis': await fixRedis(onLog); break
+        case 'sandbox': await fixSandbox(onLog); break
+        case 'venv': await fixVenv(onLog); break
+        default: throw new Error(`未知项: ${item}`)
+      }
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+
+  ipcMain.handle('startup:launch', async (e) => {
+    try {
+      await startMCP()
+      await startBackend()
+      // 通知渲染层切到主界面
+      e.sender.send('startup:ready')
+      // 关引导窗 + 开主窗口
+      if (setupWin && !setupWin.isDestroyed()) setupWin.close()
+      await createWindow()
+      setupSecurityPolicies()
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  })
+}
+
 // ==================== 应用生命周期 ====================
 app.whenReady().then(async () => {
   // file:// 协议拦截器（必须在 createWindow 之前注册）
@@ -438,14 +758,62 @@ app.whenReady().then(async () => {
     }
   }
 
-  await createWindow()
-  setupSecurityPolicies()
+  // 算项目根（packaged 时 4 层上溯，dev 时 __dirname 上溯）
+  PROJECT_ROOT = getProjectRoot(app)
+  console.log('[setup] 项目根:', PROJECT_ROOT, '| 平台:', process.platform, ARCH, '| isPackaged:', app.isPackaged)
+
+  // 1. 后端 + MCP 都已在跑？→ 直接进主窗口
+  if (await isPortInUse(8211) && await isPortInUse(28211)) {
+    console.log('[setup] 后端已在跑（端口 8211/28211 占用），跳过引导')
+    await createWindow()
+    setupSecurityPolicies()
+    return
+  }
+
+  // 2. 缺后端 → 显示引导窗口
+  const setupWin = createSetupWindow()
+
+  // 注册 startup 相关 IPC
+  registerStartupIpc(setupWin)
+
+  setupWin.on('closed', () => {
+    // 用户关引导窗且后端没起来 → 退出 app（避免主界面无后端的诡异状态）
+    if (!backendProcess || backendProcess.killed) {
+      console.log('[setup] 引导窗关闭且后端未启动 → app.quit()')
+      app.quit()
+    }
+  })
 })
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit()
   }
+})
+
+/**
+ * 退出清理：杀我们 spawn 的后端/MCP 子进程
+ * ⚠️ 只杀我们自己起的进程；端口已被占（外部进程）的情况**不**杀
+ */
+app.on('will-quit', () => {
+  for (const [name, proc] of [['mcp', mcpProcess], ['backend', backendProcess]]) {
+    if (!proc) continue
+    try {
+      if (IS_WIN) {
+        // win 不支持 SIGTERM，用 taskkill /T 杀整个进程树
+        exec(`taskkill /pid ${proc.pid} /T /F`, () => {})
+      } else {
+        proc.kill('SIGTERM')
+        // 给 3s 软退出，超时强杀
+        setTimeout(() => { try { proc.kill('SIGKILL') } catch {} }, 3000)
+      }
+      console.log(`[cleanup] killed ${name} (pid=${proc.pid})`)
+    } catch (e) {
+      console.error(`[cleanup] failed to kill ${name}:`, e.message)
+    }
+  }
+  // 清理 ready 文件
+  try { fsSync.unlinkSync(mcpReadyFilePath()) } catch {}
 })
 
 app.on('activate', () => {

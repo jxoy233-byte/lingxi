@@ -1,13 +1,16 @@
 <template>
   <!--
-    启动引导页：Electron 主进程检测到后端未启动时，会创建 SetUpView 窗口，
-    引导用户完成环境配置；用户点击"启动应用"且后端就绪后，主进程通过
-    'startup:ready' 事件通知渲染层切换到主界面。
+    双路径（按 isElectron 分流）+ 初始 gate（按 _isInitializing 分流）：
+    - _isInitializing 期间（首次 servicesReady IPC 还没回，约 5-50ms）：只渲染空白底色占位，
+      既不显示主界面也不显示 SetUpView——避免「已知 warm 还要闪一下 SetUpView / 已知 cold 还要闪一下空主界面」。
+    - 拿到结果后：
+      - Electron cold（servicesReady=false）：主界面灰显 + SetUpView 叠加 → bootstrap 完成 → 解除 disabled + SetUpView 淡出
+      - Electron warm（servicesReady=true）/ Web：主界面直接挂载，不再有任何闪烁
   -->
-  <SetUpView v-if="!appReady" />
+  <div v-if="_isInitializing" class="app-loading-bg"></div>
+  <template v-else>
   <div
-    v-else
-    :class="['app-container', { 'dark-theme': isDarkTheme }]"
+    :class="['app-container', { 'dark-theme': isDarkTheme, 'app-disabled': isElectron && !appReady }]"
   >
     <div class="main-layout">
       <Sidebar
@@ -16,6 +19,7 @@
         :active-session-id="currentSessionId"
         :mobile-open="sidebarMobileOpen"
         :active-streaming-sessions="_activeStreamingSessions"
+        :load-error="conversationsLoadError"
         @toggle="toggleSidebar"
         @new-chat="createNewChat"
         @select-conversation="loadConversation"
@@ -140,6 +144,23 @@
         class="checkpoint-overlay"
         @click="showCheckpoints = false"
       />
+
+      <!-- 后端失联 banner：主进程每 10s 探一次 /health + MCP ready，
+           仅在状态变化时推 backend-health-changed。失联时显示顶部条 + 重新连接按钮，
+           用户点「重新连接」后由主进程 kill + restart mcp/backend，banner 自动消失。 -->
+      <div
+        v-if="backendHealth === false"
+        class="backend-health-banner"
+        role="alert"
+      >
+        <span class="banner-icon">⚠️</span>
+        <span class="banner-text">后端服务已断开连接，部分功能不可用</span>
+        <button
+          class="banner-action"
+          :disabled="restartingBackend"
+          @click="handleRestartBackend"
+        >{{ restartingBackend ? '重新连接中...' : '重新连接' }}</button>
+      </div>
     </div>
 
     <ConfirmDialog
@@ -178,6 +199,24 @@
       @theme-change="setTheme"
     />
   </div>
+
+  <!--
+    启动浮窗：仅 Electron 路径 + 主界面还没启用（!appReady）时挂载。
+    包含 3 种状态：
+      - cold start：servicesReady=false，SetUpView 显示「启动应用」按钮
+      - cold start 完成后未勾自动进：servicesReady=true && appReady=false，SetUpView 显示「进入应用」
+      - warm start：appReady=true，SetUpView 不挂载（不闪一下）
+    当后端从 health→crash 时 appReady 重置为 false，SetUpView 重新显示「启动应用」。
+    v-if 切换走淡入淡出过渡，不直接 v-show（v-show 会让 .setup-overlay 的 animation 反复触发）。
+  -->
+  <transition name="setup-fade">
+    <SetUpView
+      v-if="isElectron && !appReady"
+      :services-ready="servicesReady === true"
+      @enter-app="onEnterApp"
+    />
+  </transition>
+  </template>
 </template>
 
 <script>
@@ -224,8 +263,21 @@ export default {
       isDarkTheme: false,
       sidebarCollapsed: false,
       conversations: [],
-      // 启动引导完成标志；为 false 时显示 SetUpView，true 时显示主界面
+      // 加载会话失败时的错误消息（用户可见），空字符串 = 成功或尚未加载
+      conversationsLoadError: '',
+      // 是否在 Electron 环境运行（仅有 electronAPI）；web 永远 false
+      // 控制是否走 servicesReady 状态机 + 渲染 SetUpView 浮窗
+      isElectron: false,
+      // 后端服务就绪状态：null = 首次 IPC 还没回（gate 期间不渲染任何东西，避免闪烁）；
+      // true = 后端可用；false = 后端未启动（cold start，需要走 bootstrap + SetUpView 浮窗）
+      servicesReady: null,
+      // 启动引导完成标志（区分 servicesReady：appReady 表示「主界面启用 + 会话已初始化」，
+      // 后端重启可能让 appReady 重置但 servicesReady 翻 true 时同样需要重 init）
       appReady: false,
+      // 首次 servicesReady 检查还没回来时为 true，期间不渲染主界面也不渲染 SetUpView。
+      // Electron IPC 单次往返通常 < 10ms，最多 50ms 左右，体感几乎不可见；
+      // 但换来「warm start 不闪浮窗 / cold start 不闪空主界面」的干净体验。
+      _isInitializing: true,
       currentSessionId: null,
       messages: [],
       isLoading: false,
@@ -263,23 +315,19 @@ export default {
       _activeStreamingSessions: new Set(),  // 正在流式的 session_id 集合；驱动侧栏小点 + loadConversation 分支判断
       _streamingMessages: new Map(),       // session_id -> 当前 messages 数组引用（与 this.messages 同源）
       _streamingMeta: new Map(),           // session_id -> { aiIndex, responseStartTime, userMessage, lastUserMessage }
-      _streamTimers: new Map()             // session_id -> setInterval id；本地读秒（每 250ms 重算 elapsedMs），让 SSE 事件间隙数字也能跳
+      _streamTimers: new Map(),            // session_id -> setInterval id；本地读秒（每 250ms 重算 elapsedMs），让 SSE 事件间隙数字也能跳
+      // —— 后端健康监测 —— null = 还没拉过；true = 健康；false = 失联 → 显示 banner
+      backendHealth: null,
+      restartingBackend: false,  // 用户点「重新连接」期间 disable 按钮，避免重复触发
+      // appReady 从 false→true 触发的 initConversationState 只跑一次，避免 servicesReady
+      // 反复变化时（比如重启后端）重复初始化会话
+      _conversationInited: false
     }
   },
   mounted() {
-    // 订阅启动完成事件：Electron 主进程检测到后端 ready 后触发
-    // dev 模式下 electronAPI.onStartupReady 不存在（直接进入主界面），用 typeof 守卫
-    if (typeof window.electronAPI?.onStartupReady === 'function') {
-      window.electronAPI.onStartupReady(() => {
-        this.appReady = true
-        // 重新加载会话列表（之前引导页期间用户没法操作）
-        this.loadConversations()
-      })
-    } else {
-      // 没有引导流程（dev 或后端已在跑）→ 直接进入主界面
-      this.appReady = true
-    }
-
+    // 单窗口架构（Electron）：主界面永远 mount，SetUpView 浮窗叠加在 .app-disabled 主界面上方。
+    // Web 端：根本不渲染 SetUpView（直接进主界面），不走 servicesReady 状态机。
+    //        isElectron = !!window.electronAPI 控制两套路径分流。
     const savedTheme = localStorage.getItem('chatme-theme')
     if (savedTheme) {
       this.isDarkTheme = savedTheme === 'dark'
@@ -289,18 +337,71 @@ export default {
     this.isMobile = window.innerWidth <= 600
     window.addEventListener('resize', this.handleResize)
 
-    this.loadConversations()
-
-    // 直接显示新对话界面，不调用 get_conversation 获取会话详情
-    // 延迟初始化：确保 router 完全就绪后再处理 URL 参数
-    this.$nextTick(() => {
-      const initialSessionId = this.$route.params.sessionId
-      if (initialSessionId) {
-        this.loadConversation(initialSessionId)
-      } else {
-        this.createNewChat()
+    if (window.electronAPI?.getServicesReady) {
+      // ===== Electron 路径 =====
+      this.isElectron = true
+      // 拉一次 servicesReady 快照（避免订阅前错过早期事件），然后订阅后续变更。
+      // 路径分流：
+      //   - ready=true（warm）：servicesReady=true，直接 init，SetUpView 永远不渲染（不闪）
+      //   - ready=false（cold）：servicesReady=false，SetUpView 浮窗渲染，主界面灰显
+      window.electronAPI.getServicesReady().then(ready => {
+        this.servicesReady = !!ready
+        this._isInitializing = false
+        if (ready && !this._conversationInited) {
+          this._conversationInited = true
+          this.appReady = true
+          this.$nextTick(() => this.initConversationState())
+        }
+      })
+      // 后续变更：bootstrap 完成 / 后端重启。
+      // payload = { ready, autoEnterFrontend? }：cold 完成时主进程带 autoEnterFrontend，
+      // =true 立刻翻 appReady，=false 保留 SetUpView 等用户点「进入应用」。
+      // warm / restart / crash-to-false 这几条路径只读 ready 字段。
+      window.electronAPI.onServicesReadyChange((payload) => {
+        const ready = !!(payload && payload.ready)
+        const autoEnter = !!(payload && payload.autoEnterFrontend)
+        const wasReady = !!this.servicesReady
+        this.servicesReady = ready
+        // cold start 完成 → ready 翻 true
+        if (ready && !wasReady && !this._conversationInited) {
+          if (autoEnter) {
+            // 勾了自动进：立即翻 appReady 让主界面接管
+            this._conversationInited = true
+            this.appReady = true
+            this.$nextTick(() => this.initConversationState())
+          } else {
+            // 没勾自动进：保持 appReady=false，SetUpView 显示「进入应用」等用户点
+            this.appReady = false
+          }
+        }
+        // 后端从 true 变 false（重启中）：主界面回退到 disabled，SetUpView 重新显示
+        if (!ready && wasReady) {
+          this.appReady = false
+        }
+      })
+    } else {
+      // ===== Web 路径 =====
+      this.isElectron = false
+      this.servicesReady = true
+      this.appReady = true
+      this._isInitializing = false
+      // Web 直接调 initConversationState——不绕道 watcher（避免时序坑）
+      if (!this._conversationInited) {
+        this._conversationInited = true
+        this.$nextTick(() => this.initConversationState())
       }
-    })
+    }
+
+    // 订阅后端健康监测：主进程 10s 探一次，仅在状态变化时推 backend-health-changed；
+    // 首次 mount 拉一次 get-health 拿到「没在推事件」时的当前状态（如一直健康从未变化）。
+    if (window.electronAPI?.getHealth) {
+      window.electronAPI.getHealth().then(h => {
+        if (h && typeof h.backend === 'boolean') this.backendHealth = h.backend
+      })
+      window.electronAPI.onHealthChange(({ backend }) => {
+        this.backendHealth = backend
+      })
+    }
   },
   watch: {
     '$route.params.sessionId'(newSessionId) {
@@ -310,6 +411,19 @@ export default {
       } else if (!newSessionId || newSessionId.trim() === '') {
         this.createNewChat()
       }
+    },
+    // appReady 从 false → true 时主界面从 disabled 变可交互，需要初始化会话状态。
+    // 仅 Electron 路径用：web 在 mounted 里已经直接调过 initConversationState，避免 Vue 3
+    // reactivity 时机问题导致 web 端刷新后 conversations 不加载。
+    // _conversationInited 防反复触发（bootstrap 完成后 servicesReady 反复广播也只 init 一次）。
+    appReady: {
+      handler(ready) {
+        if (ready && !this._conversationInited && this.isElectron) {
+          this._conversationInited = true
+          this.initConversationState()
+        }
+      },
+      immediate: false
     }
   },
   methods: {
@@ -317,10 +431,62 @@ export default {
       this.isDarkTheme = !!isDark
       localStorage.setItem('chatme-theme', this.isDarkTheme ? 'dark' : 'light')
     },
+    /**
+     * 用户在 SetUpView 上点「进入应用」：
+     * 翻 appReady=true 触发 .app-disabled 解除 + initConversationState。
+     * 与 warm path / cold autoEnter=true 同路径（自动翻 + init），只是入口从 IPC 广播
+     * 变成 SetUpView 的主动 emit。
+     */
+    onEnterApp() {
+      if (!this.appReady) {
+        this._conversationInited = true
+        this.appReady = true
+        this.$nextTick(() => this.initConversationState())
+      }
+    },
+    /**
+     * 用户点 banner 上的「重新连接」：调 IPC 让主进程 kill mcp/backend 后串行重启。
+     * 完成后主进程会主动推 backend-health-changed，banner 自动消失；
+     * 失败用 alert 提示（重启通常意味着后端进程死掉，原因多样，没必要做精细错误分类）。
+     */
+    async handleRestartBackend() {
+      if (this.restartingBackend) return
+      this.restartingBackend = true
+      try {
+        const r = await window.electronAPI.restartBackend()
+        if (!r?.ok) {
+          alert('重新连接失败：' + (r?.error || '未知错误'))
+        }
+      } finally {
+        this.restartingBackend = false
+      }
+    },
+    /**
+     * 会话状态初始化：拉会话列表 + 按 URL 决定进历史会话还是新对话。
+     * 仅主窗口调用；引导窗不会初始化会话状态。
+     */
+    initConversationState() {
+      this.loadConversations()
+      this.$nextTick(() => {
+        const initialSessionId = this.$route.params.sessionId
+        if (initialSessionId) {
+          this.loadConversation(initialSessionId)
+        } else {
+          this.createNewChat()
+        }
+      })
+    },
     refreshPage() {
-      // 浏览器/Electron 通用：location.reload() 会重新走 protocol.handle 拦截器，
-      // 把 /chat/* 重新代理到后端，所有 Vue state 重置
-      window.location.reload()
+      // Electron app：走主进程 webContents.reload() 整页硬刷，比 window.location.reload()
+      // 可靠（file:// + protocol.handle 拦截器下，JS 级 reload 偶尔没可见反馈）。
+      // web 端没有 electronAPI → 退回 location.reload()。
+      if (window.electronAPI?.refreshPage) {
+        window.electronAPI.refreshPage()
+      } else {
+        // 浏览器/Electron 通用：location.reload() 会重新走 protocol.handle 拦截器，
+        // 把 /chat/* 重新代理到后端，所有 Vue state 重置
+        window.location.reload()
+      }
     },
     /**
      * 把后端流式事件携带的 elapsed_ms / token_usage 写到 AI 消息上（in-place，Vue 2 响应式）。
@@ -1580,8 +1746,15 @@ export default {
           const data = await response.json()
           // 后端返回完整会话列表，前端一次性展示，CSS 溢出时显示滚动条
           this.conversations = data
+          this.conversationsLoadError = ''
+        } else {
+          // 非 2xx：留个话到 UI 提示用户「后端没起」/「端口被占」等常见原因（否则静默失败用户一脸懵）
+          this.conversationsLoadError = `HTTP ${response.status} ${response.statusText}`
+          console.warn('[conversations] 接口返回非 OK:', this.conversationsLoadError)
         }
       } catch (error) {
+        // 网络层失败（CORS / fetch 本身失败 / JSON 解析错误）—— 静默吞 console 用户看不到
+        this.conversationsLoadError = error?.message || '网络请求失败'
         console.error('加载对话列表失败:', error)
       }
     },
@@ -2856,6 +3029,95 @@ body {
   overflow: hidden;
 }
 
+/*
+ * 首次 servicesReady IPC 等待期间的占位背景色。
+ * Electron IPC 单次往返通常 < 10ms，warm path 用户几乎感觉不到这一帧；
+ * cold path 也只是一闪——比「warm 时 SetUpView 弹一下再消失」「cold 时先露空主界面再叠浮窗」都干净。
+ * 暗色主题下也是这个浅色占位（几十 ms 内看不全，且避免主题判断的额外 IPC），
+ * 主界面亮起时如果是暗色主题会立即接管，看起来跟主界面错位一帧——可接受。
+ */
+.app-loading-bg {
+  position: fixed;
+  inset: 0;
+  background: var(--bg-primary, #f5f5f7);
+}
+
+/*
+ * 启动期主界面灰显 + 禁用交互：后端未就绪时主界面已经在 DOM 里（用户能隐约看到布局），
+ * 但不能点；SetUpView 浮窗叠在上方（z-index 1000），bootstrap 完成后 SetUpView 淡出、
+ * app-disabled 解除，主界面自动 loadConversations。
+ */
+.app-container.app-disabled {
+  pointer-events: none;
+  user-select: none;
+  filter: grayscale(0.3) brightness(0.92);
+  transition: filter 0.3s ease-out;
+}
+
+.app-container:not(.app-disabled) {
+  transition: filter 0.3s ease-out;
+}
+
+/* 后端失联 banner：fixed 贴顶，不挤占 layout 空间 */
+.backend-health-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: rgba(255, 59, 48, 0.95);
+  color: white;
+  font-size: 13px;
+  font-weight: 500;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  animation: bannerSlideDown 0.25s ease-out;
+}
+
+@keyframes bannerSlideDown {
+  from { transform: translateY(-100%); opacity: 0; }
+  to   { transform: translateY(0);     opacity: 1; }
+}
+
+.backend-health-banner .banner-icon {
+  font-size: 16px;
+}
+
+.backend-health-banner .banner-text {
+  flex: 0 1 auto;
+}
+
+.backend-health-banner .banner-action {
+  margin-left: 8px;
+  padding: 4px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #ff3b30;
+  background: white;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.backend-health-banner .banner-action:hover:not(:disabled) {
+  opacity: 0.85;
+}
+
+.backend-health-banner .banner-action:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* 暗色主题下用更柔和的红，避免刺眼 */
+.app-container.dark-theme .backend-health-banner {
+  background: rgba(180, 40, 30, 0.95);
+}
+
 .main-layout {
   display: flex;
   height: 100%;
@@ -3093,5 +3355,19 @@ body {
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--text-secondary);
+}
+
+/*
+ * SetUpView 浮窗淡入淡出：appReady 翻 true 时整组淡出，避免 v-if 突然消失的硬切。
+ * SetUpView 内部已经有 .setup-overlay 自己的 fade-in animation，
+ * 这里用 Vue transition 钩子同步 enter/leave 曲线。
+ */
+.setup-fade-enter-active,
+.setup-fade-leave-active {
+  transition: opacity 0.25s ease-out;
+}
+.setup-fade-enter,
+.setup-fade-leave-to {
+  opacity: 0;
 }
 </style>

@@ -27,7 +27,12 @@
         @update-title="$emit('update-title', $event)"
         @refresh="$emit('refresh-conversation', conv.session_id)"
       />
-      <div v-if="conversations.length === 0" class="empty-state">
+      <div v-if="loadError" class="empty-state load-error">
+        <div>加载对话列表失败</div>
+        <div class="load-error-detail">{{ loadError }}</div>
+        <div class="load-error-hint">请确认后端服务已启动（端口 8211）</div>
+      </div>
+      <div v-else-if="conversations.length === 0" class="empty-state">
         暂无历史对话
       </div>
     </div>
@@ -63,6 +68,11 @@ export default {
       // 正在流式的 session_id Set；由 App.vue 整 Set 替换触发响应式
       type: Set,
       default: () => new Set()
+    },
+    loadError: {
+      // loadConversations 失败时的错误消息（App.vue 写入），空字符串 = 没有错误
+      type: String,
+      default: ''
     }
   },
   data() {
@@ -220,6 +230,25 @@ export default {
   color: var(--text-secondary);
   padding: 20px;
   font-size: 14px;
+}
+
+/* 加载错误态：明确告诉用户「后端没起」而不是显示空白让人猜 */
+.empty-state.load-error {
+  text-align: left;
+  padding: 14px 12px;
+}
+.load-error-detail {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--danger-color, #ff3b30);
+  word-break: break-all;
+  opacity: 0.85;
+}
+.load-error-hint {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  opacity: 0.7;
 }
 
 @media (max-width: 600px) {

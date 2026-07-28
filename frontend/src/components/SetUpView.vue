@@ -1,9 +1,29 @@
 <template>
-  <div class="setup-container">
+  <!--
+    浮窗形式：fixed 全屏 + 半透明 backdrop + 居中卡片。
+    App.vue 的主界面始终在 DOM 里（appReady=false 时灰显禁用），
+    用户点"启动应用" → 主进程广播 servicesReady=true → 浮窗消失，主界面启用。
+  -->
+  <div class="setup-overlay">
+    <div class="setup-backdrop"></div>
     <div class="setup-card">
       <div class="setup-header">
         <h2>灵析 启动配置</h2>
         <p class="subtitle">首次启动需要检测并配置以下依赖项</p>
+      </div>
+
+      <!-- 项目目录行（独立于 items 列表，因为它有专属的「选择目录」按钮） -->
+      <div :class="['check-item', projectRoot.ok ? 'ok' : 'fail']" style="margin-bottom:8px">
+        <span class="icon">{{ projectRoot.ok ? '✓' : '✗' }}</span>
+        <div class="info">
+          <div class="label">项目目录（lingxi/）</div>
+          <div class="detail">{{ projectRoot.detail || '检测中...' }}</div>
+        </div>
+        <div class="action">
+          <button class="btn-fix" @click="pickProjectRoot" :disabled="picking">
+            {{ picking ? '选择中...' : '选择目录' }}
+          </button>
+        </div>
       </div>
 
       <div class="check-list">
@@ -36,20 +56,46 @@
 
       <div class="log-box" ref="logBox">
         <pre v-if="logs">{{ logs }}</pre>
-        <div v-else class="log-placeholder">点击"配置"按钮后，这里会显示实时日志</div>
+        <div v-else class="log-placeholder">点击"启动应用"后，这里会显示自动配置进度</div>
       </div>
+
+      <label class="auto-enter-option">
+        <input
+          v-model="autoEnterFrontend"
+          type="checkbox"
+          :disabled="launching"
+          @change="saveAutoEnterPreference"
+        />
+        <span>后端启动完成后自动进入前端</span>
+      </label>
 
       <div class="actions">
         <button class="btn-secondary" @click="recheck" :disabled="checking || launching">
           {{ checking ? '检测中...' : '重新检测' }}
         </button>
+        <!--
+          主按钮三态：
+          - launching=true：启动中，按钮 disabled 显示「启动中...」
+          - servicesReady=true && !autoEnterFrontend：bootstrap 已完成但用户没勾自动进，
+            显示「进入应用」让用户主动点；emit enter-app 让 App.vue 翻 appReady
+          - 其他：未启动（cold 初始 / 后端挂掉重启），显示「启动应用」
+        -->
         <button
+          v-if="launching"
           class="btn-primary"
-          :disabled="!allOk || launching"
+          disabled
+        >启动中...</button>
+        <button
+          v-else-if="servicesReady && !autoEnterFrontend"
+          class="btn-primary"
+          @click="enterApp"
+        >进入应用</button>
+        <button
+          v-else
+          class="btn-primary"
+          :disabled="!allOk"
           @click="launch"
-        >
-          {{ launching ? '启动中...' : '启动应用' }}
-        </button>
+        >启动应用</button>
       </div>
 
       <div v-if="launchError" class="error-bar">
@@ -62,22 +108,28 @@
 <script>
 export default {
   name: 'SetUpView',
+  // servicesReady 是父级 (App.vue) 持有的主进程 servicesReady 状态；
+  // 通过 prop 下传避免 SetUpView 重复 invoke getServicesReady（避免双源真相漂移）。
+  props: {
+    servicesReady: {
+      type: Boolean,
+      default: false
+    }
+  },
   data() {
     return {
+      // 项目目录独立于 items：必须先确定 lingxi/ 根目录才能做后续
+      projectRoot: { ok: false, detail: '' },
+      picking: false,
+      // UI 只展示 2 项：python 和 docker。
+      // uv / redis / sandbox / venv 都是「docker + python 在」之后由 bootstrap 自动配置的，
+      // 暴露成 4 个单独配置按钮只会徒增操作步骤（一键部署应该真的「一键」）。
       items: [
         {
           id: 'python',
           label: 'Python 3.12+',
           canAutoFix: false,
           downloadUrl: 'https://www.python.org/downloads/',
-          ok: false,
-          detail: '',
-          fixing: false,
-        },
-        {
-          id: 'uv',
-          label: 'uv（Python 包管理）',
-          canAutoFix: true,
           ok: false,
           detail: '',
           fixing: false,
@@ -91,44 +143,36 @@ export default {
           detail: '',
           fixing: false,
         },
-        {
-          id: 'redis',
-          label: 'Redis 容器',
-          canAutoFix: true,
-          ok: false,
-          detail: '',
-          fixing: false,
-        },
-        {
-          id: 'sandbox',
-          label: '代码沙盒镜像',
-          canAutoFix: true,
-          ok: false,
-          detail: '',
-          fixing: false,
-        },
-        {
-          id: 'venv',
-          label: 'Python 依赖（.venv）',
-          canAutoFix: true,
-          ok: false,
-          detail: '',
-          fixing: false,
-        },
       ],
       logs: '',
       checking: false,
       launching: false,
       launchError: '',
+      autoEnterFrontend: false,
     }
   },
   computed: {
     allOk() {
-      return this.items.every(i => i.ok)
+      // 启动按钮可用 = 项目根 + 2 项基础检查都 ok
+      return this.projectRoot.ok && this.items.every(i => i.ok)
     },
   },
+  watch: {
+    // servicesReady 由父级 (App.vue) 通过 prop 下传；这里只追加日志，不重复触发 launch。
+    servicesReady(ready) {
+      if (ready) this.logs += '[启动] ✅ 后端与 MCP 已就绪\n'
+    }
+  },
   async mounted() {
+    if (window.electronAPI?.getStartupPreferences) {
+      const preferences = await window.electronAPI.getStartupPreferences()
+      this.autoEnterFrontend = preferences?.autoEnterFrontend === true
+    }
     await this.recheck()
+    // servicesReady 由 App.vue 持有 + 通过 prop 下传，避免双源真相；这里不再 invoke getServicesReady。
+    if (this.servicesReady) {
+      this.logs += '[启动] ✅ 后端与 MCP 已就绪\n'
+    }
     // 订阅日志流
     if (window.electronAPI?.onStartupLog) {
       window.electronAPI.onStartupLog((data) => {
@@ -140,12 +184,23 @@ export default {
         })
       })
     }
+
+    // 自动启动：用户勾选了"启动完成后自动进入前端" + 服务未就绪 + 探测都通过 → 自动触发 bootstrap。
+    // 勾了 autoEnter 时主进程 bootstrap 完成后会带 autoEnterFrontend=true 广播，App.vue 翻 appReady
+    // 让 SetUpView 卸载；这里只是发起 bootstrap 这一步。
+    if (this.autoEnterFrontend && !this.servicesReady && this.allOk) {
+      this.$nextTick(() => this.launch())
+    }
   },
   methods: {
     async recheck() {
       this.checking = true
       try {
         const results = await window.electronAPI.probeAll()
+        if (results.projectRoot) {
+          this.projectRoot.ok = results.projectRoot.ok
+          this.projectRoot.detail = results.projectRoot.detail || ''
+        }
         this.items.forEach(item => {
           if (results[item.id]) {
             item.ok = results[item.id].ok
@@ -158,29 +213,72 @@ export default {
         this.checking = false
       }
     },
-    async fixOne(item) {
-      item.fixing = true
-      this.logs += `\n[${item.label}] 开始配置...\n`
-      const result = await window.electronAPI.fixItem(item.id)
-      item.fixing = false
-      if (result.ok) {
-        this.logs += `[${item.label}] ✅ 配置完成\n\n`
-        await this.recheck()
-      } else {
-        this.logs += `[${item.label}] ❌ 配置失败：${result.error}\n\n`
+    async pickProjectRoot() {
+      this.picking = true
+      try {
+        const result = await window.electronAPI.pickProjectRoot()
+        if (result.ok) {
+          this.projectRoot.ok = true
+          this.projectRoot.detail = result.projectRoot
+          this.logs += `\n[项目目录] 已选择：${result.projectRoot}\n`
+          // 选了根目录后重新探测 python / docker
+          await this.recheck()
+        } else if (result.error && result.error !== '已取消') {
+          this.logs += `[项目目录] ❌ ${result.error}\n`
+        }
+      } catch (e) {
+        console.error('pickProjectRoot failed:', e)
+        this.logs += `[项目目录] ❌ 选择失败：${e.message}\n`
+      } finally {
+        this.picking = false
       }
     },
+    async saveAutoEnterPreference() {
+      const result = await window.electronAPI.setAutoEnterFrontend(this.autoEnterFrontend)
+      if (!result?.ok) {
+        this.launchError = `保存启动偏好失败：${result?.error || '未知错误'}`
+      }
+    },
+    /**
+     * 触发一键 bootstrap（uv → redis → sandbox → venv → mcp → backend）。
+     * 完成后由主进程 broadcast servicesReady=true，App.vue 翻 appReady=true，
+     * SetUpView 自动消失，主界面 mount + 加载会话。
+     *
+     * 按钮永远只走 bootstrap 这条路径；服务已就绪时按钮 disabled（mounted 期间由
+     * App.vue 的 getServicesReady=true 触发 appReady=true 直接切走，SetUpView 根本不会渲染）。
+     */
     async launch() {
-      this.launching = true
       this.launchError = ''
-      this.logs += '\n[启动] 先启动 MCP 服务，再启动后端...\n'
-      const result = await window.electronAPI.launch()
-      if (!result.ok) {
-        this.launchError = result.error
-        this.logs += `[启动] ❌ 失败：${result.error}\n`
+
+      if (!this.projectRoot.ok) {
+        this.launchError = '请先选择项目目录'
+        return
+      }
+      for (const item of this.items) {
+        if (!item.ok) {
+          this.launchError = `请先配置 ${item.label}`
+          return
+        }
+      }
+
+      this.launching = true
+      this.logs += '\n[启动] 一键部署开始...\n'
+      try {
+        const result = await window.electronAPI.bootstrap({
+          autoEnterFrontend: this.autoEnterFrontend,
+        })
+        if (!result?.ok) {
+          this.launchError = result?.error || '启动失败'
+          this.logs += `[启动] ❌ 失败：${this.launchError}\n`
+        }
+        // 成功路径：主进程会广播 services-ready-changed，App.vue 接管翻 appReady=true。
+        // 这里不需要主动通知；SetUpView 会在 watch 检测到 servicesReady 翻 true 后卸载。
+      } catch (e) {
+        this.launchError = e.message || '启动失败'
+        this.logs += `[启动] ❌ 异常：${this.launchError}\n`
+      } finally {
         this.launching = false
       }
-      // 成功路径：main 进程会触发 startup:ready 事件，App.vue 切到主界面
     },
     getStatusClass(item) {
       if (item.fixing) return 'fixing'
@@ -192,29 +290,70 @@ export default {
       if (item.ok) return '✓'
       return '✗'
     },
+    /**
+     * bootstrap 已完成 + 用户没勾自动进 → 用户手动点「进入应用」。
+     * 通知父级 (App.vue) 翻 appReady=true + initConversationState。
+     * 不要直接翻 this.$root.appReady 之类——App.vue 是真相源，统一走 emit。
+     */
+    enterApp() {
+      this.$emit('enter-app')
+    },
   },
 }
 </script>
 
 <style scoped>
-.setup-container {
+/*
+ * 浮窗形式：fixed 全屏 overlay + 半透明 backdrop + 居中卡片。
+ * 渲染层永远叠加在主界面之上（App.vue 控制 v-if），主界面始终在 DOM 里 mount 着，
+ * bootstrap 完成 → SetUpView 卸载 → 主界面从「灰显禁用」变可交互，零窗口创建/销毁竞态。
+ */
+.setup-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 100vh;
-  background: var(--bg-primary, #f5f5f7);
   padding: 24px;
+  /* 浮窗本身不需要背景色——backdrop 单独做半透明 + 模糊 */
+  background: transparent;
+  pointer-events: auto;
+  animation: setup-fade-in 0.2s ease-out;
+}
+
+.setup-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
 }
 
 .setup-card {
+  position: relative;
+  z-index: 1;
   width: 100%;
   max-width: 640px;
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
   background: var(--bg-secondary, #ffffff);
   border-radius: 12px;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
   padding: 32px;
   display: flex;
   flex-direction: column;
+  animation: setup-card-in 0.25s ease-out;
+}
+
+@keyframes setup-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes setup-card-in {
+  from { opacity: 0; transform: translateY(-8px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0)    scale(1);    }
 }
 
 .setup-header {
@@ -348,6 +487,28 @@ export default {
   font-size: 12px;
   color: #6e6e73;
   font-style: italic;
+}
+
+.auto-enter-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 14px;
+  font-size: 13px;
+  color: var(--text-primary, #1d1d1f);
+  cursor: pointer;
+}
+
+.auto-enter-option input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent-color, #007aff);
+}
+
+.auto-enter-option:has(input:disabled) {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .actions {

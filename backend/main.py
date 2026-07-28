@@ -22,7 +22,7 @@ from ChatMe.LoggingManager.logging_config import set_logger
 
 
 app_config = config.get_app_config()
-version = app_config.get("version", "v0.0.3")
+version = app_config.get("version", "v0.0.4")
 app_name = app_config.get("name", "ChatMe")
 app_description = app_config.get("description", "")
 app_host = app_config.get("host", "127.0.0.1")

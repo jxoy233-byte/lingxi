@@ -30,7 +30,7 @@
 ## 项目特性
 
 - **多智能体工作流**：基于 LangGraph StateGraph 实现 `input_parse → context_assembly → agent_node ↔ tool_execution_node → final_node` 循环
-- **ReAct 流程压缩**：`context_assembly_node` 按完整工具 loop 节拍自动压缩长 ReAct 轨迹，`imp_ipt` 标记做切分锚点，最近 keep 轮原文保留（详见 CLAUDE.md）
+- **ReAct 流程压缩**：`context_assembly_node` 按 4 阶段循环自动压缩长 ReAct 轨迹，后台 LLM 异步推进不阻塞工作流，`imp_ipt` 标记做切分锚点，最近 keep 轮原文保留；`final_node` 用 dynamic system prompt 把 `imp_ipt` 注入 system 层独占最高注意力位（详见 CLAUDE.md）
 - **流式 SSE 响应**：前端通过 EventSource 实时接收 `content` / `reasoning` / `tool_call_*` / `memory_wait_*` 事件
 - **多模态文件解析**：图片（OSS / base64）、文本（CSV / JSON / MD / TXT / XML）、文档（PDF / Word / PowerPoint / Excel），docling + qwen-vl-utils + unstructured
 - **Docker 沙盒执行**：预启动容器池 + tmpfs 隔离，提供安全的 Python 数据分析环境
@@ -71,7 +71,7 @@
 | 桌面端 | Electron 41 + electron-builder 26 |
 | 样式 | CSS Variables + 原生 CSS |
 | Markdown / 数学 | marked + highlight.js + katex |
-| 桌面端关键能力 | `file://` 协议拦截（→ 后端代理）、SSE 流透传、↻ 刷新按钮、多环境切换 |
+| 桌面端关键能力 | `file://` 协议拦截（→ 后端代理）、SSE 流透传、↻ 刷新按钮、多环境切换、**单窗口架构** + SetUpView 浮窗 + autoEnter 三态按钮 |
 | 特性 | 流式 SSE、主题切换、响应式布局、网页预览 |
 
 ## 架构概览
@@ -211,7 +211,7 @@ OPENAI_PRESENCE_PENALTY=0.0
 {
   "app": {
     "name": "ChatMe",
-    "version": "v0.0.3",
+    "version": "v0.0.4",
     "host": "127.0.0.1",
     "port": 8211
   },
@@ -391,13 +391,13 @@ MCP 服务器（`mcps/server.py`，FastMCP 3.x）暴露以下核心工具：
 ```bash
 cd backend
 uv build --wheel
-# 输出: dist/ChatMe-0.0.1-py3-none-any.whl
+# 输出: dist/ChatMe-0.0.4-py3-none-any.whl
 ```
 
 ### 安装 wheel
 
 ```bash
-uv pip install dist/ChatMe-0.0.1-py3-none-any.whl
+uv pip install dist/ChatMe-0.0.4-py3-none-any.whl
 # 安装后 chatme_main 和 chatme_mcp 命令全局可用
 ```
 
@@ -430,12 +430,12 @@ npm run electron:build:win      # Windows NSIS（x64）
 npm run electron:build:linux    # Linux AppImage（x64）
 ```
 
-桌面端通过 `electron-builder` 打包，应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.0.1）在 `frontend/electron/electron.config.js` 中配置。
+桌面端通过 `electron-builder` 打包，应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.0.4）在 `frontend/electron/electron.config.js` 中配置。
 
 **输出位置**：`../release/electron-builder/`（项目根，与 Vite 的 `dist/` / `frontend/` 区分开）：
 - `mac-arm64/灵析.app` — 直接打开
 - `mac/` — x64 .app
-- `灵析-0.0.1-arm64-mac.zip` / `灵析-0.0.1-mac.zip` — 分发包
+- `灵析-0.0.4-arm64-mac.zip` / `灵析-0.0.4-mac.zip` — 分发包
 - `linux-unpacked/` — Linux 解压目录
 - `win-unpacked.exe` — Windows 安装器
 
@@ -443,10 +443,11 @@ npm run electron:build:linux    # Linux AppImage（x64）
 - 只打 zip：`npx electron-builder --mac zip --arm64 --x64`
 - DMG 走 GitHub 直链：`ELECTRON_BUILDER_BINARIES_MIRROR=https://github.com npx electron-builder --mac dmg`
 
-**Electron 核心机制**（详见 `frontend/README.md`）：
+**Electron 核心机制**（详见 [`frontend/README.md`](frontend/README.md)）：
 - `protocol.handle('file', ...)` 在 `app.whenReady()` 内注册，把 `/chat/*` 和 `/static/*` 转发到后端（等价 Vite dev proxy）；其他 `file://` 走白名单校验后从 asar 内 `dist/` 读盘
 - API 转发必须显式带 `method/headers/body + duplex: 'half'`（POST `/chat/` 的 body 否则被丢），SSE 流必须显式 `new Response(upstream.body, ...)` 透传避免被 buffer
 - 多环境由 `NODE_ENV` 严格控制：`development` / `test` / `production` 分别走 Vite dev / Vite dev / 本地 dist；`app.isPackaged` 仅用于决定图标路径来源
+- **单窗口架构 + 启动引导**：始终一个 BrowserWindow，主界面始终在 DOM 里（冷启动未就绪时灰显禁用 + SetUpView 浮窗叠加）。`main.js` 维护模块级 `servicesReady` 状态，bootstrap 完成后 `webContents.send('startup:services-ready-changed', { ready, autoEnterFrontend })` 广播给 `App.vue`；`App.vue` 翻 `appReady` 控制主界面启用 + 调 `initConversationState()`。详见 CLAUDE.md 偏好章节「单窗口架构 + autoEnter 三态按钮」。
 
 ## 开发注意事项
 

@@ -23,7 +23,7 @@ ChatMe（产品名「灵析」Lingxi）是一个基于 LangGraph 的多智能体
 - **桌面端**: Electron 41 + electron-builder 26
 - **样式**: CSS Variables + 原生 CSS
 - **Markdown / 数学**: marked + highlight.js + katex
-- **Electron 关键能力**：`file://` 协议拦截（→ 后端代理等价 Vite dev proxy）、SSE 流透传、↻ 页面刷新按钮（ChatHeader + DataAnalysisTree 共用 SVG path `M20.49 15a9 9 0 1 1-2.12-9.36L23 10`）、多环境切换（dev/test/prod）
+- **Electron 关键能力**：`file://` 协议拦截（→ 后端代理等价 Vite dev proxy）、SSE 流透传、↻ 页面刷新按钮（ChatHeader + DataAnalysisTree 共用 SVG path `M20.49 15a9 9 0 1 1-2.12-9.36L23 10`）、多环境切换（dev/test/prod）、**单窗口架构** + SetUpView 浮窗 + `servicesReady` IPC 状态机 + autoEnter 三态按钮（详见偏好 22）
 - **特性**: 流式 SSE、主题切换、响应式布局、头部刷新按钮
 
 ## 架构
@@ -315,10 +315,24 @@ claude --cron-delete a09d41ec
    - **点别处 / Esc 取消**：`mounted` 绑 `document.addEventListener('click', this.cancelDeleteConfirm)` + `('keydown', this.onKeydown)`；`cancelDeleteConfirm` 用 `!this.$el.contains(e.target)` 防御（避免 button click 被二次处理），`onKeydown` 只在 `Escape` 且 confirming 态才重置；`beforeUnmount` 记得 `removeEventListener` 解绑
    - **App.vue 必保留逻辑**：`deleteConversation(sessionId)` 直接执行的版本**必须**保留 finally 块的三件套清理（`stopStreamTimer` + `_activeStreamingSessions.delete` + `_streamingMessages.delete` + `_streamingMeta.delete` + `new Set(...)` 触发响应式）+ 当前会话切换（关 SSE + `cleanupLoadingState()` + `createNewChat()`）；不要因为去掉弹窗就把 finally 一并删了
    - **emit 契约不变**：Sidebar 的 `@delete-conversation="deleteConversation"`、ConversationItem 的 `emits: ['delete']` 都不用动，只有 App.vue 的 `deleteConversation` 内部从"弹窗 + 确认"变成"直接执行"
+22. **Electron 单窗口架构 + autoEnter 三态按钮**：早期实现是双 BrowserWindow（引导窗 + 主窗），关闭引导窗触发 GPU process 重启 + renderer 崩溃；v0.0.4 改单窗口架构：
+   - **架构**：`main.js` 始终一个 BrowserWindow；主界面永远在 DOM 里（`appReady=false` 时加 `.app-disabled` 灰显禁用），`<SetUpView>` 是浮窗叠加（fixed + z-index 1000 + backdrop-filter 模糊）。完全消除窗口创建/销毁竞态，service 起来后无需创建新窗口。
+   - **状态机**：主进程维护模块级 `let servicesReady = false`；bootstrap 完成后调 `setServicesReady(true, { autoEnterFrontend })` 通过 `webContents.send('startup:services-ready-changed', { ready, autoEnterFrontend })` 单方面广播给 renderer（推 object payload 而非 bool）
+   - **初始 gate**：`App.vue` 新增 `_isInitializing: true` + `servicesReady: null` 兜底 IPC 还没回的窗口期（5-50ms）。`getServicesReady()` 一发返 + 监听 `onServicesReadyChange`，warm/cold/warm-refresh 三条路径一律不闪一下 SetUpView：
+     - warm start：`getServicesReady=true` → 直接进主界面
+     - cold start：`getServicesReady=false` → SetUpView 浮窗显示
+     - warm refresh（`webContents.reload()`）：同 warm path
+   - **三态按钮**：SetUpView 主按钮 v-if 三态：
+     - `launching=true`：显示「启动中...」disabled
+     - `servicesReady=true && !autoEnterFrontend`：显示「进入应用」enabled，emit `enter-app` 让 App.vue 翻 `appReady` + `initConversationState()`
+     - 其他：显示「启动应用」（`!allOk` 时 disabled）
+   - **避免双源真相**：`SetUpView.servicesReady` 是 prop（由 App.vue 下传），不重复 invoke `getServicesReady`；`SetUpView` 只通过 `@enter-app` 通知父级，所有 `appReady` 翻转都在 App.vue 一处
+   - **重启路径**：`restartBackend()` 完成后也调 `setServicesReady(true, { autoEnterFrontend: true })` —— 用户已在 app 里（被踢回 disabled），重启恢复直接交回交互权，不再弹「进入应用」
+   - **失败兜底**：bootstrap catch 块调 `setServicesReady(false)` 回到冷启动态，SetUpView 重新挂载显示「启动应用」重试
 
 ### 代码 / 提交风格
 
-- 提交信息遵循仓库现有风格：`v0.0.1 <说明>`（参考 `git log`）
+- 提交信息遵循仓库现有风格：`v0.0.X <说明>`（参考 `git log`）
 - 不要引入为假设需求而设计的抽象 / 配置项 / fallback
 - 系统边界（用户输入、外部 API）才做校验；内部代码信任框架保证
 - 修改代码前先读相关文件，不读不写

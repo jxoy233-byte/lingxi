@@ -17,26 +17,60 @@ contextBridge.exposeInMainWorld('electronAPI', {
   isTest: () => process.env.NODE_ENV === 'test',
 
   // ===== 启动引导相关（SetUpView 用）=====
-  // 探测全部 6 项环境（python/uv/docker/redis/sandbox/venv）
+  // 单窗口架构：始终一个 BrowserWindow，渲染层根据 servicesReady 决定显示 SetUpView 还是主界面。
+  // 不再区分引导窗口 / 主窗口（也不需要 isSetupWindow 标志）。
+
+  // 探测 3 项基础环境（projectRoot / python / docker）。uv/redis/sandbox/venv
+  // 不在 UI 暴露，bootstrap 阶段自动搞定。
   probeAll: () => ipcRenderer.invoke('startup:probe-all'),
 
-  // 单项修复（uv/redis/sandbox/venv），返回 { ok, error? }；日志通过 onStartupLog 推流
-  fixItem: (item) => ipcRenderer.invoke('startup:fix-item', item),
+  // 当前项目根路径（null 表示尚未定位到）
+  getProjectRoot: () => ipcRenderer.invoke('startup:get-project-root'),
 
-  // 启动后端（MCP 先 → backend 后），返回 { ok, error? }；成功后会触发 onStartupReady
-  launch: () => ipcRenderer.invoke('startup:launch'),
+  // 弹目录选择框手动指定项目根，返回 { ok, projectRoot?, error? }
+  pickProjectRoot: () => ipcRenderer.invoke('startup:pick-project-root'),
 
-  // 订阅实时日志（fix 期间 stdout/stderr 流）
+  // 一键 bootstrap：uv → redis → sandbox → venv → mcp → backend 串行执行。
+  // 完成后主进程 broadcast servicesReady=true，App.vue 翻 appReady=true → SetUpView 自动消失。
+  bootstrap: (options = {}) => ipcRenderer.invoke('startup:bootstrap', options),
+
+  getStartupPreferences: () => ipcRenderer.invoke('startup:get-preferences'),
+  setAutoEnterFrontend: (value) => ipcRenderer.invoke('startup:set-auto-enter', value === true),
+
+  // 订阅实时日志（bootstrap 期间 stdout/stderr 流）
   onStartupLog: (callback) => {
     const handler = (_event, data) => callback(data)
     ipcRenderer.on('startup:log', handler)
   },
 
-  // 订阅启动完成事件（main 进程后端 ready 后触发，App.vue 切到主界面）
-  onStartupReady: (callback) => {
-    const handler = () => callback()
-    ipcRenderer.on('startup:ready', handler)
-  }
+  // 服务就绪状态：renderer 首次 mount 拉一次（避免订阅前错过事件），
+  // 之后订阅 onServicesReadyChange 接收后续变更（bootstrap 完成 / 进程重启）。
+  //   - getServicesReady：返 bool（warm path 拉快照够用）
+  //   - onServicesReadyChange：返 { ready, autoEnterFrontend? }；
+  //     cold start 完成时 main 带 autoEnterFrontend 让 renderer 决定是否立刻翻 appReady；
+  //     autoEnterFrontend=undefined 时 SetUpView 不需要重渲染按钮（warm / false 都是 noop）。
+  getServicesReady: () => ipcRenderer.invoke('startup:get-services-ready'),
+  onServicesReadyChange: (callback) => {
+    const handler = (_event, payload) => callback(payload)
+    ipcRenderer.on('startup:services-ready-changed', handler)
+  },
+
+  // ===== 健康监测（10s 轮询）=====
+  // 拉一次当前状态（首次 mount 用，避免等下一个 10s 周期）
+  getHealth: () => ipcRenderer.invoke('startup:get-health'),
+
+  // 订阅状态变化推送（仅在状态切换时触发，避免每秒无效事件）
+  onHealthChange: (callback) => {
+    const handler = (_event, data) => callback(data)
+    ipcRenderer.on('backend-health-changed', handler)
+  },
+
+  // 用户在 banner 上点「重新连接」：杀 mcp/backend 后串行重启
+  restartBackend: () => ipcRenderer.invoke('startup:restart-backend'),
+
+  // 头部 ↻ 刷新按钮：走主进程 webContents.reload()，比 window.location.reload() 更可靠
+  // （file:// + protocol.handle 拦截器下 JS 级 reload 偶尔没可见反馈）
+  refreshPage: () => ipcRenderer.invoke('app:refresh-page'),
 })
 
 // 暴露 Electron 相关功能

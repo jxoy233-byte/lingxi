@@ -2,7 +2,7 @@
 
 基于 LangGraph 的多智能体数据分析对话系统。支持流式响应、工具调用、对话记忆管理、文档/图片多模态解析，以及基于 Docker 沙盒的安全 Python 代码执行。同时提供 Web 端和 Electron 桌面端两种运行形态。
 
-> AI 协作者请阅读 [`CLAUDE.md`](CLAUDE.md) 获取完整的工作流说明、关键文件、协作偏好与踩坑记录。
+> 贡献者 / 开发者 / AI 协作者请阅读 [`docs/contributing.md`](docs/contributing.md) 与 [`CLAUDE.md`](CLAUDE.md)：前者汇总开发约定、踩坑记录与 AI 自动化工具，后者是 AI 协作者的工作流指南。
 
 ---
 
@@ -11,7 +11,6 @@
 - [项目特性](#项目特性)
 - [界面预览](#界面预览)
 - [技术栈](#技术栈)
-- [架构概览](#架构概览)
 - [工作流](#工作流)
 - [快速开始](#快速开始)
 - [配置说明](#配置说明)
@@ -20,7 +19,6 @@
 - [代码沙盒](#代码沙盒)
 - [MCP 工具](#mcp-工具)
 - [效果展示](#效果展示)
-- [设计文档](#设计文档)
 - [部署打包](#部署打包)
 - [开发注意事项](#开发注意事项)
 - [许可证](#许可证)
@@ -50,61 +48,29 @@
 
 ### 后端
 
-| 模块 | 选型 |
-|------|------|
-| Web 框架 | FastAPI |
-| 工作流引擎 | LangGraph + LangChain |
-| 状态管理 | Redis (checkpointer + state saver) |
-| MCP 工具 | FastMCP 3.x |
-| 代码沙盒 | Docker 容器池 |
-| 文档解析 | docling + qwen-vl-utils + unstructured |
-| 对象存储 | oss2（阿里云 OSS） |
-| 定时任务 | apscheduler |
-| LLM | OpenAI 兼容 API（OpenAI / DeepSeek / 本地 VL） |
-| 包管理 | uv |
+| 模块     | 选型                                       |
+| ------ | ---------------------------------------- |
+| Web 框架 | FastAPI                                  |
+| 工作流引擎  | LangGraph + LangChain                    |
+| 状态管理   | Redis (checkpointer + state saver)       |
+| MCP 工具 | FastMCP 3.x                              |
+| 代码沙盒   | Docker 容器池                               |
+| 文档解析   | docling + qwen-vl-utils + unstructured   |
+| 对象存储   | oss2（阿里云 OSS）                            |
+| 定时任务   | apscheduler                              |
+| LLM    | OpenAI 兼容 API（OpenAI / DeepSeek / 本地 VL） |
+| 包管理    | uv                                       |
 
 ### 前端
 
-| 模块 | 选型 |
-|------|------|
-| Web 框架 | Vue 3 + Vite |
-| 桌面端 | Electron 41 + electron-builder 26 |
-| 样式 | CSS Variables + 原生 CSS |
-| Markdown / 数学 | marked + highlight.js + katex |
-| 桌面端关键能力 | `file://` 协议拦截（→ 后端代理）、SSE 流透传、↻ 刷新按钮、多环境切换、**单窗口架构** + SetUpView 浮窗 + autoEnter 三态按钮 |
-| 特性 | 流式 SSE、主题切换、响应式布局、网页预览 |
-
-## 架构概览
-
-```
-ChatMe/
-├── backend/
-│   ├── ChatMe/
-│   │   ├── APIRouter/                    # FastAPI 路由（/chat /static /api /admin）
-│   │   ├── ChatMeConfig/                 # 配置管理
-│   │   ├── ChatService/                  # 聊天服务层（SSE 流式输出）
-│   │   │   └── FilesLoaders/             # 文件加载与处理
-│   │   ├── ChatWorkflow/                 # LangGraph 工作流核心
-│   │   │   ├── config/                   # 图配置与 prompts
-│   │   │   ├── decorators.py             # node_guard 节点异常统一兜底
-│   │   │   ├── mcps/                     # MCP 工具服务器 + Docker 沙盒
-│   │   │   └── Memory/                   # 长期记忆管理
-│   │   ├── LoggingManager/               # 异步日志
-│   │   └── test/                         # 单元测试
-│   ├── skills/                           # 技能包（Bocha / Exa / Tavily / ImageParser / DataAnalysis）
-│   ├── .chatme/                          # 局部配置（仓库内已含）
-│   ├── pyproject.toml
-│   └── main.py                           # FastAPI 入口
-├── sandbox/                              # 代码沙盒 Docker 镜像（Python 3.12）
-├── frontend/
-│   ├── electron/                         # 主进程 / preload / 配置
-│   ├── src/                              # Vue 组件
-│   └── vite.config.js
-├── docker-compose.yml                    # Redis 服务编排
-├── docker_data/                          # Redis 持久化
-├── docs/                                 # 综合实践文档（详见 [设计文档](#设计文档)）
-└── .env.example
-```
+| 模块            | 选型                                       |
+| ------------- | ---------------------------------------- |
+| Web 框架        | Vue 3 + Vite                             |
+| 桌面端           | Electron 41 + electron-builder 26        |
+| 样式            | CSS Variables + 原生 CSS                   |
+| Markdown / 数学 | marked + highlight.js + katex            |
+| 桌面端关键能力       | `file://` 协议拦截 + SSE 流透传 + 单窗口架构 + autoEnter 启动引导 |
+| 特性            | 流式 SSE、主题切换、响应式布局、网页预览                   |
 
 ## 工作流
 
@@ -116,13 +82,13 @@ ChatMe/
                               final_node → END
 ```
 
-| 节点 | 职责 |
-|------|------|
-| `input_parse_node` | 输入预处理、文件解析（docling / VL）、输入优化，给 `imp_ipt` 打 `additional_kwargs.imp_ipt=True` 标记 |
-| `context_assembly_node` | 上下文组装 + **ReAct 流程压缩** + 中断检查 |
-| `agent_node` | AI 决策，决定调用工具或结束；工具调用超过 20 次会注入 SystemMessage 提示停止 |
-| `tool_execution_node` | 工具执行（搜索 / MCP / Docker 沙盒），由 LangGraph 官方 `ToolNode` 提供 |
-| `final_node` | 最终回复生成（独立 LLM），用 dynamic system prompt 把 `imp_ipt` 注入 system 层，输出带 SUMMARY 标记 |
+| 节点                      | 职责                                                                              |
+| ----------------------- | ------------------------------------------------------------------------------- |
+| `input_parse_node`      | 输入预处理、文件解析（docling / VL）、输入优化，给 `imp_ipt` 打 `additional_kwargs.imp_ipt=True` 标记 |
+| `context_assembly_node` | 上下文组装 + **ReAct 流程压缩** + 中断检查                                                   |
+| `agent_node`            | AI 决策，决定调用工具或结束；工具调用超过 20 次会注入 SystemMessage 提示停止                               |
+| `tool_execution_node`   | 工具执行（搜索 / MCP / Docker 沙盒），由 LangGraph 官方 `ToolNode` 提供                         |
+| `final_node`            | 最终回复生成（独立 LLM），用 dynamic system prompt 把 `imp_ipt` 注入 system 层，输出带 SUMMARY 标记   |
 
 State 定义在 `backend/ChatMe/ChatWorkflow/config/models.py`（`ChatStateCore2` / `FileParseState`）。完整工作流说明、ReAct 压缩实现、关键文件、协作偏好见 [`CLAUDE.md`](CLAUDE.md)。
 
@@ -284,29 +250,29 @@ ChatMe/
 
 ### 聊天接口（`/chat` 前缀）
 
-| 接口 | 方法 | 说明 |
-|------|------|------|
-| `/chat/` | POST | 流式对话（无 session_id 则新建） |
-| `/chat/conversations` | GET | 会话列表 |
-| `/chat/{session_id}/conversation` | GET | 会话详情 |
-| `/chat/{session_id}/title` | GET / PUT | 获取 / 修改会话标题 |
-| `/chat/{session_id}/clear` | DELETE | 删除会话（含聊天记录） |
-| `/chat/{session_id}/backtrack` | POST | 会话回溯 |
-| `/chat/{session_id}/interrupt` | POST | 中断对话 |
-| `/chat/{session_id}/invoke_interrupted/{msg}` | POST | 中断续接对话 |
-| `/chat/{session_id}/upload_file` | POST | 上传文件 |
-| `/chat/cancel_upload_file` | POST | 取消已上传文件 |
-| `/chat/improve_input` | POST | 优化用户输入 |
-| `/chat/file-config` | GET | 获取文件上传配置 |
+| 接口                                            | 方法        | 说明                     |
+| --------------------------------------------- | --------- | ---------------------- |
+| `/chat/`                                      | POST      | 流式对话（无 session_id 则新建） |
+| `/chat/conversations`                         | GET       | 会话列表                   |
+| `/chat/{session_id}/conversation`             | GET       | 会话详情                   |
+| `/chat/{session_id}/title`                    | GET / PUT | 获取 / 修改会话标题            |
+| `/chat/{session_id}/clear`                    | DELETE    | 删除会话（含聊天记录）            |
+| `/chat/{session_id}/backtrack`                | POST      | 会话回溯                   |
+| `/chat/{session_id}/interrupt`                | POST      | 中断对话                   |
+| `/chat/{session_id}/invoke_interrupted/{msg}` | POST      | 中断续接对话                 |
+| `/chat/{session_id}/upload_file`              | POST      | 上传文件                   |
+| `/chat/cancel_upload_file`                    | POST      | 取消已上传文件                |
+| `/chat/improve_input`                         | POST      | 优化用户输入                 |
+| `/chat/file-config`                           | GET       | 获取文件上传配置               |
 
 ### 其它接口
 
-| 接口 | 方法 | 说明 |
-|------|------|------|
-| `/static/cached/{file_path:path}` | GET | 访问 cached 目录静态文件；详见 [静态文件 fallback](#静态文件-fallback) |
-| `/api/v1/chat/completions` | POST | 视觉语言模型服务（本地 Qwen3-VL） |
-| `/admin/cleanup` | POST | 手动触发清理任务 |
-| `/admin/cleanup/status` | GET | 获取清理状态 |
+| 接口                                | 方法   | 说明                                                  |
+| --------------------------------- | ---- | --------------------------------------------------- |
+| `/static/cached/{file_path:path}` | GET  | 访问 cached 目录静态文件；详见 [静态文件 fallback](#静态文件-fallback) |
+| `/api/v1/chat/completions`        | POST | 视觉语言模型服务（本地 Qwen3-VL）                               |
+| `/admin/cleanup`                  | POST | 手动触发清理任务                                            |
+| `/admin/cleanup/status`           | GET  | 获取清理状态                                              |
 
 #### 静态文件 fallback
 
@@ -342,47 +308,22 @@ ChatMe/
 
 MCP 服务器（`mcps/server.py`，FastMCP 3.x）暴露以下核心工具：
 
-| 工具 | 说明 |
-|------|------|
-| `execute_code` | 默认在 Docker 沙盒中执行 Python / Node.js 代码（`use_sandbox=False` 降级到本机 venv） |
-| `execute_command` | 默认在 Docker 沙盒中执行白名单内的 shell 命令（`use_sandbox=False` 降级到本机）；带危险命令检测 |
-| `interrupt` | 中断当前对话 |
-| `get_current_datetime` | 获取当前日期时间 |
+| 工具                     | 说明                                                                   |
+| ---------------------- | -------------------------------------------------------------------- |
+| `execute_code`         | 默认在 Docker 沙盒中执行 Python / Node.js 代码（`use_sandbox=False` 降级到本机 venv） |
+| `execute_command`      | 默认在 Docker 沙盒中执行白名单内的 shell 命令（`use_sandbox=False` 降级到本机）；带危险命令检测    |
+| `interrupt`            | 中断当前对话                                                               |
+| `get_current_datetime` | 获取当前日期时间                                                             |
 
 每个 tool 函数都带 `session_id` 参数。
 
 ## 效果展示
-
-### 数据分析对话效果
 
 下面是一次完整的数据分析请求（让 AI 对清洗好的数据集做 EDA 探索性分析）的输出节选。AI 通过 `execute_code` 工具在 Docker 沙盒中调用 matplotlib / seaborn 生成图表，结果通过 `static/cached/` 路径返回前端渲染：
 
 ![EDA 探索性分析图表](docs/img/对话效果.png)
 
 > 三张图分别为：① AIGC 置信度分数分布直方图（带阈值参考线）② 不同置信度等级下的媒体类型偏好柱状图 ③ 发帖时段 × 星期的热力图（Hour × Weekday）。所有图表由 AI 在沙盒内生成后自动嵌入到回复流中。
-
-### 完整分析输出
-
-下面是一次 AIGC 数据挖掘任务的完整 AI 回复，展示了 agent_node 在多轮工具调用 + 长上下文压缩 + 最终回复生成的完整链路：
-
-![完整分析输出](docs/img/图效果.png)
-
-> 输出包含：① 数据集概览（行数 / 字段数 / 文件大小）② 数据质量报告（缺失率 / 重复值 / 长尾分布）③ 衍生字段说明 ④ 关键发现总结 ⑤ 完整可复用的执行脚本。整套流程通过 ReAct 循环（agent_node ↔ tool_execution_node）驱动，最终在 final_node 用独立 LLM + dynamic system prompt 整合输出。
-
-## 设计文档
-
-`docs/综合实践文档/` 目录下提供了完整的设计资料（**该目录在 `.gitignore` 中，仅在本地存在**）：
-
-| 文件 | 内容 |
-|------|------|
-| `01_需求规格说明书.md` | 需求规格说明书 |
-| `02_概要设计说明书.md` | 概要设计说明书 |
-| `03_详细设计说明书.md` | 详细设计说明书 |
-| `部署图.png` | 系统部署架构图 |
-| `时序图.png` | 关键时序图 |
-| `程序流程图/` | 程序流程图目录 |
-
-每个 `.md` 文件有对应的 `.docx` 版本。如果目录缺失，请从团队渠道获取。
 
 ## 部署打包
 
@@ -433,17 +374,15 @@ npm run electron:build:linux    # Linux AppImage（x64）
 桌面端通过 `electron-builder` 打包，应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.0.4）在 `frontend/electron/electron.config.js` 中配置。
 
 **输出位置**：`../release/electron-builder/`（项目根，与 Vite 的 `dist/` / `frontend/` 区分开）：
+
 - `mac-arm64/灵析.app` — 直接打开
 - `mac/` — x64 .app
 - `灵析-0.0.4-arm64-mac.zip` / `灵析-0.0.4-mac.zip` — 分发包
 - `linux-unpacked/` — Linux 解压目录
 - `win-unpacked.exe` — Windows 安装器
 
-**DMG 镜像问题**：dmg-builder 在 npmmirror 缺包，DMG 阶段会 404。绕过方案：
-- 只打 zip：`npx electron-builder --mac zip --arm64 --x64`
-- DMG 走 GitHub 直链：`ELECTRON_BUILDER_BINARIES_MIRROR=https://github.com npx electron-builder --mac dmg`
-
 **Electron 核心机制**（详见 [`frontend/README.md`](frontend/README.md)）：
+
 - `protocol.handle('file', ...)` 在 `app.whenReady()` 内注册，把 `/chat/*` 和 `/static/*` 转发到后端（等价 Vite dev proxy）；其他 `file://` 走白名单校验后从 asar 内 `dist/` 读盘
 - API 转发必须显式带 `method/headers/body + duplex: 'half'`（POST `/chat/` 的 body 否则被丢），SSE 流必须显式 `new Response(upstream.body, ...)` 透传避免被 buffer
 - 多环境由 `NODE_ENV` 严格控制：`development` / `test` / `production` 分别走 Vite dev / Vite dev / 本地 dist；`app.isPackaged` 仅用于决定图标路径来源
@@ -451,36 +390,7 @@ npm run electron:build:linux    # Linux AppImage（x64）
 
 ## 开发注意事项
 
-### 启动与依赖
-
-1. **MCP 服务器**必须单独启动，首次启动会自动检查 Redis 并清理残留沙盒容器
-2. **Redis** 通过 `docker-compose up -d redis` 启动，端口 6024，密码 `123456`
-3. **代码沙盒**需要先 `docker-compose build sandbox` 构建镜像
-4. **unstructured 首次使用**：CSV / MD / XML 解析会自动下载 NLTK 数据（punkt、averaged_perceptron_tagger 等），需外网环境
-5. **配置脱敏**：`backend/.chatme/config.json` 包含真实 API key，提交时务必脱敏
-
-### 流式响应
-
-前端通过 SSE 实时接收 `content` / `reasoning` / `tool_call_*` / `memory_wait_*` / `error` 事件：
-- `memory_wait_start` / `memory_wait_done` 在新请求发起 / 中断续接 且上一轮记忆任务仍在后台时插入
-- `interrupt` / `done` 事件携带 `memory_status` 字段（`idle` / `pending` / `done` / `failed`）
-
-### AI 协作者约定
-
-工作流实现细节（`imp_ipt` 锚点、ReAct 压缩清空 AIMessage.content + filter 兜底、`@node_guard` 装饰器、`_filter_thinking_content` MiniMax-M3 wrapper（含 `<tool_calls>` / `[<invoke name="cmd">][<command>...]` 7 个变体）、`MemoryManager` per-thread Lock、SandboxPool 池锁整段、Electron `file://` 三件套与图标包外、侧栏 CSS 7 条、流式会话快照 19 条、删除会话行内二次确认（小红叉状态机 + document click / Esc 取消，详见偏好 21）等）见 [`CLAUDE.md`](CLAUDE.md)。新增节点 / 流式 SSE 入口 / 执行方法 / 二次确认交互前必须先读对应章节。
-
-### AI 测试 Agent（多轮对话测试）
-
-`.test_agent/test_agent.md` 是给后续 AI 协作者跑多轮对话测试的完整指南——硬约束（MCP 单调用 ≤280s / 单 batch ≤12 轮）、工具链（首选 Codex IAB 浏览器，备选本地 Chrome + CDP）、DOM 节点 selector、单 batch 完整流程代码、报告生成代码、4 个已确认的真实后端缺陷都在那。**接手后做端到端测试前必须先读这个文件**，不要凭直觉写 Playwright 脚本。已知 4 个真实后端缺陷（测试时遇到是已知问题，不是新 bug）：
-
-1. 跨多轮记忆上限：19+ 轮 R12/R17 失败（IAB 状态丢失，非 LLM）
-2. 优化输入无效：`POST /chat/improve_input` 返回的 `improved_text` 与原文完全相同
-3. 业务复杂题卡死：复杂业务题（T08 类）触发 20+ 分钟无限工具调用循环
-4. IAB 路由状态不稳：新会话 URL 在 R1 后从 `/` 跳到 `/<hash>`，可丢失前端历史
-
-### AI 定时优化 Agent（cron job）
-
-`~/.claude/scheduled_tasks.json` 里的持久化 cron job `a09d41ec` **每小时 :23 自动触发** ChatMe 后端优化 Agent：读 `.chatme/logs/thinking_chain-*.log`，按 ✅/❌ 清单自主优化 prompt / AI 配置（详见 CLAUDE.md "AI 自动化工具 → 定时优化 Agent"）。7 天后自动过期，需要时续期。
+启动 Redis / 后端 / 前端 / 构建沙盒镜像的命令见 [快速开始](#快速开始)。开发侧的额外约定与踩坑（unstructured NLTK 下载、配置脱敏提交规范、流式 SSE 事件类型、桌面端 DMG 镜像绕坑等）见 [`docs/contributing.md`](docs/contributing.md)。
 
 ## 许可证
 

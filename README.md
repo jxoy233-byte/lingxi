@@ -117,12 +117,13 @@ docker-compose up -d redis
 cd backend
 uv sync                                          # 安装依赖
 
-# 启动 MCP 服务器（端口 28211）
+# 启动主服务（端口 8211，stdio 模式下会 fork MCP 子进程）
 # 首次启动会自动：1) 检查 Redis  2) 清理残留沙盒容器  3) 初始化沙盒池
-uv run chatme_mcp                                # 等价于 uv run python -m ChatMe.ChatWorkflow.mcps.server
-
-# 另开终端，启动主服务（端口 8211）
 uv run chatme_main                               # 等价于 uv run python main.py
+
+# 开发模式单独起 MCP（stdio 模式，监听 stdin/stdout）——
+# chatme_main 会自动 fork 它，正常运行不需要手动起
+uv run chatme_mcp                                # 等价于 uv run python -m ChatMe.ChatWorkflow.mcps.server
 ```
 
 ### 2. 启动前端
@@ -180,10 +181,6 @@ OPENAI_PRESENCE_PENALTY=0.0
     "version": "v0.0.4",
     "host": "127.0.0.1",
     "port": 8211
-  },
-  "mcp_server": {
-    "url": "http://127.0.0.1:28211/streamable",
-    "transport": "streamable_http"
   },
   "redis": {
     "checkpointer_url": "redis://:123456@localhost:6024/0",
@@ -306,20 +303,20 @@ ChatMe/
 
 ## MCP 工具
 
-MCP 服务器（`mcps/server.py`，FastMCP 3.x）暴露以下核心工具：
+MCP 服务器（`mcps/server.py`，FastMCP 3.x，stdio transport）暴露以下核心工具：
 
-| 工具                     | 说明                                                                   |
-| ---------------------- | -------------------------------------------------------------------- |
-| `execute_code`         | 默认在 Docker 沙盒中执行 Python / Node.js 代码（`use_sandbox=False` 降级到本机 venv） |
-| `execute_command`      | 默认在 Docker 沙盒中执行白名单内的 shell 命令（`use_sandbox=False` 降级到本机）；带危险命令检测    |
-| `interrupt`            | 中断当前对话                                                               |
-| `get_current_datetime` | 获取当前日期时间                                                             |
+| 工具          | 说明                                                                  |
+| ----------- | ------------------------------------------------------------------- |
+| `code`      | 默认在 Docker 沙盒中执行 Python / Node.js 代码（`use_sandbox=False` 降级到本机 venv）   |
+| `cmd`       | 默认在 Docker 沙盒中执行白名单内的 shell 命令（`use_sandbox=False` 降级到本机）；带危险命令检测         |
+| `interrupt` | 中断当前对话                                                              |
+| `ctime`     | 获取当前日期时间                                                            |
 
-每个 tool 函数都带 `session_id` 参数。
+> **stdio transport**：MCP 由 `chatme_main` 自动 fork 作为子进程，父子通过 stdin/stdout 通信；不需要 port / URL 配置。`session_id` 不再是工具参数 — 客户端 interceptor 自动从 LangGraph runtime 的 `thread_id` 注入，工具函数通过 `current_session_id.get()` 取。
 
 ## 效果展示
 
-下面是一次完整的数据分析请求（让 AI 对清洗好的数据集做 EDA 探索性分析）的输出节选。AI 通过 `execute_code` 工具在 Docker 沙盒中调用 matplotlib / seaborn 生成图表，结果通过 `static/cached/` 路径返回前端渲染：
+下面是一次完整的数据分析请求（让 AI 对清洗好的数据集做 EDA 探索性分析）的输出节选。AI 通过 `code` 工具在 Docker 沙盒中调用 matplotlib / seaborn 生成图表，结果通过 `static/cached/` 路径返回前端渲染：
 
 ![EDA 探索性分析图表](docs/img/对话效果.png)
 

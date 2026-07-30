@@ -8,7 +8,6 @@ from typing import Optional, Dict, Any, AsyncGenerator, List
 
 from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
-from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.graph import StateGraph, END
@@ -21,7 +20,7 @@ from .config.graph_config import get_agent_node_config, get_graph_final_node_con
     get_should_end_node_config, get_react_compact_config
 from .config.models import ChatStateCore2, AIMessageType, FileParseState
 from .Memory.core import MemoryManager
-from .mcps.tools import sub_agent
+from .mcps.session import init_mcp, shutdown_mcp, get_mcp_tools
 from .helpers import get_message_content_string, filter_thinking_content, format_thinking_chain
 from ..LoggingManager.logging_config import (
     get_logger,
@@ -34,10 +33,8 @@ from .decorators import node_guard
 
 async def _inject_session_header(request, handler):
     """
-    MCP tool call interceptor：从 LangGraph runtime.config 拿 thread_id（或 fallback session_id），
-    注入到 X-Session-Id header。MCP server 端 middleware 读这个 header → ContextVar → 工具日志归属。
-
-    单 client 全局共享 + interceptor per-call 注入，无需 per-session client 缓存。
+    MCP tool call interceptor:从 LangGraph runtime.config 拿 thread_id,
+    注入到 args["__session_id"]。server 端 middleware 从 arguments pop 后塞 ContextVar。
     """
     sid = ""
     runtime = getattr(request, "runtime", None)
@@ -48,54 +45,14 @@ async def _inject_session_header(request, handler):
             sid = configurable.get("thread_id") or configurable.get("session_id") or ""
 
     if sid:
-        # override() 返回新实例，不修改原 request（interceptor 协议要求不可变）
-        request = request.override(headers={"X-Session-Id": sid})
+        new_args = dict(request.args or {})
+        new_args["__session_id"] = sid
+        request = request.override(args=new_args)
     return await handler(request)
 
 
-# =========================================================================
-# 共享 MCP client + tools（模块级单例）
-# =========================================================================
-# 为什么模块级：sub_agent 在 tools.py 里独立构建 LangGraph，
-# 需要复用 main agent 同一个 MCP client（同一连接 + 同一 interceptor）。
-# 单条 entry，不是 per-session，永远 1 条 → 不需要 LRU / TTL 清理。
-_mcp_client = None
-_mcp_tools_cache: Optional[List[Any]] = None
-
-
-async def _init_mcp_singleton():
-    """惰性初始化共享 MCP client + tools。ChatWorkflow.ainit 和 tools._get_sub_agent_tools 都调。"""
-    global _mcp_client, _mcp_tools_cache
-    if _mcp_client is not None:
-        return
-
-    try:
-        from ChatMe.ChatMeConfig import get_mcp_config
-        mcp_config = get_mcp_config()
-        core_mcp_config = {
-            'url': mcp_config.get('url', 'http://127.0.0.1:28211/streamable'),
-            'transport': mcp_config.get('transport', 'streamable_http')
-        }
-    except Exception:
-        core_mcp_config = {
-            'url': 'http://127.0.0.1:28211/streamable',
-            'transport': 'streamable_http'
-        }
-
-    _mcp_client = MultiServerMCPClient(
-        {'core_mcp': core_mcp_config},
-        tool_interceptors=[_inject_session_header],
-    )
-    tools = await _mcp_client.get_tools()
-    tools.append(sub_agent)
-    _mcp_tools_cache = tools
-
-
-def get_mcp_tools() -> List[Any]:
-    """返回已初始化的 MCP tools 列表（懒加载）。"""
-    if _mcp_tools_cache is None:
-        raise RuntimeError("MCP tools not initialized yet; call ainit() first or _init_mcp_singleton()")
-    return _mcp_tools_cache
+# MCP session 生命周期管理移到了 mcps/session.py
+# core.py 只持有 interceptor + 在 init_mcps 里调 init_mcp(...)
 
 
 class ChatWorkflow:
@@ -128,7 +85,6 @@ class ChatWorkflow:
         self.graph_process_files = None
         self.checkpointer = None
         self.redis_client = None
-        self.mcp_client = None
         self.memory_manager = None
         self.files_cached_dir = None
 
@@ -165,9 +121,8 @@ class ChatWorkflow:
 
     async def init_mcps(self):
         # 走模块级共享 singleton（sub_agent 也复用同一 client / tools）
-        await _init_mcp_singleton()
-        self.mcp_client = _mcp_client
-        self.tools = _mcp_tools_cache or []
+        await init_mcp(tool_interceptors=[_inject_session_header])
+        self.tools = get_mcp_tools()
 
     async def init_memory_manager(self):
         llm_memory_config, llm_memory_prompt = get_llm_memory_config()

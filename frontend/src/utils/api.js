@@ -37,7 +37,7 @@ async function request(path, options = {}) {
 
 /**
  * 读取当前可编辑配置（密钥脱敏）
- * Returns: { ok, config: { llm_providers, mcp_server, skills } }
+ * Returns: { ok, config: { llm_providers, skills } }
  */
 export async function getConfig() {
   return request('/admin/config', { method: 'GET' })
@@ -45,7 +45,7 @@ export async function getConfig() {
 
 /**
  * 保存配置（白名单校验）
- * @param {Object} update - { llm_providers?, mcp_server?, skills? }
+ * @param {Object} update - { llm_providers?, skills? }
  *   api_key 空字符串表示「不修改该字段」
  * Returns: { ok, applied, restart_required, saved_keys }
  */

@@ -54,24 +54,20 @@ def _get_llm_config():
 
 
 def _get_sub_agent_tools():
-    """获取 sub-agent 可用的工具列表（不含 interrupt）。
+    """获取 sub-agent 可用的工具列表(不含 interrupt)。
 
-    复用 core.py 模块级共享 MCP client（同一连接 + 同一 _inject_session_header interceptor），
-    sid 通过 X-Session-Id header 自动传递，无需在 tool_call args 里手动注入。
+    复用 mcps.session 模块级共享 MCP client(同一连接 + 同一 interceptor)。
     """
     try:
-        from ChatMe.ChatWorkflow.core import get_mcp_tools
+        from ChatMe.ChatWorkflow.mcps.session import get_mcp_tools
 
-        # 触发 lazy init（如果 ChatWorkflow.ainit 还没跑过）
-        # 这里直接拿已 init 的 tools；如果 ChatWorkflow 还没起来，子进程调用会拿到空（不会崩）
         try:
             all_tools = get_mcp_tools()
         except RuntimeError:
-            # 共享 client 还没初始化（MCP server 独立于 ChatWorkflow 启动的场景）
-            logger.warning("MCP 共享 client 未初始化，sub-agent 暂无可用工具")
+            logger.warning("MCP 共享 client 未初始化,sub-agent 暂无可用工具")
             return []
 
-        # 过滤掉 interrupt（主 agent 才有权中断）
+        # 过滤掉 interrupt(主 agent 才有权中断)
         tools = [t for t in all_tools if getattr(t, 'name', None) != 'interrupt']
         return tools
     except Exception as e:

@@ -116,15 +116,6 @@ export function getUserShell() {
   return process.env.SHELL || '/bin/sh'
 }
 
-/**
- * MCP ready 文件路径（Electron 用来判断 MCP 服务完全就绪）
- * - macOS / Linux:  /tmp/chatme-mcp.ready
- * - Windows:        %TEMP%/chatme-mcp.ready
- */
-export function mcpReadyFilePath() {
-  return path.join(os.tmpdir(), 'chatme-mcp.ready')
-}
-
 // ==================== 项目根定位 ====================
 //
 // 设计前提（重要）：app 里**不打包 backend/**。

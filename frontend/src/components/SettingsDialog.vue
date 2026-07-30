@@ -98,27 +98,6 @@
               </div>
             </section>
 
-            <!-- MCP -->
-            <section v-else-if="activeTab === 'mcp'" class="section">
-              <div class="section-header">
-                <h4>MCP Server</h4>
-                <p class="section-desc">MCP 工具服务器。修改后需重启后端。</p>
-              </div>
-              <div class="group">
-                <div class="field">
-                  <label>URL</label>
-                  <input v-model="formConfig.mcp_server.url" type="text" placeholder="http://127.0.0.1:28211/streamable" />
-                </div>
-                <div class="field">
-                  <label>Transport</label>
-                  <select v-model="formConfig.mcp_server.transport">
-                    <option value="streamable_http">streamable_http</option>
-                    <option value="sse">sse</option>
-                  </select>
-                </div>
-              </div>
-            </section>
-
             <!-- Skills -->
             <section v-else-if="activeTab === 'skills'" class="section">
               <div class="section-header">
@@ -225,7 +204,6 @@ export default {
       tabs: [
         { key: 'appearance', label: 'Appearance' },
         { key: 'llm', label: 'Models' },
-        { key: 'mcp', label: 'MCP' },
         { key: 'skills', label: 'Skills' }
       ],
       themeOptions: [
@@ -238,7 +216,6 @@ export default {
       loadError: '',
       formConfig: {
         llm_providers: {},
-        mcp_server: { url: '', transport: 'streamable_http' },
         skills: {}
       },
 
@@ -280,7 +257,6 @@ export default {
         const resp = await getConfig()
         const cfg = JSON.parse(JSON.stringify(resp.config || {}))
         cfg.llm_providers = cfg.llm_providers || {}
-        cfg.mcp_server = cfg.mcp_server || { url: '', transport: 'streamable_http' }
         cfg.skills = cfg.skills || {}
 
         // 脱敏的 api_key 不入 form（masked 串带回会被当新 key 覆盖真值，401）

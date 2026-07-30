@@ -7,6 +7,8 @@ from collections import deque
 from pathlib import Path
 from typing import Optional, Set, Dict, Deque
 
+from ChatMe.LoggingManager.logging_config import get_logger
+
 
 class SandboxPoolTimeoutError(RuntimeError):
     """沙盒池无可用容器（acquire 超时）。RuntimeError 子类，调用方 except Exception 仍能 catch。"""
@@ -37,6 +39,8 @@ class SandboxPool:
     - SANDBOX_MIN_SIZE / SANDBOX_MAX_SIZE / SANDBOX_PER_CONTAINER_CONCURRENCY
     - SANDBOX_CMD_TIMEOUT / SANDBOX_CODE_TIMEOUT
     """
+
+    _logger = get_logger("mcp_server")
 
     def __init__(
         self,
@@ -162,10 +166,10 @@ class SandboxPool:
             ]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             container_id = result.stdout.strip()
-            print(f"[SandboxPool] 创建容器: {container_id}")
+            self._logger.debug(f"[SandboxPool] 创建容器: {container_id}")
             return container_id
         except Exception as e:
-            print(f"[SandboxPool] 创建容器失败: {e}")
+            self._logger.warning(f"[SandboxPool] 创建容器失败: {e}")
             return None
 
     def _is_container_running(self, cid: str) -> bool:
@@ -275,7 +279,7 @@ class SandboxPool:
             try:
                 self._gc_once(IDLE_THRESHOLD_SEC)
             except Exception as e:
-                print(f"[SandboxPool] GC 异常: {e}")
+                self._logger.warning(f"[SandboxPool] GC 异常: {e}")
 
     def _gc_once(self, idle_threshold_sec: float) -> None:
         now = time.monotonic()
@@ -305,7 +309,7 @@ class SandboxPool:
                 self.last_released_ts.pop(cid, None)
                 # 实际销毁
                 self._destroy_container(cid)
-                print(f"[SandboxPool] GC 销毁闲置 temp 容器: {cid}")
+                self._logger.debug(f"[SandboxPool] GC 销毁闲置 temp 容器: {cid}")
 
     # =========================================================================
     # 公共 API：execute / execute_command（同步签名保持不变）
@@ -345,7 +349,7 @@ class SandboxPool:
 
         # 检查容器状态（不健康就重建）
         if not self._is_container_running(cid):
-            print(f"[SandboxPool] 容器 {cid} 不在跑，重建")
+            self._logger.debug(f"[SandboxPool] 容器 {cid} 不在跑，重建")
             self._destroy_container(cid)
             new_cid = self._create_container()
             if not new_cid:
@@ -382,7 +386,7 @@ class SandboxPool:
     def _exec_command_in_container(self, cid: str, command: str, timeout: int) -> str:
         # 检查容器状态（不健康就重建）
         if not self._is_container_running(cid):
-            print(f"[SandboxPool] 容器 {cid} 不在跑，重建")
+            self._logger.debug(f"[SandboxPool] 容器 {cid} 不在跑，重建")
             self._destroy_container(cid)
             new_cid = self._create_container()
             if not new_cid:
@@ -432,7 +436,7 @@ class SandboxPool:
             self.last_released_ts.clear()
         for cid in cids:
             self._destroy_container(cid)
-        print(f"[SandboxPool] shutdown 完成，销毁 {len(cids)} 个容器")
+        self._logger.debug(f"[SandboxPool] shutdown 完成,销毁 {len(cids)} 个容器")
 
     # =========================================================================
     # config 生成（保留原实现）
@@ -447,7 +451,7 @@ class SandboxPool:
         """
         try:
             if not os.path.exists(self.config_path):
-                print(f"[SandboxPool] config.json 不存在: {self.config_path}，跳过抽取")
+                self._logger.debug(f"[SandboxPool] config.json 不存在: {self.config_path}，跳过抽取")
                 return
 
             with open(self.config_path, "r", encoding="utf-8") as f:
@@ -459,6 +463,6 @@ class SandboxPool:
             with open(self.sandbox_config_path, "w", encoding="utf-8") as f:
                 json.dump(sandbox_cfg, f, ensure_ascii=False, indent=2)
             os.chmod(self.sandbox_config_path, 0o600)
-            print(f"[SandboxPool] 已生成 sandbox-only config: {self.sandbox_config_path}")
+            self._logger.debug(f"[SandboxPool] 已生成 sandbox-only config: {self.sandbox_config_path}")
         except Exception as e:
-            print(f"[SandboxPool] 生成 sandbox config 失败: {e}")
+            self._logger.warning(f"[SandboxPool] 生成 sandbox config 失败: {e}")

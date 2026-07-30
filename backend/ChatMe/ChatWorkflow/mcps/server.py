@@ -1,13 +1,8 @@
 """
-智能体的底层自带的核心工具能力
+智能体的底层自带的核心工具能力(FASTMCP 实现,stdio transport 作为 chatme_main 子进程启动)
 
-FASTMCP 实现
-
-tips:
-- session_id 不再作为 MCP 工具的 schema 参数（避免 LLM 误传 / 漏传）
-- session_id 由 client 端通过 HTTP header X-Session-Id 注入
-- SessionHeaderMiddleware 从 header 读取并写入 ContextVar
-- 工具函数从 current_session_id.get() 取 sid（仅用于日志 / 沙盒归属）
+session_id 由 client 通过 tool_interceptor 注入 args["__session_id"],
+middleware 读取后写入 ContextVar,工具函数通过 current_session_id.get() 取值
 """
 
 from contextvars import ContextVar
@@ -20,7 +15,6 @@ import redis
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 import subprocess
-import tempfile
 import os
 import platform
 import re
@@ -51,12 +45,12 @@ current_session_id: ContextVar[str] = ContextVar("current_session_id", default="
 
 
 class SessionHeaderMiddleware(Middleware):
-    """每个 MCP 工具调用请求进来时，从 header 取 X-Session-Id 塞进 ContextVar。
+    """每个 MCP 工具调用请求进来时，从注入的 __session_id 取 sid 塞进 ContextVar。
 
     链路：
-    - client 端 interceptor 从 LangGraph runtime 拿 thread_id → X-Session-Id header
-    - FastMCP transport 把 header 透传到 server
-    - 本中间件读 header → current_session_id.set(sid)
+    - client 端 _inject_session_header 从 LangGraph runtime 拿 thread_id → 注入 args["__session_id"]
+    - FastMCP stdio transport 把 call arguments 透传到 server
+    - 本中间件读 context.message.arguments["__session_id"] → current_session_id.set(sid)
     - 工具函数 current_session_id.get() 取 sid
     - finally reset token 清理，避免泄漏
 
@@ -66,9 +60,9 @@ class SessionHeaderMiddleware(Middleware):
     async def on_call_tool(self, context: MiddlewareContext, call_next):
         sid = ""
         try:
-            from fastmcp.server.dependencies import get_http_request
-            request = get_http_request()
-            sid = request.headers.get("x-session-id", "")
+            # 从 args pop 掉 __session_id,避免 Pydantic 报 unexpected_keyword_argument
+            args = getattr(context.message, "arguments", None) or {}
+            sid = args.pop("__session_id", "") or ""
         except Exception:
             sid = ""
 
@@ -566,51 +560,58 @@ def ctime() -> str:
     return json.dumps(result, ensure_ascii=False)
 
 def _stop_redis():
-    """停止 redis 容器（使用 docker-compose）"""
+    """停止 redis 容器(使用 docker-compose)"""
     try:
         project_root = Path(__file__).parent.parent.parent.parent
-        subprocess.run(
+        result = subprocess.run(
             ["docker-compose", "stop", "redis"],
             cwd=str(project_root),
-            capture_output=True
+            capture_output=True,
+            text=True,
         )
-        logger.info("Redis 服务已停止")
+        if result.returncode == 0:
+            logger.info("Redis 服务已停止")
+        else:
+            logger.warning(f"Redis 停止失败 (exit={result.returncode}): {result.stderr.strip()}")
     except Exception as e:
-        logger.warning(f"Redis 停止失败: {e}")
+        logger.warning(f"Redis 停止异常: {e}")
+
+def _shutdown_resources() -> None:
+    """关闭 sandbox pool + 停 redis,被 signal handler / main finally 复用
+
+    防御:即便 sandbox shutdown 抛异常(比如 print 在 stdout 关闭后写),
+    也要保证 _stop_redis() 跑到 —— redis 跟 sandbox 是独立 cleanup。
+    """
+    if _sandbox_pool:
+        try:
+            _sandbox_pool.shutdown()
+        except Exception as e:
+            logger.warning(f"sandbox shutdown 异常: {e}")
+    _stop_redis()
+
 
 def _signal_handler(signum, frame):
-    """捕获 Ctrl+C 信号，清理容器后退出"""
+    """捕获 Ctrl+C 信号,触发 cleanup 后退出"""
     print("\n收到中断信号，正在关闭沙盒容器...")
-    if _sandbox_pool:
-        _sandbox_pool.shutdown()
-    _stop_redis()
+    _shutdown_resources()
     sys.exit(0)
 
 def main():
-    # 注册信号处理
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
-    # 1. 清理残留沙盒容器
+    # eager init(chatme_main 启动时随 MCP subprocess 一并就位):
+    # redis 通过 docker-compose up -d 启,sandbox 池通过 SandboxPool() 启动。
+    # 长生命周期 stdio session 下只有一个 subprocess,无需 lazy。
     _cleanup_existing_containers()
-
-    # 2. 确保 redis 运行
     _ensure_redis_running()
-
-    # 3. 初始化沙盒池
     _init_sandbox_pool()
 
-    # 4. 写入 ready 标记文件（Electron 检测此文件判断 MCP 完全就绪）
-    # 系统临时目录
-    _ready_file = Path(tempfile.gettempdir()) / "chatme-mcp.ready"
     try:
-        _ready_file.touch()
-        get_logger("mcps").info(f"MCP ready 文件已写入: {_ready_file}")
-    except Exception as e:
-        get_logger("mcps").warning(f"MCP ready 文件写入失败（不影响启动）: {e}")
-
-    # 5. 启动 MCP 服务
-    server.run(host="127.0.0.1", port=28211, transport="streamable-http", path="/streamable")
+        server.run(transport="stdio")
+    finally:
+        # stdio EOF(chatme_main 关闭)/ signal / exception 都会走这里,确保 sandbox + redis 清理
+        _shutdown_resources()
 
 if __name__ == "__main__":
     main()

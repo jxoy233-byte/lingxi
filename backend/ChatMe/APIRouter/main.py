@@ -53,6 +53,8 @@ async def chat_service_lifespan(app: FastAPI):
     logger.info("ChatService 启动成功")
     yield
     chat_service = None
+    from ChatMe.ChatWorkflow.mcps.session import shutdown_mcp
+    await shutdown_mcp()
     logger.info("ChatService 关闭成功")
 
 

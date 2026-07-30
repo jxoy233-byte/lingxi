@@ -84,10 +84,6 @@ class ChatMeConfig:
                 "checkpointer_url": "redis://:123456@localhost:6024/0",
                 "state_saver_url": "redis://:123456@localhost:6024/1",
             },
-            "mcp_server": {
-                "url": "http://127.0.0.1:28211/streamable",
-                "transport": "streamable_http",
-            },
             "oss": {
                 "access_key_id": os.getenv("OSS_ACCESS_KEY_ID", ""),
                 "access_key_secret": os.getenv("OSS_ACCESS_KEY_SECRET", ""),
@@ -303,13 +299,6 @@ class ChatMeConfig:
 
         return result
 
-    def get_mcp_config(self) -> dict:
-        """获取 MCP 服务器配置"""
-        return {
-            "url": self.get("mcp_server.url", fallback_env="MCP_SERVER_URL"),
-            "transport": self.get("mcp_server.transport", fallback_env="MCP_TRANSPORT"),
-        }
-
     def get_redis_checkpointer_url(self) -> str:
         """获取 Redis checkpointer URL"""
         return self.get("redis.checkpointer_url", fallback_env="REDIS_CHECKPOINTER_URL")
@@ -379,7 +368,7 @@ class ChatMeConfig:
     # ========================================================================
 
     # 前端表单允许编辑的顶层 key 白名单；其他节点（app/redis/dirs/oss）禁止修改
-    EDITABLE_TOP_KEYS = ("llm_providers", "mcp_server", "skills")
+    EDITABLE_TOP_KEYS = ("llm_providers", "skills")
 
     # 修改后必须重启后端才能生效的字段（langchain client / mcp client 是常驻对象）
     RESTART_REQUIRED = True
@@ -419,10 +408,6 @@ class ChatMeConfig:
                     cfg_copy["api_key"] = self._mask_secret(cfg_copy["api_key"])
                 llm_copy[name] = cfg_copy
             result["llm_providers"] = llm_copy
-
-        mcp = self.get("mcp_server", {}) or {}
-        if isinstance(mcp, dict):
-            result["mcp_server"] = dict(mcp)
 
         skills = self.get("skills", {}) or {}
         if isinstance(skills, dict):
@@ -478,13 +463,6 @@ class ChatMeConfig:
                         continue
                     current["llm_providers"][prov_name][field] = value
                     saved_keys.append(f"llm_providers.{prov_name}.{field}")
-
-        # === mcp_server ===
-        if "mcp_server" in updates:
-            current.setdefault("mcp_server", {})
-            for field, value in updates["mcp_server"].items():
-                current["mcp_server"][field] = value
-                saved_keys.append(f"mcp_server.{field}")
 
         # === skills ===
         if "skills" in updates:
@@ -557,11 +535,6 @@ config = ChatMeConfig()
 def get_config(key: str, default: Any = None, fallback_env: str = None) -> Any:
     """快捷获取配置"""
     return config.get(key, default, fallback_env)
-
-
-def get_mcp_config() -> dict:
-    """获取 MCP 配置"""
-    return config.get_mcp_config()
 
 
 def get_redis_checkpointer_url() -> str:

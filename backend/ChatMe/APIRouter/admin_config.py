@@ -5,8 +5,8 @@ Settings dialog 后端 API：
   - POST /admin/restart        触发后端重启（BackgroundTasks）
   - GET  /admin/health         健康检查（前端轮询等待重启完成）
 
-所有 LLM/MCP/skills 字段改后必须重启才能生效（langchain client / mcp client
-是常驻对象，运行时替换会污染运行态）。
+所有 LLM/skills 字段改后必须重启才能生效（langchain client 是常驻对象，
+运行时替换会污染运行态）。
 """
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel, Field
@@ -23,7 +23,6 @@ class ConfigUpdate(BaseModel):
     """配置更新 payload — 所有字段可选；api_key 空字符串表示不修改"""
 
     llm_providers: dict | None = Field(default=None, description="LLM providers 配置")
-    mcp_server: dict | None = Field(default=None, description="MCP server 配置")
     skills: dict | None = Field(default=None, description="Skills API keys")
 
 
@@ -43,8 +42,6 @@ async def put_config(update: ConfigUpdate):
     payload = {}
     if update.llm_providers is not None:
         payload["llm_providers"] = update.llm_providers
-    if update.mcp_server is not None:
-        payload["mcp_server"] = update.mcp_server
     if update.skills is not None:
         payload["skills"] = update.skills
 

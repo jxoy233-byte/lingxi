@@ -121,11 +121,12 @@ State 定义在 [`backend/ChatMe/ChatWorkflow/config/models.py`](backend/ChatMe/
 ### 工作流启动入口
 
 ```bash
-# MCP 服务（端口 28211）
-uv run chatme_mcp
-
-# 主服务（端口 8211）
+# 主服务（端口 8211，stdio 模式下会 fork MCP 子进程，无需单独起）
 uv run chatme_main
+
+# 开发模式单独起 MCP 服务（stdio 模式，监听 stdin/stdout ——
+# chatme_main 会自动 fork 它，正常运行不需要手动起）
+uv run chatme_mcp
 ```
 
 ## 前端组件
@@ -203,8 +204,8 @@ uv run chatme_main
 安装 wheel 后全局可用：
 
 ```bash
-chatme_main         # 启动后端主服务（端口 8211）
-chatme_mcp          # 启动 MCP 服务（端口 28211）
+chatme_main         # 启动后端主服务（端口 8211），stdio 模式下 fork MCP 子进程
+chatme_mcp          # 仅开发模式单独起 MCP（stdio 模式，正常运行不需要）
 ```
 
 开发模式（不进 wheel）：

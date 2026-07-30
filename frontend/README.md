@@ -79,12 +79,12 @@ Web 端走 Vite dev server，Electron 端在窗口内嵌同一个 URL 或 `file:
 # 启动 Redis（端口 6024，密码 123456）
 docker-compose up -d redis
 
-# 启动 MCP 服务器（端口 28211）
+# 启动主服务（端口 8211，stdio 模式下自动 fork MCP 子进程）
 cd backend
-uv run chatme_mcp
-
-# 另开终端，启动主服务（端口 8211）
 uv run chatme_main
+
+# 开发模式单独起 MCP（仅手动调试用，正常运行不需要）
+uv run chatme_mcp
 ```
 
 详见根目录 [`README.md`](../README.md)。
@@ -468,7 +468,7 @@ open ~/Downloads/灵析.app
 ### 1. Electron 启动后窗口是空白的
 
 - 检查后端 Redis 是否启动（端口 6024）
-- 检查 MCP 服务器是否启动（端口 28211）
+- 检查 MCP 子进程是否随主服务拉起（stdio 模式：MCP 由 chatme_main 自动 fork，`ps -ef | grep chatme` 应见父子两进程）
 - 检查主服务是否启动（端口 8211）
 - Vite 代理 `/chat` 和 `/static` 到 8211；如改了后端端口，需同步 `vite.config.js` 的 `proxy`
 

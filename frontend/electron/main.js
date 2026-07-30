@@ -10,7 +10,7 @@ import http from 'http'
 
 import {
   IS_WIN, IS_MAC, ARCH,
-  venvPythonPath, resolvePythonForBackend, getShellCmd, mcpReadyFilePath,
+  venvPythonPath, resolvePythonForBackend, getShellCmd,
   discoverProjectRoot, isValidProjectRoot, saveProjectRoot,
   persistProjectRootToShell, execInUserShell, readStartupPreferences,
   saveStartupPreferences
@@ -25,27 +25,28 @@ const config = configModule.default
 let mainWindow
 let previewWindow = null
 
-// 后端 / MCP 子进程引用（封装在 mcpProcRef / backendProcRef 里，配合 killChild 用）
 // 项目根（app.whenReady 时算，因为 app.isPackaged 需要 ready）
 let PROJECT_ROOT = null
 let startupPreferences = { autoEnterFrontend: false }
 
-// 后端 + MCP 是否就绪。主进程单方面维护，broadcast 给 renderer 驱动 view 切换。
+// 后端是否就绪。主进程单方面维护，broadcast 给 renderer 驱动 view 切换。
 // true → 渲染层翻 appReady=true，SetUpView 自动消失，主界面 mount 跑 initConversationState。
 // false → SetUpView 显示，按钮可点。
+//
+// 注：MCP server 在 stdio 模式下作为 chatme_main 的子进程被 fork，跟着 backend
+// 一起 ready / 死掉，不再单独探。
 let servicesReady = false
 
 // ==================== 后端健康监测 ====================
 //
-// 主窗口起来后每 10s 探一次后端 /health + MCP ready 文件：
+// 主窗口起来后每 10s 探一次后端 /health：
 // - 仅在状态变化时推 IPC 给 renderer（10s → 6 次/分钟，对 localhost
 //   几乎零开销，rAF 渲染 + SSE 才是真正大头）
 // - renderer 收到 backend=false 时顶部出 banner + 「重新连接」按钮
-// - 「重新连接」调 IPC 主动 kill + restart mcp/backend（不重启 app）
+// - 「重新连接」调 IPC 主动 kill + restart backend（不重启 app）
 
 let healthMonitorInterval = null
 let lastBackendHealth = null   // null = 还没探过
-let lastMCPHealth = null
 
 function startHealthMonitor() {
   if (healthMonitorInterval) return
@@ -63,17 +64,16 @@ function stopHealthMonitor() {
 }
 
 /**
- * 单次健康检查：并发探 backend + MCP；只有状态变了才推 IPC，避免
+ * 单次健康检查：探 backend；只有状态变了才推 IPC，避免
  * 每 10s 一次无意义的事件风暴（main → renderer）。
  */
 async function runHealthCheck() {
-  const [backendOk, mcpOk] = await Promise.all([checkBackendHealth(), checkMCPHealth()])
-  if (backendOk === lastBackendHealth && mcpOk === lastMCPHealth) return
+  const backendOk = await checkBackendHealth()
+  if (backendOk === lastBackendHealth) return
   lastBackendHealth = backendOk
-  lastMCPHealth = mcpOk
-  console.log(`[health] changed: backend=${backendOk} mcp=${mcpOk}`)
+  console.log(`[health] changed: backend=${backendOk}`)
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('backend-health-changed', { backend: backendOk, mcp: mcpOk })
+    mainWindow.webContents.send('backend-health-changed', { backend: backendOk })
   }
 }
 
@@ -540,19 +540,6 @@ function checkBackendHealth() {
   })
 }
 
-/**
- * MCP 健康检查：MCP server.py 在 sandbox pool 初始化完后写 ready 文件，
- * 读这个文件比探端口可靠——端口可能已 listen 但 pool 还没 ready。
- */
-async function checkMCPHealth() {
-  try {
-    await fsSync.promises.access(mcpReadyFilePath())
-    return true
-  } catch {
-    return false
-  }
-}
-
 // ==================== 子进程生命周期管理 ====================
 //
 // 设计：execStream（fixUv/fixRedis/fixSandbox/fixVenv）启动的子进程
@@ -561,8 +548,8 @@ async function checkMCPHealth() {
 // 任务会变孤儿继续跑、占 CPU 内存 IO，下次启动 app 也清理不掉。
 //
 // 解决：execStream 内部把 child 加进全局 Set，所有退出路径兜底 kill。
-// 注意：这里跟踪的是「shell exec 类的子进程」，MCP / backend 用 spawn
-// 走 mcpProcRef / backendProcRef 那条线，不混在 Set 里。
+// 注意：这里跟踪的是「shell exec 类的子进程」，backend 用 spawn
+// 走 backendProcRef 那条线，不混在 Set 里。
 
 const trackedChildProcesses = new Set()
 let isKillingTracked = false
@@ -586,7 +573,7 @@ async function getShellAugmentedPath() {
 
 /**
  * 给 spawn 子进程的 env 加 PATH 增强（同步版本：假设已经 getShellAugmentedPath 跑过缓存了）。
- * 用于 startMCP / startBackend 这种必须用 spawn 的场景——它们内部 spawn 出的 Python
+ * 用于 startBackend 这种必须用 spawn 的场景——它内部 spawn 出的 Python
  * 还要再 spawn docker / uv 之类的命令，必须继承完整 PATH。
  */
 function withAugmentedEnv(env = process.env) {
@@ -861,7 +848,11 @@ async function fixVenv(onLog) {
   )
 }
 
-// ---------- 启动后端 + MCP ----------
+// ---------- 启动后端 ----------
+//
+// MCP server 在 stdio 模式下作为 chatme_main 的子进程由其内部 fork，
+// Electron 不再单独起 MCP。
+
 /**
  * 杀子进程 + 清全局引用（用于失败兜底）。
  * SIGKILL 而非 SIGTERM——启动阶段进程可能卡在 import 链/IO 阻塞，SIGTERM 不一定响应。
@@ -882,64 +873,7 @@ function killChild(procRef, name) {
     procRef.value = null
   }
 }
-const mcpProcRef = { value: null }      // 替 mcpProcess 存引用，封装 kill
 const backendProcRef = { value: null }  // 替 backendProcess 存引用，封装 kill
-
-async function startMCP(onLog) {
-  const root = requireProjectRoot()
-  const [pythonExe] = resolvePythonForBackend(root)
-  const backendDir = path.join(root, 'backend')
-  // MCP 进程内部还会直接调用 docker / docker-compose；确保它继承用户 shell 的完整 PATH。
-  await getShellAugmentedPath()
-
-  // 清理旧的 ready 文件
-  try { fsSync.unlinkSync(mcpReadyFilePath()) } catch {}
-
-  console.log('[mcp] starting:', pythonExe, '-m ChatMe.ChatWorkflow.mcps.server')
-  onLog?.(`[mcp] starting: ${pythonExe} -m ChatMe.ChatWorkflow.mcps.server\n`)
-
-  const proc = spawn(pythonExe, ['-m', 'ChatMe.ChatWorkflow.mcps.server'], {
-    cwd: backendDir,
-    env: withAugmentedEnv({ ...process.env, PYTHONUNBUFFERED: '1' }),
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
-  mcpProcRef.value = proc
-
-  proc.stdout?.on('data', d => {
-    const msg = d.toString().trimEnd()
-    console.log('[mcp]', msg)
-    onLog?.(msg + '\n')
-  })
-  proc.stderr?.on('data', d => {
-    const msg = d.toString().trimEnd()
-    console.error('[mcp]', msg)
-    onLog?.(msg + '\n')
-  })
-  proc.on('exit', (code) => {
-    console.log('[mcp] exited:', code)
-    if (mcpProcRef.value === proc) mcpProcRef.value = null
-  })
-
-  // 等 ready 文件（最多 60s；Redis 起 + 沙盒池初始化可能慢）
-  const deadline = Date.now() + 60_000
-  try {
-    while (Date.now() < deadline) {
-      if (fsSync.existsSync(mcpReadyFilePath())) {
-        console.log('[mcp] ready 文件已写入:', mcpReadyFilePath())
-        return
-      }
-      if (mcpProcRef.value === null) {
-        throw new Error('MCP 进程已退出，未生成 ready 文件')
-      }
-      await new Promise(r => setTimeout(r, 500))
-    }
-    throw new Error('MCP 启动超时（60s）')
-  } catch (err) {
-    // ⚠️ 失败兜底：杀掉子进程，避免泄漏
-    killChild(mcpProcRef, 'mcp')
-    throw err
-  }
-}
 
 async function startBackend(onLog) {
   const root = requireProjectRoot()
@@ -1025,26 +959,24 @@ function setServicesReady(ready, payload = {}) {
       autoEnterFrontend: payload.autoEnterFrontend,
     })
   }
-  // 健康检查同步更新 banner（之前 backend/mcp 都 false，现在应都 true）
+  // 健康检查同步更新 banner（之前 backend false，现在应都 true）
   if (ready) runHealthCheck()
 }
 
 // ---------- 注册 startup IPC ----------
 /**
- * 主动重启 mcp + backend（用户在 banner 上点「重新连接」时调用）。
+ * 主动重启 backend（用户在 banner 上点「重新连接」时调用）。
  * - 先 SIGKILL 旧子进程（含 taskkill /T /F 杀整个进程树）
- * - 再走 startMCP / startBackend 串行重启
+ * - 再走 startBackend 重启；MCP 子进程跟着 chatme_main 一起重新 fork
  * - 完成后推 servicesReady(true) 给 renderer；autoEnterFrontend=true 是因为用户
  *   已经在 app 里（被踢回 disabled），重启恢复后直接交回交互权，不必再弹「进入应用」按钮。
  *   注意 setServicesReady 内部会去重 + 只在状态翻转时推，重复 restart 不会刷屏。
  * - 失败抛错，由 IPC 兜底返回 { ok: false, error } 让前端给用户反馈
  */
 async function restartBackend() {
-  killChild(mcpProcRef, 'mcp')
   killChild(backendProcRef, 'backend')
   // 给 OS 回收旧 socket / 释放端口的时间（FastAPI 软关闭可能 1-2s 没收完）
   await new Promise(r => setTimeout(r, 500))
-  await startMCP()
   await startBackend()
   // 推 servicesReady 状态（让 renderer 翻 appReady=true + initConversation）+
   // 即时健康检查（让 banner 立即消失）。两者独立：前者解除 disabled，后者驱动 banner。
@@ -1117,12 +1049,14 @@ function registerStartupIpc() {
   /**
    * 一键 bootstrap：用户点"启动应用"后跑这条链路。
    * 1) 装 uv（如果没装）→ 2) 起 redis 容器 → 3) 构沙盒镜像 →
-   * 4) uv sync 装 python 依赖 → 5) 起 MCP → 6) 起后端 → setServicesReady(true)
+   * 4) uv sync 装 python 依赖 → 5) 起后端 → setServicesReady(true)
+   *
+   * MCP server 在 stdio 模式下由 chatme_main 内部 fork，无需单独起。
    *
    * setServicesReady 触发 renderer 翻 appReady=true，SetUpView 自动消失。
    * 单窗口架构下不再需要「切主窗口」步骤，GPU/renderer 资源完全稳定。
    *
-   * 任一步抛错：杀掉所有已起的子进程（不漏 mcp/backend 孤儿）+ 错误回给前端
+   * 任一步抛错：杀掉所有已起的子进程（不漏 backend 孤儿）+ 错误回给前端
    */
   ipcMain.handle('startup:bootstrap', async (e, options = {}) => {
     const autoEnterFrontend = options.autoEnterFrontend === true
@@ -1160,12 +1094,7 @@ function registerStartupIpc() {
       }
       onLog('venv', '✅ Python 依赖就绪\n')
 
-      // 5. MCP
-      onLog('mcp', '正在启动 MCP 服务...\n')
-      await startMCP((m) => onLog('mcp', m))
-      onLog('mcp', '✅ MCP 就绪\n')
-
-      // 6. backend
+      // 5. backend
       onLog('backend', '正在启动后端服务（首次加载 docling/QwenVL 可能较慢）...\n')
       await startBackend((m) => onLog('backend', m))
       onLog('backend', '✅ 后端就绪\n')
@@ -1177,8 +1106,7 @@ function registerStartupIpc() {
       setServicesReady(true, { autoEnterFrontend })
       return { ok: true }
     } catch (err) {
-      // 失败兜底：杀掉所有已起的子进程，避免 mcp/backend 泄漏
-      killChild(mcpProcRef, 'mcp')
+      // 失败兜底：杀掉所有已起的子进程，避免 backend 泄漏
       killChild(backendProcRef, 'backend')
       // 兜底：杀掉 tracked shell 子进程（理论上 fixXxx 失败时子进程已 close，
       // 杀不到；但保险起见再清一次，防止某步没正确 unregister）
@@ -1205,14 +1133,13 @@ function registerStartupIpc() {
   /**
    * 健康监测 IPC：
    * - get-health：renderer 首次 mount 时拉一次当前状态（避免等下一个 10s 周期才更新 banner）
-   * - restart-backend：用户在 banner 上点「重新连接」时主动 kill + restart mcp/backend
+   * - restart-backend：用户在 banner 上点「重新连接」时主动 kill + restart backend
    * 状态变化走 mainWindow.webContents.send('backend-health-changed', ...) push，无需 renderer 轮询
    */
   ipcMain.handle('startup:get-health', async () => {
-    const [backend, mcp] = await Promise.all([checkBackendHealth(), checkMCPHealth()])
+    const backend = await checkBackendHealth()
     lastBackendHealth = backend
-    lastMCPHealth = mcp
-    return { backend, mcp }
+    return { backend }
   })
 
   ipcMain.handle('startup:restart-backend', async () => {
@@ -1266,11 +1193,10 @@ app.whenReady().then(async () => {
   // 探测当前服务状态。已健康时直接置 servicesReady=true，App.vue 翻 appReady=true
   // 直接进主界面，SetUpView 不会渲染。autoEnterFrontend 现在由 SetUpView 消费，
   // 用来自动触发 bootstrap；这里不再分流到 setup 窗口。
-  const [backendOk, mcpOk] = await Promise.all([checkBackendHealth(), checkMCPHealth()])
+  const backendOk = await checkBackendHealth()
   lastBackendHealth = backendOk
-  lastMCPHealth = mcpOk
   console.log(
-    `[setup] 后端状态 backend=${backendOk}, mcp=${mcpOk}, ` +
+    `[setup] 后端状态 backend=${backendOk}, ` +
     `autoEnter=${startupPreferences.autoEnterFrontend}`
   )
 
@@ -1284,7 +1210,7 @@ app.whenReady().then(async () => {
   // 服务已健康 → 同步置 servicesReady=true，触发 SetUpView 消失。
   // 这必须在 registerStartupIpc() 之后（renderer 已能收到事件），且在 createWindow 之后（renderer 已挂载）。
   // warm path 总是 autoEnter=true（用户已经在 app 里了，无需等点「进入应用」）。
-  if (backendOk && mcpOk) {
+  if (backendOk) {
     setServicesReady(true, { autoEnterFrontend: true })
   }
 })
@@ -1296,49 +1222,57 @@ app.on('window-all-closed', () => {
 })
 
 /**
- * 退出清理：杀我们 spawn 的后端/MCP 子进程 + tracked shell 子进程
- * ⚠️ 只杀我们自己起的进程；端口已被占（外部进程）的情况**不**杀
+ * 退出清理:杀我们 spawn 的后端子进程 + tracked shell 子进程
+ * ⚠️ 只杀我们自己起的进程;端口已被占(外部进程)的情况**不**杀
+ * MCP 子进程是 chatme_main 的子进程,跟着 backend 一起收尸,不需要单独处理。
+ *
+ * 关键:必须给 backend 发 SIGTERM(软退出)而不是 SIGKILL(强杀),
+ * 否则 chatme_main 没机会跑 lifespan cleanup → MCP subprocess / sandbox / redis 全残留。
  */
-app.on('will-quit', () => {
+app.on('will-quit', (event) => {
   // 0. 停止健康监测定时器，避免跑空检查 + IPC 到已销毁的 webContents
   stopHealthMonitor()
 
-  // 1. tracked shell 子进程（docker build / uv sync / redis up）—— SIGKILL 强杀
+  // 1. tracked shell 子进程(docker build / uv sync / redis up)—— SIGKILL 强杀
   killTrackedChildren('will-quit')
 
-  // 2. spawn 出来的 mcp / backend —— SIGTERM 软退出 + 3s 后 SIGKILL
-  for (const [name, ref] of [['mcp', mcpProcRef], ['backend', backendProcRef]]) {
-    const proc = ref.value
-    if (!proc) continue
+  // 2. spawn 出来的 backend —— SIGTERM 软退出,等真正退出再 app.exit()
+  const proc = backendProcRef.value
+  if (proc) {
+    event.preventDefault()  // 推迟 Electron 退出,等 backend 自然死
     try {
       if (IS_WIN) {
-        // win 不支持 SIGTERM，用 taskkill /T 杀整个进程树
         exec(`taskkill /pid ${proc.pid} /T /F`, () => {})
       } else {
         proc.kill('SIGTERM')
-        // 给 3s 软退出，超时强杀
-        setTimeout(() => { try { proc.kill('SIGKILL') } catch {} }, 3000)
       }
-      console.log(`[cleanup] killed ${name} (pid=${proc.pid})`)
+      console.log(`[cleanup] sent SIGTERM to backend (pid=${proc.pid})`)
+      // 等 backend 退出(最长 5s),超时强杀
+      const exitTimeout = setTimeout(() => {
+        try { proc.kill('SIGKILL') } catch {}
+      }, 5000)
+      proc.once('exit', () => {
+        clearTimeout(exitTimeout)
+        console.log('[cleanup] backend exited')
+        backendProcRef.value = null
+        app.exit(0)
+      })
     } catch (e) {
-      console.error(`[cleanup] failed to kill ${name}:`, e.message)
+      console.error(`[cleanup] failed to kill backend:`, e.message)
+      app.exit(0)
     }
   }
-  // 清理 ready 文件
-  try { fsSync.unlinkSync(mcpReadyFilePath()) } catch {}
 })
 
 /**
- * before-quit：用户触发退出（Cmd+Q / app.quit）时第一时间杀 tracked 子进程，
- * 不等 will-quit，避免在 will-quit 之前子进程已经把父进程当 orphan 处理掉。
+ * before-quit:用户触发退出(Cmd+Q / app.quit)时第一时间杀 tracked shell 子进程,
+ * 不等 will-quit,避免在 will-quit 之前子进程已经把父进程当 orphan 处理掉。
+ *
+ * 注意:这里**不**杀 backend —— 留给 will-quit 的 SIGTERM 软退出路径,
+ * 让 chatme_main 有机会跑 lifespan cleanup(MCP subprocess / sandbox / redis)。
  */
 app.on('before-quit', () => {
   killTrackedChildren('before-quit')
-  // 可控退出必须同步清掉由 App 启动的常驻服务。backend 会加载 VL 模型，不能在
-  // macOS 无窗口状态下继续占内存；Windows 使用同步 taskkill，确保 Electron 退出前完成。
-  killChild(mcpProcRef, 'mcp')
-  killChild(backendProcRef, 'backend')
-  try { fsSync.unlinkSync(mcpReadyFilePath()) } catch {}
 })
 
 /**

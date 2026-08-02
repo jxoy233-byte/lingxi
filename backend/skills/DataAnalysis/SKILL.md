@@ -107,7 +107,22 @@ cached/{sid}/data_analysis/{gen_xxx}/
 └── _meta.json   ← generation 计数
 ```
 
-## ⚠️ 不要做
+## 数据库分析能力（按需动态加载）
+
+本 skill 默认不展示数据库相关细节。DataAnalysis agent 只在用户提到数据库、SQL、数据表、MySQL、PostgreSQL、MongoDB、SQLite 等关键词时，才按下面的方式动态加载数据库模块文档。
+
+```python
+cmd("cat /skills/DataAnalysis/database/SKILL.md")
+```
+
+加载完成后，数据库配置、只读查询、schema 探索、SQL/MongoDB 示例、结果落盘、SQL 方言选择等全部由 `skills/DataAnalysis/database/SKILL.md` 提供。本 skill 不在此处复制粘贴数据库相关函数和示例，避免占用上下文 token。
+
+加载数据库子文档后再继续后续步骤：检查 `list_database_configs()`、必要时中断询问用户、调用 `save_database_config()`、用 `query_sql()` / `query_mongo()` 探索结构与抽取数据、最后把结果转成 `pandas.DataFrame` 并交给本 skill 的 `ChatDataAnalysisFormat` 落盘和分析。
+
+如果用户的问题与数据库无关，不要加载该子文档。
+
+
+
 
 - **不要重复 `ChatDataAnalysisFormat(session_id)`** 或重复访问 `da.output_dir`（会复用同一 `gen_001`，不自增）
 - **不要绕过 `da.save_*` 直接 `open()` 写文件**（绕过 generation 管理 + 路径校验）

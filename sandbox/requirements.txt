@@ -20,6 +20,11 @@ networkx
 requests
 beautifulsoup4
 
+# 数据库数据分析
+pymysql
+psycopg[binary]
+pymongo
+
 # Excel解析、图片、模板引擎
 lxml
 openpyxl

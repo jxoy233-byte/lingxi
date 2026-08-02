@@ -268,6 +268,19 @@
                 <polyline points="20 6 9 17 4 12"/>
               </svg>
             </button>
+            <button
+              v-if="canExportTurn"
+              class="action-button"
+              :disabled="exporting"
+              @click="exportTurn"
+              :title="exporting ? '导出中…' : '导出到本轮为止的对话（OpenAI 格式 + 软件备份）'"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="7 10 12 15 17 10"/>
+                <line x1="12" y1="15" x2="12" y2="3"/>
+              </svg>
+            </button>
             <button v-if="isInterrupted && isLatestAiMessage && (isInterruptedSessionId === currentSessionId || isInterruptedSessionId === pendingInterruptSessionId)" class="action-button resume-action" @click="$emit('resume')" title="续接对话">
               <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <polygon points="5 3 19 12 5 21 5 3"/>
@@ -470,7 +483,9 @@ export default {
       previewFile: {},
       // 引用按钮浮动状态
       quoteButtonVisible: false,
-      quoteButtonPos: { top: 0, left: 0 }
+      quoteButtonPos: { top: 0, left: 0 },
+      // 导出本轮按钮：防连点
+      exporting: false
     }
   },
   mounted() {
@@ -497,6 +512,16 @@ export default {
       if (!this.message || this.message.role !== 'ai') return false
       if (this.message.error) return false
       return this.metricsElapsedSec > 0 || this.metricsTokenTotal > 0
+    },
+    /**
+     * 是否显示「导出到本轮」按钮：仅 AI 消息 + 非流式中 + 有 checkpoint_id（说明后端已落盘）
+     * 流式中 checkpoint 还没生成（done 事件才写），避免点了 404。
+     */
+    canExportTurn() {
+      if (!this.message || this.message.role !== 'ai') return false
+      if (this.message.streaming) return false
+      if (this.message.error) return false
+      return !!this.message.checkpointId
     },
     metricsElapsedSec() {
       // 优先用后端权威 elapsedMs（毫秒）；fallback 到 responseTime（秒）
@@ -1809,6 +1834,53 @@ export default {
       } catch (err) {
         console.error('复制失败:', err)
       }
+    },
+
+    /**
+     * 导出到本轮为止的完整对话历史。
+     * 调后端 /chat/{sid}/export/turn/{checkpoint_id} 拿 ZIP（openai.json + chatme.json）下载。
+     */
+    async exportTurn() {
+      if (!this.canExportTurn || this.exporting) return
+      const cid = this.message.checkpointId
+      const sid = this.currentSessionId
+      if (!cid || !sid) {
+        console.warn('[exportTurn] missing checkpointId or sessionId')
+        return
+      }
+      this.exporting = true
+      try {
+        const resp = await fetch(`/chat/${sid}/export/turn/${encodeURIComponent(cid)}`)
+        if (!resp.ok) {
+          const detail = await resp.text().catch(() => '')
+          alert(`导出失败：${resp.status} ${detail || resp.statusText}`)
+          return
+        }
+        const blob = await resp.blob()
+        const filename = this._filenameFromResponse(resp) || `chatme_export_${sid.slice(0, 8)}.zip`
+        this._downloadBlob(blob, filename)
+      } catch (e) {
+        console.error('[exportTurn] failed:', e)
+        alert(`导出失败：${e?.message || e}`)
+      } finally {
+        this.exporting = false
+      }
+    },
+    _downloadBlob(blob, filename) {
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      a.style.display = 'none'
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+    },
+    _filenameFromResponse(resp) {
+      const cd = resp.headers.get('content-disposition') || ''
+      const m = /filename="?([^";]+)"?/i.exec(cd)
+      return m ? m[1] : ''
     },
 
     async copyUserMessage() {

@@ -37,6 +37,10 @@
 - **节点异常统一兜底**：`@node_guard` 装饰器包住所有 LangGraph 节点，异常后 SSE 外层统一返回 `error` 事件
 - **OSS 对象存储**：阿里云 OSS，图片 / 文件上传后通过 URL 直接访问
 - **桌面端打包**：Electron 41 + electron-builder 26 多平台打包，含 `file://` 协议拦截器等价 Vite dev proxy、↻ 刷新按钮、网页预览窗口
+- **数据库分析**：DataAnalysis skill 支持 MySQL / SQLite / PostgreSQL / MongoDB 只读查询（agent 在 `data_analysis/` 工作树模式下可主动调用 `query_sql` / `query_mongo`，配置跨会话保存在 `skills/DataAnalysis/database/.runtime/`）
+- **一键导出**：
+  - 文件树「会话文件」面板头部的 ⬇ / 👁 按钮把 `data_analysis/` 产物打包成 ZIP 或单文件 HTML 预览（marked.js + mermaid.js CDN，PNG/SVG 转 base64 内嵌，CSV/JSON 转 HTML 表格）
+  - AI 消息气泡下方按钮排的 ⬇ 「导出到本轮」按钮，截至该 checkpoint 导出 OpenAI Chat Completions 格式 JSON + 自家完整 state 备份 JSON（ZIP 下载，后续可恢复）
 
 ## 界面预览
 
@@ -178,7 +182,7 @@ OPENAI_PRESENCE_PENALTY=0.0
 {
   "app": {
     "name": "ChatMe",
-    "version": "v0.0.4",
+    "version": "v0.1.0",
     "host": "127.0.0.1",
     "port": 8211
   },
@@ -206,7 +210,7 @@ OPENAI_PRESENCE_PENALTY=0.0
 ChatMe/
 ├── backend/
 │   ├── ChatMe/
-│   │   ├── APIRouter/
+│   │   ├── APIRouter/                   # 4 个 Router + data_export
 │   │   ├── ChatMeConfig/                 # 配置加载器
 │   │   ├── ChatService/
 │   │   │   ├── core.py                   # ChatService，SSE 流式输出 + 记忆任务调度
@@ -222,9 +226,18 @@ ChatMe/
 │   │   │   │   ├── server.py             # FastMCP 工具入口
 │   │   │   │   └── CodeSandboxPool.py    # Docker 容器池
 │   │   │   └── Memory/                   # 长期记忆
+│   │   ├── APIRouter/
+│   │   │   ├── main.py                   # /chat 前缀主对话路由 + 会话树
+│   │   │   ├── static_file.py            # /static 静态文件 + 文件树接口
+│   │   │   ├── data_export.py            # /export/artifacts + /export/turn（DataAnalysis ZIP/HTML 预览 + 对话历史导出）
+│   │   │   └── admin_config / timed_clean / model_vl
 │   │   ├── LoggingManager/               # 异步日志
 │   │   └── test/
-│   ├── skills/                           # 技能包
+│   ├── skills/
+│   │   └── DataAnalysis/                  # 数据分析 skill
+│   │       ├── SKILL.md                  # 主规范（生成图表 / 报告 / CSV 等）
+│   │       ├── format/                   # ChatDataAnalysisFormat（拆分为 base / artifacts / manifest / database）
+│   │       └── database/                 # 数据库分析（MySQL/SQLite/PostgreSQL/MongoDB 只读查询 + 跨会话配置）
 │   ├── .chatme/
 │   ├── pyproject.toml
 │   └── main.py
@@ -261,6 +274,10 @@ ChatMe/
 | `/chat/cancel_upload_file`                    | POST      | 取消已上传文件                |
 | `/chat/improve_input`                         | POST      | 优化用户输入                 |
 | `/chat/file-config`                           | GET       | 获取文件上传配置               |
+| `/chat/{session_id}/data-analysis/tree`       | GET       | DataAnalysis 目录文件树（仅 data_analysis 子目录） |
+| `/chat/{session_id}/tree`                     | GET       | 整个 session 工作树（data_analysis + 上传文件 + AI 中间产物） |
+| `/chat/{session_id}/export/artifacts`         | GET       | 导出 DataAnalysis 产物（`?format=zip\|html`） |
+| `/chat/{session_id}/export/turn/{checkpoint_id}` | GET     | 导出截至指定 checkpoint 的对话历史（OpenAI JSON + 完整 state 备份，打包 ZIP） |
 
 ### 其它接口
 
@@ -329,13 +346,13 @@ MCP 服务器（`mcps/server.py`，FastMCP 3.x，stdio transport）暴露以下�
 ```bash
 cd backend
 uv build --wheel
-# 输出: dist/ChatMe-0.0.4-py3-none-any.whl
+# 输出: dist/ChatMe-0.1.0-py3-none-any.whl
 ```
 
 ### 安装 wheel
 
 ```bash
-uv pip install dist/ChatMe-0.0.4-py3-none-any.whl
+uv pip install dist/ChatMe-0.1.0-py3-none-any.whl
 # 安装后 chatme_main 和 chatme_mcp 命令全局可用
 ```
 
@@ -368,13 +385,13 @@ npm run electron:build:win      # Windows NSIS（x64）
 npm run electron:build:linux    # Linux AppImage（x64）
 ```
 
-桌面端通过 `electron-builder` 打包，应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.0.4）在 `frontend/electron/electron.config.js` 中配置。
+桌面端通过 `electron-builder` 打包，应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.1.0）在 `frontend/electron/electron.config.js` 中配置。
 
 **输出位置**：`../release/electron-builder/`（项目根，与 Vite 的 `dist/` / `frontend/` 区分开）：
 
 - `mac-arm64/灵析.app` — 直接打开
 - `mac/` — x64 .app
-- `灵析-0.0.4-arm64-mac.zip` / `灵析-0.0.4-mac.zip` — 分发包
+- `灵析-0.1.0-arm64-mac.zip` / `灵析-0.1.0-mac.zip` — 分发包
 - `linux-unpacked/` — Linux 解压目录
 - `win-unpacked.exe` — Windows 安装器
 

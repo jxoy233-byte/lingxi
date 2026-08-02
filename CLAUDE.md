@@ -141,7 +141,7 @@ uv run chatme_mcp
 | `ChatHeader.vue`                                | 头部 + 主题切换 + ↻ 刷新页面按钮（与 `DataAnalysisTree` 同款 SVG path：`M20.49 15a9 9 0 1 1-2.12-9.36L23 10` + polyline 箭头）               |
 | `CheckpointPanel.vue`                           | 回溯面板                                                                                                                     |
 | `FilePreviewPanel.vue` / `FilePreviewModal.vue` | 文件预览                                                                                                                     |
-| `DataAnalysisTree.vue` / `DataTreeNode.vue`     | 数据分析树形结构展示；`DataAnalysisTree` 面板头部 reload 按钮与 `ChatHeader` 共用同款 SVG                                                      |
+| `DataAnalysisTree.vue` / `DataTreeNode.vue`     | 数据分析树形结构展示；`DataAnalysisTree` 面板头部 reload 按钮与 `ChatHeader` 共用同款 SVG；头部新增 ⬇ ZIP 导出 + 👁 HTML 预览按钮（见偏好 26）                                              |
 | `WebPreviewPanel.vue`                           | 网页预览窗口（Electron IPC 触发）                                                                                                  |
 | `SearchResults.vue`                             | 搜索结果展示                                                                                                                   |
 | `ConfirmDialog.vue`                             | 确认对话框                                                                                                                    |
@@ -177,11 +177,13 @@ uv run chatme_mcp
 | `backend/ChatMe/ChatService/core.py`                  | 聊天服务，SSE 流式输出 + 记忆任务调度（`_memory_update_tasks` 串行队列 + `memory_wait_*` 事件）                                                          |
 | `backend/ChatMe/ChatService/FilesLoaders/core.py`     | 文件加载 + `_maybe_truncate` 大文件截断                                                                                                    |
 | `backend/ChatMe/ChatService/FilesLoaders/config.py`   | 文件大小/类型/截断阈值常量（`TEXT_TRUNCATE_LENGTH=4000`）                                                                                       |
-| `backend/skills/DataAnalysis/format.py`               | 数据分析规范（`ChatDataAnalysisFormat` 类、generation 管理）                                                                                  |
+| `backend/skills/DataAnalysis/format/`                 | 数据分析规范包（拆分为 `core` / `artifacts` / `manifest` / `database`；保留旧导入兼容）                                                                  |
+| `backend/skills/DataAnalysis/database/`               | 数据库分析子模块：MySQL / SQLite / PostgreSQL / MongoDB 只读查询 + 跨会话配置（`.runtime/`）                                                      |
 | `backend/ChatMe/ChatMeConfig/core.py`                 | 配置加载器                                                                                                                             |
 | `backend/ChatMe/APIRouter/main.py`                    | `/chat` 前缀主对话路由                                                                                                                   |
 | `backend/ChatMe/APIRouter/model_vl.py`                | `/api` VL 模型路由                                                                                                                    |
 | `backend/ChatMe/APIRouter/timed_clean.py`             | 定时清理任务                                                                                                                            |
+| `backend/ChatMe/APIRouter/data_export.py`             | `/chat/{sid}/export/artifacts`（DataAnalysis 产物 ZIP/HTML 预览）+ `/chat/{sid}/export/turn/{checkpoint_id}`（截至该轮的 OpenAI JSON + 完整 state 备份 ZIP） |
 | `backend/ChatMe/LoggingManager/logging_config.py`     | `QueueHandler` + `QueueListener` 异步日志，`atexit` 清理                                                                                 |
 | `sandbox/Dockerfile`                                  | 代码沙盒镜像定义                                                                                                                          |
 
@@ -333,9 +335,29 @@ claude --cron-delete a09d41ec
     - **重启路径**：`restartBackend()` 完成后也调 `setServicesReady(true, { autoEnterFrontend: true })` —— 用户已在 app 里（被踢回 disabled），重启恢复直接交回交互权，不再弹「进入应用」
     - **失败兜底**：bootstrap catch 块调 `setServicesReady(false)` 回到冷启动态，SetUpView 重新挂载显示「启动应用」重试
 
+24. **DataAnalysis 数据库分析（只读 + 跨会话配置 + 自动中断）**：
+    - **能力边界**：`skills/DataAnalysis/database/` 提供 MySQL / SQLite / PostgreSQL / MongoDB 4 个引擎的只读分析，写操作（SQL `INSERT/UPDATE/DELETE/DROP/ALTER/CREATE/TRUNCATE/GRANT/REVOKE/MERGE/CALL/REPLACE` + Mongo `$out/$merge/$where/$function/$accumulator/mapReduce/eval`）一律拦截。
+    - **跨会话配置存储**：DB 连接配置写入 `skills/DataAnalysis/database/.runtime/`（fcntl 文件锁 + 临时文件 + 原子替换）；LLM 只能看到 alias / engine / host / database 等非敏感信息，密码不进入 prompt / checkpoint / 日志。
+    - **沙盒挂载**：DataAnalysis 目录 `:rw` 覆盖在 `/skills` 只读挂载之上（`CodeSandboxPool`），保证其他 skill 文件仍只读。
+    - **SKILL.md 动态加载**：主 `SKILL.md` 不直接列数据库指引；agent 识别到「数据库/SQL/MySQL/Mongo」等关键词时 `cmd("cat /skills/DataAnalysis/database/SKILL.md")` 动态加载子文档，避免占用主上下文 token。
+    - **agent 主动中断**：`need_db_credentials` 中断事件携带 `db_type` / 字段列表，用户在 UI 输入凭据后 resume；中断机制沿用现有 SSE `interrupt` 通道。
+    - **`ChatDataAnalysisFormat` 包结构**：`format.py` 已拆分为 `format/` 包（`base` / `artifacts` / `manifest` / `database`），保留旧 `format.py` 路径的导入兼容；数据库查询结果通过 `save_database_result` 落到 `data_analysis/gen_xxx/data/` 后走主流程。
+
+25. **导出端点（产物 + 对话历史）**：`backend/ChatMe/APIRouter/data_export.py` 提供两个端点：
+    - **`/chat/{sid}/export/artifacts?format=zip|html`**：打包 `cached/{sid}/data_analysis/` 全目录。
+      - ZIP：保留 `gen_xxx/charts|data|reports|scripts/` 目录结构，跨平台解压即可。
+      - HTML：单文件预览，marked.js + mermaid.js CDN，PNG/SVG 转 base64 内嵌，CSV/JSON 转 HTML 表格，Markdown 客户端渲染。
+      - 大小限制：单文件 ≤100MB，总和 ≤500MB；`_meta.json` / 隐藏文件跳过。
+      - macOS `/tmp` 解析兼容：路径校验用 `Path.relative_to(base)` 代替字符串前缀（防止 `/tmp` ↔ `/private/tmp` symlink resolve 后字符串不一致）。
+    - **`/chat/{sid}/export/turn/{checkpoint_id}`**：截至指定 checkpoint 的完整对话历史，打包 ZIP：
+      - `openai.json`：标准 Chat Completions 格式 `[{role, content, tool_calls?, tool_call_id?, name?}, ...]`，可被其他工具链消费。
+      - `chatme.json`：直接 dump 该 checkpoint 的 `state.values`（messages / context / tool_call_times / imp_ipt / pending_compaction_* / memory_* 全字段），用于软件内恢复对话（恢复接口后续实现）。
+    - **前端入口**：`DataAnalysisTree.vue` 头部新增 ⬇ ZIP + 👁 HTML 预览两个按钮（`exporting` data 防连点）；`MessageItem.vue` AI 消息按钮排新增 ⬇ 「导出到本轮」按钮（`canExportTurn` 计算属性：仅 AI + 非流式 + 非 error + 有 `checkpointId` 才显示）。
+    - **Electron 转发**：现有 `protocol.handle('file')` 已含 `pathname.startsWith('/chat/')`，无需修改；Vite dev proxy 同样覆盖。
+
 ### 代码 / 提交风格
 
-- 提交信息遵循仓库现有风格：`v0.0.X <说明>`（参考 `git log`）
+- 提交信息遵循仓库现有风格：`v0.X.Y <说明>`（参考 `git log`）
 - 不要引入为假设需求而设计的抽象 / 配置项 / fallback
 - 系统边界（用户输入、外部 API）才做校验；内部代码信任框架保证
 - 修改代码前先读相关文件，不读不写

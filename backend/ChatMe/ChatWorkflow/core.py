@@ -1037,10 +1037,6 @@ class ChatWorkflow:
 
             input_msg = state["context"]
 
-            if isinstance(state["messages"][-1], SystemMessage):
-                if "中断" in state["messages"][-1].content:
-                    input_msg.append(state["messages"][-1])
-
             if state["memory_tool_calls"]:
                 tool_calls = state["memory_tool_calls"]
             else:

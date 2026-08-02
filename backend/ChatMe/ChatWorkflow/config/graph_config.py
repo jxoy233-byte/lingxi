@@ -490,6 +490,7 @@ When you cannot tell whether the call executed or stalled, output retry. A stall
 - end — accepted forms:
     end
     END
+    `except 'retry'`
 - retry — accepted forms:
     retry
     RETRY

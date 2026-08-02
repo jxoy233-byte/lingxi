@@ -137,8 +137,9 @@ class SandboxPool:
     def _create_container(self) -> Optional[str]:
         """
         启动一个常驻容器：
-        - mount skills(ro) + cached(rw) + sandbox-only config + logs
+        - mount skills(ro) + DataAnalysis(rw) + cached(rw) + sandbox-only config + logs
         - 容器内能看到：/skills, /cached, /.chatme/config.json（仅 skills 段）, /.chatme/logs
+        - DataAnalysis 目录允许 skill 内配置函数写入跨会话配置，其余 skills 保持只读
         - ChatMeConfig / LoggingManager 已通过 Dockerfile COPY 进 site-packages
         - DataAnalysis skill.md 已通过 Dockerfile COPY 进 site-packages/skills/DataAnalysis
         """
@@ -147,8 +148,10 @@ class SandboxPool:
 
             cmd = [
                 "docker", "run", "-d",
-                # skills 只读：保护源码 + 让 import skills.* 直接生效
+                # skills 源码默认只读：保护其他 skill；随后单独覆盖 DataAnalysis 为可写
                 "-v", f"{self.skills_path}:/skills:ro",
+                # DataAnalysis 内置配置函数需要保存跨会话数据库配置
+                "-v", f"{os.path.join(self.skills_path, 'DataAnalysis')}:/skills/DataAnalysis:rw",
                 # cached 读写：用户上传立即可见，沙盒生成图表立即给用户
                 "-v", f"{self.cached_path}:/cached:rw",
                 # sandbox-only config（仅 skills 段，不含 llm/oss/app）

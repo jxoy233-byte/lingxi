@@ -19,7 +19,7 @@ export default {
     name: '灵析',
     title: '灵析——数据分析智能助手',
     identifier: 'com.chatme.app',
-    version: '0.0.4'
+    version: '0.1.0'
   },
 
   // 窗口配置

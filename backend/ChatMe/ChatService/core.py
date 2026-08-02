@@ -1229,7 +1229,7 @@ class ChatService:
             await self.redis_client.delete(key)
             await self._delete_last_round_checkpoint(session_id)
 
-            # context 续接的时候不是追加逻辑，是覆盖逻辑
+            # state["context"] 是覆盖逻辑，不是追加逻辑
             config = {"configurable": {"thread_id": session_id}}
             state = await self.graph.aget_state(config=config)
             pre_context = state.values.get("context",[]) or []

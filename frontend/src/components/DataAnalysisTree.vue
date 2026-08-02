@@ -35,6 +35,31 @@
             >ⓘ</button>
           </span>
           <div class="da-panel-actions">
+            <button
+              class="da-icon-btn"
+              :disabled="!files.length || exporting"
+              @click="exportZip"
+              title="导出全部产物（ZIP）"
+              aria-label="导出 ZIP"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="7 10 12 15 17 10"/>
+                <line x1="12" y1="15" x2="12" y2="3"/>
+              </svg>
+            </button>
+            <button
+              class="da-icon-btn"
+              :disabled="!files.length || exporting"
+              @click="previewHtml"
+              title="下载 HTML 预览文件（双击在浏览器打开）"
+              aria-label="HTML 预览"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                <circle cx="12" cy="12" r="3"/>
+              </svg>
+            </button>
             <button class="da-icon-btn" @click="reload" title="刷新">
               <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="23 4 23 10 17 10"/>
@@ -116,7 +141,8 @@ export default {
       loading: false,
       tipsHovered: false,
       tipsPinned: false,
-      _tipsHoverEndTimer: null
+      _tipsHoverEndTimer: null,
+      exporting: false
     }
   },
   computed: {
@@ -264,6 +290,64 @@ export default {
     },
     reload() {
       this.check()
+    },
+    async exportZip() {
+      if (!this.sessionId || this.exporting) return
+      this.exporting = true
+      try {
+        const resp = await fetch(`/chat/${this.sessionId}/export/artifacts?format=zip`)
+        if (!resp.ok) {
+          const detail = await resp.text().catch(() => '')
+          alert(`导出失败：${resp.status} ${detail || resp.statusText}`)
+          return
+        }
+        const blob = await resp.blob()
+        this._downloadBlob(blob, this._filenameFromResponse(resp) || `data_analysis_${this.sessionId.slice(0, 8)}.zip`)
+      } catch (e) {
+        console.error('[DataAnalysisTree] export zip failed:', e)
+        alert(`导出失败：${e.message || e}`)
+      } finally {
+        this.exporting = false
+      }
+    },
+    async previewHtml() {
+      // HTML 直接下载到本地（Electron 下 window.open 会跳出 app，统一改成 blob 下载），
+      // 用户双击在默认浏览器里打开查看。
+      if (!this.sessionId || this.exporting) return
+      this.exporting = true
+      try {
+        const resp = await fetch(`/chat/${this.sessionId}/export/artifacts?format=html`)
+        if (!resp.ok) {
+          const detail = await resp.text().catch(() => '')
+          alert(`导出失败：${resp.status} ${detail || resp.statusText}`)
+          return
+        }
+        const blob = await resp.blob()
+        const filename = this._filenameFromResponse(resp) || `data_analysis_${this.sessionId.slice(0, 8)}.html`
+        this._downloadBlob(blob, filename)
+      } catch (e) {
+        console.error('[DataAnalysisTree] preview html failed:', e)
+        alert(`导出失败：${e.message || e}`)
+      } finally {
+        this.exporting = false
+      }
+    },
+    _downloadBlob(blob, filename) {
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      a.style.display = 'none'
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      // 释放 object URL，避免内存泄漏
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+    },
+    _filenameFromResponse(resp) {
+      const cd = resp.headers.get('content-disposition') || ''
+      const m = /filename="?([^";]+)"?/i.exec(cd)
+      return m ? m[1] : ''
     },
     onFileClick(node) {
       // 点文件后不折叠树：保留树状态让用户继续浏览其他文件，
@@ -495,6 +579,11 @@ export default {
 .da-icon-btn:hover {
   background: var(--bg-hover, #e5e7eb);
   color: var(--text-primary, #111);
+}
+.da-icon-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  pointer-events: none;
 }
 
 .da-panel-body {

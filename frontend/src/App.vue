@@ -19,6 +19,9 @@
         :active-session-id="currentSessionId"
         :mobile-open="sidebarMobileOpen"
         :active-streaming-sessions="_activeStreamingSessions"
+        :completed-sessions="_completedSessions"
+        :approval-pending-sessions="_approvalPendingSessions"
+        :error-sessions="_errorSessions"
         :load-error="conversationsLoadError"
         @toggle="toggleSidebar"
         @new-chat="createNewChat"
@@ -61,6 +64,9 @@
           :current-session-id="currentSessionId"
           :has-received-init="hasReceivedInit"
           :pending-interrupt-session-id="_pendingInterruptSessionId"
+          :pending-tool-approval="pendingToolApproval"
+          :submitting-tool-decision="submittingToolDecision"
+          @tool-decide="onToolDecision"
           @restore="restoreCheckpoint"
           @restream="handleRestream"
           @open-link="openWebPreview"
@@ -74,6 +80,7 @@
           ref="messageInput"
           :is-loading="isLoading"
           :session-id="currentSessionId"
+          :permission-resume-in-flight="permissionResumeInFlight"
           v-model:quote="currentQuote"
           @send="sendMessage"
           @files-selected-need-session="handleFilesSelectedNeedSession"
@@ -310,7 +317,18 @@ export default {
       resumeInputText: '',  // 续接输入文本
       currentQuote: null,  // 当前引用内容：{ content: string }
       settingsVisible: false,  // 设置弹窗可见性
+      // 工具调用级别的内嵌审批：标记具体 AI 消息 + tool call，让 MessageItem 高亮该 tool 并渲染内嵌按钮
+      pendingToolApproval: null,  // { messageIndex, toolIndex, command, action, sessionId }
+      submittingToolDecision: false,
+      // 权限 resume 流期间为 true（用户点完审批按钮、后端正在执行 Command(resume)）——
+      // 此期间禁用发送按钮防止用户并发发起新请求。仅此一处使用，与 submittingToolDecision
+      // 不同：后者语义是"提交决策中"（瞬时），前者覆盖整个 resume 流生命周期。
+      permissionResumeInFlight: false,
       _sessionHadError: new Set(),  // 处于「出错保护态」的 session_id 集合；保护态下不重拉 messages，避免覆盖错误气泡
+      // —— 侧栏状态点跟踪（绿/黄/红）——
+      _completedSessions: new Set(),       // 流式 clean done 后待用户回看（绿点）
+      _approvalPendingSessions: new Set(),  // 等用户审批（黄点）
+      _errorSessions: new Set(),           // 出错待用户回看（红点；与 _sessionHadError 并行，UI 保护职责留给后者）
       // —— 流式会话状态保存（用户切走后 SSE 继续推进 + 切回时恢复 in-progress）——
       _activeStreamingSessions: new Set(),  // 正在流式的 session_id 集合；驱动侧栏小点 + loadConversation 分支判断
       _streamingMessages: new Map(),       // session_id -> 当前 messages 数组引用（与 this.messages 同源）
@@ -557,7 +575,7 @@ export default {
       // MessageInput 已经存储了文件内容和 sessionId 到 sessionStorage
       // 这里只需要导航到对应的 sessionId，并等待导航完成
       const pendingSid = localStorage.getItem('pendingSessionId')
-      const targetSid = pendingSid || crypto.randomUUID().replace(/-/g, '')
+      const targetSid = pendingSid || crypto.randomUUID().replace(/-/g, '').slice(0, 12)
 
       console.log('[handleFilesSelectedNeedSession] files count:', files.length, 'pendingSid:', pendingSid, 'targetSid:', targetSid)
 
@@ -619,6 +637,7 @@ export default {
 
       // 用户主动续接 → 视为恢复，清掉旧错误保护态
       this._sessionHadError.delete(this.currentSessionId)
+      this.markSessionErrorResolved(this.currentSessionId)
 
       // 有消息则直接执行续接
       this.isInterrupted = false
@@ -718,15 +737,10 @@ export default {
                     }
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_name') {
-                    const toolCalls = [...(snap[meta.aiIndex].toolCalls || [])]
-                    toolCalls.push({ name: data.content.name, args: data.content.args, id: data.id, result: null })
-                    snap[meta.aiIndex] = { ...snap[meta.aiIndex], toolCalls, responseTime: this.currentResponseTime }
+                    snap[meta.aiIndex] = this.mergeToolCallStart(snap[meta.aiIndex], data)
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_result') {
-                    const toolCalls = [...(snap[meta.aiIndex].toolCalls || [])]
-                    const idx = toolCalls.findIndex(tc => tc.id === data.id)
-                    if (idx !== -1) toolCalls[idx] = { ...toolCalls[idx], result: data.content }
-                    snap[meta.aiIndex] = { ...snap[meta.aiIndex], toolCalls, responseTime: this.currentResponseTime }
+                    snap[meta.aiIndex] = this.mergeToolCallResult(snap[meta.aiIndex], data)
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'done') {
                     this.stopResponseTimer()
@@ -749,12 +763,15 @@ export default {
                     this._streamingMessages.delete(requestSessionId)
                     this._streamingMeta.delete(requestSessionId)
                     this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                    // 绿点：clean done 才标记（已计算 wasError）
+                    if (!wasError) this.markSessionCompleted(requestSessionId)
                     // 会话已切换：只 PUT 标题 + 同步侧栏，不调 get_conversation（避免并发 N 个 done 时反复重拉）
                     if (requestSessionId) {
                       await this.updateTitleOnly(requestSessionId, lastUserMessage)
                     }
                   } else if (data.type === 'error') {
                     this._sessionHadError.add(requestSessionId)
+                    this.markSessionErrored(requestSessionId)
                     snap[meta.aiIndex] = {
                       ...snap[meta.aiIndex],
                       content: `续接失败：${data.error}`,
@@ -787,6 +804,8 @@ export default {
                     if (requestSessionId) {
                       await this.updateTitleOnly(requestSessionId, lastUserMessage)
                     }
+                  } else if (data.type === 'permission_request') {
+                    this.handlePermissionRequest(data, requestSessionId)
                   }
                 }
                 continue
@@ -813,15 +832,10 @@ export default {
                 }
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_name') {
-                const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
-                toolCalls.push({ name: data.content.name, args: data.content.args, id: data.id, result: null })
-                this.messages[aiMessageIndex] = { ...this.messages[aiMessageIndex], toolCalls, responseTime: this.currentResponseTime }
+                this.messages[aiMessageIndex] = this.mergeToolCallStart(this.messages[aiMessageIndex], data)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_result') {
-                const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
-                const idx = toolCalls.findIndex(tc => tc.id === data.id)
-                if (idx !== -1) toolCalls[idx] = { ...toolCalls[idx], result: data.content }
-                this.messages[aiMessageIndex] = { ...this.messages[aiMessageIndex], toolCalls, responseTime: this.currentResponseTime }
+                this.messages[aiMessageIndex] = this.mergeToolCallResult(this.messages[aiMessageIndex], data)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'done') {
                 this.stopResponseTimer()
@@ -844,9 +858,12 @@ export default {
                 this._streamingMessages.delete(requestSessionId)
                 this._streamingMeta.delete(requestSessionId)
                 this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                // 绿点：用户正在当前会话，无条件标记（用户在 done 时已经在看）
+                this.markSessionCompleted(requestSessionId)
               } else if (data.type === 'error') {
                 console.error('续接响应错误:', data.error)
                 this._sessionHadError.add(this.currentSessionId)
+                this.markSessionErrored(requestSessionId)
                 this.messages[aiMessageIndex] = {
                   ...this.messages[aiMessageIndex],
                   content: `续接失败：${data.error}`,
@@ -880,6 +897,8 @@ export default {
                 this._streamingMessages.delete(requestSessionId)
                 this._streamingMeta.delete(requestSessionId)
                 this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+              } else if (data.type === 'permission_request') {
+                this.handlePermissionRequest(data, requestSessionId)
               }
             } catch (e) {
               console.error('解析 SSE 消息失败:', e, '原始内容:', line)
@@ -909,6 +928,12 @@ export default {
                     responseTime: this.currentResponseTime
                   }
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
+                } else if (data.type === 'tool_call_name') {
+                  snap[meta.aiIndex] = this.mergeToolCallStart(snap[meta.aiIndex], data)
+                  this.writeStreamMetrics(snap[meta.aiIndex], data)
+                } else if (data.type === 'tool_call_result') {
+                  snap[meta.aiIndex] = this.mergeToolCallResult(snap[meta.aiIndex], data)
+                  this.writeStreamMetrics(snap[meta.aiIndex], data)
                 } else if (data.type === 'done') {
                   this.stopResponseTimer()
                   const wasError = snap[meta.aiIndex]?.error === true
@@ -930,12 +955,15 @@ export default {
                   this._streamingMessages.delete(requestSessionId)
                   this._streamingMeta.delete(requestSessionId)
                   this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                  // 绿点：clean done 才标记（buffer-tail sessionChanged 分支，已计算 wasError）
+                  if (!wasError) this.markSessionCompleted(requestSessionId)
                   // 会话已切换：只 PUT 标题 + 同步侧栏，不调 get_conversation
                   if (requestSessionId) {
                     await this.updateTitleOnly(requestSessionId, lastUserMessage)
                   }
                 } else if (data.type === 'error') {
                   this._sessionHadError.add(requestSessionId)
+                  this.markSessionErrored(requestSessionId)
                   snap[meta.aiIndex] = {
                     ...snap[meta.aiIndex],
                     content: `续接失败：${data.error}`,
@@ -954,6 +982,8 @@ export default {
                   if (requestSessionId) {
                     await this.updateTitleOnly(requestSessionId, lastUserMessage)
                   }
+                } else if (data.type === 'permission_request') {
+                  this.handlePermissionRequest(data, requestSessionId)
                 }
               }
             } else if (data.type === 'reasoning') {
@@ -964,23 +994,10 @@ export default {
               }
               this.writeStreamMetrics(this.messages[aiMessageIndex], data)
             } else if (data.type === 'tool_call_name') {
-              const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
-              toolCalls.push({ name: data.content.name, args: data.content.args, id: data.id, result: null })
-              this.messages[aiMessageIndex] = {
-                ...this.messages[aiMessageIndex],
-                toolCalls,
-                responseTime: this.currentResponseTime
-              }
+              this.messages[aiMessageIndex] = this.mergeToolCallStart(this.messages[aiMessageIndex], data)
               this.writeStreamMetrics(this.messages[aiMessageIndex], data)
             } else if (data.type === 'tool_call_result') {
-              const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
-              const idx = toolCalls.findIndex(tc => tc.id === data.id)
-              if (idx !== -1) toolCalls[idx] = { ...toolCalls[idx], result: data.content }
-              this.messages[aiMessageIndex] = {
-                ...this.messages[aiMessageIndex],
-                toolCalls,
-                responseTime: this.currentResponseTime
-              }
+              this.messages[aiMessageIndex] = this.mergeToolCallResult(this.messages[aiMessageIndex], data)
               this.writeStreamMetrics(this.messages[aiMessageIndex], data)
             } else if (data.type === 'content') {
               this.messages[aiMessageIndex] = {
@@ -1009,6 +1026,8 @@ export default {
               this._streamingMessages.delete(requestSessionId)
               this._streamingMeta.delete(requestSessionId)
               this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+              // 绿点：buffer-tail in-session done
+              this.markSessionCompleted(requestSessionId)
             } else if (data.type === 'interrupt') {
               this.stopResponseTimer()
               const reason = data.reason || '用户主动中断'
@@ -1023,6 +1042,8 @@ export default {
               this._streamingMessages.delete(requestSessionId)
               this._streamingMeta.delete(requestSessionId)
               this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+            } else if (data.type === 'permission_request') {
+              this.handlePermissionRequest(data, requestSessionId)
             }
           } catch (e) {
             console.error('解析缓冲区剩余数据失败:', e)
@@ -1251,6 +1272,810 @@ export default {
     async restoreCheckpoint(checkpointId) {
       this.restoreTargetId = checkpointId
       this.showRestoreConfirm = true
+    },
+    mergeToolCallStart(message, data) {
+      const toolCalls = [...(message.toolCalls || [])]
+      // 1. 精确匹配：_pendingApproval && name===data.content.name
+      //    （正常路径——前端 handlePermissionRequest 已按 tool_call_name 精确标过位）
+      let pendingIdx = toolCalls.findIndex(
+        toolCall => toolCall._pendingApproval && toolCall.name === data.content.name
+      )
+      // 2. 容错匹配：找到 _pendingApproval 但 name 不匹配 → 极可能是 sequencing 错位
+      //    （老 backend 或异常情况下，pending UI 标到了别的 entry 上），修正它
+      if (pendingIdx === -1) {
+        pendingIdx = toolCalls.findIndex(toolCall => toolCall._pendingApproval)
+      }
+      // 3. 同 id 去重：resume / LangGraph 内部 ToolNode 重执行场景下，
+      //    on_tool_start 可能再次触发（run_id 复用或同 tc.id）；如果已有同 id entry，
+      //    命中后只更新 args/name 而不 push（防止 duplicate entry）。
+      if (pendingIdx === -1 && data.id) {
+        pendingIdx = toolCalls.findIndex(toolCall => toolCall.id === data.id)
+      }
+      if (pendingIdx !== -1) {
+        // 任何命中路径都覆盖 id/name/args——确保 resume 后即便 run_id 变了，已有 entry
+        // 的 id 也会被刷成最新的（mergeToolCallResult 按 id 查找才能命中）。
+        toolCalls[pendingIdx] = {
+          ...toolCalls[pendingIdx],
+          id: data.id,
+          name: data.content.name,
+          args: data.content.args,
+          _pendingApproval: false,
+        }
+      } else {
+        toolCalls.push({
+          name: data.content.name,
+          args: data.content.args,
+          id: data.id,
+          result: null,
+        })
+      }
+      return { ...message, toolCalls, responseTime: this.currentResponseTime }
+    },
+    mergeToolCallResult(message, data) {
+      const toolCalls = [...(message.toolCalls || [])]
+      let toolIndex = toolCalls.findIndex(toolCall => toolCall.id === data.id)
+      if (toolIndex === -1) {
+        toolIndex = toolCalls.findIndex(toolCall => toolCall._pendingApproval)
+      }
+      if (toolIndex !== -1) {
+        toolCalls[toolIndex] = {
+          ...toolCalls[toolIndex],
+          id: data.id || toolCalls[toolIndex].id,
+          result: data.content,
+          _pendingApproval: false,
+        }
+      }
+      return { ...message, toolCalls, responseTime: this.currentResponseTime }
+    },
+    // —— 侧栏状态点 helper（绿/黄/红）——
+    // 全部幂等：add 前 has 检查、delete 前 .delete 返回值检查；mutate 后整 Set 替换触发 Vue 2 响应式
+    markSessionCompleted(sessionId) {
+      if (!sessionId) return
+      if (this._completedSessions.has(sessionId)) return
+      this._completedSessions.add(sessionId)
+      this._completedSessions = new Set(this._completedSessions)
+      // 防御性：完成同时清掉残留的 approval / error 状态（罕见但保证一致性）
+      if (this._approvalPendingSessions.delete(sessionId)) {
+        this._approvalPendingSessions = new Set(this._approvalPendingSessions)
+      }
+      if (this._errorSessions.delete(sessionId)) {
+        this._errorSessions = new Set(this._errorSessions)
+      }
+    },
+    markSessionApprovalPending(sessionId) {
+      if (!sessionId) return
+      if (this._approvalPendingSessions.has(sessionId)) return
+      this._approvalPendingSessions.add(sessionId)
+      this._approvalPendingSessions = new Set(this._approvalPendingSessions)
+    },
+    markSessionApprovalResolved(sessionId) {
+      if (!sessionId) return
+      if (!this._approvalPendingSessions.delete(sessionId)) return
+      this._approvalPendingSessions = new Set(this._approvalPendingSessions)
+    },
+    markSessionErrored(sessionId) {
+      if (!sessionId) return
+      if (this._errorSessions.has(sessionId)) return
+      this._errorSessions.add(sessionId)
+      this._errorSessions = new Set(this._errorSessions)
+    },
+    markSessionErrorResolved(sessionId) {
+      if (!sessionId) return
+      if (!this._errorSessions.delete(sessionId)) return
+      this._errorSessions = new Set(this._errorSessions)
+    },
+    /**
+     * permission_request 事件统一处理：找到当前 AI 消息的待审批 tool call + 高亮 + 渲染内嵌按钮
+     *
+     * 在每个 SSE 循环的 'interrupt' 分支后挂 `} else if (data.type === 'permission_request') { ... }` 调用本方法
+     */
+    handlePermissionRequest(data, requestSessionId) {
+      const sessionId = data.session_id || requestSessionId || ''
+      // 黄点跟踪（独立于 singleton pendingToolApproval），必须在 early-return 之前：
+      // singleton 是 UI 渲染状态（一时刻只能让用户对一个工具做决策），黄点是侧栏可见性标记（多 session 并行跟踪）。
+      this.markSessionApprovalPending(sessionId)
+
+      // 已有 pending 时忽略（singleton：每 sid 最多一个）
+      if (this.pendingToolApproval) {
+        // 跨会话泄漏守卫：现有 pending 指向别的 session，新 event 来自当前 session，
+        // 必须清掉旧 pending 才能让当前 session 的 UI 正常显示（否则用户在切到新会话
+        // 后看不到审批按钮）。同 session 的重复事件继续 drop。
+        if (this.pendingToolApproval.sessionId !== sessionId) {
+          this.pendingToolApproval = null
+        } else {
+          return
+        }
+      }
+
+      // 幂等去重：F5 / 刷新会话后 processConversationMessages 会重建历史 toolCalls entry
+      // （_pendingApproval 标志会丢，因为 history 里只是 AIMessage(REASONING) 的 tool_calls
+      // 字段，不带前端运行时标志）。如果此时再调 handlePermissionRequest，扫描+合成路径
+      // 会**再 push 一个新 entry**——同一个 tool 出现两条 entry：
+      //   - 第一条是 processConversationMessages 重建的（无 _pendingApproval，看着像正常）
+      //   - 第二条是 handlePermissionRequest 合成的（_pendingApproval=true）
+      // 同一 tool_call_name + result===null 的 entry 视为重复——标 _pendingApproval=true
+      // 而不是 push 新 entry。注意：deny/feedback 后 _pendingApproval 会被 onToolDecision
+      // 置 false 并写 synthetic result，所以此守卫只在「未决 + 已被 processConversationMessages
+      // 重建过」的边界 case 生效。
+      if (data.tool_call_name) {
+        const targets = []
+        if (this._streamingMessages.has(requestSessionId)) {
+          targets.push(this._streamingMessages.get(requestSessionId))
+        }
+        if (requestSessionId === this.currentSessionId) {
+          targets.push(this.messages)
+        }
+        for (const arr of targets) {
+          for (let i = arr.length - 1; i >= 0; i--) {
+            const m = arr[i]
+            if (m.role !== 'ai' || !m.toolCalls) continue
+            for (let j = m.toolCalls.length - 1; j >= 0; j--) {
+              if (m.toolCalls[j].name === data.tool_call_name && m.toolCalls[j].result === null) {
+                // 找到重复 entry——标 _pendingApproval=true 并设置 pendingToolApproval，不 push
+                const updatedToolCalls = [...m.toolCalls]
+                updatedToolCalls[j] = { ...updatedToolCalls[j], _pendingApproval: true }
+                arr[i] = { ...m, toolCalls: updatedToolCalls }
+                this.pendingToolApproval = {
+                  messageIndex: i,
+                  toolIndex: j,
+                  command: data.command || '',
+                  action: data.action || 'write',
+                  sessionId,
+                }
+                this.stopResponseTimer()
+                return
+              }
+            }
+            // 只看最新 AI message 上的 entry；旧 AI message 的同名 entry 是历史轮次，不能复用
+            break
+          }
+        }
+      }
+
+      // 找到当前 AI 消息的最后一个无 result 的 tool call —— 这就是等待审批的工具调用
+      // 优先级：this.messages（当前会话） > _streamingMessages snapshot（切走会话）
+      const targets = []
+      if (this._streamingMessages.has(requestSessionId)) {
+        targets.push({ arr: this._streamingMessages.get(requestSessionId), isSnapshot: true })
+      }
+      if (requestSessionId === this.currentSessionId) {
+        targets.push({ arr: this.messages, isSnapshot: false })
+      }
+
+      let aiMessageIndex = -1
+      let toolIndex = -1
+      let targetArr = null
+
+      // 优先按 tool_call_name 精确匹配：permission_request SSE 事件携带了需要审批的工具名
+      // （后端 _permission_target_for 返回），并发场景下 on_tool_start 的 arrival sequencing
+      // 未必稳定（按"倒序找 result===null"会错位到 ctime 等非审批工具上——它们也 result===null
+      // 只是永远不会变成 string 因为被 LangGraph gather cancel），按 name 精确匹配才能保证
+      // pending UI 挂到正确的 tool_call entry 上。
+      //
+      // **必须再加 `result === null` 守卫**：resume 流里 LLM 决定调用新工具（code3）时，
+      // 如果新工具又被 permission 中断，on_tool_start 不发 → 没有 tool_call_name(code3) SSE →
+      // 此时 toolCalls 里只有上一轮 code2 (done)。如果只按 name 匹配 `name==='code'` 会命中
+      // code2 已完成的 entry，把 _pendingApproval=true 覆盖到已完成 entry 上——表现为
+      // 「已完成的 tool 又弹审批 UI」、「新工具请求没出现」。加上 `result === null` 过滤后，
+      // code2 (done) 被跳过，synthesize 新 entry → 新工具请求正确显示为新 entry。
+      //
+      // round-after-loop 例外：如果倒序遍历命中的 entry 在**非最新** AIMessage 上（旧
+      // AIMessage 留有上一轮 tool entry，新 AIMessage 上 tool_call_name event 还没来所以
+      // 没有 entry），不能复用——要保留旧 entry（已完成/被拒绝的历史）不变，synthesize 新
+      // entry 到最新 AIMessage 上。检测方式：i 之后还有 AIMessage → 不是最新。
+      if (data.tool_call_name) {
+        outer_name: for (const { arr } of targets) {
+          for (let i = arr.length - 1; i >= 0; i--) {
+            const m = arr[i]
+            if (m.role !== 'ai' || !m.toolCalls) continue
+            for (let j = m.toolCalls.length - 1; j >= 0; j--) {
+              if (m.toolCalls[j].name === data.tool_call_name && m.toolCalls[j].result === null) {
+                // 检查 i 是否对应最新 AIMessage
+                let isLatestAi = true
+                for (let k = i + 1; k < arr.length; k++) {
+                  if (arr[k].role === 'ai') {
+                    isLatestAi = false
+                    break
+                  }
+                }
+                if (isLatestAi) {
+                  // 当前 round：采纳这个 entry
+                  aiMessageIndex = i
+                  toolIndex = j
+                  targetArr = arr
+                }
+                // 不是最新 AIMessage 上的 entry → round-after-loop → 不采纳，
+                // aiMessageIndex 保持 -1，下方 synthesize 路径会在最新 AIMessage 上 push 新 entry
+                break outer_name
+              }
+            }
+          }
+        }
+      }
+
+      // 没找到精确匹配 entry 时，直接合成占位（旧版 fallback 路径"找 result===null"已删除——
+      // 会标错到 ctime 那样的"result 永远=null"的非审批工具上）。
+      // 合成时优先用 data.tool_call_name 作为 entry.name，比之前从 data.action 推断
+      // （'code' → 'code' / 其他 → 'cmd'）更精确（兼容 tool_call_name='cmd' / 'code' 的
+      // 实际 MCP 工具名）。
+      if (aiMessageIndex === -1) {
+        const toolName = data.tool_call_name || (data.action === 'code' ? 'code' : 'cmd')
+        const command = data.command || ''
+        let toolArgs
+        if (toolName === 'code') {
+          try {
+            const parsedArgs = JSON.parse(command)
+            toolArgs = parsedArgs && typeof parsedArgs === 'object'
+              ? parsedArgs
+              : { code: command }
+          } catch {
+            toolArgs = { code: command }
+          }
+        } else {
+          toolArgs = { command }
+        }
+        outer: for (const { arr } of targets) {
+          for (let i = arr.length - 1; i >= 0; i--) {
+            const m = arr[i]
+            if (m.role !== 'ai') continue
+            const toolCalls = [...(m.toolCalls || [])]
+            toolCalls.push({
+              id: `pending-${sessionId}-${Date.now()}`,
+              name: toolName,
+              args: toolArgs,
+              result: null,
+              _pendingApproval: true,
+            })
+            arr[i] = { ...m, toolCalls }
+            aiMessageIndex = i
+            toolIndex = toolCalls.length - 1
+            targetArr = arr
+            break outer
+          }
+        }
+      } else {
+        // 历史里已有 AIMessage(REASONING) 留下的 toolCalls 条目（result=null），
+        // 标记 _pendingApproval=true 让 resume 流来的 tool_call_name 事件能匹配上
+        // mergeToolCallStart（按 _pendingApproval && name===data.content.name 匹配），
+        // 避免重复 push 新条目导致冗余显示。merge 后 _pendingApproval 会被置回 false。
+        //
+        // round-after-loop 已被上方 matching 阶段排除（倒序命中非最新 AIMessage 上的
+        // entry 时不采纳），所以走到这里的 entry 一定是当前 round 的、id/args 已经正确的，
+        // 不需要再覆盖 args/result。
+        const updatedToolCalls = [...targetArr[aiMessageIndex].toolCalls]
+        updatedToolCalls[toolIndex] = {
+          ...updatedToolCalls[toolIndex],
+          _pendingApproval: true,
+        }
+        targetArr[aiMessageIndex] = {
+          ...targetArr[aiMessageIndex],
+          toolCalls: updatedToolCalls,
+        }
+      }
+
+      this.pendingToolApproval = {
+        messageIndex: aiMessageIndex,
+        toolIndex,
+        command: data.command || '',
+        action: data.action || 'write',
+        sessionId,
+        // 不再缓存 targetArr 引用：onToolDecision 时按 sessionId + messageIndex/toolIndex
+        // 重新解析（snapshot 优先 → 当前 messages 兜底），避免 stale 引用导致写错位置
+      }
+
+      // 停响应计时器 + 清理流式快照（pending 状态下不再产生增量事件）
+      this.stopResponseTimer()
+      this.stopStreamTimer(requestSessionId)
+      this._activeStreamingSessions.delete(requestSessionId)
+      this._streamingMessages.delete(requestSessionId)
+      this._streamingMeta.delete(requestSessionId)
+      this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+    },
+    async onToolDecision(decision) {
+      // decision: 'approve' | 'this-time-only' | 'deny' | 'feedback:<text>'
+      // 后端 permissions.request_approval 看到 'feedback:' 前缀会返回 ("feedback", text)，
+      // 由 _permission_wrap 包成 ToolMessage 让 LLM 看到用户指引并重新尝试调用。
+      if (!this.pendingToolApproval) return
+      const { sessionId } = this.pendingToolApproval
+      if (!sessionId) {
+        this.pendingToolApproval = null
+        return
+      }
+
+      // deny / feedback 时：先把当前 entry 在前端本地标记为已拒绝 / 已反馈。
+      // 根因：gate 返回 synthetic denied ToolMessage 时 LangGraph 不发 on_tool_end 事件，
+      // ChatService 的 tool_call_result SSE 永远到不了前端，entry 会停在
+      // _pendingApproval=true / result=null。如果不立刻更新，后续同 fingerprint 的
+      // permission_request 会走 handlePermissionRequest 的 `name && result === null`
+      // 匹配命中这条旧 entry，把 _pendingApproval 再次标 true —— 表现为"覆盖"而不是追加。
+      //
+      // 文案严格对齐后端 permissions.py:_rejected_tool_result / _feedback_tool_result
+      // 的模板（permissions.py:507 / :520），保证前端展示与后端注入到 LangGraph state
+      // 的 ToolMessage content 完全一致（LLM 看到什么，前端 UI 就展示什么）。
+      // approve / this-time-only 不走这条路径：gate 真正执行 execute(request)，on_tool_start
+      // + on_tool_end 会正常发，mergeToolCallStart / mergeToolCallResult 会正确写 result。
+      if (decision === 'deny' || (typeof decision === 'string' && decision.startsWith('feedback:'))) {
+        const { messageIndex, toolIndex, sessionId } = this.pendingToolApproval
+        // 按需解析目标数组：snapshot 优先（用户可能切走过原 session，this.messages 已
+        // 被替换成别的 session 的数组），当前 messages 兜底（in-session 决策场景）。
+        const arr = this._streamingMessages.get(sessionId) || this.messages
+        if (arr && arr[messageIndex] && arr[messageIndex].toolCalls && arr[messageIndex].toolCalls[toolIndex]) {
+          const toolEntry = arr[messageIndex].toolCalls[toolIndex]
+          const toolName = toolEntry.name || 'tool'
+          const argsSummary = JSON.stringify(toolEntry.args || {}).slice(0, 200)
+          let syntheticResult
+          if (decision === 'deny') {
+            syntheticResult =
+              `User rejected this ${toolName} call (${argsSummary}); ` +
+              `the ${toolName} was not executed and no side effects occurred. ` +
+              `Think about possible alternative approaches, ` +
+              `or use the interrupt tool to ask the user how to proceed.`
+          } else {
+            const feedbackText = decision.slice('feedback:'.length).trim()
+            syntheticResult =
+              `User has provided guidance for this ${toolName} call (${argsSummary}); ` +
+              `the ${toolName} was not executed and no side effects occurred. ` +
+              `User guidance: ${feedbackText}. ` +
+              `Re-attempt the call considering this feedback.`
+          }
+          const updatedToolCalls = [...arr[messageIndex].toolCalls]
+          updatedToolCalls[toolIndex] = {
+            ...updatedToolCalls[toolIndex],
+            result: syntheticResult,
+            _pendingApproval: false,
+          }
+          arr[messageIndex] = { ...arr[messageIndex], toolCalls: updatedToolCalls }
+        }
+      }
+
+      // 立刻 disable 按钮，防止用户连点 / 重复 /resume
+      this.submittingToolDecision = true
+      // 标记 resume 流开始——此期间禁用发送按钮（待审核时不禁用，见 MessageInput prop）
+      this.permissionResumeInFlight = true
+      try {
+        // 第 1 步：写决策到 redis hash
+        const decideResp = await fetch(`/chat/${sessionId}/permission/decide`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ decision }),
+        })
+        if (!decideResp.ok) {
+          throw new Error(`decide failed: ${decideResp.status}`)
+        }
+        // 第 2 步：触发 Command(resume=decision) 让 LangGraph 继续
+        const resumeResp = await fetch(`/chat/${sessionId}/permission/resume`, {
+          method: 'POST',
+        })
+        if (!resumeResp.ok) {
+          throw new Error(`resume failed: ${resumeResp.status}`)
+        }
+        // 清掉审批标记（tool_call_result 到达时也会清，这里先清掉按钮）
+        this.pendingToolApproval = null
+        // 黄点立即清除：用户做了决定 = 审批状态解除（不依赖后续 resume done 兜底）
+        this.markSessionApprovalResolved(sessionId)
+        // 走 SSE 流：复用 handleResume 的 SSE 处理逻辑（content / reasoning / tool_call / done）
+        await this.handlePermissionResumeStream(resumeResp)
+      } catch (error) {
+        console.error('tool decision resume error:', error)
+        this.pendingToolApproval = null
+        // 出错也清黄点（用户已经提交了决定 = 状态解除）
+        this.markSessionApprovalResolved(sessionId)
+      } finally {
+        this.submittingToolDecision = false
+        // resume 流无论成功 / 异常都已结束，清掉 in-flight 标志恢复发送按钮
+        this.permissionResumeInFlight = false
+      }
+    },
+    /**
+     * 处理 /permission/resume 端点的 SSE 流，沿用偏好 20 的 handleResume 模式：
+     *   - 注册 snapshot 三件套 + startStreamTimer（用户切走不丢增量）
+     *   - SSE 循环 sessionChanged + in-session 双分支
+     *   - 终态用 wasError 守护 + updateTitleAndRefresh / updateTitleOnly
+     *   - buffer-tail 兜底
+     */
+    async handlePermissionResumeStream(response) {
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      // 锁定发起 resume 时的 session id（用户切走要按原始 sid 处理）
+      const requestSessionId = this.currentSessionId
+      let buffer = ''
+      // 找到/创建 AI 消息（与 handleResume 一致）
+      let aiMessageIndex = -1
+      for (let i = this.messages.length - 1; i >= 0; i--) {
+        if (this.messages[i].role === 'ai') {
+          aiMessageIndex = i
+          break
+        }
+      }
+      if (aiMessageIndex === -1) {
+        aiMessageIndex = this.messages.length
+        this.messages.push({
+          role: 'ai', content: '', streaming: true, thinkingDone: false,
+          responseStartTime: Date.now(), toolCalls: [],
+        })
+      } else {
+        this.messages[aiMessageIndex] = {
+          ...this.messages[aiMessageIndex],
+          streaming: true, thinkingDone: false, responseStartTime: Date.now(),
+        }
+      }
+      this.currentAiMessageIndex = aiMessageIndex
+      this.isLoading = true
+      this.startResponseTimer()
+      this.hasReceivedInit = true
+      // 预先取最后一个用户消息，给 error/done 兜底分支用
+      const lastUserMessage = this.messages.filter(m => m.role === 'user').pop()?.content || ''
+      // 注册流式会话快照三件套（用户切走时 SSE 增量写到 snapshot，切回时直接恢复 this.messages）
+      this._activeStreamingSessions.add(requestSessionId)
+      this._streamingMessages.set(requestSessionId, this.messages)
+      this._streamingMeta.set(requestSessionId, {
+        aiIndex: aiMessageIndex,
+        responseStartTime: this.responseStartTime,
+        userMessage: lastUserMessage,
+        lastUserMessage,
+      })
+      this.startStreamTimer(requestSessionId, this.messages[aiMessageIndex])
+      this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          let idx
+          while ((idx = buffer.indexOf('\n\n')) !== -1) {
+            const raw = buffer.slice(0, idx)
+            buffer = buffer.slice(idx + 2)
+            const line = raw.trim()
+            if (!line) continue
+            try {
+              const data = JSON.parse(line)
+              const sessionChanged = this.currentSessionId !== requestSessionId
+
+              // ---- sessionChanged 分支（写 snapshot，与 handleResume 完全同构）----
+              if (sessionChanged) {
+                const snap = this._streamingMessages.get(requestSessionId)
+                const meta = this._streamingMeta.get(requestSessionId)
+                if (snap && meta) {
+                  if (data.type === 'content') {
+                    snap[meta.aiIndex] = {
+                      ...snap[meta.aiIndex],
+                      content: snap[meta.aiIndex].content + data.content,
+                      thinkingDone: true,
+                      responseTime: this.currentResponseTime,
+                    }
+                    this.writeStreamMetrics(snap[meta.aiIndex], data)
+                  } else if (data.type === 'reasoning') {
+                    snap[meta.aiIndex] = {
+                      ...snap[meta.aiIndex],
+                      reasoning: snap[meta.aiIndex].reasoning + data.content,
+                      responseTime: this.currentResponseTime,
+                    }
+                    this.writeStreamMetrics(snap[meta.aiIndex], data)
+                  } else if (data.type === 'tool_call_name') {
+                    snap[meta.aiIndex] = this.mergeToolCallStart(snap[meta.aiIndex], data)
+                    this.writeStreamMetrics(snap[meta.aiIndex], data)
+                  } else if (data.type === 'tool_call_result') {
+                    snap[meta.aiIndex] = this.mergeToolCallResult(snap[meta.aiIndex], data)
+                    this.writeStreamMetrics(snap[meta.aiIndex], data)
+                  } else if (data.type === 'done') {
+                    this.stopResponseTimer()
+                    const wasError = snap[meta.aiIndex]?.error === true
+                    snap[meta.aiIndex] = {
+                      ...snap[meta.aiIndex],
+                      role: 'ai',
+                      content: wasError ? snap[meta.aiIndex].content : (data.full_response ?? snap[meta.aiIndex].content),
+                      reasoning: snap[meta.aiIndex].reasoning,
+                      toolCalls: snap[meta.aiIndex].toolCalls,
+                      thinkingDone: true,
+                      streaming: false,
+                      responseTime: this.currentResponseTime,
+                      checkpointId: data.checkpoint_id || null,
+                      error: wasError || undefined,
+                    }
+                    this.writeStreamMetrics(snap[meta.aiIndex], data)
+                    this.stopStreamTimer(requestSessionId)
+                    this._activeStreamingSessions.delete(requestSessionId)
+                    this._streamingMessages.delete(requestSessionId)
+                    this._streamingMeta.delete(requestSessionId)
+                    this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                    // 绿点：clean done 才标记（已计算 wasError）
+                    if (!wasError) this.markSessionCompleted(requestSessionId)
+                    // 已切走：仅更新侧栏标题，不重拉 messages（避免覆盖快照）
+                    if (requestSessionId) {
+                      await this.updateTitleOnly(requestSessionId, lastUserMessage)
+                    }
+                  } else if (data.type === 'error') {
+                    this._sessionHadError.add(requestSessionId)
+                    this.markSessionErrored(requestSessionId)
+                    snap[meta.aiIndex] = {
+                      ...snap[meta.aiIndex],
+                      content: `resume 失败：${data.error}`,
+                      error: true,
+                      errorMessage: data.error,
+                      streaming: false,
+                      thinkingDone: true,
+                      responseTime: this.currentResponseTime,
+                    }
+                    this.writeStreamMetrics(snap[meta.aiIndex], data)
+                    this.stopStreamTimer(requestSessionId)
+                    this._activeStreamingSessions.delete(requestSessionId)
+                    this._streamingMessages.delete(requestSessionId)
+                    this._streamingMeta.delete(requestSessionId)
+                    this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                    if (requestSessionId) {
+                      await this.updateTitleOnly(requestSessionId, lastUserMessage)
+                    }
+                  } else if (data.type === 'interrupt') {
+                    this.stopResponseTimer()
+                    const reason = data.reason || '用户主动中断'
+                    snap[meta.aiIndex] = { ...snap[meta.aiIndex], streaming: false, interruptReason: reason }
+                    this.writeStreamMetrics(snap[meta.aiIndex], data)
+                    this.stopStreamTimer(requestSessionId)
+                    this._activeStreamingSessions.delete(requestSessionId)
+                    this._streamingMessages.delete(requestSessionId)
+                    this._streamingMeta.delete(requestSessionId)
+                    this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                    if (requestSessionId) {
+                      await this.updateTitleOnly(requestSessionId, lastUserMessage)
+                    }
+                  } else if (data.type === 'permission_request') {
+                    this.handlePermissionRequest(data, requestSessionId)
+                  }
+                }
+                continue
+              }
+
+              // ---- in-session 分支（写 this.messages[aiIndex]，与 handleResume 完全同构）----
+              if (data.type === 'init') {
+                this.hasReceivedInit = true
+                if (data.session_id) this._pendingInterruptSessionId = data.session_id
+              } else if (data.type === 'content') {
+                this.messages[aiMessageIndex] = {
+                  ...this.messages[aiMessageIndex],
+                  content: this.messages[aiMessageIndex].content + data.content,
+                  thinkingDone: true,
+                  responseTime: this.currentResponseTime,
+                }
+                this.writeStreamMetrics(this.messages[aiMessageIndex], data)
+              } else if (data.type === 'reasoning') {
+                this.messages[aiMessageIndex] = {
+                  ...this.messages[aiMessageIndex],
+                  reasoning: (this.messages[aiMessageIndex].reasoning || '') + data.content,
+                  responseTime: this.currentResponseTime,
+                }
+                this.writeStreamMetrics(this.messages[aiMessageIndex], data)
+              } else if (data.type === 'tool_call_name') {
+                this.messages[aiMessageIndex] = this.mergeToolCallStart(this.messages[aiMessageIndex], data)
+                this.writeStreamMetrics(this.messages[aiMessageIndex], data)
+              } else if (data.type === 'tool_call_result') {
+                this.messages[aiMessageIndex] = this.mergeToolCallResult(this.messages[aiMessageIndex], data)
+                this.writeStreamMetrics(this.messages[aiMessageIndex], data)
+              } else if (data.type === 'done') {
+                this.stopResponseTimer()
+                this.messages[aiMessageIndex] = {
+                  role: 'ai',
+                  content: data.full_response ?? this.messages[aiMessageIndex].content,
+                  reasoning: this.messages[aiMessageIndex].reasoning,
+                  toolCalls: this.messages[aiMessageIndex].toolCalls,
+                  thinkingDone: true,
+                  streaming: false,
+                  responseTime: this.currentResponseTime,
+                  checkpointId: data.checkpoint_id || null,
+                }
+                this.writeStreamMetrics(this.messages[aiMessageIndex], data)
+                // 当前会话：调 updateTitleAndRefresh（更新标题 + 刷侧栏）
+                await this.updateTitleAndRefresh(this.currentSessionId, lastUserMessage)
+                this.stopStreamTimer(requestSessionId)
+                this._activeStreamingSessions.delete(requestSessionId)
+                this._streamingMessages.delete(requestSessionId)
+                this._streamingMeta.delete(requestSessionId)
+                this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                // 绿点：in-session done
+                this.markSessionCompleted(requestSessionId)
+              } else if (data.type === 'error') {
+                this.stopResponseTimer()
+                this.messages[aiMessageIndex] = {
+                  ...this.messages[aiMessageIndex],
+                  content: `resume 失败：${data.error}`,
+                  error: true,
+                  errorMessage: data.error,
+                  streaming: false,
+                  thinkingDone: true,
+                  responseTime: this.currentResponseTime,
+                }
+                this._sessionHadError.add(this.currentSessionId)
+                this.markSessionErrored(requestSessionId)
+                this.writeStreamMetrics(this.messages[aiMessageIndex], data)
+                // 错误路径：updateTitleOnly（仅更新标题，不重拉 messages，避免错误气泡被覆盖）
+                if (this.currentSessionId) {
+                  await this.updateTitleOnly(this.currentSessionId, lastUserMessage)
+                }
+                this.stopStreamTimer(requestSessionId)
+                this._activeStreamingSessions.delete(requestSessionId)
+                this._streamingMessages.delete(requestSessionId)
+                this._streamingMeta.delete(requestSessionId)
+                this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+              } else if (data.type === 'interrupt') {
+                this.stopResponseTimer()
+                const reason = data.reason || '用户主动中断'
+                this.messages[aiMessageIndex] = {
+                  ...this.messages[aiMessageIndex],
+                  streaming: false,
+                  interruptReason: reason,
+                  responseTime: this.currentResponseTime,
+                }
+                this.writeStreamMetrics(this.messages[aiMessageIndex], data)
+                this.isInterrupted = true
+                this.isInterruptedSessionId = data.session_id || this.currentSessionId || this._pendingInterruptSessionId
+                this.interruptReason = reason
+                this.stopStreamTimer(requestSessionId)
+                this._activeStreamingSessions.delete(requestSessionId)
+                this._streamingMessages.delete(requestSessionId)
+                this._streamingMeta.delete(requestSessionId)
+                this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+              } else if (data.type === 'permission_request') {
+                this.handlePermissionRequest(data, requestSessionId)
+              }
+            } catch (e) {
+              console.error('permission resume SSE parse error:', e, 'raw:', line)
+            }
+          }
+        }
+
+        // buffer-tail 兜底（流关闭后剩余 buffer 同处理，与 handleResume 同构）
+        if (buffer.trim()) {
+          try {
+            const data = JSON.parse(buffer.trim())
+            const sessionChanged = this.currentSessionId !== requestSessionId
+            if (sessionChanged) {
+              const snap = this._streamingMessages.get(requestSessionId)
+              const meta = this._streamingMeta.get(requestSessionId)
+              if (snap && meta) {
+                if (data.type === 'content') {
+                  snap[meta.aiIndex] = {
+                    ...snap[meta.aiIndex],
+                    content: snap[meta.aiIndex].content + data.content,
+                    thinkingDone: true,
+                    responseTime: this.currentResponseTime,
+                  }
+                  this.writeStreamMetrics(snap[meta.aiIndex], data)
+                } else if (data.type === 'reasoning') {
+                  snap[meta.aiIndex] = {
+                    ...snap[meta.aiIndex],
+                    reasoning: snap[meta.aiIndex].reasoning + data.content,
+                    responseTime: this.currentResponseTime,
+                  }
+                  this.writeStreamMetrics(snap[meta.aiIndex], data)
+                } else if (data.type === 'tool_call_name') {
+                  snap[meta.aiIndex] = this.mergeToolCallStart(snap[meta.aiIndex], data)
+                  this.writeStreamMetrics(snap[meta.aiIndex], data)
+                } else if (data.type === 'tool_call_result') {
+                  snap[meta.aiIndex] = this.mergeToolCallResult(snap[meta.aiIndex], data)
+                  this.writeStreamMetrics(snap[meta.aiIndex], data)
+                } else if (data.type === 'done') {
+                  this.stopResponseTimer()
+                  const wasError = snap[meta.aiIndex]?.error === true
+                  snap[meta.aiIndex] = {
+                    ...snap[meta.aiIndex],
+                    role: 'ai',
+                    content: wasError ? snap[meta.aiIndex].content : (data.full_response ?? snap[meta.aiIndex].content),
+                    reasoning: snap[meta.aiIndex].reasoning,
+                    toolCalls: snap[meta.aiIndex].toolCalls,
+                    thinkingDone: true,
+                    streaming: false,
+                    responseTime: this.currentResponseTime,
+                    checkpointId: data.checkpoint_id || null,
+                    error: wasError || undefined,
+                  }
+                  this.writeStreamMetrics(snap[meta.aiIndex], data)
+                  this.stopStreamTimer(requestSessionId)
+                  this._activeStreamingSessions.delete(requestSessionId)
+                  this._streamingMessages.delete(requestSessionId)
+                  this._streamingMeta.delete(requestSessionId)
+                  this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                  // 绿点：buffer-tail sessionChanged done（已计算 wasError）
+                  if (!wasError) this.markSessionCompleted(requestSessionId)
+                  if (requestSessionId) {
+                    await this.updateTitleOnly(requestSessionId, lastUserMessage)
+                  }
+                } else if (data.type === 'error') {
+                  this._sessionHadError.add(requestSessionId)
+                  this.markSessionErrored(requestSessionId)
+                  snap[meta.aiIndex] = {
+                    ...snap[meta.aiIndex],
+                    content: `resume 失败：${data.error}`,
+                    error: true,
+                    errorMessage: data.error,
+                    streaming: false,
+                    thinkingDone: true,
+                    responseTime: this.currentResponseTime,
+                  }
+                  this.writeStreamMetrics(snap[meta.aiIndex], data)
+                  this.stopStreamTimer(requestSessionId)
+                  this._activeStreamingSessions.delete(requestSessionId)
+                  this._streamingMessages.delete(requestSessionId)
+                  this._streamingMeta.delete(requestSessionId)
+                  this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                  if (requestSessionId) {
+                    await this.updateTitleOnly(requestSessionId, lastUserMessage)
+                  }
+                } else if (data.type === 'permission_request') {
+                  this.handlePermissionRequest(data, requestSessionId)
+                }
+              }
+            } else if (data.type === 'reasoning') {
+              this.messages[aiMessageIndex] = {
+                ...this.messages[aiMessageIndex],
+                reasoning: (this.messages[aiMessageIndex].reasoning || '') + data.content,
+                responseTime: this.currentResponseTime,
+              }
+              this.writeStreamMetrics(this.messages[aiMessageIndex], data)
+            } else if (data.type === 'tool_call_name') {
+              this.messages[aiMessageIndex] = this.mergeToolCallStart(this.messages[aiMessageIndex], data)
+              this.writeStreamMetrics(this.messages[aiMessageIndex], data)
+            } else if (data.type === 'tool_call_result') {
+              this.messages[aiMessageIndex] = this.mergeToolCallResult(this.messages[aiMessageIndex], data)
+              this.writeStreamMetrics(this.messages[aiMessageIndex], data)
+            } else if (data.type === 'content') {
+              this.messages[aiMessageIndex] = {
+                ...this.messages[aiMessageIndex],
+                content: this.messages[aiMessageIndex].content + data.content,
+                thinkingDone: true,
+                responseTime: this.currentResponseTime,
+              }
+              this.writeStreamMetrics(this.messages[aiMessageIndex], data)
+            } else if (data.type === 'done') {
+              this.stopResponseTimer()
+              this.messages[aiMessageIndex] = {
+                role: 'ai',
+                content: data.full_response ?? this.messages[aiMessageIndex].content,
+                reasoning: this.messages[aiMessageIndex].reasoning,
+                toolCalls: this.messages[aiMessageIndex].toolCalls,
+                thinkingDone: true,
+                streaming: false,
+                responseTime: this.currentResponseTime,
+                checkpointId: data.checkpoint_id || null,
+              }
+              this.writeStreamMetrics(this.messages[aiMessageIndex], data)
+              await this.updateTitleAndRefresh(this.currentSessionId, lastUserMessage)
+              this.stopStreamTimer(requestSessionId)
+              this._activeStreamingSessions.delete(requestSessionId)
+              this._streamingMessages.delete(requestSessionId)
+              this._streamingMeta.delete(requestSessionId)
+              this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+              // 绿点：buffer-tail in-session done
+              this.markSessionCompleted(requestSessionId)
+            } else if (data.type === 'interrupt') {
+              this.stopResponseTimer()
+              const reason = data.reason || '用户主动中断'
+              this.messages[aiMessageIndex] = {
+                ...this.messages[aiMessageIndex],
+                streaming: false,
+                interruptReason: reason,
+                responseTime: this.currentResponseTime,
+              }
+              this.writeStreamMetrics(this.messages[aiMessageIndex], data)
+              this.isInterrupted = true
+              this.isInterruptedSessionId = data.session_id || this.currentSessionId || this._pendingInterruptSessionId
+              this.interruptReason = reason
+              this.stopStreamTimer(requestSessionId)
+              this._activeStreamingSessions.delete(requestSessionId)
+              this._streamingMessages.delete(requestSessionId)
+              this._streamingMeta.delete(requestSessionId)
+              this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+            } else if (data.type === 'permission_request') {
+              this.handlePermissionRequest(data, requestSessionId)
+            }
+          } catch (e) {
+            console.error('解析 buffer 剩余数据失败:', e)
+          }
+        }
+      } catch (error) {
+        console.error('permission resume stream error:', error)
+      } finally {
+        this.isLoading = false
+        this.stopResponseTimer()
+      }
     },
     async handleRestream(checkpointId, aiMessage) {
       // 防止重复点击
@@ -1518,15 +2343,10 @@ export default {
                     }
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_name') {
-                    const toolCalls = [...(snap[meta.aiIndex].toolCalls || [])]
-                    toolCalls.push({ name: data.content.name, args: data.content.args, id: data.id, result: null })
-                    snap[meta.aiIndex] = { ...snap[meta.aiIndex], toolCalls, responseTime: this.currentResponseTime }
+                    snap[meta.aiIndex] = this.mergeToolCallStart(snap[meta.aiIndex], data)
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_result') {
-                    const toolCalls = [...(snap[meta.aiIndex].toolCalls || [])]
-                    const idx = toolCalls.findIndex(tc => tc.id === data.id)
-                    if (idx !== -1) toolCalls[idx] = { ...toolCalls[idx], result: data.content }
-                    snap[meta.aiIndex] = { ...snap[meta.aiIndex], toolCalls, responseTime: this.currentResponseTime }
+                    snap[meta.aiIndex] = this.mergeToolCallResult(snap[meta.aiIndex], data)
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'done') {
                     this.stopResponseTimer()
@@ -1549,12 +2369,15 @@ export default {
                     this._streamingMessages.delete(requestSessionId)
                     this._streamingMeta.delete(requestSessionId)
                     this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                    // 绿点：clean done 才标记（已计算 wasError）
+                    if (!wasError) this.markSessionCompleted(requestSessionId)
                     // 会话已切换：只 PUT 标题 + 同步侧栏，不调 get_conversation
                     if (requestSessionId) {
                       await this.updateTitleOnly(requestSessionId, restreamMessage)
                     }
                   } else if (data.type === 'error') {
                     this._sessionHadError.add(requestSessionId)
+                    this.markSessionErrored(requestSessionId)
                     snap[meta.aiIndex] = {
                       ...snap[meta.aiIndex],
                       content: `重新对话失败：${data.error}`,
@@ -1587,6 +2410,8 @@ export default {
                     if (requestSessionId) {
                       await this.updateTitleOnly(requestSessionId, restreamMessage)
                     }
+                  } else if (data.type === 'permission_request') {
+                    this.handlePermissionRequest(data, requestSessionId)
                   }
                 }
                 continue
@@ -1613,23 +2438,10 @@ export default {
                 }
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_name') {
-                const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
-                toolCalls.push({ name: data.content.name, args: data.content.args, id: data.id, result: null })
-                this.messages[aiMessageIndex] = {
-                  ...this.messages[aiMessageIndex],
-                  toolCalls,
-                  responseTime: this.currentResponseTime
-                }
+                this.messages[aiMessageIndex] = this.mergeToolCallStart(this.messages[aiMessageIndex], data)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_result') {
-                const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
-                const idx = toolCalls.findIndex(tc => tc.id === data.id)
-                if (idx !== -1) toolCalls[idx] = { ...toolCalls[idx], result: data.content }
-                this.messages[aiMessageIndex] = {
-                  ...this.messages[aiMessageIndex],
-                  toolCalls,
-                  responseTime: this.currentResponseTime
-                }
+                this.messages[aiMessageIndex] = this.mergeToolCallResult(this.messages[aiMessageIndex], data)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'done') {
                 this.stopResponseTimer()
@@ -1658,6 +2470,8 @@ export default {
                 this._streamingMessages.delete(requestSessionId)
                 this._streamingMeta.delete(requestSessionId)
                 this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                // 绿点：handleRestream in-session done
+                this.markSessionCompleted(requestSessionId)
               } else if (data.type === 'interrupt') {
                 this.stopResponseTimer()
                 const reason = data.reason || '用户主动中断'
@@ -1672,6 +2486,8 @@ export default {
                 this._streamingMessages.delete(requestSessionId)
                 this._streamingMeta.delete(requestSessionId)
                 this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+              } else if (data.type === 'permission_request') {
+                this.handlePermissionRequest(data, requestSessionId)
               }
             } catch (e) {
               console.error('解析消息失败:', e)
@@ -1828,12 +2644,20 @@ export default {
       if (!isTargetStreaming) {
         // 切到非流式会话：清理旧状态
         this.cleanupLoadingState()
+        // 用户进入会话 = "看到了完成 / 错误结果"，清绿/红点（在 fetch 之前做，避免 fetch 期间新 done 事件被错误清除的竞态）
+        // 不清 _approvalPendingSessions（用户可能只是切进去看，审批待办还要保留）
+        // 不清 _sessionHadError（UI 保护职责与显示无关）
+        this._completedSessions.delete(sessionId)
+        this._completedSessions = new Set(this._completedSessions)
+        this._errorSessions.delete(sessionId)
+        this._errorSessions = new Set(this._errorSessions)
         // 清理输入框和文件
         this.$refs.messageInput?.clearInput()
         // 清理引用状态
         this.currentQuote = null
       }
       // 切到流式会话：不调 cleanupLoadingState，保留 isLoading=true + 当前 responseTimer + 计时基准
+      // 流式中的会话不会有绿/红点（流式接管视觉），无需清除
 
       this.currentSessionId = sessionId
       if (this.$route.params.sessionId !== sessionId) {
@@ -1877,6 +2701,17 @@ export default {
               this.isInterruptedSessionId = null
               this.interruptReason = ''
             }
+
+            // 同步 pending tool approval —— F5 / 刷新会话后立刻高亮对应 tool + 内嵌审批按钮，
+            // 不必等 SSE 流连上来才看到
+            if (conversation.pending_permission) {
+              this.handlePermissionRequest({
+                session_id: sessionId,
+                command: conversation.pending_permission.command,
+                action: conversation.pending_permission.action,
+                tool_call_name: conversation.pending_permission.tool_call_name,  // 让幂等去重守卫生效
+              }, sessionId)
+            }
           } else if (response.status === 404) {
             // 会话不存在（可能是新会话通过 URL 进入），当作新会话处理
             this.messages = []
@@ -1910,6 +2745,15 @@ export default {
             this.isInterrupted = false
             this.isInterruptedSessionId = null
             this.interruptReason = ''
+          }
+          // 同步 pending permission —— 用户在已加载会话上右键刷新也能立刻看到审批弹窗
+          if (conversation.pending_permission) {
+            this.handlePermissionRequest({
+              session_id: this.currentSessionId,
+              command: conversation.pending_permission.command,
+              action: conversation.pending_permission.action,
+              tool_call_name: conversation.pending_permission.tool_call_name,  // 让幂等去重守卫生效
+            }, this.currentSessionId)
           }
         }
       } catch (error) {
@@ -1997,6 +2841,13 @@ export default {
         this._streamingMessages.delete(sessionId)
         this._streamingMeta.delete(sessionId)
         this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+        // 清理侧栏状态点（防孤儿 ID；ConversationItem 已 unmount，渲染上看不到残留）
+        this._completedSessions.delete(sessionId)
+        this._completedSessions = new Set(this._completedSessions)
+        this._approvalPendingSessions.delete(sessionId)
+        this._approvalPendingSessions = new Set(this._approvalPendingSessions)
+        this._errorSessions.delete(sessionId)
+        this._errorSessions = new Set(this._errorSessions)
       }
     },
     async updateConversationTitle({ sessionId, title }) {
@@ -2091,7 +2942,7 @@ export default {
 
       // 如果当前没有 sessionId，先创建并跳转到新会话页面，再发送请求
       if (!this.currentSessionId && !this.$route.params.sessionId) {
-        const newSid = crypto.randomUUID().replace(/-/g, '')
+        const newSid = crypto.randomUUID().replace(/-/g, '').slice(0, 12)
         this.currentSessionId = newSid
         await this.$router.push(`/${newSid}`)
       }
@@ -2102,6 +2953,7 @@ export default {
 
       // 用户主动发起新一轮请求 → 视为恢复，清掉旧错误保护态
       this._sessionHadError.delete(requestSessionId)
+      this.markSessionErrorResolved(requestSessionId)
 
       // 立即把当前会话加入侧边栏顶部，让用户马上看到「最新对话」
       // 占位标题「新对话」会在 AI 回复后由 updateTitleAndRefresh 校正
@@ -2214,15 +3066,10 @@ export default {
                     }
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_name') {
-                    const toolCalls = [...(snap[meta.aiIndex].toolCalls || [])]
-                    toolCalls.push({ name: data.content.name, args: data.content.args, id: data.id, result: null })
-                    snap[meta.aiIndex] = { ...snap[meta.aiIndex], toolCalls, responseTime: this.currentResponseTime }
+                    snap[meta.aiIndex] = this.mergeToolCallStart(snap[meta.aiIndex], data)
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_result') {
-                    const toolCalls = [...(snap[meta.aiIndex].toolCalls || [])]
-                    const idx = toolCalls.findIndex(tc => tc.id === data.id)
-                    if (idx !== -1) toolCalls[idx] = { ...toolCalls[idx], result: data.content }
-                    snap[meta.aiIndex] = { ...snap[meta.aiIndex], toolCalls, responseTime: this.currentResponseTime }
+                    snap[meta.aiIndex] = this.mergeToolCallResult(snap[meta.aiIndex], data)
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'done') {
                     this.stopResponseTimer()
@@ -2246,6 +3093,8 @@ export default {
                     this._streamingMessages.delete(requestSessionId)
                     this._streamingMeta.delete(requestSessionId)
                     this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                    // 绿点：clean done 才标记（已计算 wasError）
+                    if (!wasError) this.markSessionCompleted(requestSessionId)
                     // 会话已切换：只 PUT 标题 + 同步侧栏，不调 get_conversation（避免并发 N 个 done 时反复重拉）
                     if (requestSessionId) {
                       await this.updateTitleOnly(requestSessionId, message)
@@ -2253,6 +3102,7 @@ export default {
                   } else if (data.type === 'error') {
                     console.error('AI响应错误（原会话）:', data.error)
                     this._sessionHadError.add(requestSessionId)
+                    this.markSessionErrored(requestSessionId)
                     snap[meta.aiIndex] = {
                       ...snap[meta.aiIndex],
                       content: `抱歉，出现了一些问题：${data.error}`,
@@ -2289,6 +3139,8 @@ export default {
                     if (requestSessionId) {
                       await this.updateTitleOnly(requestSessionId, message)
                     }
+                  } else if (data.type === 'permission_request') {
+                    this.handlePermissionRequest(data, requestSessionId)
                   }
                 }
                 continue
@@ -2316,23 +3168,10 @@ export default {
                 }
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_name') {
-                const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
-                toolCalls.push({ name: data.content.name, args: data.content.args, id: data.id, result: null })
-                this.messages[aiMessageIndex] = {
-                  ...this.messages[aiMessageIndex],
-                  toolCalls,
-                  responseTime: this.currentResponseTime
-                }
+                this.messages[aiMessageIndex] = this.mergeToolCallStart(this.messages[aiMessageIndex], data)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_result') {
-                const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
-                const idx = toolCalls.findIndex(tc => tc.id === data.id)
-                if (idx !== -1) toolCalls[idx] = { ...toolCalls[idx], result: data.content }
-                this.messages[aiMessageIndex] = {
-                  ...this.messages[aiMessageIndex],
-                  toolCalls,
-                  responseTime: this.currentResponseTime
-                }
+                this.messages[aiMessageIndex] = this.mergeToolCallResult(this.messages[aiMessageIndex], data)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'done') {
                 this.stopResponseTimer()
@@ -2366,6 +3205,8 @@ export default {
                 this._streamingMessages.delete(requestSessionId)
                 this._streamingMeta.delete(requestSessionId)
                 this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                // 绿点：in-session done（sendMessage）。仅在 clean 时标记，避免覆盖错误后又被错误 done 复活。
+                if (!wasError) this.markSessionCompleted(requestSessionId)
 
                 // 如果是新建会话（没有 session_id）
                 if (!requestSessionId && data.session_id) {
@@ -2396,6 +3237,7 @@ export default {
               } else if (data.type === 'error') {
                 console.error('AI响应错误:', data.error)
                 this._sessionHadError.add(requestSessionId)
+                this.markSessionErrored(requestSessionId)
                 if (!sessionChanged) {
                   this.messages[aiMessageIndex] = {
                     ...this.messages[aiMessageIndex],
@@ -2436,6 +3278,8 @@ export default {
                 this._streamingMessages.delete(requestSessionId)
                 this._streamingMeta.delete(requestSessionId)
                 this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+              } else if (data.type === 'permission_request') {
+                this.handlePermissionRequest(data, requestSessionId)
               }
             } catch (e) {
               console.error('解析 SSE 消息失败:', e, '原始内容:', line)
@@ -2468,6 +3312,12 @@ export default {
                     responseTime: this.currentResponseTime
                   }
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
+                } else if (data.type === 'tool_call_name') {
+                  snap[meta.aiIndex] = this.mergeToolCallStart(snap[meta.aiIndex], data)
+                  this.writeStreamMetrics(snap[meta.aiIndex], data)
+                } else if (data.type === 'tool_call_result') {
+                  snap[meta.aiIndex] = this.mergeToolCallResult(snap[meta.aiIndex], data)
+                  this.writeStreamMetrics(snap[meta.aiIndex], data)
                 } else if (data.type === 'done') {
                   const wasError = snap[meta.aiIndex]?.error === true
                   snap[meta.aiIndex] = {
@@ -2488,6 +3338,8 @@ export default {
                   this._streamingMessages.delete(requestSessionId)
                   this._streamingMeta.delete(requestSessionId)
                   this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                  // 绿点：buffer-tail sessionChanged done（已计算 wasError）
+                  if (!wasError) this.markSessionCompleted(requestSessionId)
                   // 会话已切换：只 PUT 标题 + 同步侧栏，不调 get_conversation
                   if (requestSessionId) {
                     await this.updateTitleOnly(requestSessionId, message)
@@ -2495,6 +3347,7 @@ export default {
                 } else if (data.type === 'error') {
                   console.error('AI响应错误（buffer，原会话）:', data.error)
                   this._sessionHadError.add(requestSessionId)
+                  this.markSessionErrored(requestSessionId)
                   snap[meta.aiIndex] = {
                     ...snap[meta.aiIndex],
                     content: `抱歉，出现了一些问题：${data.error}`,
@@ -2513,6 +3366,8 @@ export default {
                   if (requestSessionId) {
                     await this.updateTitleOnly(requestSessionId, message)
                   }
+                } else if (data.type === 'permission_request') {
+                  this.handlePermissionRequest(data, requestSessionId)
                 }
               }
             } else {
@@ -2524,22 +3379,10 @@ export default {
                 }
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_name') {
-                const toolCall = { name: data.content.name, args: data.content.args, id: data.id, result: null }
-                // 如果是 sub_agent 工具，特殊处理
-                if (data.content.name === 'sub_agent') {
-                  this._handleSubAgentStart(aiMessageIndex, toolCall)
-                } else {
-                  this._addToolCallToMessage(aiMessageIndex, toolCall)
-                }
+                this.messages[aiMessageIndex] = this.mergeToolCallStart(this.messages[aiMessageIndex], data)
+                this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_result') {
-                const toolCalls = [...(this.messages[aiMessageIndex].toolCalls || [])]
-                const idx = toolCalls.findIndex(tc => tc.id === data.id)
-                if (idx !== -1) toolCalls[idx] = { ...toolCalls[idx], result: data.content }
-                this.messages[aiMessageIndex] = {
-                  ...this.messages[aiMessageIndex],
-                  toolCalls,
-                  responseTime: this.currentResponseTime
-                }
+                this.messages[aiMessageIndex] = this.mergeToolCallResult(this.messages[aiMessageIndex], data)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'content') {
                 this.messages[aiMessageIndex] = {
@@ -2585,6 +3428,10 @@ export default {
                 this._streamingMessages.delete(requestSessionId)
                 this._streamingMeta.delete(requestSessionId)
                 this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                // 绿点：buffer-tail in-session done（已计算 wasError）
+                if (!wasError) this.markSessionCompleted(requestSessionId)
+              } else if (data.type === 'permission_request') {
+                this.handlePermissionRequest(data, requestSessionId)
               }
             }
           } catch (e) {

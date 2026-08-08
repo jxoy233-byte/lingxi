@@ -62,6 +62,7 @@ async def init_mcp(tool_interceptors: list = None) -> None:
         _mcp_session,
         tool_interceptors=_tool_interceptors,
     )
+    # DEPRECATED: sub_agent 已废弃，prompt 不再向 LLM 暴露；保留注册仅为兼容潜在遗留调用
     tools.append(sub_agent)
     _mcp_tools_cache = tools
 

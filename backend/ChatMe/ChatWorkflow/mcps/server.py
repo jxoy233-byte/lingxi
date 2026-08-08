@@ -8,22 +8,19 @@ middleware 读取后写入 ContextVar,工具函数通过 current_session_id.get(
 from contextvars import ContextVar
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from shutil import which
 from typing import Annotated, Literal, Optional
 
 import redis
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 import subprocess
-import os
-import platform
-import re
 import sys
 import signal
 
 from ChatMe.LoggingManager.logging_config import get_logger
 from ChatMe.ChatMeConfig import get_redis_checkpointer_url
 from ChatMe.ChatWorkflow.mcps.CodeSandboxPool import SandboxPool
+from ChatMe.ChatWorkflow.mcps.platforms import get_platform, init_platform
 
 server = FastMCP(name="ChatMe Agent Core Skills")
 
@@ -118,278 +115,18 @@ def _init_sandbox_pool():
         logger.warning(f"沙盒容器池初始化失败: {e}，将使用本地虚拟环境")
         _sandbox_pool = None
 
-def is_dangerous_command(command: Annotated[ str, "系统执行命令"]) -> tuple[bool, str]:
-    """
-    检测命令是否危险
-    返回：(是否危险，危险原因)
-    """
-    system = platform.system().lower()
-    command_lower = command.lower()
+# =========================================================================
+# cmd / code 工具：业务逻辑统一走 platform adapter
+# =========================================================================
+# 危险检测 / 白名单 / 脚本识别 / 本地 fallback / prompt 片段全部在
+# ChatMe.ChatWorkflow.mcps.platforms 模块下三套独立 adapter 里：
+# - LinuxAdapter: 通用 + Unix 危险模式 + /bin/sh + /tmp
+# - DarwinAdapter: macOS 专属 + /bin/zsh
+# - WindowsAdapter: Windows 等价命令 + cmd.exe + %TEMP%
+# 详见 platforms/base.py 抽象接口。
+# 启动时 main() 调 init_platform() 检测 + 缓存，业务代码用 get_platform() 读。
+# =========================================================================
 
-    # 通用
-    dangerous_patterns = {
-        'rm -rf /': '删除根目录',
-        'rm -rf /*': '删除所有文件',
-        'rm -rf \\': 'Windows 删除操作',
-        'deltree': 'Windows 删除目录树',
-        'mkfs': '创建文件系统（可能破坏数据）',
-        'newfs': '创建新文件系统',
-
-        'dd if=/dev/zero': '用零覆盖数据',
-        'dd if=/dev/random': '用随机数据覆盖',
-        '> /dev/sda': '直接写入磁盘设备',
-        '> \\\\.\\PhysicalDrive': 'Windows 物理磁盘写入',
-        'cat /dev/null >': '清空文件内容',
-
-        'chmod -R 777 /': '开放所有权限到根目录',
-        'chmod -R 777 \\': 'Windows 开放所有权限',
-        'chown -R': '递归修改所有者（可能破坏系统）',
-        'icacls * /grant everyone:F': 'Windows 完全控制权限',
-
-        ':(){ :|:& };:': 'Bash fork 炸弹',
-        '${fork bomb variants}': '各种 fork 炸弹变体',
-
-        'iptables -F': '清空防火墙规则',
-        'netsh advfirewall reset': 'Windows 重置防火墙',
-        'tcpkill': '阻断网络连接',
-
-        'kill -9 -1': '终止所有进程',
-        'taskkill /F /IM *': 'Windows 终止所有进程',
-
-        '/etc/passwd': 'Linux 用户配置文件',
-        '/etc/shadow': 'Linux 密码文件',
-        'C:\\Windows\\System32': 'Windows 系统目录',
-        'HKEY_LOCAL_MACHINE': 'Windows 注册表',
-        'reg delete HKLM': '删除注册表项',
-
-        'apt-get remove --purge': '彻底删除包',
-        'yum erase': '删除包',
-        'dnf remove': '删除包',
-        'pacman -Rns': 'Arch 删除包',
-        'pip uninstall -y': '卸载 Python 包',
-        'npm uninstall -g': '卸载全局 npm 包',
-    }
-
-    # windows
-    if system == 'windows':
-        windows_dangerous = {
-            'del /s /q': '静默删除文件',
-            'rmdir /s /q': '静默删除目录',
-            'fsutil': '文件系统工具（可能破坏数据）',
-            'diskpart': '磁盘分区工具',
-            'bcdedit /delete': '删除启动配置',
-            'sfc /scannow': '系统文件检查（可能影响系统）',
-            'cipher /w': '擦除空闲空间',
-            'shutdown /s /t 0': '立即关机',
-            'shutdown /r /t 0': '立即重启',
-        }
-        dangerous_patterns.update(windows_dangerous)
-
-    # linux/mac
-    elif system in ['linux', 'darwin']:
-        unix_dangerous = {
-            'sudo su -': '获取 root shell',
-            'passwd -d': '删除用户密码',
-            'userdel -r': '删除用户及家目录',
-            'vigr': '编辑组文件',
-            'vipw': 'edit password file',
-            'update-rc.d': 'modify startup services',
-            'systemctl disable': 'disable system service',
-            'mount -o remount,ro /': 'remount as read-only',
-            'umount /': 'unmount root directory',
-        }
-        dangerous_patterns.update(unix_dangerous)
-
-    # 检查是否包含危险模式
-    for pattern, reason in dangerous_patterns.items():
-        if pattern.lower() in command_lower:
-            return True, f"Dangerous command detected: {pattern} ({reason})"
-
-    # 检查是否有重定向到设备文件
-    device_patterns = [
-        r'>\s*/dev/[hs]d[a-z]',
-        r'>\s*/dev/sd[a-z]',
-        r'>\s*\\\\.\\PhysicalDrive',
-        r'\s+\|\s*tee\s+/dev/',
-    ]
-    for pattern in device_patterns:
-        if re.search(pattern, command):
-            return True, "Redirecting to device file detected"
-
-    # 检查 format 磁盘格式化（仅当作为独立命令 + 跟设备路径时才拦截）
-    # 拦截: format c:、format /dev/sda1、format -f
-    # 不拦截: cat format.py、python format.py、--format=json、format_string
-    if re.search(r'(?:^|[\s;&|])format\s+(?:/dev/|[a-zA-Z]:|--?\w+)', command):
-        return True, "Dangerous command detected: format (disk format)"
-
-    # 检查是否尝试提升权限
-    if 'sudo' in command_lower and any(x in command_lower for x in ['rm', 'dd', 'mkfs', 'chmod', 'chown']):
-        return True, "sudo executing dangerous operation detected"
-
-    return False, ""
-
-
-def _is_script_command(command: str) -> tuple[bool, str]:
-    """
-    检测命令是否为脚本执行（Python / Node.js / Ruby / PHP / Perl 等）
-    返回：(是否为脚本执行, 脚本语言名称)
-    """
-    script_patterns = [
-        ("Python", [
-            r'^python(\d+(\.\d+)?)?\s+',
-            r'^pypy3?\s+',
-            r'python(\d+(\.\d+)?)?\s+-c\s+',
-            r'python(\d+(\.\d+)?)?\s+-m\s+',
-            r'python(\d+(\.\d+)?)?\s+<<',
-        ]),
-        ("Node.js", [
-            r'^node(\d+(\.\d+)?)?\s+',
-            r'^node(\d+(\.\d+)?)?\s+-e\s+',
-            r'^node(\d+(\.\d+)?)?\s+-p\s+',
-            r'^node(\d+(\.\d+)?)?\s+-pe\s+',
-            r'^node(\d+(\.\d+)?)?\s+<<',
-        ]),
-        ("Ruby", [
-            r'^ruby\s+',
-            r'^ruby\s+-e\s+',
-        ]),
-        ("PHP", [
-            r'^php\s+',
-            r'^php\s+-r\s+',
-        ]),
-        ("Perl", [
-            r'^perl\s+',
-            r'^perl\s+-e\s+',
-        ]),
-    ]
-
-    for lang, patterns in script_patterns:
-        if any(re.search(p, command) for p in patterns):
-            return True, lang
-    return False, ""
-
-
-_ALLOWED_COMMANDS_UNIX = {
-    "ls", "cd", "pwd", "which",
-    "cat", "head", "tail", "grep", "wc",
-    "cp", "mv", "mkdir", "rm", "find", "sed",
-    "awk", "sort", "echo", "touch", "diff", "tar", "gzip",
-    "curl",
-}
-
-_ALLOWED_COMMANDS_WIN = {
-    "dir", "cd",
-    "type", "more", "findstr", "fc",
-    "copy", "move", "mkdir", "del", "rmdir", "dir",
-    "sort",
-    "curl",
-}
-
-
-def _is_allowed_command(command: str) -> tuple[bool, str]:
-    """
-    检测命令是否为当前平台白名单中的命令。
-    返回：(是否允许, 不允许的原因)
-    """
-    system = platform.system().lower()
-    allowed = _ALLOWED_COMMANDS_WIN if system == "windows" else _ALLOWED_COMMANDS_UNIX
-
-    first_token = command.strip().split()[0].strip('"\'|;$<>')
-    main_cmd = first_token.split("/")[-1]
-
-    if main_cmd in allowed:
-        return True, ""
-
-    return False, f"Command \"{main_cmd}\" is not in the whitelist. Use a whitelisted command."
-
-
-def _execute_code_in_local(code: str, language: str) -> str:
-    """本地虚拟环境执行（cwd=backend/，跟沙盒语义一致：相对路径 cached/xxx 都能解析）
-
-    沙盒 cwd=/ + 容器内 /cached /skills mount；
-    本机 cwd=backend/ + backend/cached/ backend/skills/ 真实存在。
-    AI 写代码时用相对路径 `cached/xxx` / `skills/xxx` 在两边都有效。
-    timeout 硬编码 300s（与沙盒 execute 对齐）。
-    """
-    timeout = 300
-    project_root = Path.cwd()
-    skills_dir = project_root / "skills"
-
-    venv_candidates = [
-        project_root / ".venv",
-        project_root / "venv",
-        project_root.parent / ".venv",
-        project_root.parent / "venv",
-    ]
-
-    venv_python = None
-    for venv in venv_candidates:
-        if (venv / "bin" / "python").exists():
-            venv_python = str(venv / "bin" / "python")
-            break
-        elif (venv / "Scripts" / "python.exe").exists():
-            venv_python = str(venv / "Scripts" / "python.exe")
-            break
-
-    if not venv_python:
-        venv_python = sys.executable
-
-    env = os.environ.copy()
-    current_path = env.get('PATH', '')
-    venv_bin = str(Path(venv_python).parent)
-    if not current_path.startswith(venv_bin):
-        env['PATH'] = f"{venv_bin}:{current_path}"
-
-    # PYTHONPATH 包含 backend_dir + skills_dir
-    # 让 `import Exa`（走 skills_dir）、`from ChatMe.xxx import xxx`（走 backend_dir）都能解析
-    backend_dir = str(project_root)
-    skills_abs = str(skills_dir)
-    existing_pythonpath = env.get('PYTHONPATH', '')
-    new_pythonpath_parts = [backend_dir, skills_abs]
-    seen = set()
-    merged = []
-    for p in ([existing_pythonpath] if existing_pythonpath else []) + new_pythonpath_parts:
-        if p and p not in seen:
-            seen.add(p)
-            merged.append(p)
-    env['PYTHONPATH'] = os.pathsep.join(merged)
-
-    suffix = ".py" if language == "python" else ".js"
-
-    # 临时文件写到 /tmp（与沙盒一致位置），执行完立即清理
-    temp_file = f"/tmp/code{suffix}"
-    try:
-        with open(temp_file, 'w') as f:
-            f.write(code)
-
-        if language == "python":
-            result = subprocess.run(
-                [venv_python, temp_file],
-                cwd=str(project_root),
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                env=env,
-            )
-        else:
-            node_cmd = which("node")
-            if not node_cmd:
-                return "Error: Node.js not found"
-            result = subprocess.run(
-                [node_cmd, temp_file],
-                cwd=str(project_root),
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                env=env,
-            )
-
-        return f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n\nReturn code: {result.returncode}"
-    finally:
-        try:
-            os.unlink(temp_file)
-        except FileNotFoundError:
-            pass
 
 @server.tool
 def code(
@@ -399,8 +136,14 @@ def code(
 ) -> Optional[str]:
     """
     Execute code (sandbox by default; sandbox exposes /skills (read-only) and /cached (read-write)).
+    Falls back to local platform venv if sandbox is unavailable.
+
+    Permission: 审批在主进程的 tool_execution_node 里做（interrupt 需要 LangGraph runtime 上下文），
+    MCP 侧只做 platform 硬过滤。
     """
     session_id = current_session_id.get()
+    platform = get_platform()
+
     # 沙盒执行
     if use_sandbox and _sandbox_pool is not None:
         logger.debug(f"会话 {session_id} 使用[沙盒容器]执行代码")
@@ -413,39 +156,27 @@ def code(
 
     # 沙盒池未初始化但 AI 想要沙盒 → 降级到本地
     if use_sandbox and _sandbox_pool is None:
-        logger.warning(f"会话 {session_id} 请求沙盒但沙盒池未初始化，降级到本地 venv")
+        logger.warning(f"会话 {session_id} 请求沙盒但沙盒池未初始化，降级到 {platform.name} 本地 venv")
 
-    logger.debug(f"会话 {session_id} 使用[本地环境]执行代码")
-    try:
-        return _execute_code_in_local(code, language)
-    except subprocess.TimeoutExpired:
-        logger.warning(f"会话 {session_id} code 本地执行超时(300s)")
-        return ("Error: code execution timed out (300s limit), "
-                "please optimize the script or split the task into smaller steps")
+    logger.debug(f"会话 {session_id} 使用[{platform.name} 本地环境]执行代码")
+    return platform.execute_code_local(code, language, code_timeout=300)
+
 
 @server.tool
 def cmd(
         command: Annotated[str, "System command to execute"],
         use_sandbox: Annotated[bool, "Whether to execute in sandbox (default True)"] = True,
 ) -> str:
-    """Execute a shell command within the whitelist (sandbox by default; only skills/ and cached/ are exposed)."""
+    """Execute a shell command within the whitelist (sandbox by default; only skills/ and cached/ are exposed).
+
+    Whitelist and danger patterns are determined by the platform adapter
+    (Linux / Darwin / Windows). Windows uses cmd.exe commands (dir / type / findstr / copy / move / del).
+
+    Permission + 静态前置 gate（dangerous / script / whitelist）都在主进程的 PermissionedToolNode
+    里做完；这里只做执行。如果走到这里，说明前置 gate 已经放行。
+    """
     session_id = current_session_id.get()
-    is_dangerous, reason = is_dangerous_command(command=command)
-    if is_dangerous:
-        logger.warning(f"会话{session_id}中危险命令,已安全拦截")
-        return f"Error: blocked: {reason}"
-
-    # 检测脚本执行
-    is_script, script_lang = _is_script_command(command)
-    if is_script:
-        logger.warning(f"会话{session_id}尝试用 cmd 执行{script_lang}")
-        return f"Error: cmd cannot execute {script_lang} scripts; use the code tool instead"
-
-    # 白名单检查
-    is_allowed, allow_reason = _is_allowed_command(command)
-    if not is_allowed:
-        logger.warning(f"会话{session_id}中非白名单命令: {allow_reason}")
-        return f"Error: {allow_reason}"
+    platform = get_platform()
 
     # 沙盒执行
     if use_sandbox and _sandbox_pool is not None:
@@ -459,62 +190,10 @@ def cmd(
 
     # 沙盒池未初始化但 AI 想要沙盒 → 降级到本地
     if use_sandbox and _sandbox_pool is None:
-        logger.warning(f"会话 {session_id} 请求沙盒但沙盒池未初始化，降级到本地 venv")
+        logger.warning(f"会话 {session_id} 请求沙盒但沙盒池未初始化，降级到 {platform.name} 本地")
 
-    logger.debug(f"会话 {session_id} 使用[本地环境]执行命令")
-
-    # 向上查找项目根目录的虚拟环境
-    project_root = Path.cwd()
-    venv_candidates = [
-        project_root / ".venv",
-        project_root / "venv",
-        project_root.parent / ".venv",
-        project_root.parent / "venv",
-    ]
-
-    venv_path = None
-    for venv in venv_candidates:
-        if venv.exists() and (venv / "bin" / "python").exists():
-            venv_path = str(venv / "bin")
-            break
-        elif venv.exists() and (venv / "Scripts" / "python.exe").exists():
-            venv_path = str(venv / "Scripts")
-            break
-
-    env = os.environ.copy()
-    current_path = env.get('PATH', '')
-
-    # 确保虚拟环境路径在最前面
-    if venv_path and not current_path.startswith(venv_path):
-        env['PATH'] = f"{venv_path}:{current_path}"
-
-    # 添加 backend 目录到 PYTHONPATH，使 ChatMe 包可以正确导入
-    backend_dir = str(project_root)
-    current_pythonpath = env.get('PYTHONPATH', '')
-    if backend_dir not in current_pythonpath:
-        env['PYTHONPATH'] = f"{backend_dir}{os.pathsep}{current_pythonpath}" if current_pythonpath else backend_dir
-
-    cmd_timeout = 120
-    try:
-        result = subprocess.run(
-            command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=cmd_timeout,
-            cwd=str(project_root),
-            env=env,
-        )
-
-        output = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n\nReturn code: {result.returncode}"
-        logger.debug(f"会话{session_id}中执行终端命令成功")
-        return output
-    except subprocess.TimeoutExpired:
-        logger.error(f"会话{session_id}中终端命令执行超时")
-        return f"Error: Command execution timed out ({cmd_timeout} seconds limit)"
-    except Exception as e:
-        logger.error(f"会话{session_id}中错误执行终端命令")
-        return f"Error: {str(e)}"
+    logger.debug(f"会话 {session_id} 使用[{platform.name} 本地环境({platform.shell_path})]执行命令")
+    return platform.execute_command(command, sandbox_pool=None, cmd_timeout=120)
 
 @server.tool
 def interrupt(
@@ -599,6 +278,14 @@ def _signal_handler(signum, frame):
 def main():
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
+
+    # 启动时检测平台（permissions 审批已挪到主进程 tool_execution_node，MCP 侧不再加载）
+    platform = init_platform()
+    logger.info(
+        f"[ChatMe MCP] detected platform: {platform.name} "
+        f"({platform.system_name}) / shell: {platform.shell_path} {platform.shell_flag} / "
+        f"allowed cmds: {len(platform.allowed_commands)}"
+    )
 
     # eager init(chatme_main 启动时随 MCP subprocess 一并就位):
     # redis 通过 docker-compose up -d 启,sandbox 池通过 SandboxPool() 启动。

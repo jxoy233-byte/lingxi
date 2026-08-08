@@ -91,6 +91,11 @@ class ChatMeConfig:
                 "endpoint": os.getenv("OSS_ENDPOINT", ""),
                 "region": os.getenv("OSS_REGION", ""),
             },
+            "permissions": {
+                "approval_policy": "default",
+                "approved_commands": [],
+                "denied_commands": [],
+            },
         }
 
         try:
@@ -270,22 +275,38 @@ class ChatMeConfig:
         }
 
     def get_model_vl_config(self) -> dict:
-        """获取 VL 模型配置"""
+        """获取 VL 模型配置
+
+        local 字段语义（vl.local 默认 True）：
+        - True  ：走独立 VL provider（默认 Qwen3-VL-2B 本地模型）
+        - False ：fallback 到主模型（llm_providers 链中第一个有效项），与主用 LLM 共用
+                  api_key / base_url / model_name；适用于"不想额外配 VL、让主模型兼职看图"的场景
+        """
         self._load()
 
         provider_config = self.get("llm_providers.vl", {})
 
         result = {}
         for key in ["model_name", "api_key", "base_url", "local"]:
-            config_value = provider_config.get(key, "") if isinstance(provider_config, dict) else ""
+            config_value = provider_config.get(key) if isinstance(provider_config, dict) else None
             env_value = os.getenv(f"VL_{key.upper()}", None)
 
-            if config_value and config_value != "":
-                result[key] = config_value
-            elif env_value is not None:
-                result[key] = env_value
+            # 字符串字段：空字符串视为未设
+            if key != "local":
+                if config_value and config_value != "":
+                    result[key] = config_value
+                elif env_value is not None and env_value != "":
+                    result[key] = env_value
+                else:
+                    result[key] = None
             else:
-                result[key] = None
+                # local 布尔字段：保留 False 语义（不要把 False 当空字符串处理）
+                if isinstance(config_value, bool):
+                    result[key] = config_value
+                elif env_value is not None:
+                    result[key] = str(env_value).lower() in ("true", "1", "yes")
+                else:
+                    result[key] = True  # 默认 True（旧行为）
 
         for key in ["temperature", "max_tokens", "top_p", "frequency_penalty", "presence_penalty"]:
             env_value = os.getenv(f"VL_{key.upper()}", None)
@@ -296,6 +317,9 @@ class ChatMeConfig:
                     result[key] = env_value
             else:
                 result[key] = None
+
+        # local=False 时 fallback 到主用 LLM（仅覆盖连接三元组，不动 local/temperature/...）
+        result = self._resolve_vl_fallback(result)
 
         return result
 
@@ -317,12 +341,37 @@ class ChatMeConfig:
             "region": self.get("oss.region", fallback_env="OSS_REGION"),
         }
 
+    def _resolve_vl_fallback(self, cfg: dict) -> dict:
+        """vl.local=False 时把连接三元组 fallback 到"当前生效的" LLM。
+
+        完全无视 vl 段自己填的 model_name / api_key / base_url —— 即便 vl 段配了也丢掉，
+        一律用主用 provider（get_active_llm_config 内部已经做了主→备 fallback，
+        跟启动健康检查保持一致）。
+
+        输入 cfg 应至少含 model_name/api_key/base_url/local 四个键。
+        返回新 dict，不修改入参。
+
+        主模型链空（没配任何有效 provider）时 → 保留 vl 自己的配置兜底，
+        比半残的 None 更安全。
+        """
+        if cfg.get("local") is not False:
+            return cfg
+        primary = self.get_active_llm_config()
+        if not primary:
+            return cfg
+        out = dict(cfg)
+        for key in ("model_name", "api_key", "base_url"):
+            primary_val = primary.get(key, "")
+            out[key] = primary_val  # 无条件覆盖：完全不管 vl 段自己的配置
+        return out
+
     def get_skills_config(self) -> dict:
         """获取 skills 配置（API key 等）
 
         优先级：config.json > 环境变量
         - 搜索类（config.json 的 skills 段）：bocha_api_key / exa_api_key / tavily_api_key
         - 视觉模型类（复用 llm_providers.vl）：vl_base_url / vl_api_key / vl_model_name
+        - vl.local=False 时连接三元组 fallback 到主用 LLM
 
         容器内自动把 127.0.0.1 替换为 host.docker.internal（容器访问 host 的特殊 DNS）
         """
@@ -335,11 +384,25 @@ class ChatMeConfig:
             "vl_api_key": self.get("llm_providers.vl.api_key", fallback_env="VL_API_KEY", default="empty"),
             "vl_model_name": self.get("llm_providers.vl.model_name", fallback_env="VL_MODEL_NAME",
                                         default="Qwen3-VL-2B"),
+            "vl_local": self.get("llm_providers.vl.local", fallback_env="VL_LOCAL", default=True),
         }
         # 容器内：127.0.0.1 → host.docker.internal
         if os.path.exists("/.dockerenv"):
             if "127.0.0.1" in cfg.get("vl_base_url", ""):
                 cfg["vl_base_url"] = cfg["vl_base_url"].replace("127.0.0.1", "host.docker.internal")
+
+        # local=False fallback：把连接三元组换成主模型
+        fallback_input = {
+            "model_name": cfg["vl_model_name"],
+            "api_key": cfg["vl_api_key"],
+            "base_url": cfg["vl_base_url"],
+            "local": cfg["vl_local"] if isinstance(cfg["vl_local"], bool)
+                     else str(cfg["vl_local"]).lower() in ("false", "0", "no"),
+        }
+        resolved = self._resolve_vl_fallback(fallback_input)
+        cfg["vl_model_name"] = resolved["model_name"]
+        cfg["vl_api_key"] = resolved["api_key"]
+        cfg["vl_base_url"] = resolved["base_url"]
         return cfg
 
     def get_oss_bucket(self) -> str:
@@ -368,7 +431,7 @@ class ChatMeConfig:
     # ========================================================================
 
     # 前端表单允许编辑的顶层 key 白名单；其他节点（app/redis/dirs/oss）禁止修改
-    EDITABLE_TOP_KEYS = ("llm_providers", "skills")
+    EDITABLE_TOP_KEYS = ("llm_providers", "skills", "permissions")
 
     # 修改后必须重启后端才能生效的字段（langchain client / mcp client 是常驻对象）
     RESTART_REQUIRED = True
@@ -416,6 +479,11 @@ class ChatMeConfig:
                 if k.endswith("_api_key"):
                     skills_copy[k] = self._mask_secret(skills_copy[k])
             result["skills"] = skills_copy
+
+        # permissions 段：原样返回。改动后需重启后端（Permissions 单例是启动时缓存的）
+        perms = self.get("permissions", {}) or {}
+        if isinstance(perms, dict):
+            result["permissions"] = dict(perms)
 
         return result
 
@@ -473,6 +541,23 @@ class ChatMeConfig:
                     continue
                 current["skills"][field] = value
                 saved_keys.append(f"skills.{field}")
+
+        # === permissions ===
+        if "permissions" in updates:
+            current.setdefault("permissions", {})
+            for field, value in updates["permissions"].items():
+                if field == "approval_policy":
+                    if value not in ("default", "yolo"):
+                        raise ValueError(f"approval_policy 必须是 'default' 或 'yolo'，实际是 {value!r}")
+                    current["permissions"]["approval_policy"] = value
+                    saved_keys.append("permissions.approval_policy")
+                elif field in ("approved_commands", "denied_commands"):
+                    if not isinstance(value, list):
+                        raise ValueError(f"{field} 必须是 list，实际是 {type(value).__name__}")
+                    current["permissions"][field] = value
+                    saved_keys.append(f"permissions.{field}")
+                else:
+                    raise ValueError(f"permissions 段不允许的字段: {field!r}")
 
         # 原子写：tmp + os.replace（不写 .bak 副本，避免污染用户配置目录 / git untracked 列表）
         # 关键：tmp 文件名带进程 PID，避免与仓库里提交的 config.json.tmp 模板重名
@@ -558,6 +643,16 @@ def get_skills_config() -> dict:
     优先级：config.json > 环境变量
     """
     return config.get_skills_config()
+
+
+def get_permissions_config() -> dict:
+    """获取 permissions 段（dict 形式）。段缺失时返回 default 配置。"""
+    cfg = config.get("permissions", {}) or {}
+    return {
+        "approval_policy": cfg.get("approval_policy", "default"),
+        "approved_commands": cfg.get("approved_commands", []),
+        "denied_commands": cfg.get("denied_commands", []),
+    }
 
 
 def get_app_config() -> dict:

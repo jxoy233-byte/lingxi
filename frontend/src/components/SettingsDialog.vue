@@ -67,6 +67,26 @@
                   {{ providerLabel(name) }}
                   <span v-if="name === 'vl'" class="tag">vision</span>
                 </div>
+
+                <!-- VL 专用：local 开关（决定是否走独立视觉模型 vs fallback 主用 LLM） -->
+                <div v-if="name === 'vl'" class="field">
+                  <label class="toggle-label">
+                    <input
+                      type="checkbox"
+                      :checked="prov.local !== false"
+                      @change="prov.local = $event.target.checked"
+                    />
+                    <span>使用独立视觉模型 (local)</span>
+                  </label>
+                  <p class="field-hint">
+                    勾选：用下方专属 <code>Model / Base URL / API Key</code> 跑视觉任务（默认 Qwen3-VL-2B 本地模型）。<br>
+                    <strong>不勾选（local=false）</strong>：忽略下方三个字段，<strong>fallback 到主用 LLM</strong>
+                    （取 <code>llm_providers</code> 中第一个有效 provider，已自动 main→backup 切换），
+                    适用于「不想额外配 VL、让主模型兼职看图」的场景。<br>
+                    改动需重启后端生效 —— <code>local</code> 字段决定是否加载本地模型到内存。
+                  </p>
+                </div>
+
                 <div class="field">
                   <label>Model</label>
                   <input v-model="prov.model_name" type="text" placeholder="如 gpt-4o" />
@@ -152,6 +172,85 @@
                 </div>
               </div>
             </section>
+
+            <!-- Permissions -->
+            <section v-else-if="activeTab === 'permissions'" class="section">
+              <div class="section-header">
+                <h4>Tool Permissions</h4>
+                <p class="section-desc">
+                  控制 LLM 跑 <code>cmd</code> / <code>code</code> 工具时是否询问。
+                  改动需重启后端生效（Permissions 单例是启动时缓存的）。
+                </p>
+              </div>
+
+              <div class="group">
+                <div class="group-title">审批策略</div>
+                <div class="policy-row">
+                  <label
+                    v-for="opt in policyOptions"
+                    :key="opt.value"
+                    :class="['policy-pill', { active: formConfig.permissions.approval_policy === opt.value }]"
+                  >
+                    <input type="radio" :value="opt.value" v-model="formConfig.permissions.approval_policy" />
+                    <span class="policy-label">{{ opt.label }}</span>
+                    <span class="policy-desc">{{ opt.desc }}</span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="group">
+                <div class="group-title">
+                  已批准命令
+                  <span class="tag">{{ formConfig.permissions.approved_commands.length }}</span>
+                </div>
+                <p class="field-hint" style="margin-bottom: 10px;">
+                  同 pattern 命中后自动放行。点击 × 撤销授权。
+                </p>
+                <div v-if="formConfig.permissions.approved_commands.length === 0" class="empty-list">
+                  还没有任何已批准命令
+                </div>
+                <div v-else class="cmd-list">
+                  <div
+                    v-for="(cmd, idx) in formConfig.permissions.approved_commands"
+                    :key="cmd.pattern + idx"
+                    class="cmd-row"
+                  >
+                    <div class="cmd-pattern">{{ cmd.pattern }}</div>
+                    <div class="cmd-meta">
+                      <span class="cmd-scope">{{ cmd.scope || 'global' }}</span>
+                      <span class="cmd-time">{{ cmd.approved_at || '' }}</span>
+                    </div>
+                    <button class="cmd-delete" @click="removeApproved(idx)" aria-label="撤销">×</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="group">
+                <div class="group-title">
+                  已拒绝命令
+                  <span class="tag">{{ formConfig.permissions.denied_commands.length }}</span>
+                </div>
+                <p class="field-hint" style="margin-bottom: 10px;">
+                  同 pattern 命中后直接拦截。点击 × 撤销拒绝。
+                </p>
+                <div v-if="formConfig.permissions.denied_commands.length === 0" class="empty-list">
+                  还没有任何已拒绝命令
+                </div>
+                <div v-else class="cmd-list">
+                  <div
+                    v-for="(cmd, idx) in formConfig.permissions.denied_commands"
+                    :key="cmd.pattern + idx"
+                    class="cmd-row"
+                  >
+                    <div class="cmd-pattern">{{ cmd.pattern }}</div>
+                    <div class="cmd-meta">
+                      <span class="cmd-time">{{ cmd.denied_at || '' }}</span>
+                    </div>
+                    <button class="cmd-delete" @click="removeDenied(idx)" aria-label="撤销">×</button>
+                  </div>
+                </div>
+              </div>
+            </section>
           </div>
         </div>
 
@@ -204,19 +303,25 @@ export default {
       tabs: [
         { key: 'appearance', label: 'Appearance' },
         { key: 'llm', label: 'Models' },
-        { key: 'skills', label: 'Skills' }
+        { key: 'skills', label: 'Skills' },
+        { key: 'permissions', label: 'Permissions' }
       ],
       themeOptions: [
         { value: 'light', label: 'Light' },
         { value: 'dark', label: 'Dark' }
       ],
       theme: 'light',
+      policyOptions: [
+        { value: 'default', label: 'Default', desc: '敏感命令（写/code/网络）每次执行前询问' },
+        { value: 'yolo', label: 'Yolo', desc: '全部放行（硬危险命令仍拦截）' }
+      ],
 
       loading: false,
       loadError: '',
       formConfig: {
         llm_providers: {},
-        skills: {}
+        skills: {},
+        permissions: { approval_policy: 'default', approved_commands: [], denied_commands: [] }
       },
 
       showKey: {},
@@ -258,6 +363,9 @@ export default {
         const cfg = JSON.parse(JSON.stringify(resp.config || {}))
         cfg.llm_providers = cfg.llm_providers || {}
         cfg.skills = cfg.skills || {}
+        cfg.permissions = cfg.permissions || { approval_policy: 'default', approved_commands: [], denied_commands: [] }
+        cfg.permissions.approved_commands = cfg.permissions.approved_commands || []
+        cfg.permissions.denied_commands = cfg.permissions.denied_commands || []
 
         // 脱敏的 api_key 不入 form（masked 串带回会被当新 key 覆盖真值，401）
         // 留空让 placeholder "留空表示不修改" 显示，buildPayload 会 delete 掉，后端 save_config 跳过
@@ -275,6 +383,12 @@ export default {
       } finally {
         this.loading = false
       }
+    },
+    removeApproved(idx) {
+      this.formConfig.permissions.approved_commands.splice(idx, 1)
+    },
+    removeDenied(idx) {
+      this.formConfig.permissions.denied_commands.splice(idx, 1)
     },
     async saveOnly() {
       this.saving = true
@@ -590,6 +704,24 @@ export default {
   color: var(--text-secondary);
   font-weight: 500;
 }
+
+/* checkbox 跟文字同行 —— 用于 vl.local 开关 */
+.toggle-label {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  color: var(--text-primary) !important;
+}
+.toggle-label input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--text-primary);
+}
 .field input,
 .field select {
   width: 100%;
@@ -644,6 +776,107 @@ export default {
 .toggle-eye:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
+}
+
+/* ===== Permissions: policy picker ===== */
+.policy-row {
+  display: flex;
+  gap: 8px;
+}
+.policy-pill {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  cursor: pointer;
+  background: transparent;
+  transition: border-color 0.12s, background 0.12s;
+}
+.policy-pill:hover { border-color: var(--text-secondary); }
+.policy-pill.active {
+  border-color: var(--text-primary);
+  background: var(--bg-hover);
+}
+.policy-pill input { display: none; }
+.policy-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.policy-desc {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+/* ===== Permissions: approved/denied lists ===== */
+.empty-list {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  font-style: italic;
+  padding: 8px 0;
+}
+.cmd-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.cmd-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-primary);
+}
+.cmd-pattern {
+  font-family: 'SF Mono', 'Menlo', monospace;
+  font-size: 12px;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+.cmd-meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.cmd-scope {
+  font-family: 'SF Mono', 'Menlo', monospace;
+  background: var(--bg-hover);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.cmd-time {
+  font-family: 'SF Mono', 'Menlo', monospace;
+}
+.cmd-delete {
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--border-color);
+  background: transparent;
+  color: var(--text-secondary);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.12s;
+}
+.cmd-delete:hover {
+  background: #fee2e2;
+  color: #b91c1c;
+  border-color: #fca5a5;
 }
 
 /* ===== Footer ===== */

@@ -10,7 +10,7 @@ def node_guard(name: str, logger=None):
     """
     包装普通 graph node：记录异常并继续抛出，让 SSE 外层统一返回 error。
 
-    作为模块级装饰器，可被 ChatWorkflow 节点、sub_agent 工具等任意 sync / async 函数直接复用。
+    作为模块级装饰器，可被 ChatWorkflow 节点等任意 sync / async 函数直接复用。
 
     关键：
     - LangGraph 控制流异常（GraphInterrupt / ParentCommand 等 GraphBubbleUp 子类）

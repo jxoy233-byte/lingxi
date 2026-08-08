@@ -12,7 +12,6 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.redis import AsyncRedisSaver
-from langgraph.prebuilt import ToolNode
 from langgraph.types import Send, interrupt
 
 from .config.graph_config import get_agent_node_config, get_graph_final_node_config, \
@@ -21,6 +20,10 @@ from .config.graph_config import get_agent_node_config, get_graph_final_node_con
 from .config.models import ChatStateCore2, AIMessageType, FileParseState
 from .Memory.core import MemoryManager
 from .mcps.session import init_mcp, shutdown_mcp, get_mcp_tools
+from .mcps.permissions import (
+    PermissionedToolNode,
+    init_permissions,
+)
 from .helpers import get_message_content_string, filter_thinking_content, format_thinking_chain
 from ..LoggingManager.logging_config import (
     get_logger,
@@ -183,9 +186,17 @@ class ChatWorkflow:
         """
         初始化mcp，初始化redis-stack，初始化llm和配置工作流：
         """
+        import asyncio
         self.files_cached_dir = str(Path.cwd()) + "/cached"
 
         await self.init_mcps()
+
+        # 权限审批单例（cmd/code 审批在 tool_execution_node 里做，所以在主进程加载）
+        perms = init_permissions()
+        self.logger.info(
+            f"权限审批: policy={perms.policy.value}, "
+            f"approved={len(perms.approved)}, denied={len(perms.denied)}"
+        )
 
         await self.init_memory_manager()
 
@@ -198,7 +209,23 @@ class ChatWorkflow:
             raise e
 
         self.checkpointer = AsyncRedisSaver(redis_url=redis_url_checkpoint)
-        await self.checkpointer.setup()
+        # dump.rdb 较大时 Redis 启动会撞 LOADING： 启动时轮询redis状态
+        for attempt in range(1, 31):
+            try:
+                await self.checkpointer.setup()
+                break
+            except Exception as e:
+                msg = str(e)
+                if "LOADING" in msg or "loading" in msg:
+                    self.logger.warning(
+                        f"Redis 还在加载 dump.rdb（第 {attempt}/30 次，1s 后重试）"
+                    )
+                    await asyncio.sleep(1.0)
+                else:
+                    raise
+        else:
+            raise RuntimeError("Redis 30s 内仍在 LOADING（dump.rdb 过大？）")
+
         self.redis_client = self.checkpointer._redis
 
         # 初始化所有llm
@@ -1102,7 +1129,7 @@ class ChatWorkflow:
                 "memory_tool_calls": tool_calls,
             }
 
-        tool_execution_node = ToolNode(tools=self.tools)  # 使用langgraph官方工具节点
+        tool_execution_node = PermissionedToolNode(tools=self.tools)  # 官方 ToolNode 子类，权限审批走 awrap_tool_call hook
 
         @node_guard("should_end_node", logger=self.logger)
         async def should_end_node(state: ChatStateCore2, config: RunnableConfig):
@@ -1204,16 +1231,19 @@ class ChatWorkflow:
         def route_agent_output(state: ChatStateCore2) -> str:
             """根据代理输出决定下一步"""
             last_message = state["messages"][-1]
-            if isinstance(last_message, AIMessage) and hasattr(last_message, "tool_calls") and last_message.tool_calls:
-                return "tool_execution_node"
-            return "should_end_node"
+            has_tool_calls = (
+                isinstance(last_message, AIMessage)
+                and hasattr(last_message, "tool_calls")
+                and bool(last_message.tool_calls)
+            )
+            decision = "tool_execution_node" if has_tool_calls else "should_end_node"
+            return decision
 
         def route_should_end(state: ChatStateCore2) -> str:
             """should_end_node 返回 end 则去 final_node，返回 retry 则回 context_assembly_node"""
             decision = state.get("should_end_decision", "end")
-            if decision == "retry":
-                return "context_assembly_node"
-            return "final_node"
+            next_node = "context_assembly_node" if decision == "retry" else "final_node"
+            return next_node
 
         workflow.set_entry_point("input_parse_node")
         workflow.add_edge("input_parse_node", "context_assembly_node")

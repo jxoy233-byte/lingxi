@@ -65,12 +65,8 @@ Task arrives → Is there a skill.md for this?
 ├─ Code execution needed? (data processing, calculation, drawing)
 │   YES → code
 │
-├─ Single small task sub_agent can finish in one shot (single goal,~5 tool calls)?
-│   YES → sub_agent(task=<the task>, prompt_addon=...)
-│
 ├─ Complex / large / multi-deliverable task?
 │   Main agent splits it into N focused sub-tasks first
-│   (each sub-task may go via sub_agent or be handled directly)
 │
 ├─ All tool calls made → results received → output DONE immediately
 │
@@ -85,14 +81,6 @@ Task arrives → Is there a skill.md for this?
 - "analyze this CSV" / "generate a chart" / "visualize this" → DataAnalysis skill.md
 - "ER diagram" / "mermaid" / "flowchart" → DataAnalysis skill.md
 - "parse this image" / "what's in this screenshot" → ImageParser skill.md
-
-**When to use sub_agent**:
-- Small task (single goal, single deliverable, ≤ ~5 tool calls) → call sub_agent directly; gives you an isolated ReAct context that does not pollute the main loop
-- Large / multi-deliverable task → main agent splits into N focused sub-tasks first, then calls sub_agent once per sub-task
-
-**When NOT to use sub_agent**:
-- A single cmd / code call is enough → call cmd / code directly (don't use sub_agent for the sake of it)
-- Do NOT pass the entire large task to one sub_agent — mid-task failure wastes everything done so far
 
 **Skill-first rule**: When in doubt whether a skill.md exists → explore skills/ first.
 
@@ -140,25 +128,14 @@ code("python", "from skills.DataAnalysis import ChatDataAnalysisFormat;import pa
 code(...) → split into multiple calls, each building on previous
 - read prior output to decide next step (don't blindly retry)
 
-Good (small task — call sub_agent directly):
-*simple, independent sub-task*:
-sub_agent(task="Read skills/DataAnalysis/SKILL.md and load the uploaded CSV into pandas")
-→ sub-agent runs cmd → cat → code on its own; one shot.
-
-Good (large task — main agent splits, then calls sub_agent multiple times):
-*data analysis with multiple distinct deliverables*:
-Main agent first splits into N focused sub-tasks, then calls sub_agent once per sub-task:
-- sub_agent(task="Confirm uploaded file dir and load CSV", prompt_addon="cmd(ls cached/) → cat skills/DataAnalysis/SKILL.md → code(load csv)")
-- sub_agent(task="Generate daily sales trend chart", prompt_addon="code(groupby day, plot, save)")
-- sub_agent(task="Generate monthly summary table", prompt_addon="code(groupby month, agg, save)")
-→ Each sub-agent returns its own result; main agent combines them.
-
 """
 
 
 # ----- SUB_EXECUTION: sub-agent 精简执行原则 -----
+# DEPRECATED: sub_agent tool 已废弃，prompt 不再向 LLM 暴露该能力。
+# 这里保留 prompt 模板仅为兼容 tools.py 中 sub_agent 函数仍可能调用 build_sub_agent_prompt 的场景。
 
-PROMPT_SUB_EXECUTION = """
+PROMPT_SUB_EXECUTION = """  # DEPRECATED
 ## Decision Flow
 ```
 Task assigned → Follow the execution steps provided
@@ -198,90 +175,21 @@ skills/ — Skill library (read only)
 cached/'sid'/ — Your Own Sid Cached files operation dir (read and write)
 """
 
-# ----- TOOLS: 工具定义模块（按 agent 类型拆分）-----
+# ----- TOOLS: 工具定义模块（cmd / code / ctime 已搬到 platform adapter）-----
+# cmd / code / ctime 三个工具的 prompt 片段在 ChatMe.ChatWorkflow.mcps.platforms
+# 下三套独立 adapter（Linux / Darwin / Windows）里维护。
+# 这样 agent_node 启动时通过 get_platform() 拿当前平台对应的 Allowed Commands 表格、
+# 本地 fallback 行为说明、Runtime Environment 信息。
+#
+# interrupt 与平台无关，留在 PROMPT_TOOLS_DISPATCH 统一描述。
+# sub_agent 已废弃，PROMPT_TOOLS_DISPATCH 不再描述。
 
-PROMPT_TOOLS_ALL = """
-## Tool
-
+PROMPT_TOOLS_DISPATCH = """
 ### interrupt — Emergency Stop
 Use when: User explicitly asks to stop, or operation is sensitive/dangerous and requires human confirmation before proceeding.
 Note: Calling interrupt will **pause the entire workflow** — the session state is saved and can be resumed later. Use only when truly necessary.
 Parameters:
 - message (required, string): Reason for interruption (will be shown to the user)
-
-### sub_agent — Sub-Agent Execution
-Use when: Dispatching a task to an isolated ReAct context. The sub-agent runs its own tool loop and returns the result text directly.
-
-**Key constraints**:
-- Suited for small tasks (single goal, single deliverable, ≤ ~5 tool calls)
-- Trivial single cmd / code work → call cmd / code directly; do not use sub_agent for the sake of it
-- Large / multi-deliverable task → main agent must split into N focused sub-tasks first, then call sub_agent N times (each sub-task may go via sub_agent or be handled directly)
-- Do NOT pass the entire large task to a single sub_agent — mid-task failure wastes everything done before
-- sub_agent calls are independent: one failure does not affect the others; main agent decides whether to skip / retry / report
-
-Parameters:
-- task (required, string): Sub-task description (one sub_agent call handles one sub-task)
-- prompt_addon (optional, string): Execution steps hint, e.g. "cmd → cat SKILL.md → code"
-
-### cmd — Environment Exploring & File Operations
-Parameters: command (required, string), use_sandbox(default, True)
-**Allowed Commands**:
-| Scenario | Commands |
-|----------|----------|
-| Browse directories | `ls`, `cd`, `pwd`, `which` |
-| Read files | `cat`, `head`, `tail`, `grep`, `wc`, `awk` |
-| File operations | `cp`, `mv`, `mkdir`, `rm`, `find`, `sed`, `sort`, `echo`, `touch`, `diff` |
-| Network probe | `curl` (only as last resort when no suitable skills available) |
-
-Note: On other OS, commands may differ — adjust accordingly.
-
-### code — Code Execution & Skill Usage & Data Analysis & other codes required scenes
-Use when: Writing or running code to solve problems, invoke skills, process data, or perform actions that require code execution.
-Parameters: code (required, string), language (default: "python"), use_sandbox(default, True)
-
-Important for cmd && code:
-- Always remember to print final key results you need to pass to the next step.
-- Default use_sandbox=True(sandbox, isolated execution with /skills ro + /cached rw).
-- Don't add comments in your codes
-- If you want to write some scripts files, you must write under 'cached/' dir
-
-### ctime — Timf Reference
-Use when: Task involves any time reference including "today", "tomorrow", "now", "this week", "current date/time", "what time is it", etc.
-Must call this FIRST before any other time-related operations.
-Parameters: none
-"""
-
-# sub-agent 精简工具集
-PROMPT_TOOLS_SUB = """
-## Tool
-
-### cmd — Environment Exploring & File Operations
-Parameters: command (required, string), use_sandbox(default, True)
-**Allowed Commands**:
-| Scenario | Commands |
-|----------|----------|
-| Browse directories | `ls`, `cd`, `pwd`, `which` |
-| Read files | `cat`, `head`, `tail`, `grep`, `wc`, `awk` |
-| File operations | `cp`, `mv`, `mkdir`, `rm`, `find`, `sed`, `sort`, `echo`, `touch`, `diff` |
-| Network probe | `curl` (only as last resort when no suitable skills available) |
-
-Note: On other OS, commands may differ — adjust accordingly.
-⚠️ Scripts Execution must use `code`, not `cmd`
-
-### code — Code Execution & Skill Usage & Data Analysis & other codes required scenes
-Use when: Writing or running code to solve problems, invoke skills, process data, or perform actions that require code execution.
-Parameters: code (required, string), language (default: "python"), use_sandbox(default, True)
-
-Important for cmd && code:
-- Always remember to print final key results you need to pass to the next step.
-- Default use_sandbox=True(sandbox, isolated execution with /skills ro + /cached rw).
-- Don't add comments in your codes
-- If you want to write some scripts files, you must write under 'cached/' dir
-
-### ctime — Time Reference
-Use when: Task involves any time reference including "today", "tomorrow", "now", "this week", "current date/time", "what time is it", etc.
-Must call this FIRST before any other time-related operations.
-Parameters: none
 """
 
 # ----- MAIN_SPECIFIC: 主 agent 专属模块 -----
@@ -303,8 +211,9 @@ When all needed information is collected, output exactly `Done`.
 """
 
 # ----- SUB_SPECIFIC: sub-agent 专属终止模块 -----
+# DEPRECATED: 同 PROMPT_SUB_EXECUTION，保留仅作兼容。
 
-PROMPT_SUB_TERMINATION = """
+PROMPT_SUB_TERMINATION = """  # DEPRECATED
 ## **Termination**
 When your sub-task is complete, just output the result directly — no wrapper tags, no prefix, no explanation.
 
@@ -321,36 +230,62 @@ Do NOT keep retrying after 2 distinct failed attempts — stop and report so mai
 def get_agent_node_prompt() -> str:
     """
     主 agent 的完整 prompt
-    = MAIN_ROLE + TOOLS_ALL + MAIN_FLOW + COMMON + MAIN_TERMINATION
+    = MAIN_ROLE + DISPATCH + <platform.cmd_tool_prompt_block>
+    + <platform.code_tool_prompt_block> + <platform.ctime_tool_prompt_block>
+    + MAIN_FLOW + COMMON + <platform.system_info_block> + MAIN_TERMINATION
+
+    cmd / code / ctime 三个工具的 prompt 片段由 platform adapter 按当前平台提供：
+    - LinuxAdapter: bash + Unix 命令 + /tmp
+    - DarwinAdapter: zsh + Unix 命令（macOS 备注）
+    - WindowsAdapter: cmd.exe + Windows 等价命令 + %TEMP%
     """
+    from ChatMe.ChatWorkflow.mcps.platforms import get_platform
+    platform = get_platform()
     return "\n\n".join([
         "# Agent Node — Task Execution Agent",
         PROMPT_MAIN_ROLE,
-        PROMPT_TOOLS_ALL,
+        PROMPT_TOOLS_DISPATCH,
+        platform.cmd_tool_prompt_block,
+        platform.code_tool_prompt_block,
+        platform.ctime_tool_prompt_block,
         PROMPT_MAIN_FLOW,
         PROMPT_COMMON,
+        platform.system_info_block,
         PROMPT_MAIN_TERMINATION,
     ])
 
 
 def build_sub_agent_prompt(task: str, prompt_addon: str = "") -> str:
     """
+    DEPRECATED: sub_agent tool 已废弃，prompt 不再向 LLM 暴露该能力。
+    此函数保留仅为兼容 tools.py 中 sub_agent 函数仍可能调用 build_sub_agent_prompt 的场景。
+    新代码不应再调用。
+
     构建 sub-agent 的 prompt
-    = TOOLS_SUB + SUB_EXECUTION + COMMON + 任务注入 + SUB_TERMINATION
+    = <platform.cmd_tool_prompt_block> + <platform.code_tool_prompt_block>
+    + <platform.ctime_tool_prompt_block> + SUB_EXECUTION + COMMON + 任务注入 + SUB_TERMINATION
+
+    sub-agent 不暴露 interrupt / sub_agent（不允许嵌套 sub-agent），
+    所以省略 PROMPT_TOOLS_DISPATCH。
 
     Args:
         task: 子任务描述（主 agent 下发给 sub-agent 的任务）
         prompt_addon: 额外指令（可选，主 agent 给的额外要求）
     """
+    from ChatMe.ChatWorkflow.mcps.platforms import get_platform
+    platform = get_platform()
     parts = [
         "# Sub-Agent — Task Execution Agent",
-        PROMPT_TOOLS_SUB,
+        platform.cmd_tool_prompt_block,
+        platform.code_tool_prompt_block,
+        platform.ctime_tool_prompt_block,
         PROMPT_SUB_EXECUTION,
         PROMPT_COMMON,
         f"\n## Current Sub-Task\n{task.replace('{', '{{').replace('}', '}}')}\n",
     ]
     if prompt_addon:
         parts.append(f"\n## Additional Instructions\n{prompt_addon.replace('{', '{{').replace('}', '}}')}\n")
+    parts.append(platform.system_info_block)
     parts.append(PROMPT_SUB_TERMINATION)
     return "\n\n".join(parts)
 

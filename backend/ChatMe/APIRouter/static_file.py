@@ -22,10 +22,14 @@ logger = get_logger("static_file")
 BACKEND_DIR = Path.cwd()
 CACHED_DIR = BACKEND_DIR / "cached"
 
-# session_id = uuid.uuid4().hex (32-char lowercase hex)
-SESSION_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
-# Referer 中提取 sid：不限位置（容忍 http://host/{sid} 或 http://host/{sid}/foo）
-SESSION_ID_RE = re.compile(r"[0-9a-f]{32}")
+# session_id = uuid.uuid4().hex[:12] (12-char lowercase hex)；旧版曾用 32-char hex，
+# 仍兼容遗留 sid —— PATH 中带 32-char 旧 sid 时不要 404。
+SESSION_ID_PATTERN = re.compile(r"^([0-9a-f]{12}|[0-9a-f]{32})$")
+# Referer URL 中提取 sid —— 12-char / 32-char 双兼容。
+# 路径边界（`/` 或字符串首）+ 32/12 hex + 路径边界（`/` `?` `#` 或字符串尾）：
+# 避免 31/13 等「凑巧 hex 长」被 12-char 分支误匹配（re.search 命中子串即返回）。
+# 32-char 写前面 —— re 交替优先匹配左侧，URL 同时含 32/12-char 子串时取更长的那个。
+SESSION_ID_RE = re.compile(r"/([0-9a-f]{32}|[0-9a-f]{12})(?:[/?#]|$)")
 
 
 static_file_router = APIRouter(prefix="/static", tags=["静态文件"])
@@ -150,7 +154,7 @@ def _get_safe_path(path: str) -> Optional[Path]:
 
 
 def _has_session_id(path: str) -> bool:
-    """检测 file_path 是否含 session_id（32 位 hex 在第一段）"""
+    """检测 file_path 是否含 session_id（12 或 32 位 hex 在第一段）"""
     if path.startswith("cached/"):
         path = path[len("cached/"):]
     if not path:
@@ -165,18 +169,18 @@ def _extract_sid_from_referer(referer: str) -> Optional[str]:
 
     浏览器在发起请求时会自动带 Referer（除非 referrer-policy=no-referrer），
     URL 格式通常为 http://host/{sid} 或 http://host/{sid}/foo/bar。
-    用 32 位 hex 正则全局匹配第一个 sid 即可，位置不限。
+    SESSION_ID_RE 优先匹配 32 位 hex（兼容旧版 sid），没命中再 fallback 12 位 hex（新版本）。
 
     Args:
         referer: Referer header 值，可能为空 / None / 异常格式
 
     Returns:
-        提取到的 sid（32 位 hex），或 None
+        提取到的 sid（12 或 32 位 hex），或 None
     """
     if not referer:
         return None
     m = SESSION_ID_RE.search(referer)
-    return m.group(0) if m else None
+    return m.group(1) if m else None
 
 
 def _resolve_fallback(filename: str, primary_sid: Optional[str] = None) -> Optional[Path]:

@@ -61,3 +61,8 @@ py-modules = ["main"]
 where = ["."]
 include = ["ChatMe*", "skills*"]
 exclude = ["ChatMe.test*", "*.test*"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

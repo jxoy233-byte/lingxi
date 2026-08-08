@@ -10,6 +10,7 @@
         v-for="(msg, index) in flattenedMessages"
         :key="msg._key || index"
         :message="msg"
+        :message-index="index"
         :is-first-ai-message="isFirstAiMessage(index)"
         :is-latest-ai-message="index === latestAiMessageIndex"
         :is-interrupted="isInterrupted"
@@ -17,6 +18,8 @@
         :current-session-id="currentSessionId"
         :has-received-init="hasReceivedInit"
         :pending-interrupt-session-id="pendingInterruptSessionId"
+        :pending-tool-approval="pendingToolApproval"
+        :submitting-tool-decision="submittingToolDecision"
         @restore="$emit('restore', $event)"
         @restream="(...args) => $emit('restream', ...args)"
         @open-link="$emit('open-link', $event)"
@@ -24,6 +27,7 @@
         @interrupt="$emit('interrupt', $event)"
         @resume="$emit('resume', $event)"
         @quote="$emit('quote', $event)"
+        @tool-decide="(decision) => $emit('tool-decide', decision)"
       />
 
       <div v-if="isLoading" class="loading-message" :class="{ 'interrupted': isInterrupted && isInterruptedSessionId === currentSessionId }">
@@ -86,9 +90,19 @@ export default {
     pendingInterruptSessionId: {
       type: String,
       default: null
+    },
+    pendingToolApproval: {
+      // 内嵌审批：标记具体 AI 消息 + tool call，让 MessageItem 高亮 + 渲染内嵌按钮
+      // { messageIndex, toolIndex, command, action, sessionId } | null
+      type: Object,
+      default: null
+    },
+    submittingToolDecision: {
+      type: Boolean,
+      default: false
     }
   },
-  emits: ['restore', 'restream', 'open-link', 'preview-file', 'interrupt', 'resume', 'quote'],
+  emits: ['restore', 'restream', 'open-link', 'preview-file', 'interrupt', 'resume', 'quote', 'tool-decide'],
   data() {
     return {
       isAutoScrolling: false,   // 当前是否在自动滚动中

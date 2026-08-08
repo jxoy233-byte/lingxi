@@ -139,9 +139,9 @@
 
       <button
         @click="handleSend"
-        :disabled="(!inputText.trim() && selectedFiles.filter(f => !f.error && !f.uploading).length === 0) || isLoading || hasUploadingFiles"
+        :disabled="(!inputText.trim() && selectedFiles.filter(f => !f.error && !f.uploading).length === 0) || isLoading || hasUploadingFiles || permissionResumeInFlight"
         class="send-btn"
-        :title="hasUploadingFiles ? '文件上传中，请等待' : ''"
+        :title="hasUploadingFiles ? '文件上传中，请等待' : permissionResumeInFlight ? '权限决策处理中，请等待' : ''"
       >
         发送
       </button>
@@ -185,6 +185,12 @@ export default {
     quote: {
       type: Object,
       default: null
+    },
+    // 权限 resume 流期间为 true（用户点完审批按钮、后端正在执行 Command(resume)）。
+    // 此期间禁用发送按钮防止并发请求；待审核状态本身不阻塞发送（用户可在审批期间编辑/发送新消息）。
+    permissionResumeInFlight: {
+      type: Boolean,
+      default: false
     }
   },
   emits: ['send', 'files-selected-need-session', 'update:quote'],
@@ -438,7 +444,7 @@ export default {
     handleSend() {
       const validFiles = this.selectedFiles.filter(f => !f.error && !f.uploading)
 
-      if ((!this.inputText.trim() && validFiles.length === 0) || this.isLoading) {
+      if ((!this.inputText.trim() && validFiles.length === 0) || this.isLoading || this.permissionResumeInFlight) {
         return
       }
 
@@ -580,7 +586,7 @@ export default {
 
       if (!urlHasSessionId) {
         // 生成新的 session_id
-        const sessionId = crypto.randomUUID().replace(/-/g, '')
+        const sessionId = crypto.randomUUID().replace(/-/g, '').slice(0, 12)
         localStorage.setItem('currentSessionId', sessionId)
         localStorage.setItem('pendingSessionId', sessionId)
 

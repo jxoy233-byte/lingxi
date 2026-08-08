@@ -38,6 +38,10 @@ class Conversation(BaseModel):
     created_at :datetime = Field(default_factory=datetime.now) # 要求传入的是函数方法
     updated_at :datetime = Field(default_factory=datetime.now)
     interrupted_info: Optional[Dict[str, Any]] = None
+    # pending_permission: 工具权限审批待决状态（前端 F5 / 刷新会话时也能立刻高亮 tool + 渲染内嵌按钮）
+    # 字段格式与 SSE permission_request 事件一致：command / action / session_id / timestamp
+    # 不带 request_id：thread_id (= session_id) 足够定位 pending permission（singleton）
+    pending_permission: Optional[Dict[str, Any]] = None
 
 class ConversationListResp(BaseModel):
     total: int = Field(default=0, description="会话总数")

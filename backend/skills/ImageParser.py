@@ -4,6 +4,10 @@
 支持:
 - OSS URL (http/https)
 - 本地文件（相对于 backend/cached/ 目录，或含 cached/ 的相对路径）
+- base64 data URL
+
+实现走 langchain_openai.ChatOpenAI（标准 OpenAI 多模态格式），
+vl.local=False 时连接三元组自动 fallback 到主用 LLM（走 get_skills_config）。
 """
 
 import os
@@ -14,6 +18,14 @@ from urllib.parse import urlparse
 
 import requests
 from PIL import Image
+
+from langchain_core.messages import HumanMessage
+from langchain_openai import ChatOpenAI
+
+
+_DEFAULT_PROMPT = (
+    "请详细描述这张图片的内容，包括其中的文字、人物、物体、场景等所有可见元素。"
+)
 
 
 def _compress_image(image: Image.Image, max_size: int = 512) -> Image.Image:
@@ -50,7 +62,7 @@ def _resolve_cached_path(file_path: str) -> str:
 
 
 def _fetch_local_image(file_path: str) -> Image.Image:
-    """从本地文件读取图片"""
+    """从本地文件读取图片（不压缩，由调用方统一在 encode 前压缩）"""
     full_path = _resolve_cached_path(file_path)
 
     if not os.path.exists(full_path):
@@ -59,20 +71,18 @@ def _fetch_local_image(file_path: str) -> Image.Image:
     # 刷新文件时间戳，防止被清理任务删除
     os.utime(full_path, None)
 
-    image = Image.open(full_path).convert("RGB")
-    return _compress_image(image)
+    return Image.open(full_path).convert("RGB")
 
 
 def _fetch_url_image(url: str) -> Image.Image:
-    """从 URL 获取图片"""
+    """从 URL 获取图片（不压缩，由调用方统一在 encode 前压缩）"""
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
         raise ValueError(f"不支持的 URL 协议: {parsed.scheme}")
 
     response = requests.get(url, timeout=30)
     response.raise_for_status()
-    image = Image.open(io.BytesIO(response.content)).convert("RGB")
-    return _compress_image(image)
+    return Image.open(io.BytesIO(response.content)).convert("RGB")
 
 
 def _encode_image_to_base64(image: Image.Image) -> str:
@@ -80,6 +90,36 @@ def _encode_image_to_base64(image: Image.Image) -> str:
     buffer = io.BytesIO()
     image.save(buffer, format="JPEG", quality=85)
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+
+def _build_vl_llm() -> ChatOpenAI:
+    """
+    构造 ChatOpenAI（每次调用重建 → config 变更立即生效，无需重启 backend）。
+
+    连接三元组走 get_skills_config：
+    - vl.local=False 时自动 fallback 到主用 LLM（chatme_config 内部的主→备链）
+    - vl.local=True 时保留 vl 自己的 model_name / api_key / base_url
+
+    信任 config，不校验目标 endpoint 是否真正支持 multimodal。
+    """
+    from ChatMe.ChatMeConfig import get_skills_config
+    try:
+        skills = get_skills_config()
+        base_url = skills.get("vl_base_url") or os.getenv("VL_BASE_URL", "http://127.0.0.1:8211/api/v1")
+        api_key = skills.get("vl_api_key") or os.getenv("VL_API_KEY", "empty")
+        model_name = skills.get("vl_model_name") or os.getenv("VL_MODEL_NAME", "Qwen3-VL-2B")
+    except Exception:
+        base_url = os.getenv("VL_BASE_URL", "http://127.0.0.1:8211/api/v1")
+        api_key = os.getenv("VL_API_KEY", "empty")
+        model_name = os.getenv("VL_MODEL_NAME", "Qwen3-VL-2B")
+
+    return ChatOpenAI(
+        model=model_name,
+        api_key=api_key,
+        base_url=base_url,
+        timeout=120,    # 图片解析可能耗时较长
+        max_retries=2,
+    )
 
 
 def parse_image(
@@ -96,6 +136,7 @@ def parse_image(
         image_source: 图片源，可以是:
             - OSS URL (http/https 开头)
             - 本地文件路径（支持相对路径和绝对路径）
+            - base64 data URL (data:image/...;base64,...)
         prompt: 可选的提示词，默认使用通用图片描述
         max_tokens: 最大生成 token 数
         temperature: 温度参数
@@ -109,99 +150,62 @@ def parse_image(
         - 其他相对路径：相对于 backend/cached/ 目录
 
     示例:
-        # OSS URL
         >>> parse_image("https://example.com/image.jpg")
         '这张图片展示了一只可爱的橘猫...'
 
-        # cached/ 下文件（相对路径）
         >>> parse_image("screenshot.png")
         '界面顶部是导航栏，左侧...'
 
-        # 含 cached/ 的相对路径
         >>> parse_image("cached/screenshot.png")
-
-        # 绝对路径
-        >>> parse_image("/path/to/image.jpg")
     """
-    # 确定图片源类型
+    # 确定图片源类型（统一压缩：encode 前再压一次，保证三个入口对称）
     if image_source.startswith("data:image/"):
         # Base64 编码的图片
         base64_data = image_source.split(",", 1)[1]
         image_bytes = base64.b64decode(base64_data)
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        image = _compress_image(image)
-        base64_str = _encode_image_to_base64(image)  # 用压缩后的图片编码
     elif image_source.startswith(("http://", "https://")):
-        # URL 图片
         image = _fetch_url_image(image_source)
-        base64_str = _encode_image_to_base64(image)
     else:
-        # 本地文件
         image = _fetch_local_image(image_source)
-        base64_str = _encode_image_to_base64(image)
 
-    # 构建消息
-    if prompt is None:
-        prompt = "请详细描述这张图片的内容，包括其中的文字、人物、物体、场景等所有可见元素。"
+    # 统一压缩到 512px 后再 base64 编码（节省 VL 模型 token + 加速推理）
+    image = _compress_image(image)
+    base64_str = _encode_image_to_base64(image)
 
-    messages = [
+    text_prompt = prompt if prompt is not None else _DEFAULT_PROMPT
+
+    # 标准 OpenAI 多模态格式：HumanMessage.content 是 list of content blocks
+    msg = HumanMessage(content=[
+        {"type": "text", "text": text_prompt},
         {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{base64_str}"}
-                }
-            ]
-        }
-    ]
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{base64_str}"},
+        },
+    ])
 
-    # 调用 VL 模型 API
-    from ChatMe.ChatMeConfig import get_skills_config
-    try:
-        skills = get_skills_config()
-        vl_base_url = skills.get("vl_base_url") or os.getenv("VL_BASE_URL", "http://127.0.0.1:8211/api/v1")
-        vl_api_key = skills.get("vl_api_key") or os.getenv("VL_API_KEY", "empty")
-        vl_model = skills.get("vl_model_name") or os.getenv("VL_MODEL_NAME", "Qwen3-VL-2B")
-        # 配置仅作为默认值，用户传入参数时优先使用传入值
-        # 如需使用配置值，传参时不要指定即可
-    except Exception:
-        vl_base_url = os.getenv("VL_BASE_URL", "http://127.0.0.1:8211/api/v1")
-        vl_api_key = os.getenv("VL_API_KEY", "empty")
-        vl_model = os.getenv("VL_MODEL_NAME", "Qwen3-VL-2B")
-
-    payload = {
-        "model": vl_model,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "stream": False
-    }
-
-    headers = {
-        "Authorization": f"Bearer {vl_api_key}",
-        "Content-Type": "application/json"
-    }
+    # 每次重建 ChatOpenAI → config 变更立即生效，无需重启
+    llm = _build_vl_llm()
+    # bind max_tokens / temperature → 与原 requests 实现保持一致
+    llm = llm.bind(max_tokens=max_tokens, temperature=temperature)
 
     try:
-        response = requests.post(
-            f"{vl_base_url}/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=120  # 图片解析可能需要更长时间
-        )
-        response.raise_for_status()
-        result = response.json()
+        resp = llm.invoke([msg])
+    except Exception as e:
+        return f"调用 VL 模型失败: {type(e).__name__}: {str(e)[:200]}"
 
-        if "choices" in result and len(result["choices"]) > 0:
-            content = result["choices"][0]["message"]["content"]
-            return content.strip()
-        else:
-            return f"VL 模型返回格式异常: {result}"
-
-    except requests.RequestException as e:
-        return f"调用 VL 模型失败: {str(e)}"
+    content = resp.content
+    if isinstance(content, str):
+        return content.strip()
+    # 少数模型返回 list of blocks，统一拍成字符串
+    if isinstance(content, list):
+        parts = [
+            block.get("text", "")
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        ]
+        return "\n".join(parts).strip()
+    return str(content).strip()
 
 
 def parse_images_batch(

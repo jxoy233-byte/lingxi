@@ -22,6 +22,9 @@
         :conversation="conv"
         :is-active="conv.session_id === activeSessionId"
         :is-streaming="activeStreamingSessions.has(conv.session_id)"
+        :is-completed-unread="completedSessions.has(conv.session_id)"
+        :is-approval-pending="approvalPendingSessions.has(conv.session_id)"
+        :is-errored="errorSessions.has(conv.session_id)"
         @select="$emit('select-conversation', conv.session_id)"
         @delete="$emit('delete-conversation', conv.session_id)"
         @update-title="$emit('update-title', $event)"
@@ -66,6 +69,21 @@ export default {
     },
     activeStreamingSessions: {
       // 正在流式的 session_id Set；由 App.vue 整 Set 替换触发响应式
+      type: Set,
+      default: () => new Set()
+    },
+    completedSessions: {
+      // 已完成（clean done）但用户还没点进去过的 session_id Set —— 侧栏绿点
+      type: Set,
+      default: () => new Set()
+    },
+    approvalPendingSessions: {
+      // 等用户审批的 session_id Set —— 侧栏黄点
+      type: Set,
+      default: () => new Set()
+    },
+    errorSessions: {
+      // 出错但用户还没点进去看的 session_id Set —— 侧栏红点（与 _sessionHadError 并行，独立清除）
       type: Set,
       default: () => new Set()
     },

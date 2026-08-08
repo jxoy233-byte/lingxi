@@ -474,6 +474,35 @@ class ChatService:
             for k, v in key_value.items()
         }
 
+    # 权限审批 pending 状态检测（仿 _judge_is_interrupted）
+    # 在 SSE 流启动时 / 每轮结束后扫一遍 redis，发现 pending 就推 permission_request
+    async def _judge_has_pending_permission(self, session_id: str) -> bool:
+        """是否有 pending permission（status=pending 且 decision 未设）。"""
+        try:
+            key_value = await self.redis_client.hgetall(f"permission:{session_id}")
+            if not key_value:
+                return False
+            decoded = {
+                k.decode() if isinstance(k, bytes) else k: v.decode() if isinstance(v, bytes) else v
+                for k, v in key_value.items()
+            }
+            return decoded.get("status") == "pending" and not decoded.get("decision")
+        except Exception as e:
+            self.logger.warning(f"检测 pending permission 失败(session_id={session_id}): {e}")
+            return False
+
+    async def _get_permission_request_info(self, session_id: str) -> Dict[str, Any]:
+        """读 redis permission:{sid} hash 返回 dict。"""
+        try:
+            key_value = await self.redis_client.hgetall(f"permission:{session_id}")
+            return {
+                k.decode() if isinstance(k, bytes) else k: v.decode() if isinstance(v, bytes) else v
+                for k, v in key_value.items()
+            }
+        except Exception as e:
+            self.logger.warning(f"读 pending permission 失败(session_id={session_id}): {e}")
+            return {}
+
     @staticmethod
     async def _switch_chunk_to_str(chunk_content: Any):
         content = chunk_content
@@ -561,7 +590,7 @@ class ChatService:
 
         # 会话ID处理：无则新建，有则直接使用
         if session_id == "" or session_id is None:
-            session_id = str(uuid.uuid4().hex)
+            session_id = str(uuid.uuid4().hex[:12])
             self.logger.info(f"\n------------------------------------------------------------\n  新建会话 session_id={session_id}\n------------------------------------------------------------")
         else:
             self.logger.info(f"\n------------------------------------------------------------\n  进入会话 session_id={session_id}\n------------------------------------------------------------")
@@ -590,6 +619,10 @@ class ChatService:
         # 清除中断状态，确保流式响应正常
         if await self._judge_is_interrupted(session_id):
             await self.redis_client.delete(f"interrupt:{session_id}")
+
+        # 检测到 stale permission 直接清理——不推旧 permission_request 事件 ,直接开启新一轮的对话
+        if await self._judge_has_pending_permission(session_id):
+            await self.redis_client.delete(f"permission:{session_id}")
 
         # 后端指标聚合：本回合 start_monotonic + 累计 token_usage；仅覆盖 4 个工作流主节点
         start_mono = time.monotonic()
@@ -662,7 +695,8 @@ class ChatService:
                         default=str
                     ) + "\n\n"
                 elif chunk['event'] == 'on_tool_end':
-                    output_content = chunk['data']['output'].content
+                    output = chunk['data'].get('output')
+                    output_content = output.content if hasattr(output, "content") else ""
                     if output_content:
                         content = await self._switch_chunk_to_str(output_content)
                         yield json.dumps(
@@ -724,6 +758,26 @@ class ChatService:
             flush_pending_thinking_for_session(session_id)
             return
 
+        # round 结束时再扫一遍 pending（防止决策链上又触发新权限请求）
+        if await self._judge_has_pending_permission(session_id):
+            perm_info = await self._get_permission_request_info(session_id)
+            yield json.dumps(
+                {
+                    "type": "permission_request",
+                    "session_id": session_id,
+                    "command": perm_info.get("command", ""),
+                    "action": perm_info.get("action", ""),
+                    "tool_call_name": perm_info.get("tool_call_name", ""),
+                    "timestamp": perm_info.get("timestamp", ""),
+                    "elapsed_ms": self._elapsed_ms_since(start_mono),
+                    "token_usage": token_usage,
+                },
+                ensure_ascii=False,
+                default=str,
+            ) + "\n\n"
+            flush_pending_thinking_for_session(session_id)
+            return
+
         checkpoint_id = await self._save_round_checkpoint(
             session_id,
             metrics={"elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
@@ -764,6 +818,10 @@ class ChatService:
             state = await self.graph.aget_state(config=config)
             # print(state)
             interrupted_info = await self._get_interrupted_info(session_id)
+            # 同步检测 pending permission —— F5 / 刷新会话后立即知道是否有待审批命令
+            pending_permission = None
+            if await self._judge_has_pending_permission(session_id):
+                pending_permission = await self._get_permission_request_info(session_id)
         except HTTPException as e:
             self.logger.error(f"获取会话状态异常(session_id:{session_id})：{str(e)}")
             return Conversation(session_id=session_id)
@@ -881,7 +939,8 @@ class ChatService:
             title=title,
             created_at=created_at,
             updated_at=updated_at,
-            interrupted_info=interrupted_info if interrupted_info else None
+            interrupted_info=interrupted_info if interrupted_info else None,
+            pending_permission=pending_permission,
         )
 
         return conversations
@@ -926,6 +985,10 @@ class ChatService:
             # 清除中断状态，确保流式响应正常
             if await self._judge_is_interrupted(session_id):
                 await self.redis_client.delete(f"interrupt:{session_id}")
+
+            # 清除 pending permission hash（无条件 delete：覆盖 decision 已设但 gate 未消费
+            # 的孤儿 case；redis DEL 对不存在 key 幂等）
+            await self.redis_client.delete(f"permission:{session_id}")
 
             await self._wait_previous_memory_update(session_id)
 
@@ -1084,6 +1147,10 @@ class ChatService:
         if await self._judge_is_interrupted(session_id):
             await self.redis_client.delete(f"interrupt:{session_id}")
 
+        # 清除 pending permission hash（无条件 delete：回溯后旧 permission_request 没意义，
+        # 新一轮不会再问同样的命令；redis DEL 对不存在 key 幂等）
+        await self.redis_client.delete(f"permission:{session_id}")
+
         try:
             await self._wait_previous_memory_update(session_id)
 
@@ -1185,6 +1252,179 @@ class ChatService:
             self.logger.error(f"会话中断失败(session_id:{session_id}): {str(e)}")
             return False
 
+    async def resume_permission_stream(self, session_id: str, decision: str):
+        """
+        Resume LangGraph 让 tool 内部的 `interrupt()` 返回 decision，工具据此返回执行结果 / 拒绝消息。
+
+        与 invoke_interrupted_stream 的区别：本方法走 `Command(resume=decision)` 把 decision 字符串
+        传给 interrupt() 调用点（不是重建图 + SystemMessage 注入）。
+        """
+        start_mono = time.monotonic()
+        token_usage = self._new_workflow_token_usage()
+        elapsed_ms = self._elapsed_ms_since(start_mono)
+        full_response = ""  # 与 message_stream 同构：done 事件携带 full_response，前端兜底最终内容
+
+        # 旧版这里会 preemptively 清掉 redis hash（避免 /permission/decide 残留的 decision
+        # 字段被下一次 _write_pending_permission 继承）。但 hash 清理已下沉到
+        # request_approval 的 interrupt() 返回后（permissions.py:412 _delete_pending_permission），
+        # 每个 gate 消费完即清一次，所以这里不再需要预先清理。
+
+        yield json.dumps(
+            {"type": "init", "session_id": session_id, "elapsed_ms": elapsed_ms, "token_usage": token_usage},
+            ensure_ascii=False,
+            default=str,
+        ) + "\n\n"
+
+        config = {"configurable": {"thread_id": session_id}}
+
+        try:
+            async for chunk in self.chat_workflow.astream(
+                Command(resume=decision),
+                config=config,
+            ):
+                event = chunk.get("event")
+                metadata = chunk.get("metadata") or {}
+                node = metadata.get("langgraph_node")
+
+                # 复用与 message_stream 同构的事件 yield 逻辑（final_node / agent_node 等节点流）
+                if chunk['event'] == 'on_chat_model_stream':
+                    if chunk['metadata']['langgraph_node'] and chunk['metadata']['langgraph_node'] == 'final_node':
+                        content = await self._switch_chunk_to_str(chunk['data']['chunk'].content)
+                        full_response += content
+                        yield json.dumps(
+                            {"type": "content", "content": content, "elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
+                            ensure_ascii=False,
+                            default=str,
+                        ) + "\n\n"
+                    elif chunk['metadata']['langgraph_node'] and chunk['metadata']['langgraph_node'] in ('agent_node', 'input_parse_node'):
+                        content = await self._switch_chunk_to_str(chunk['data']['chunk'].content)
+                        yield json.dumps(
+                            {"type": "reasoning", "content": content, "elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
+                            ensure_ascii=False,
+                            default=str,
+                        ) + "\n\n"
+                    else:
+                        continue
+                elif chunk['event'] == 'on_chat_model_end':
+                    output = (chunk.get('data') or {}).get('output')
+                    self._accumulate_workflow_tokens(
+                        token_usage,
+                        (chunk.get('metadata') or {}).get('langgraph_node'),
+                        output,
+                    )
+                elif chunk['event'] == 'on_tool_start':
+                    tool_call_args = chunk['data'].get('input', {})
+                    tool_call_name = chunk['name']
+                    yield json.dumps(
+                        {"type": "tool_call_name", "id": chunk["run_id"], "content": {'args': tool_call_args, 'name': tool_call_name}, "elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
+                        ensure_ascii=False,
+                        default=str,
+                    ) + "\n\n"
+                elif chunk['event'] == 'on_tool_end':
+                    output = chunk['data'].get('output')
+                    output_content = output.content if hasattr(output, "content") else ""
+                    if output_content:
+                        content = await self._switch_chunk_to_str(output_content)
+                        yield json.dumps(
+                            {"type": "tool_call_result", "id": chunk["run_id"], "content": content, "elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
+                            ensure_ascii=False,
+                            default=str,
+                        ) + "\n\n"
+        except Exception as e:
+            error_detail = f"{str(e)}\n{traceback.format_exc()}"
+            self.logger.error(f"resume_permission_stream 异常(session_id:{session_id}): {error_detail}")
+            yield json.dumps(
+                {"type": "error", "error": str(e), "elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
+                ensure_ascii=False,
+                default=str,
+            ) + "\n\n"
+            flush_pending_thinking_for_session(session_id)
+            return
+
+        # 中断检测（与 message_stream / invoke_interrupted_stream 同构）：
+        # resume 后如果用户又按了「中断」按钮，redis interrupt:{sid} hash 会被
+        # interrupt_stream 写入；astream 正常结束后我们也要兜底 yield interrupt 事件，
+        # 否则前端会把此当成 done 流，丢失中断信号。
+        if await self._judge_is_interrupted(session_id):
+            key_value = await self._get_interrupted_info(session_id)
+            reason = key_value.get("reason", "user_initiated_interrupt")
+
+            self.logger.info(f"会话{session_id} permission resume 路径被中断: {reason}")
+
+            checkpoint_id = await self._save_round_checkpoint(
+                session_id,
+                metrics={"elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
+                status="interrupted",
+            )
+
+            # 补充 checkpoint_id 到 interrupt hash（前端 loadConversation 拉取时看到）
+            await self.redis_client.hset(
+                f"interrupt:{session_id}",
+                mapping={
+                    "reason": key_value.get("reason", "user_initiated_interrupt"),
+                    "checkpoint_id": checkpoint_id,
+                    "timestamp": key_value.get("timestamp", ""),
+                },
+            )
+
+            yield json.dumps(
+                {
+                    "type": "interrupt",
+                    "session_id": session_id,
+                    "checkpoint_id": checkpoint_id,
+                    "memory_status": self._get_memory_update_status(session_id),
+                    "reason": reason,
+                    "elapsed_ms": self._elapsed_ms_since(start_mono),
+                    "token_usage": token_usage,
+                },
+                ensure_ascii=False,
+                default=str,
+            ) + "\n\n"
+
+            flush_pending_thinking_for_session(session_id)
+            return
+
+        # round 结束时再扫一遍 pending（防止决策链上又触发新权限请求）
+        if await self._judge_has_pending_permission(session_id):
+            perm_info = await self._get_permission_request_info(session_id)
+            yield json.dumps(
+                {
+                    "type": "permission_request",
+                    "session_id": session_id,
+                    "command": perm_info.get("command", ""),
+                    "action": perm_info.get("action", ""),
+                    "tool_call_name": perm_info.get("tool_call_name", ""),
+                    "timestamp": perm_info.get("timestamp", ""),
+                    "elapsed_ms": self._elapsed_ms_since(start_mono),
+                    "token_usage": token_usage,
+                },
+                ensure_ascii=False,
+                default=str,
+            ) + "\n\n"
+            flush_pending_thinking_for_session(session_id)
+            return
+
+        checkpoint_id = await self._save_round_checkpoint(
+            session_id,
+            metrics={"elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
+        )
+
+        self.logger.info(
+            f"会话 {session_id} permission resume 完成 "
+        )
+
+        yield json.dumps({
+            "type": "done",
+            "full_response": full_response,
+            "session_id": session_id,
+            "checkpoint_id": checkpoint_id,
+            "memory_status": self._get_memory_update_status(session_id),
+            "elapsed_ms": self._elapsed_ms_since(start_mono),
+            "token_usage": token_usage,
+        }) + "\n\n"
+
+        flush_pending_thinking_for_session(session_id)
+
     async def invoke_interrupted_stream(self, session_id, message: str = "CONTINUE"):
         """
         重新进行中断了的对话，断点续接
@@ -1228,6 +1468,11 @@ class ChatService:
             # 清除中断时留下的状态
             await self.redis_client.delete(key)
             await self._delete_last_round_checkpoint(session_id)
+
+            # 极端 race：上一轮弹 permission → 用户中断 → 续接流进来时 hash 还活着，
+            # 不清掉 astream 跑完可能撞到旧 permission_request 弹窗。
+            if await self._judge_has_pending_permission(session_id):
+                await self.redis_client.delete(f"permission:{session_id}")
 
             # state["context"] 是覆盖逻辑，不是追加逻辑
             config = {"configurable": {"thread_id": session_id}}
@@ -1278,7 +1523,8 @@ class ChatService:
                         default=str
                     ) + "\n\n"
                 elif chunk['event'] == 'on_tool_end':
-                    output_content = chunk['data']['output'].content
+                    output = chunk['data'].get('output')
+                    output_content = output.content if hasattr(output, "content") else ""
                     if output_content:
                         content = await self._switch_chunk_to_str(output_content)
                         yield json.dumps(
@@ -1336,6 +1582,26 @@ class ChatService:
             ) + "\n\n"
 
             # thinking_chain 收尾：中断路径也 flush（保留中断前的思考过程）
+            flush_pending_thinking_for_session(session_id)
+            return
+
+        # round 结束时再扫一遍 pending（防止决策链上又触发新权限请求）
+        if await self._judge_has_pending_permission(session_id):
+            perm_info = await self._get_permission_request_info(session_id)
+            yield json.dumps(
+                {
+                    "type": "permission_request",
+                    "session_id": session_id,
+                    "command": perm_info.get("command", ""),
+                    "action": perm_info.get("action", ""),
+                    "tool_call_name": perm_info.get("tool_call_name", ""),
+                    "timestamp": perm_info.get("timestamp", ""),
+                    "elapsed_ms": self._elapsed_ms_since(start_mono),
+                    "token_usage": token_usage,
+                },
+                ensure_ascii=False,
+                default=str,
+            ) + "\n\n"
             flush_pending_thinking_for_session(session_id)
             return
 

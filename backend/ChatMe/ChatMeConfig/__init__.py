@@ -11,6 +11,7 @@ from .core import (
     get_model_vl_config,
     get_oss_config,
     get_skills_config,
+    get_permissions_config,
     ensure_global_config,
     # 主用 / 备用 LLM 链式解析
     get_active_llm_config,
@@ -32,6 +33,7 @@ __all__ = [
     "get_model_vl_config",
     "get_oss_config",
     "get_skills_config",
+    "get_permissions_config",
     "ensure_global_config",
     "get_active_llm_config",
     "get_backup_llm_config",

@@ -5,7 +5,16 @@
     @contextmenu.prevent="$emit('refresh')"
   >
     <div class="conv-title-row">
-      <span v-if="isStreaming" class="streaming-dot" title="正在流式响应…"></span>
+      <span
+        v-if="isStreaming || isCompletedUnread || isApprovalPending || isErrored"
+        :class="['status-dot', {
+          'streaming': isStreaming,
+          'approval': !isStreaming && isApprovalPending,
+          'errored': !isStreaming && !isApprovalPending && isErrored,
+          'completed': !isStreaming && !isApprovalPending && !isErrored && isCompletedUnread
+        }]"
+        :title="dotTitle"
+      ></span>
       <div
         class="conv-title"
         @dblclick.stop="startEdit"
@@ -49,6 +58,21 @@ export default {
     isStreaming: {
       type: Boolean,
       default: false
+    },
+    isCompletedUnread: {
+      // 流式 clean done 后用户还没点进去过——绿点
+      type: Boolean,
+      default: false
+    },
+    isApprovalPending: {
+      // permission_request 触发，等用户审批——黄点
+      type: Boolean,
+      default: false
+    },
+    isErrored: {
+      // SSE error 触发，用户还没点进去看过——红点
+      type: Boolean,
+      default: false
     }
   },
   emits: ['select', 'delete', 'update-title', 'refresh'],
@@ -82,6 +106,14 @@ export default {
       if (diffDays < 30) return `${diffDays}天前`
 
       return updatedAt.toLocaleDateString('zh-CN')
+    },
+    // 状态点的 tooltip（优先级：streaming > approval > errored > completed）
+    dotTitle() {
+      if (this.isStreaming) return '正在流式响应…'
+      if (this.isApprovalPending) return '等待命令审批'
+      if (this.isErrored) return '会话出错（点击查看）'
+      if (this.isCompletedUnread) return '已完成（点击查看）'
+      return ''
     }
   },
   mounted() {
@@ -181,18 +213,43 @@ export default {
   margin-bottom: 4px;
 }
 
-.streaming-dot {
+/* 侧栏状态点通用样式（绿/黄/红 + 蓝闪 streaming） */
+.status-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--button-bg);
   flex-shrink: 0;
+}
+
+.status-dot.streaming {
+  background: var(--button-bg);
   animation: blink 1.2s ease-in-out infinite;
+}
+
+.status-dot.completed {
+  /* 绿：流式 clean done 后待用户回看（持久到点击） */
+  background: #22c55e;
+}
+
+.status-dot.approval {
+  /* 黄：permission_request 等用户决策（慢脉冲提示 actionable） */
+  background: #eab308;
+  animation: pulse-yellow 2s ease-in-out infinite;
+}
+
+.status-dot.errored {
+  /* 红：SSE error 待用户查看 */
+  background: #ef4444;
 }
 
 @keyframes blink {
   0%, 100% { opacity: 0.3; }
   50%      { opacity: 1; }
+}
+
+@keyframes pulse-yellow {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(234, 179, 8, 0.5); }
+  50%      { opacity: 0.75; box-shadow: 0 0 0 4px rgba(234, 179, 8, 0); }
 }
 
 .conv-title {

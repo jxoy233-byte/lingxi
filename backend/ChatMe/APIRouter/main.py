@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, FastAPI, Path, Body, File, Form, UploadFile
+from pydantic import BaseModel
 from fastapi.responses import StreamingResponse
 
 from ChatMe.ChatService.FilesLoaders import UploadFileWithId
@@ -378,6 +379,109 @@ async def invoke_interrupted(
         "Cache-Control": "no-cache",  # 禁用缓存
         "X-Accel-Buffering": "no",  # 禁用nginx/uvicorn缓冲区!
         "Connection": "keep-alive"  # 长连接保持
+    }
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers=headers,
+    )
+
+
+
+# 权限审批端点（Human-in-the-Loop）：
+#   request_approval 写 redis permission:{sid} hash → SSE 推 permission_request 事件
+#   → 前端 POST /permission/decide 写决策 → POST /permission/resume 用 Command(resume=decision) 让
+#   LangGraph 在 interrupt() 调用点返回 decision，工具据此放行 / 拒绝。
+# 每 sid 只有一个 pending permission（singleton），URL 不带 request_id。
+class PermissionDecision(BaseModel):
+    """用户对 permission_request 的决策
+
+    合法值：
+    - "approve"        — 永久批准（写入 Permissions.approved）
+    - "this-time-only" — 仅本次放行
+    - "deny"           — 拒绝
+    - "feedback:<text>" — 第 4 选项，用户告诉 AI 怎么做，<text> 作为指导塞进 ToolMessage
+      让 LLM 重试时参考。permissions.request_approval 看前缀解析。
+    """
+
+    decision: str
+
+
+@ChatMe_app.post("/{session_id}/permission/decide", summary="用户对 permission_request 做出决策")
+async def decide_permission(
+    session_id: str = Path(..., embed=True, description="会话唯一ID"),
+    body: PermissionDecision = Body(...),
+):
+    """写决策到 redis hash；不触发 LangGraph resume（由 /permission/resume 处理）。"""
+    import redis as _redis
+    from ChatMe.ChatMeConfig import get_redis_checkpointer_url
+    import time as _time
+
+    r = _redis.from_url(get_redis_checkpointer_url())
+    perm = r.hgetall(f"permission:{session_id}")
+    if not perm:
+        raise HTTPException(status_code=404, detail=f"会话 {session_id} 没有 pending permission")
+
+    decoded = {
+        k.decode() if isinstance(k, bytes) else k: v.decode() if isinstance(v, bytes) else v
+        for k, v in perm.items()
+    }
+    if decoded.get("status") != "pending":
+        raise HTTPException(status_code=400, detail=f"会话 {session_id} permission 状态异常: {decoded.get('status')!r}")
+    # 已决策但还没 resume —— 允许覆盖（前端重复点击安全）
+    if decoded.get("decision"):
+        logger.debug(f"会话 {session_id} 决策覆盖: {decoded.get('decision')} → {body.decision}")
+
+    r.hset(
+        f"permission:{session_id}",
+        mapping={"decision": body.decision, "decided_at": str(_time.time())},
+    )
+
+    logger.info(f"会话 {session_id} permission decision={body.decision}")
+    return {"code": 200, "session_id": session_id, "decision": body.decision}
+
+
+@ChatMe_app.post("/{session_id}/permission/resume", summary="用决策 resume LangGraph 让 permission_request 继续")
+async def resume_permission(
+    session_id: str = Path(..., embed=True, description="会话唯一ID"),
+):
+    """用决策 resume LangGraph —— decision 通过官方 `Command(resume=decision)` 通道回到 `interrupt()` 调用点。
+
+    与 /invoke_interrupted 的区别：本端点走 `Command(resume=decision)` 把值传进 interrupt()，
+    不是走 `Command(resume=True)` + Command.update 重建图。
+    """
+    import redis as _redis
+    from ChatMe.ChatMeConfig import get_redis_checkpointer_url
+
+    r = _redis.from_url(get_redis_checkpointer_url())
+    perm = r.hgetall(f"permission:{session_id}")
+    if not perm:
+        raise HTTPException(status_code=404, detail=f"会话 {session_id} 没有 pending permission")
+
+    decoded = {
+        k.decode() if isinstance(k, bytes) else k: v.decode() if isinstance(v, bytes) else v
+        for k, v in perm.items()
+    }
+    decision = decoded.get("decision", "")
+    if not decision:
+        raise HTTPException(status_code=400, detail=f"会话 {session_id} decision 尚未设置，请先调用 /permission/decide")
+    if decision not in ("approve", "deny", "this-time-only") and not decision.startswith("feedback:"):
+        raise HTTPException(status_code=400, detail=f"会话 {session_id} decision 值非法: {decision!r}")
+
+    # 不在 resume 前清理 redis hash —— resume_permission_stream 内部最后清理
+
+    async def event_generator():
+        async for data in chat_service.resume_permission_stream(
+            session_id=session_id,
+            decision=decision,
+        ):
+            yield f"{data}"
+
+    headers = {
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+        "Connection": "keep-alive",
     }
 
     return StreamingResponse(

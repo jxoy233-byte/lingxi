@@ -1,6 +1,11 @@
 """
 额外的本地 tool 工具（不通过 MCP 暴露）
 
+DEPRECATED：本文件目前仅承载 sub_agent 一个工具，该工具已废弃。
+- prompt（graph_config.PROMPT_TOOLS_DISPATCH / PROMPT_MAIN_FLOW）已不再向 LLM 暴露 sub_agent
+- session.py 里 tools.append(sub_agent) 仍保留注册以兼容潜在遗留调用，但不会再被新 prompt 触发
+- 这里仅保留实现 + deprecation 标记，后续清理时可整体删除
+
 用于 agent 工作流中需要特殊处理的工具，如 sub-agent 调度
 """
 import asyncio
@@ -54,7 +59,7 @@ def _get_llm_config():
 
 
 def _get_sub_agent_tools():
-    """获取 sub-agent 可用的工具列表(不含 interrupt)。
+    """DEPRECATED: sub_agent 已废弃。获取 sub-agent 可用的工具列表(不含 interrupt)。
 
     复用 mcps.session 模块级共享 MCP client(同一连接 + 同一 interceptor)。
     """
@@ -81,7 +86,7 @@ def _get_sub_agent_tools():
 
 
 def _create_sub_agent_graph(prompt):
-    """创建 sub-agent 的 ReAct 工作流图"""
+    """DEPRECATED: sub_agent 已废弃。创建 sub-agent 的 ReAct 工作流图"""
     from operator import add
     from typing import TypedDict, Annotated
 
@@ -180,7 +185,7 @@ _sub_agent_graph = None
 
 
 def _get_sub_agent_graph(prompt):
-    """获取或创建 sub-agent graph（单例）"""
+    """DEPRECATED: sub_agent 已废弃。获取或创建 sub-agent graph（单例）"""
     global _sub_agent_graph
     if _sub_agent_graph is None:
         _sub_agent_graph = _create_sub_agent_graph(prompt=prompt)
@@ -252,6 +257,10 @@ def sub_agent(
     session_id: Annotated[str, "Session id"] = ""
 ) -> str:
     """
+    DEPRECATED: sub_agent 工具已废弃，prompt（graph_config.PROMPT_TOOLS_DISPATCH /
+    PROMPT_MAIN_FLOW）不再向 LLM 暴露该能力。仅保留实现以兼容潜在遗留调用，
+    后续清理时可整体删除。
+
     Spawn a sub-agent to execute a sub-task (Plan-Execute + ReAct mode; sub-agent runs its own ReAct loop and returns the result text).
 
     See main agent prompt for detailed usage rules.

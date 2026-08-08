@@ -175,14 +175,23 @@
               <span class="interrupt-reason-text">{{ displayInterruptReason }}</span>
             </div>
             <div v-if="message.toolCalls && message.toolCalls.length" class="tool-calls">
-              <div v-for="(tool, i) in message.toolCalls" :key="i" class="tool-call-item" :class="{ 'tool-done': tool.result !== null }">
+              <div
+                v-for="(tool, i) in message.toolCalls"
+                :key="i"
+                class="tool-call-item"
+                :class="{
+                  'tool-done': tool.result !== null,
+                  'awaiting-approval': isToolAwaitingApproval(i)
+                }"
+              >
                 <div class="tool-call-header" @click="toggleTool(i)" :style="tool.result !== null ? 'cursor:pointer' : ''">
                   <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
                   </svg>
                   <span class="tool-name">{{ tool.name }}</span>
                   <span v-if="getToolExecutionEnv(tool.name, tool.args)" class="tool-env-label" :class="`env-${getToolExecutionEnv(tool.name, tool.args)}`">:: {{ getToolExecutionEnv(tool.name, tool.args) }}</span>
-                  <span v-if="tool.result !== null" class="tool-check">✓</span>
+                  <span v-if="isToolAwaitingApproval(i)" class="tool-awaiting-badge">需要批准</span>
+                  <span v-else-if="tool.result !== null" class="tool-check">✓</span>
                   <span v-else class="tool-running-dot"></span>
                   <svg v-if="tool.result !== null" class="tool-expand-chevron" :class="{ rotated: expandedTools[i] }" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <polyline points="9 18 15 12 9 6"/>
@@ -190,6 +199,65 @@
                 </div>
                 <div v-if="tool.args && hasArgs(tool.args, tool.name)" class="tool-args">{{ formatArgs(tool.args, tool.name) }}</div>
                 <div v-if="tool.result !== null && expandedTools[i]" class="tool-result">{{ tool.result }}</div>
+
+                <!-- 内嵌审批 UI：仅当此 tool 是当前 pending 审批目标时渲染 -->
+                <div v-if="isToolAwaitingApproval(i)" class="tool-inline-approval">
+                  <div class="tool-inline-approval-header">
+                    <svg class="tool-inline-approval-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                      <path d="M12 2L4 6v6c0 5 3.5 9.5 8 10 4.5-.5 8-5 8-10V6l-8-4z"
+                        stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+                      <path d="M9 12l2 2 4-4" stroke="currentColor" stroke-width="1.8"
+                        stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    <span>需要批准这个 {{ pendingToolApproval.action }} 操作吗？</span>
+                  </div>
+                  <!-- 默认 4 选项：取消 / 仅本次 / 告诉 AI 怎么做 / 批准 -->
+                  <div v-if="!feedbackExpanded[i]" class="tool-inline-approval-actions">
+                    <button
+                      class="tool-btn-deny"
+                      :disabled="submittingToolDecision"
+                      @click.stop="emitToolDecision('deny')"
+                    >取消</button>
+                    <button
+                      class="tool-btn-once"
+                      :disabled="submittingToolDecision"
+                      @click.stop="emitToolDecision('this-time-only')"
+                    >仅本次</button>
+                    <button
+                      class="tool-btn-feedback"
+                      :disabled="submittingToolDecision"
+                      @click.stop="toggleFeedback(i)"
+                    >告诉 AI 怎么做</button>
+                    <button
+                      class="tool-btn-approve"
+                      :disabled="submittingToolDecision"
+                      @click.stop="emitToolDecision('approve')"
+                    >批准</button>
+                  </div>
+                  <!-- 反馈模式：textarea + 取消/发送 两个按钮 -->
+                  <div v-else class="tool-inline-feedback">
+                    <textarea
+                      v-model="feedbackText[i]"
+                      class="tool-feedback-textarea"
+                      placeholder="例如：用 Python sandbox；先列出将删除的文件再删；不要递归 ..."
+                      :disabled="submittingToolDecision"
+                      rows="3"
+                      @click.stop
+                    ></textarea>
+                    <div class="tool-inline-feedback-actions">
+                      <button
+                        class="tool-btn-deny"
+                        :disabled="submittingToolDecision"
+                        @click.stop="cancelFeedback(i)"
+                      >取消</button>
+                      <button
+                        class="tool-btn-approve"
+                        :disabled="submittingToolDecision || !(feedbackText[i] || '').trim()"
+                        @click.stop="submitFeedback(i)"
+                      >发送给 AI</button>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
             <div v-if="message.reasoning" class="reasoning-text">{{ message.reasoning }}</div>
@@ -245,13 +313,13 @@
             </svg>
           </button>
           <template v-else>
-            <button class="action-button" @click="handleRestore" title="回溯到此对话">
+            <button v-if="canBacktrack" class="action-button" @click="handleRestore" title="回溯到此对话">
               <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="1 4 1 10 7 10"/>
                 <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
               </svg>
             </button>
-            <button v-if="isLatestAiMessage && !isFirstAiMessage" class="action-button" @click="handleRestream" title="重新生成">
+            <button v-if="canRestream" class="action-button" @click="handleRestream" title="重新生成">
               <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M21 2v6h-6"/>
                 <path d="M3 12a9 9 0 0 1 15-6.7L21 8"/>
@@ -460,9 +528,23 @@ export default {
     pendingInterruptSessionId: {
       type: String,
       default: null
+    },
+    messageIndex: {
+      // 当前消息在父 messages 数组中的索引；用于判断此消息是否含有待审批的 tool call
+      type: Number,
+      default: -1
+    },
+    pendingToolApproval: {
+      // 内嵌审批：{ messageIndex, toolIndex, command, action, sessionId } | null
+      type: Object,
+      default: null
+    },
+    submittingToolDecision: {
+      type: Boolean,
+      default: false
     }
   },
-  emits: ['restore', 'restream', 'open-link', 'preview-file', 'interrupt', 'resume', 'quote'],
+  emits: ['restore', 'restream', 'open-link', 'preview-file', 'interrupt', 'resume', 'quote', 'tool-decide'],
   components: {
     FilePreviewModal
   },
@@ -485,7 +567,10 @@ export default {
       quoteButtonVisible: false,
       quoteButtonPos: { top: 0, left: 0 },
       // 导出本轮按钮：防连点
-      exporting: false
+      exporting: false,
+      // 内嵌审批的「告诉 AI 怎么做」反馈模式：按 tool index 独立记录展开态 + 文本
+      feedbackExpanded: {},
+      feedbackText: {}
     }
   },
   mounted() {
@@ -522,6 +607,25 @@ export default {
       if (this.message.streaming) return false
       if (this.message.error) return false
       return !!this.message.checkpointId
+    },
+    /**
+     * 是否显示「回溯到此对话」按钮：仅 AI 消息 + 非流式 + 非 error + 有 checkpointId。
+     * 异常对话段（permission_request 中断 / 主动中断）只有 REASONING AIMessage，没有 SUMMARY，
+     * 后端 get_conversation 不会给它分配 cid —— 按钮显示点了也是 no-op，直接隐藏。
+     */
+    canBacktrack() {
+      if (!this.message || this.message.role !== 'ai') return false
+      if (this.message.streaming) return false
+      if (this.message.error) return false
+      return !!this.message.checkpointId
+    },
+    /**
+     * 是否显示「重新生成」按钮：比 canBacktrack 额外要求"是最新的 AI 消息且不是首条"，
+     * 否则 fallback 到上一轮 cid 误重生成。同时必须有 cid（避免 fallback 语义错误）。
+     */
+    canRestream() {
+      if (!this.canBacktrack) return false
+      return this.isLatestAiMessage && !this.isFirstAiMessage
     },
     metricsElapsedSec() {
       // 优先用后端权威 elapsedMs（毫秒）；fallback 到 responseTime（秒）
@@ -662,6 +766,11 @@ export default {
     // 工具调用超过 6 个时，强制折叠整个思考过程
     // 但用户主动展开后不再强制覆盖回折叠状态
     effectiveThinkingCollapsed() {
+      // 等待审批的工具条目在这条消息里 → 强制展开（让用户看到内嵌审批按钮）
+      // 覆盖用户手动折叠的状态，因为审批按钮就在 thinking-body 里
+      if (this.pendingToolApproval && this.pendingToolApproval.messageIndex === this.messageIndex) {
+        return false
+      }
       const tcLen = this.message.toolCalls && this.message.toolCalls.length
       if (tcLen > 6 && !this.thinkingOverflowExpanded) return true
       return this.thinkingCollapsed
@@ -2018,6 +2127,56 @@ export default {
         [index]: !this.expandedTools[index]
       }
     },
+    /**
+     * 判断指定 tool call 是否是当前待审批目标：
+     * - pendingToolApproval 不为空
+     * - messageIndex 匹配
+     * - toolIndex 匹配
+     */
+    isToolAwaitingApproval(toolIndex) {
+      if (!this.pendingToolApproval) return false
+      return this.pendingToolApproval.messageIndex === this.messageIndex
+        && this.pendingToolApproval.toolIndex === toolIndex
+    },
+    /**
+     * 用户点击内嵌审批按钮，emit 给 App.vue 走 /decide + /resume 流程
+     */
+    emitToolDecision(decision) {
+      this.$emit('tool-decide', decision)
+    },
+    /**
+     * 「告诉 AI 怎么做」按钮：展开反馈 textarea
+     */
+    toggleFeedback(toolIndex) {
+      this.feedbackExpanded = {
+        ...this.feedbackExpanded,
+        [toolIndex]: true,
+      }
+      // 第一次展开时预填空字符串（v-model 需要初始 key）
+      if (!(toolIndex in this.feedbackText)) {
+        this.feedbackText = { ...this.feedbackText, [toolIndex]: '' }
+      }
+    },
+    /**
+     * 反馈模式「取消」：回到 4 选项默认视图，清空已写文本
+     */
+    cancelFeedback(toolIndex) {
+      this.feedbackExpanded = {
+        ...this.feedbackExpanded,
+        [toolIndex]: false,
+      }
+      this.feedbackText = { ...this.feedbackText, [toolIndex]: '' }
+    },
+    /**
+     * 反馈模式「发送给 AI」：把文本拼成 `feedback:<text>` 作为 decision emit
+     * 后端 permissions.py 看到这个前缀会返回 ("feedback", text)，由 _permission_wrap
+     * 包成 ToolMessage 让 LLM 看到用户指引并重新尝试调用。
+     */
+    submitFeedback(toolIndex) {
+      const text = (this.feedbackText[toolIndex] || '').trim()
+      if (!text) return
+      this.$emit('tool-decide', `feedback:${text}`)
+    },
     hasArgs(args, toolName = '') {
       const filtered = this.filterInternalArgs(args, toolName)
       return Object.keys(filtered).length > 0
@@ -3224,11 +3383,28 @@ export default {
   border-radius: 6px;
   overflow: hidden;
   opacity: 0.75;
-  transition: opacity 0.2s;
+  transition: opacity 0.2s, border-color 0.2s, box-shadow 0.2s;
 }
 
 .tool-call-item.tool-done {
   opacity: 1;
+}
+
+/* 待审批的 tool call：高亮黄色边框 + 阴影 + 顶部 badge */
+.tool-call-item.awaiting-approval {
+  opacity: 1;
+  border-color: #f59e0b;
+  box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.35), 0 2px 8px rgba(245, 158, 11, 0.12);
+}
+
+.tool-awaiting-badge {
+  font-size: 10px;
+  color: #b45309;
+  background: rgba(245, 158, 11, 0.15);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
 }
 
 .tool-call-header {
@@ -3295,6 +3471,134 @@ export default {
   overflow-y: auto;
   background: var(--bg-primary);
   border-top: 1px solid var(--border-color);
+}
+
+/* 内嵌审批 UI：出现在 awaiting-approval 的 tool call 下方 */
+.tool-inline-approval {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  background: rgba(245, 158, 11, 0.06);
+  border-top: 1px solid rgba(245, 158, 11, 0.25);
+}
+
+.tool-inline-approval-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.tool-inline-approval-icon {
+  width: 14px;
+  height: 14px;
+  color: #f59e0b;
+  flex-shrink: 0;
+}
+
+.tool-inline-approval-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.tool-btn-deny,
+.tool-btn-once,
+.tool-btn-feedback,
+.tool-btn-approve {
+  padding: 4px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  transition: all 0.15s ease;
+}
+
+.tool-btn-deny:disabled,
+.tool-btn-once:disabled,
+.tool-btn-feedback:disabled,
+.tool-btn-approve:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.tool-btn-deny:hover:not(:disabled) {
+  background: #fee2e2;
+  color: #b91c1c;
+  border-color: #fca5a5;
+}
+
+.tool-btn-once:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--text-secondary);
+}
+
+/* 「告诉 AI 怎么做」按钮：amber 主色调，呼应审批 UI 顶部的盾牌图标 */
+.tool-btn-feedback {
+  background: rgba(245, 158, 11, 0.08);
+  color: #b45309;
+  border-color: rgba(245, 158, 11, 0.35);
+}
+
+.tool-btn-feedback:hover:not(:disabled) {
+  background: rgba(245, 158, 11, 0.18);
+  border-color: #f59e0b;
+  color: #92400e;
+}
+
+.tool-btn-approve {
+  background: #10b981;
+  color: white;
+  border-color: #10b981;
+}
+
+.tool-btn-approve:hover:not(:disabled) {
+  background: #059669;
+  border-color: #059669;
+}
+
+/* 反馈模式：textarea + 取消/发送两按钮 */
+.tool-inline-feedback {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tool-feedback-textarea {
+  width: 100%;
+  min-height: 60px;
+  resize: vertical;
+  padding: 6px 8px;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 5px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  box-sizing: border-box;
+}
+
+.tool-feedback-textarea:focus {
+  outline: none;
+  border-color: #f59e0b;
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.15);
+}
+
+.tool-feedback-textarea:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.tool-inline-feedback-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
 }
 
 .tool-expand-chevron {

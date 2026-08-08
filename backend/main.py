@@ -15,7 +15,8 @@ from ChatMe.ChatMeConfig import (
 )
 from ChatMe.APIRouter.main import ChatMe_app, chat_service_lifespan
 from ChatMe.APIRouter.admin_config import router as admin_config_router
-from ChatMe.APIRouter.model_vl import model_vl_app
+# 注意：model_vl 不在最顶层 import —— 它的模块顶层会触发 Qwen3-VL 模型加载到内存，
+# 必须按 llm_providers.vl.local 配置决定是否加载。下面 line ~120 才动态 import。
 from ChatMe.APIRouter.static_file import static_file_router
 from ChatMe.APIRouter.data_export import export_router
 from ChatMe.APIRouter.timed_clean import cleanup_lifespan, cleanup_router
@@ -102,14 +103,17 @@ app.include_router(export_router)
 app.include_router(admin_config_router)
 
 # 仅在 local=true 时加载本地 VL 模型
+# 关键：必须延迟 import —— model_vl.py 顶层会调 Qwen3VLForConditionalGeneration.from_pretrained
+# 把模型加载到内存；必须按 vl.local 决定是否触发加载，而不是只决定是否挂载路由
 try:
     from ChatMe.ChatMeConfig import get_model_vl_config
     vl_config = get_model_vl_config()
     if vl_config.get("local"):
+        from ChatMe.APIRouter.model_vl import model_vl_app
         app.include_router(model_vl_app)
         logger.info("本地 VL 模型已启用")
     else:
-        logger.info("使用外部 VL 模型")
+        logger.info("使用外部 VL 模型（fallback 到主用 LLM）")
 except Exception as e:
     logger.error(f"VL 模型配置检测失败: {e}")
 

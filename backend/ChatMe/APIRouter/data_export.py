@@ -47,7 +47,7 @@ _MAX_FILE_BYTES = 100 * 1024 * 1024  # 100MB
 
 def _resolve_data_analysis_dir(session_id: str) -> Optional[Path]:
     """解析 session 的 data_analysis 目录，不存在或 sid 不合法时返回 None。"""
-    if not re.match(r"^[0-9a-f]{32}$", session_id):
+    if not re.match(r"^[0-9a-f]{12}$", session_id):
         return None
     base = CACHED_DIR.resolve()
     d = (base / session_id / _DATA_ANALYSIS_DIRNAME).resolve()

@@ -32,6 +32,7 @@ Vue 3 + Vite 单页应用，提供 **Web 端** 和 **Electron 桌面端** 两种
 - **回溯 / 中断 / 续接**：Checkpoint 面板展示历史节点，支持回溯到任意一轮；执行中可中断后从断点续接
 - **网页预览窗口**：通过 Electron IPC 在独立窗口打开外部链接（生产环境受限）
 - **错误气泡保护**：SSE `error` 事件触发时整条消息渲染为红色错误框，`done` 事件不会复活 AI 内容，避免报错堆栈被当 markdown
+- **权限审批内嵌**：`cmd` / `code` 工具触发审批时把按钮内嵌到对应 `toolCall` 行（高亮上下文），不走独立 modal 弹窗；4 档决策 approve / this-time-only / deny / feedback:<text>
 - **头部刷新按钮**：↻ 按钮 + `Cmd/Ctrl+R` + 菜单 → 视图 → 刷新，触发 `window.location.reload()` 走完整重载
 - **Electron 多环境**：开发 / 测试 / 正式三套配置，菜单栏与窗口标题栏上以颜色徽章区分
 - **file:// 协议拦截**：Electron 桌面端用 `protocol.handle('file', ...)` 把 `/chat/*` 和 `/static/*` 转发到后端，等价于 Vite dev 模式的代理
@@ -140,6 +141,7 @@ frontend/
 │       ├── MessageItem.vue
 │       ├── MessageList.vue
 │       ├── SearchResults.vue
+│       ├── SettingsDialog.vue       # 设置弹窗（Appearance / Models / Skills / Permissions 4 tab + vl.local 开关 + Save & Restart）
 │       ├── Sidebar.vue
 │       └── WebPreviewPanel.vue
 ├── tips/                       # 用户提示插图（img.png 等）
@@ -162,6 +164,7 @@ frontend/
 | `FilePreviewPanel.vue` / `FilePreviewModal.vue` | 文件预览面板 / 弹窗（图片、文本、表格） |
 | `DataAnalysisTree.vue` / `DataTreeNode.vue` | 数据分析生成的目录树（递归节点），面板头部含 reload 按钮 |
 | `SearchResults.vue` | 搜索结果列表渲染 |
+| `SettingsDialog.vue` | 设置弹窗：Appearance / Models / Skills / Permissions 4 tab；VL `local` 开关 + fallback 解释；LLM provider / Skills API Key 脱敏编辑 + Save & Restart；已批准 / 已拒绝命令列表行内删除 |
 | `WebPreviewPanel.vue` | Electron 内嵌网页预览窗口（IPC `open-web-preview`） |
 
 ### 全局状态（App.vue）
@@ -217,10 +220,16 @@ Vite dev server 通过代理把 `/chat` 和 `/static` 转发到 `http://127.0.0.
 | `/chat/{session_id}/backtrack` | POST | 回溯会话到指定轮 |
 | `/chat/{session_id}/interrupt` | POST | 中断当前对话 |
 | `/chat/{session_id}/invoke_interrupted/{msg}` | POST | 中断续接对话 |
+| `/chat/{session_id}/permission/decide` | POST | 审批权限决策（4 档：`approve` / `this-time-only` / `deny` / `feedback:<text>`） |
+| `/chat/{session_id}/permission/resume` | POST (SSE) | 决策后 resume permission 中断的 tool call，沿用 `message_stream` 同构 SSE |
 | `/chat/{session_id}/upload_file` | POST | 上传文件 |
 | `/chat/cancel_upload_file` | POST | 取消已上传文件 |
 | `/chat/improve_input` | POST | 优化用户输入 |
 | `/chat/file-config` | GET | 获取文件上传配置 |
+| `/chat/{session_id}/data-analysis/tree` | GET | DataAnalysis 目录文件树（仅 data_analysis 子目录） |
+| `/chat/{session_id}/tree` | GET | 整个 session 工作树（含上传文件 + AI 中间产物） |
+| `/chat/{session_id}/export/artifacts` | GET | 导出 DataAnalysis 产物（`?format=zip\|html`） |
+| `/chat/{session_id}/export/turn/{checkpoint_id}` | GET | 导出截至指定 checkpoint 的对话历史（OpenAI JSON + 完整 state 备份 ZIP） |
 
 ### 其它接口
 
@@ -245,6 +254,7 @@ Vite dev server 通过代理把 `/chat` 和 `/static` 转发到 `http://127.0.0.
 | `memory_wait_start` | 上一轮记忆后台任务还在跑，开始等待 |
 | `memory_wait_done` | 记忆后台任务结束，恢复对话 |
 | `interrupt` | 对话被中断（携带 `memory_status`） |
+| `permission_request` | `cmd` / `code` 工具触发审批（携带 `command` / `tool_call_name` / `fingerprint`）；前端 `handlePermissionRequest` 把审批按钮内嵌到对应 `toolCall` 行 |
 | `done` | 对话正常结束（携带 `memory_status`，字段：`idle` / `pending` / `done` / `failed`） |
 | `error` | 异常结束（前端把整条消息标 `error=true` 并加入 `_sessionHadError` 保护态） |
 
@@ -310,7 +320,7 @@ const isTest = process.env.NODE_ENV === 'test'
 | `app.name` | `灵析` | 应用名（菜单栏第一项、`app.getName()`） |
 | `app.title` | `灵析——数据分析智能助手` | 窗口标题 / 关于弹窗 |
 | `app.identifier` | `com.chatme.app` | bundle identifier |
-| `app.version` | `0.1.0` | 同步后端版本号 |
+| `app.version` | `0.1.1` | 同步后端版本号 |
 | `window.width × height` | `1100 × 720` | 主窗口尺寸 |
 | `window.minWidth × minHeight` | `650 × 480` | 最小尺寸 |
 | `devServer.url` | 从 Vite 导入的 `http://localhost:18211` | Electron 开发时加载的 URL |
@@ -444,8 +454,8 @@ DMG 阶段需要 `dmgbuild-bundle-arm64-*.tar.gz` 包，npmmirror 当前缺这�
 release/electron-builder/
 ├── mac-arm64/
 │   └── 灵析.app          ← 直接打开
-├── 灵析-0.0.1-arm64-mac.zip
-└── 灵析-0.0.1-mac.zip
+├── 灵析-0.1.1-arm64-mac.zip
+└── 灵析-0.1.1-mac.zip
 ```
 
 打开方式：
@@ -457,7 +467,7 @@ open ~/coding/projects/ChatMe/release/electron-builder/mac-arm64/灵析.app
 "~/coding/projects/ChatMe/release/electron-builder/mac-arm64/灵析.app/Contents/MacOS/灵析"
 
 # 解压 zip 后再打开
-unzip 灵析-0.0.1-arm64-mac.zip -d ~/Downloads
+unzip 灵析-0.1.1-arm64-mac.zip -d ~/Downloads
 open ~/Downloads/灵析.app
 ```
 

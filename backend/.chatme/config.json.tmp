@@ -1,8 +1,8 @@
 {
   "app": {
-    "name": "ChatMe",
+    "name": "Lingxi",
     "version": "v0.1.0",
-    "description": "multiple agents system with engineers",
+    "description": "AI data-analysis chat assistant with tool use, command approval, code execution, and persistent memory across conversations",
     "host": "127.0.0.1",
     "port": 8211
   },
@@ -25,7 +25,7 @@
       "model_name": "Qwen3-VL-2B",
       "api_key": "empty",
       "base_url": "http://127.0.0.1:8211/api/v1",
-      "local": true
+      "local": false
     }
   },
   "skills": {

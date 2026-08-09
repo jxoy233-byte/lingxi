@@ -35,6 +35,7 @@
 - **多 LLM Provider**：OpenAI / DeepSeek / 本地 VL（Qwen3-VL-2B）统一抽象，5 个独立 LLM（core / agent / summary / react_compact / imp_ipt）可分别配参
 - **对话记忆**：Redis checkpointer 状态恢复 + 自建 memory manager 长期记忆；per-thread Lock + 原子写 + 后台任务串行
 - **节点异常统一兜底**：`@node_guard` 装饰器包住所有 LangGraph 节点，异常后 SSE 外层统一返回 `error` 事件
+- **命令级权限审批**：`cmd` / `code` 工具走 `PermissionedToolNode`（基于官方 `ToolNode` + `_awrap_tool_call` hook），敏感命令执行前触发 LangGraph `interrupt()` 弹审批；4 档决策（`approve` / `this-time-only` / `deny` / `feedback:<text>`）走 Redis `permission:{sid}` hash；`code` 工具按 imports + calls + lang + sandbox 计算 fingerprint 做永久批准匹配
 - **OSS 对象存储**：阿里云 OSS，图片 / 文件上传后通过 URL 直接访问
 - **桌面端打包**：Electron 41 + electron-builder 26 多平台打包，含 `file://` 协议拦截器等价 Vite dev proxy、↻ 刷新按钮、网页预览窗口
 - **数据库分析**：DataAnalysis skill 支持 MySQL / SQLite / PostgreSQL / MongoDB 只读查询（agent 在 `data_analysis/` 工作树模式下可主动调用 `query_sql` / `query_mongo`，配置跨会话保存在 `skills/DataAnalysis/database/.runtime/`）
@@ -91,7 +92,7 @@
 | `input_parse_node`      | 输入预处理、文件解析（docling / VL）、输入优化，给 `imp_ipt` 打 `additional_kwargs.imp_ipt=True` 标记 |
 | `context_assembly_node` | 上下文组装 + **ReAct 流程压缩** + 中断检查                                                   |
 | `agent_node`            | AI 决策，决定调用工具或结束；工具调用超过 20 次会注入 SystemMessage 提示停止                               |
-| `tool_execution_node`   | 工具执行（搜索 / MCP / Docker 沙盒），由 LangGraph 官方 `ToolNode` 提供                         |
+| `tool_execution_node`   | 工具执行（搜索 / MCP / Docker 沙盒）；`PermissionedToolNode` 在官方 `ToolNode` 基础上包 `_awrap_tool_call` hook，`cmd` / `code` 执行前走 LangGraph `interrupt()` 弹审批，Redis 存 `permission:{sid}` hash 跨 SSE 流复用 |
 | `final_node`            | 最终回复生成（独立 LLM），用 dynamic system prompt 把 `imp_ipt` 注入 system 层，输出带 SUMMARY 标记   |
 
 State 定义在 `backend/ChatMe/ChatWorkflow/config/models.py`（`ChatStateCore2` / `FileParseState`）。完整工作流说明、ReAct 压缩实现、关键文件、协作偏好见 [`CLAUDE.md`](CLAUDE.md)。
@@ -182,7 +183,7 @@ OPENAI_PRESENCE_PENALTY=0.0
 {
   "app": {
     "name": "ChatMe",
-    "version": "v0.1.0",
+    "version": "v0.1.2",
     "host": "127.0.0.1",
     "port": 8211
   },
@@ -270,6 +271,8 @@ ChatMe/
 | `/chat/{session_id}/backtrack`                | POST      | 会话回溯                   |
 | `/chat/{session_id}/interrupt`                | POST      | 中断对话                   |
 | `/chat/{session_id}/invoke_interrupted/{msg}` | POST      | 中断续接对话                 |
+| `/chat/{session_id}/permission/decide`        | POST      | 审批权限决策（4 档：`approve` / `this-time-only` / `deny` / `feedback:<text>`）；决策存 Redis hash 后用 `Command(resume=...)` 唤醒 LangGraph 中断点 |
+| `/chat/{session_id}/permission/resume`        | POST (SSE)| 决策后 resume permission 中断的 tool call，沿用 `message_stream` 同构 SSE（content / reasoning / tool_call_* / done） |
 | `/chat/{session_id}/upload_file`              | POST      | 上传文件                   |
 | `/chat/cancel_upload_file`                    | POST      | 取消已上传文件                |
 | `/chat/improve_input`                         | POST      | 优化用户输入                 |
@@ -292,9 +295,9 @@ ChatMe/
 
 `serve_cached_file` 在精确路径命中失败时按以下规则走 fallback：
 
-1. **带 sid 路径（`cached/{32-hex}/...` 或 `{32-hex}/...`）找不到 → 直接 404**：不去跨会话命中同名文件，避免误把别人 session 的产物当成本会话的图。
+1. **带 sid 路径（`cached/{sid}/...` 或 `{sid}/...`）找不到 → 直接 404**：不去跨会话命中同名文件，避免误把别人 session 的产物当成本会话的图。sid 同时支持 32 位 hex（旧版 `uuid.uuid4().hex`）和 12 位 hex（新版 `uuid.uuid4().hex[:12]`），Referer 提取时优先匹配 32 位。
 2. **无 sid 路径找不到 → 双层 fallback**：
-   - **第一层（primary）**：从 `Referer` header 提取 32hex sid（如 `http://localhost:18211/{sid}` 或 `http://localhost:18211/{sid}/foo`），优先在 `cached/{referer_sid}/` 下递归找同名文件
+   - **第一层（primary）**：从 `Referer` header 正则提取 sid（32 / 12 位 hex 都识别；路径边界 `/[/?#]|$` 防止 31 / 13 位凑巧 hex 长被误匹配），优先在 `cached/{referer_sid}/` 下递归找同名文件
    - **第二层（兜底）**：跨 `cached/*/` 所有 session 子目录递归查找同名文件（`rglob("**/*")`），按 `st_mtime` 降序排序，**最新修改时间**的文件胜出
    - Referer 缺失（隐私模式 / `no-referrer` 策略）/ 不含 sid / 异常格式 → 自动跳过第一层直接走第二层
 3. **都无命中 → 404**。
@@ -324,8 +327,8 @@ MCP 服务器（`mcps/server.py`，FastMCP 3.x，stdio transport）暴露以下�
 
 | 工具          | 说明                                                                  |
 | ----------- | ------------------------------------------------------------------- |
-| `code`      | 默认在 Docker 沙盒中执行 Python / Node.js 代码（`use_sandbox=False` 降级到本机 venv）   |
-| `cmd`       | 默认在 Docker 沙盒中执行白名单内的 shell 命令（`use_sandbox=False` 降级到本机）；带危险命令检测         |
+| `code`      | 默认在 Docker 沙盒中执行 Python / Node.js 代码（`use_sandbox=False` 降级到本机 venv）；执行前 `PermissionedToolNode` 弹审批，可按 imports + calls + lang + sandbox 算 fingerprint 永久批准 |
+| `cmd`       | 默认在 Docker 沙盒中执行白名单内的 shell 命令（`use_sandbox=False` 降级到本机）；带危险命令检测；执行前 `PermissionedToolNode` 弹审批 |
 | `interrupt` | 中断当前对话                                                              |
 | `ctime`     | 获取当前日期时间                                                            |
 
@@ -346,13 +349,13 @@ MCP 服务器（`mcps/server.py`，FastMCP 3.x，stdio transport）暴露以下�
 ```bash
 cd backend
 uv build --wheel
-# 输出: dist/ChatMe-0.1.0-py3-none-any.whl
+# 输出: dist/ChatMe-0.1.1-py3-none-any.whl
 ```
 
 ### 安装 wheel
 
 ```bash
-uv pip install dist/ChatMe-0.1.0-py3-none-any.whl
+uv pip install dist/ChatMe-0.1.1-py3-none-any.whl
 # 安装后 chatme_main 和 chatme_mcp 命令全局可用
 ```
 
@@ -385,13 +388,13 @@ npm run electron:build:win      # Windows NSIS（x64）
 npm run electron:build:linux    # Linux AppImage（x64）
 ```
 
-桌面端通过 `electron-builder` 打包，应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.1.0）在 `frontend/electron/electron.config.js` 中配置。
+桌面端通过 `electron-builder` 打包，应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.1.1）在 `frontend/electron/electron.config.js` 中配置。
 
 **输出位置**：`../release/electron-builder/`（项目根，与 Vite 的 `dist/` / `frontend/` 区分开）：
 
 - `mac-arm64/灵析.app` — 直接打开
 - `mac/` — x64 .app
-- `灵析-0.1.0-arm64-mac.zip` / `灵析-0.1.0-mac.zip` — 分发包
+- `灵析-0.1.1-arm64-mac.zip` / `灵析-0.1.1-mac.zip` — 分发包
 - `linux-unpacked/` — Linux 解压目录
 - `win-unpacked.exe` — Windows 安装器
 

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+import time
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -32,6 +33,7 @@ from ..LoggingManager.logging_config import (
     sweep_pending_thinking_files,
 )
 from .decorators import node_guard
+from .CheckpointJanitor import CheckpointJanitor
 
 
 async def _inject_session_header(request, handler):
@@ -88,6 +90,7 @@ class ChatWorkflow:
         self.graph_process_files = None
         self.checkpointer = None
         self.redis_client = None
+        self.checkpoint_janitor: Optional[CheckpointJanitor] = None
         self.memory_manager = None
         self.files_cached_dir = None
 
@@ -227,6 +230,10 @@ class ChatWorkflow:
             raise RuntimeError("Redis 30s 内仍在 LOADING（dump.rdb 过大？）")
 
         self.redis_client = self.checkpointer._redis
+
+        # LangGraph checkpoint 静默清理器：实例化即可，实际触发在
+        # ChatService._save_round_checkpoint 每轮 round 完成时调 prune_thread
+        self.checkpoint_janitor = CheckpointJanitor(self.redis_client)
 
         # 初始化所有llm
         await self.init_llms()
@@ -768,12 +775,12 @@ class ChatWorkflow:
 
             file = state["single_file"]
 
-            # 纯文本/文档：跳过 VL，避免小参数视觉模型处理得慢
             has_image = any(
                 isinstance(item, dict) and item.get("type") == "image_url"
                 for item in file
             )
             if not has_image:
+                # 文本 和 文档（默认不传文档内图片，仅保留占位符）
                 text_content = ""
                 for item in file:
                     if isinstance(item, dict) and item.get("type") == "text":
@@ -901,10 +908,12 @@ class ChatWorkflow:
             imp_ipt_id = imp_ipt.id
             imp_ipt_response_metadata = imp_ipt.response_metadata
 
-            # imp_ipt 标记：业务流各处用 additional_kwargs.imp_ipt == True 来唯一识别本轮意图
             imp_ipt = HumanMessage(
                 content=imp_ipt_content,
-                additional_kwargs={**imp_ipt_additional_kwargs, "imp_ipt": True},
+                additional_kwargs={
+                    **imp_ipt_additional_kwargs,
+                    "imp_ipt": True,
+                },
                 id=imp_ipt_id,
                 response_metadata=imp_ipt_response_metadata,
             )

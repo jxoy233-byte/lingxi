@@ -15,6 +15,7 @@ from ChatMe.ChatMeConfig import (
 )
 from ChatMe.APIRouter.main import ChatMe_app, chat_service_lifespan
 from ChatMe.APIRouter.admin_config import router as admin_config_router
+from ChatMe.APIRouter.checkpoint_janitor import router as checkpoint_janitor_router
 # 注意：model_vl 不在最顶层 import —— 它的模块顶层会触发 Qwen3-VL 模型加载到内存，
 # 必须按 llm_providers.vl.local 配置决定是否加载。下面 line ~120 才动态 import。
 from ChatMe.APIRouter.static_file import static_file_router
@@ -24,7 +25,7 @@ from ChatMe.LoggingManager.logging_config import set_logger
 
 
 app_config = config.get_app_config()
-version = app_config.get("version", "v0.1.0")
+version = app_config.get("version", "v0.1.2")
 app_name = app_config.get("name", "ChatMe")
 app_description = app_config.get("description", "")
 app_host = app_config.get("host", "127.0.0.1")
@@ -101,6 +102,7 @@ app.include_router(cleanup_router)
 app.include_router(static_file_router)
 app.include_router(export_router)
 app.include_router(admin_config_router)
+app.include_router(checkpoint_janitor_router)
 
 # 仅在 local=true 时加载本地 VL 模型
 # 关键：必须延迟 import —— model_vl.py 顶层会调 Qwen3VLForConditionalGeneration.from_pretrained

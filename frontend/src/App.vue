@@ -525,23 +525,26 @@ export default {
      * 启动本地读秒 interval，每 250ms 用前端 Date.now() 重算 msg.elapsedMs，
      * 让数字在 SSE 事件间隙也能跳（不依赖后端事件频率）。
      * 同一 session 只允许一个活跃 timer，先 stopStreamTimer 防重复。
-     * 后端 done/error/interrupt 给的权威 elapsed_ms 会在终态事件里通过 writeStreamMetrics 覆盖。
+     * 后端 done/error/interrupt 给的权威 elapsed_ms 会在终态事件里通过 writeStreamMetrics 覆盖；
+     * 但下一次 timer tick 又会用本地 wall-clock 重写——这是设计选择：timer 启动时刻 ≈ round
+     * start 时刻（sendMessage 流入口），所以前端 elapsedMs 与后端 elapsed_ms 差异固定且很小，
+     * 用户视觉上看不到跳变，且 SSE 暂停时数字持续累加。
      *
-     * 注意：SSE 事件用 spread 写法 `this.messages[i] = { ...this.messages[i], ... }` 会替换数组里的
-     * message 对象为新 plain 对象。Vue 2 数组索引 setter 拦截新值时会自动 observe 新对象，
-     * 所以 spread 出去的"新对象"仍是响应式的；但旧对象引用已被替换，timer 必须动态取最新对象
-     * 才能持续触发重渲染，否则会写到已脱离 Vue 树的对象上。
+     * startTs 必须闭包捕获；timer body 不读对象上的 startTs，spread 多少次 timer 都能持续
+     * 写到 arr[meta.aiIndex] 最新对象上。
      */
     startStreamTimer(sessionId, msg) {
       this.stopStreamTimer(sessionId)
       if (!msg) return
-      msg.startTs = Date.now()
+      const startTs = Date.now()
       const meta = this._streamingMeta.get(sessionId)
+      const aiIndex = meta ? meta.aiIndex : -1
       const timer = setInterval(() => {
         const arr = this._streamingMessages.get(sessionId)
-        const cur = arr && meta && arr[meta.aiIndex]
-        if (cur && cur.startTs) {
-          cur.elapsedMs = Date.now() - cur.startTs
+        if (!arr || aiIndex < 0 || aiIndex >= arr.length) return
+        const cur = arr[aiIndex]
+        if (cur) {
+          cur.elapsedMs = Date.now() - startTs
         }
       }, 250)
       this._streamTimers.set(sessionId, timer)
@@ -1563,12 +1566,15 @@ export default {
         // 重新解析（snapshot 优先 → 当前 messages 兜底），避免 stale 引用导致写错位置
       }
 
-      // 停响应计时器 + 清理流式快照（pending 状态下不再产生增量事件）
+      // 停响应计时器。streamTimer / _streamingMessages / _streamingMeta 全部保留：
+      //   - streamTimer 跨 approval 持续累加 elapsedMs，handlePermissionResumeStream 用
+      //     `if (!has)` 检查跳过重启，闭包 startTs 保持 sendMessage 时刻
+      //   - _streamingMessages / _streamingMeta 必须保留，否则 timer body `arr = get(...)` 返回
+      //     undefined，timer 停止写 elapsedMs，数字又会冻结
+      //   - _activeStreamingSessions.delete 保留：approval 等待时 SSE 流已停，无新事件进入，
+      //     不再走 sessionChanged 分支
       this.stopResponseTimer()
-      this.stopStreamTimer(requestSessionId)
       this._activeStreamingSessions.delete(requestSessionId)
-      this._streamingMessages.delete(requestSessionId)
-      this._streamingMeta.delete(requestSessionId)
       this._activeStreamingSessions = new Set(this._activeStreamingSessions)
     },
     async onToolDecision(decision) {
@@ -1694,6 +1700,8 @@ export default {
           responseStartTime: Date.now(), toolCalls: [],
         })
       } else {
+        // 不动 startTs：timer 用闭包 startTs（sendMessage 时刻），跨审批等待持续累加；
+        // spread 后对象上 startTs 丢失不影响 timer body（它直接读闭包变量）。
         this.messages[aiMessageIndex] = {
           ...this.messages[aiMessageIndex],
           streaming: true, thinkingDone: false, responseStartTime: Date.now(),
@@ -1714,7 +1722,10 @@ export default {
         userMessage: lastUserMessage,
         lastUserMessage,
       })
-      this.startStreamTimer(requestSessionId, this.messages[aiMessageIndex])
+      // 已有 timer（审批等待期间一直跑着）就不重置 startTs，让 elapsed 继续累加
+      if (!this._streamTimers.has(requestSessionId)) {
+        this.startStreamTimer(requestSessionId, this.messages[aiMessageIndex])
+      }
       this._activeStreamingSessions = new Set(this._activeStreamingSessions)
       try {
         while (true) {

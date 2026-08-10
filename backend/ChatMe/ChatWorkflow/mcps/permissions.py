@@ -343,6 +343,7 @@ def request_approval(
     session_id: str,
     tool_call_name: str = "",
     fingerprint: str = "",
+    execution_env: str = "sandbox",
 ) -> Tuple[str, Optional[str]]:
     """同步等用户回复（走官方 `langgraph.types.interrupt` + `Command(resume=...)` 通道）。
 
@@ -354,6 +355,8 @@ def request_approval(
             前端能精确匹配 pending UI 挂到对应的 tool_call entry 上
         fingerprint: code 工具专用语义指纹（imports + calls + lang + sandbox）；cmd 工具忽略。
             永久批准走此字段精确匹配，不再用 JSON dump 全文 fnmatch。
+        execution_env: "sandbox" / "local" —— SSE permission_request payload 透传字段,
+            前端按 env 渲染差异化审批 UI(sandbox 黄色 / local 红色脉动)
 
     Returns:
         (decision, feedback)
@@ -382,7 +385,7 @@ def request_approval(
         return "approved", None
 
     # 写 redis pending request（SSE 检测到 + 推 permission_request 事件给前端）
-    _write_pending_permission(session_id, command, action, tool_call_name, fingerprint)
+    _write_pending_permission(session_id, command, action, tool_call_name, fingerprint, execution_env)
 
     # 调官方 interrupt() —— ToolNode 透明传播 GraphInterrupt
     # value 是元数据 payload（让 SSE 推 permission_request 事件用），不是 sys_msg 注入
@@ -395,6 +398,7 @@ def request_approval(
             "action": action.value,
             "session_id": session_id,
             "tool_call_name": tool_call_name,
+            "execution_env": execution_env,
         }
     )
 
@@ -439,6 +443,7 @@ def _write_pending_permission(
     action: ActionType,
     tool_call_name: str = "",
     fingerprint: str = "",
+    execution_env: str = "sandbox",
 ) -> None:
     """写 redis `permission:{sid}` hash（singleton — 每 sid 只有一个 pending permission）。
 
@@ -447,6 +452,7 @@ def _write_pending_permission(
     让前端精确匹配对应工具的 entry，并发工具 sequencing 错位也能正确标位。
     fingerprint 是 code 工具语义指纹（永久批准 match 用），前端不需要，这里入 hash 主要用于
     日志/审计（决策后 _judge_has_pending_permission 推到 SSE 时携带，便于排查）。
+    execution_env 是执行环境标签("sandbox" / "local")，写 hash 便于审计与前端兜底推送。
     """
     if not session_id:
         # 没有 sid（裸调场景）：跳过 redis，不阻塞流程
@@ -462,6 +468,7 @@ def _write_pending_permission(
             "action": action.value,
             "status": "pending",
             "timestamp": str(time.time()),
+            "execution_env": execution_env,
         }
         if tool_call_name:
             mapping["tool_call_name"] = tool_call_name
@@ -532,29 +539,45 @@ def _feedback_tool_result(tool_name: str, args_summary: str, feedback: str) -> s
 
 
 def _pre_check_cmd(command: str):
-    """cmd 工具前置 gate：dangerous / script / whitelist 三个静态检查。
+    """cmd 工具前置 gate：dangerous / whitelist 两个静态检查。
 
     返回 (block_kind, message)：
     - block_kind = None → 通过（应继续走 permission gate）
-    - "dangerous" / "script" / "not_allowed" → 拒，对应 message 即 ToolMessage content
+    - "dangerous" / "not_allowed" → 拒，对应 message 即 ToolMessage content
+
+    wording 跟 `_rejected_tool_result` / `_feedback_tool_result` 对齐——
+    不带 "Error:" 前缀（避免 LLM 误判为可重试的运行时错误），明确告诉 AI：
+    - 命令被系统自动拦截，没有执行、零副作用
+    - 不要再换参数重试同一类命令
+    - 引导：换思路 / 用 `interrupt` 问用户
+
+    早期版本还有 `is_script` 拦截（python/node 脚本必须走 code 工具），已解除——
+    cmd 工具现在可以直接跑 python/node 等脚本（沙盒默认 Linux 环境本身支持）。
     """
     from .platforms import get_platform
 
     platform = get_platform()
     is_d, reason = platform.is_dangerous(command)
     if is_d:
-        return "dangerous", f"Error: blocked: {reason}"
-    is_s, lang = platform.is_script(command)
-    if is_s:
-        return "script", f"Error: cmd cannot execute {lang} scripts; use the code tool instead"
+        return "dangerous", (
+            f"Auto-blocked by safety system: {reason}. "
+            f"Command '{command[:200]}' was not executed. "
+            f"Do NOT retry — the pattern is permanently blocked. "
+            f"Use interrupt tool to ask user if needed."
+        )
     is_a, allow_reason = platform.is_allowed(command)
     if not is_a:
-        return "not_allowed", f"Error: {allow_reason}"
+        return "not_allowed", (
+            f"Auto-blocked: command not in {platform.name} whitelist. "
+            f"'{command[:200]}' was not executed. "
+            f"Do NOT retry — use one of the whitelisted commands: {allow_reason} "
+            f"Or use interrupt tool to ask user."
+        )
     return None, ""
 
 
 def _permission_target_for(tool_call: dict) -> Optional[Dict[str, Any]]:
-    """需要审批的工具 → dict（command / fingerprint / action / tool_call_name）；其他工具返回 None。
+    """需要审批的工具 → dict（command / fingerprint / action / tool_call_name / execution_env）；其他工具返回 None。
 
     返回字段说明：
     - command: 给前端 SSE 展示 + redis hash 持久化的命令串
@@ -566,9 +589,12 @@ def _permission_target_for(tool_call: dict) -> Optional[Dict[str, Any]]:
     - action: ActionType 分类（policy 决策用）
     - tool_call_name: 工具名（"cmd" / "code"）—— SSE permission_request event 携带，
       前端能精确匹配 pending UI 挂到对应的 tool_call entry 上（并发场景 sequencing 错位时）
+    - execution_env: "sandbox" / "local" —— 由 args.local 反推 (True → "local")
+      透传到 SSE permission_request 事件，前端按 env 渲染差异化审批 UI
     """
     name = tool_call.get("name")
     args = tool_call.get("args") or {}
+    use_sandbox = not bool(args.get("local", False))  # 反向读取新参数(默认 False → sandbox)
     if name == "cmd":
         command = str(args.get("command", ""))
         return {
@@ -576,6 +602,7 @@ def _permission_target_for(tool_call: dict) -> Optional[Dict[str, Any]]:
             "fingerprint": command,
             "action": get_permissions().classify(command),
             "tool_call_name": name,
+            "execution_env": "sandbox" if use_sandbox else "local",
         }
     if name == "code":
         command = json.dumps(args, ensure_ascii=False)
@@ -584,6 +611,7 @@ def _permission_target_for(tool_call: dict) -> Optional[Dict[str, Any]]:
             "fingerprint": code_fingerprint(args),
             "action": ActionType.CODE,
             "tool_call_name": name,
+            "execution_env": "sandbox" if use_sandbox else "local",
         }
     return None
 
@@ -631,7 +659,7 @@ class PermissionedToolNode(ToolNode):
         call_id = tc["id"]
         args = tc.get("args") or {}
 
-        # gate 1：cmd 静态前置（dangerous / script / whitelist）
+        # gate 1：cmd 静态前置（dangerous / whitelist）
         if name == "cmd":
             command = str(args.get("command", ""))
             block_kind, message = _pre_check_cmd(command)
@@ -652,8 +680,9 @@ class PermissionedToolNode(ToolNode):
             action = target["action"]
             tool_call_name = target["tool_call_name"]
             fingerprint = target["fingerprint"]
+            execution_env = target["execution_env"]
             decision, feedback = request_approval(
-                command, action, thread_id, tool_call_name, fingerprint
+                command, action, thread_id, tool_call_name, fingerprint, execution_env
             )
             if decision == "denied":
                 logger.info(f"会话 {thread_id} 用户拒绝 {name} 调用: {command[:80]}")

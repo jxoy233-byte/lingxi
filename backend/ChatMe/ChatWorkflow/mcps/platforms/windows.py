@@ -76,37 +76,21 @@ class WindowsAdapter(PlatformAdapter):
 
     @property
     def cmd_tool_prompt_block(self) -> str:
-        return """### cmd — Environment Exploring & File Operations
-Parameters: command (required, string), use_sandbox(default, True)
-**Allowed Commands** (Windows native):
-| Scenario | Commands |
-|----------|----------|
-| Browse directories | `dir`, `cd`, `where` |
-| Read files | `type`, `more`, `findstr`, `fc` |
-| File operations | `copy`, `move`, `mkdir`, `del`, `rmdir`, `sort` |
-| Network probe | `curl` (only as last resort when no suitable skills available) |
-| Archive (Win10+) | `tar` |
+        return """### cmd — Shell Execution
+Default: Linux sandbox (local=False). Local fallback (Windows): cmd.exe with native commands (dir/type/findstr/copy/move/del/rmdir/where) — NO Unix commands in local fallback. To run scripts (python/node/etc), prefer the `code` tool.
 
-⚠️ This environment is Windows. The following Unix commands are NOT available:
-`ls` (use `dir`), `cat` (use `type`), `grep` (use `findstr`),
-`cp` (use `copy`), `mv` (use `move`), `rm` (use `del` or `rmdir`),
-`which` (use `where`), `pwd` (use `cd` with no args), `head` / `tail` / `awk` / `sed` / `wc` — not supported in cmd.exe; refactor to PowerShell or use the `code` tool.
+Set `local=True` to run on host.
 
-Shell is cmd.exe (NOT PowerShell, NOT bash). Use cmd.exe syntax."""
+Parameters: command (required, string), local (default: False)"""
 
     @property
     def code_tool_prompt_block(self) -> str:
-        return """### code — Code Execution & Skill Usage & Data Analysis & other codes required scenes
-Use when: Writing or running code to solve problems, invoke skills, process data, or perform actions that require code execution.
-Parameters: code (required, string), language (default: "python"), use_sandbox(default, True)
+        return """### code — Inline Code
+Default: Linux sandbox (local=False). Local fallback (Windows): .venv\\Scripts\\python.exe, temp under %TEMP% (not /tmp).
 
-Important for cmd && code:
-- Always remember to print final key results you need to pass to the next step.
-- Default use_sandbox=True(sandbox, isolated Linux container with /skills ro + /cached rw — container is always Linux regardless of host).
-- Don't add comments in your codes
-- If you want to write some scripts files, you must write under 'cached/' dir
+Set `local=True` to run on host.
 
-When sandbox is unavailable, the `code` tool falls back to the local Windows venv at `.venv\\Scripts\\python.exe`. Temp code is written to %TEMP% (not `/tmp`, which doesn't exist on Windows)."""
+Parameters: code (required, string), language (default: "python"), local (default: False)"""
 
     @property
     def system_info_block(self) -> str:

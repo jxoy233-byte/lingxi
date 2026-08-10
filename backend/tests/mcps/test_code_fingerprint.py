@@ -40,7 +40,7 @@ def test_python_fingerprint_basic():
     args = {
         "code": "from Tavily import tavily_search\nresult = tavily_search('hello', max_results=8)\nprint(result)\n",
         "language": "python",
-        "use_sandbox": True,
+        "local": False,
     }
     fp = code_fingerprint(args)
     assert fp.startswith(CODE_FP_PREFIX)
@@ -57,12 +57,12 @@ def test_python_fingerprint_parameter_change_does_not_affect():
     args1 = {
         "code": "from Tavily import tavily_search\ntavily_search('news1', search_depth='advanced', max_results=5)\n",
         "language": "python",
-        "use_sandbox": True,
+        "local": False,
     }
     args2 = {
         "code": "from Tavily import tavily_search\ntavily_search('completely different query')\n",
         "language": "python",
-        "use_sandbox": True,
+        "local": False,
     }
     assert code_fingerprint(args1) == code_fingerprint(args2)
 
@@ -72,12 +72,12 @@ def test_python_fingerprint_distinguishes_import_change():
     args1 = {
         "code": "from Tavily import tavily_search\ntavily_search('x')\n",
         "language": "python",
-        "use_sandbox": True,
+        "local": False,
     }
     args2 = {
         "code": "from Bocha import bocha_search\nbocha_search('x')\n",
         "language": "python",
-        "use_sandbox": True,
+        "local": False,
     }
     assert code_fingerprint(args1) != code_fingerprint(args2)
 
@@ -87,20 +87,20 @@ def test_python_fingerprint_distinguishes_function_call_change():
     args1 = {
         "code": "import subprocess\nsubprocess.run(['ls'])\n",
         "language": "python",
-        "use_sandbox": True,
+        "local": False,
     }
     args2 = {
         "code": "import subprocess\nsubprocess.call(['ls'])\n",
         "language": "python",
-        "use_sandbox": True,
+        "local": False,
     }
     assert code_fingerprint(args1) != code_fingerprint(args2)
 
 
 def test_python_fingerprint_sandbox_change():
-    """use_sandbox 改变 fingerprint。"""
-    args1 = {"code": "x = 1\nprint(x)\n", "language": "python", "use_sandbox": True}
-    args2 = {"code": "x = 1\nprint(x)\n", "language": "python", "use_sandbox": False}
+    """local 改变 fingerprint（反向：local=False 对应 sandbox=1）。"""
+    args1 = {"code": "x = 1\nprint(x)\n", "language": "python", "local": False}
+    args2 = {"code": "x = 1\nprint(x)\n", "language": "python", "local": True}
     assert "sandbox=1" in code_fingerprint(args1)
     assert "sandbox=0" in code_fingerprint(args2)
     assert code_fingerprint(args1) != code_fingerprint(args2)
@@ -119,7 +119,7 @@ if __name__ == '__main__':
     for i in range(10):
         print(i)
 """
-    fp = code_fingerprint({"code": code, "language": "python", "use_sandbox": True})
+    fp = code_fingerprint({"code": code, "language": "python", "local": False})
     # filter set 里包含的字
     for forbidden in ("print", "len", "range", "int", "__init__", "__name__", "__main__", "if", "for", "self"):
         assert f"fn={forbidden}" not in fp, f"{forbidden} 应该被过滤"
@@ -150,7 +150,7 @@ def test_nodejs_fingerprint_basic():
     args = {
         "code": "const fs = require('fs');\nconst data = fs.readFileSync('/tmp/foo.txt', 'utf8');\nconsole.log(data);\n",
         "language": "nodejs",
-        "use_sandbox": True,
+        "local": False,
     }
     fp = code_fingerprint(args)
     assert "lang=nodejs" in fp
@@ -166,12 +166,12 @@ def test_nodejs_parameter_change_does_not_affect():
     args1 = {
         "code": "const fs = require('fs');\nfs.readFileSync('/tmp/a.txt', 'utf8');\n",
         "language": "nodejs",
-        "use_sandbox": True,
+        "local": False,
     }
     args2 = {
         "code": "const fs = require('fs');\nfs.readFileSync('/very/different/path.js', 'binary');\n",
         "language": "nodejs",
-        "use_sandbox": True,
+        "local": False,
     }
     assert code_fingerprint(args1) == code_fingerprint(args2)
 
@@ -200,7 +200,7 @@ def test_javascript_fingerprint_basic():
     args = {
         "code": "import { searchWeb } from './search';\nconst r = searchWeb('news');\nconsole.log(r);\n",
         "language": "javascript",
-        "use_sandbox": True,
+        "local": False,
     }
     fp = code_fingerprint(args)
     assert "lang=javascript" in fp
@@ -226,7 +226,7 @@ def test_javascript_vs_nodejs_distinct_globals():
     args = {
         "code": "function customLog(msg) { return msg; }\ncustomLog('x');\n",
         "language": "javascript",
-        "use_sandbox": True,
+        "local": False,
     }
     fp = code_fingerprint(args)
     assert "fn=customLog" in fp

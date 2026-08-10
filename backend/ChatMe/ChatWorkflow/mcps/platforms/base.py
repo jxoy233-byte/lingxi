@@ -21,27 +21,6 @@ if TYPE_CHECKING:
     from ChatMe.ChatWorkflow.mcps.CodeSandboxPool import SandboxPool
 
 
-# 通用脚本执行检测（跨平台一致）
-_SCRIPT_PATTERNS = [
-    ("Python", [
-        r'^python(\d+(\.\d+)?)?\s+',
-        r'^pypy3?\s+',
-        r'python(\d+(\.\d+)?)?\s+-c\s+',
-        r'python(\d+(\.\d+)?)?\s+-m\s+',
-        r'python(\d+(\.\d+)?)?\s+<<',
-    ]),
-    ("Node.js", [
-        r'^node(\d+(\.\d+)?)?\s+',
-        r'^node(\d+(\.\d+)?)?\s+-e\s+',
-        r'^node(\d+(\.\d+)?)?\s+-p\s+',
-        r'^node(\d+(\.\d+)?)?\s+-pe\s+',
-        r'^node(\d+(\.\d+)?)?\s+<<',
-    ]),
-    ("Ruby", [r'^ruby\s+', r'^ruby\s+-e\s+']),
-    ("PHP", [r'^php\s+', r'^php\s+-r\s+']),
-    ("Perl", [r'^perl\s+', r'^perl\s+-e\s+']),
-]
-
 # 通用危险检测：设备重定向 + format 盘符 + sudo 提升
 _DEVICE_REDIRECT_PATTERNS = [
     r'>\s*/dev/[hs]d[a-z]',
@@ -61,6 +40,10 @@ class PlatformAdapter(ABC):
     cmd_tool_prompt_block / code_tool_prompt_block / ctime_tool_prompt_block /
     system_info_block 必须由子类实现（每个平台自己写 Allowed Commands 表格
     和执行说明）。
+
+    interrupt_tool_prompt_block 是 base 默认提供（跨平台一致），
+    与 ctime 同一类，工具提示词全部通过 platform.all_tool_prompt_blocks()
+    聚合。子工具是否覆盖同名属性由具体平台决定，目前没有覆盖需求。
     """
 
     def __init__(
@@ -85,16 +68,6 @@ class PlatformAdapter(ABC):
 
     @property
     @abstractmethod
-    def cmd_tool_prompt_block(self) -> str:
-        """整个 `### cmd` 章节的 prompt 片段（含 Allowed Commands 表格）。"""
-
-    @property
-    @abstractmethod
-    def code_tool_prompt_block(self) -> str:
-        """整个 `### code` 章节的 prompt 片段（sandbox + 本地 fallback 行为说明）。"""
-
-    @property
-    @abstractmethod
     def system_info_block(self) -> str:
         """**Runtime Environment**: <os> / <shell> / sandbox: <name> | <local-fallback>"""
 
@@ -115,6 +88,46 @@ class PlatformAdapter(ABC):
         """
 
     # =========================================================================
+    # 默认：cmd / code / 共享提示（跨平台一致，子类无需覆盖）
+    # =========================================================================
+    #
+    # 沙盒默认就是 Linux（无论 host 是 Windows / Mac / Linux），所以 cmd/code
+    # 描述可以统一写在 base。Windows 子类只在 cmd/code 块里补一句本地 fallback
+    # 用 cmd.exe / .venv\Scripts 的提醒即可（沙盒默认不区分 host）。
+
+    @property
+    def cmd_tool_prompt_block(self) -> str:
+        """### cmd 章节——跨平台一致，base 默认。"""
+        return """### cmd — Shell Execution
+Default: Linux sandbox (local=False). Use for shell commands and file ops. To run scripts (python/node/etc), prefer the `code` tool.
+
+Set `local=True` to run on host.
+
+Parameters: command (required, string), local (default: False)"""
+
+    @property
+    def code_tool_prompt_block(self) -> str:
+        """### code 章节——跨平台一致，base 默认。"""
+        return """### code — Inline Code
+Default: Linux sandbox (local=False). Use for inline Python/JS (write + run in one step).
+
+Set `local=True` to run on host.
+
+Parameters: code (required, string), language (default: "python"), local (default: False)"""
+
+    @property
+    def cmd_code_common_notes(self) -> str:
+        """cmd / code 共享提示——跨平台一致，base 默认。
+
+        放在 cmd/code 两个 tool block 之后，整合两条 tool 都适用的运行约束。
+        """
+        return """Common for cmd & code:
+- Always print final key results you need to pass to the next step
+- No comments in code
+- Write script files under `cached/` dir
+- Sandbox: Linux container with `/skills` ro + `/cached` rw"""
+
+    # =========================================================================
     # 通用：跨平台一致
     # =========================================================================
 
@@ -126,16 +139,58 @@ Use when: Task involves any time reference including "today", "tomorrow", "now",
 Must call this FIRST before any other time-related operations.
 Parameters: none"""
 
-    # =========================================================================
-    # 检查：危险 / 白名单 / 脚本（mix 子类数据 + 通用逻辑）
-    # =========================================================================
+    @property
+    def interrupt_tool_prompt_block(self) -> str:
+        """### interrupt 章节——跨平台一致，base 默认提供。
 
-    def is_script(self, command: str) -> Tuple[bool, str]:
-        """检测命令是否为脚本执行（Python / Node.js / Ruby / PHP / Perl）。"""
-        for lang, patterns in _SCRIPT_PATTERNS:
-            if any(re.search(p, command) for p in patterns):
-                return True, lang
-        return False, ""
+        interrupt 与 shell / sandbox 行为无关，逻辑全部在主进程 LangGraph
+        runtime 里，所以任何平台 prompt 完全相同。子类无需覆盖。
+        """
+        return """### interrupt — Emergency Stop
+Use when: User explicitly asks to stop, or operation is sensitive/dangerous and requires human confirmation before proceeding.
+Note: Calling interrupt will **pause the entire workflow** — the session state is saved and can be resumed later. Use only when truly necessary.
+Parameters:
+- message (required, string): Reason for interruption (will be shown to the user)"""
+
+    @property
+    def find_skill_tool_prompt_block(self) -> str:
+        """### find_skill 章节——跨平台一致，base 默认提供。
+
+        find_skill 是动态发现 skill 的工具（替代把全量 <available_skills> 写
+        进 prompt）。逻辑走 SkillRegistry，与平台无关。子类无需覆盖。
+        """
+        return """### find_skill — Skill Discovery
+Use when: Task could benefit from a packaged skill (search / data analysis / image parsing / etc.) and you want to discover it on demand.
+ALWAYS start with mode='match' (default). Only escalate to mode='list' if match didn't find a relevant skill.
+Parameters:
+- query (required, string): Keywords or task description (e.g. "semantic search", "深度搜索", "image parsing")
+- mode (default: 'match'): 'match' for keyword search (top 3) | 'list' for full <available_skills> block"""
+
+    def all_tool_prompt_blocks(self) -> list[str]:
+        """按 canonical 顺序返回全部 MCP 工具的 prompt 块。
+
+        顺序：interrupt → find_skill → cmd → code → cmd_code_common_notes → ctime
+        （与原 graph_config 拼装顺序一致，改动会改变 LLM 看到的相对位置，所以锁定）。
+        find_skill 放在 cmd/code 之前，让 LLM 先考虑有无现成 skill；cmd_code_common_notes
+        是 cmd/code 共享约束提示，单独成块方便扩展。
+
+        加新工具时：
+        1. base 加一个 ``<tool>_tool_prompt_block`` property（跨平台一致）
+           或在子类覆盖（需要平台特定描述）
+        2. 把新 block 按 prompt 段需求插入到本方法的列表里
+        """
+        return [
+            self.interrupt_tool_prompt_block,
+            self.find_skill_tool_prompt_block,
+            self.cmd_tool_prompt_block,
+            self.code_tool_prompt_block,
+            self.cmd_code_common_notes,
+            self.ctime_tool_prompt_block,
+        ]
+
+    # =========================================================================
+    # 检查：危险 / 白名单（mix 子类数据 + 通用逻辑）
+    # =========================================================================
 
     def is_dangerous(self, command: str) -> Tuple[bool, str]:
         """检测命令是否危险。

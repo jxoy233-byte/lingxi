@@ -90,32 +90,6 @@ class LinuxAdapter(PlatformAdapter):
     # =========================================================================
 
     @property
-    def cmd_tool_prompt_block(self) -> str:
-        return """### cmd — Environment Exploring & File Operations
-Parameters: command (required, string), use_sandbox(default, True)
-**Allowed Commands**:
-| Scenario | Commands |
-|----------|----------|
-| Browse directories | `ls`, `cd`, `pwd`, `which` |
-| Read files | `cat`, `head`, `tail`, `grep`, `wc`, `awk` |
-| File operations | `cp`, `mv`, `mkdir`, `rm`, `find`, `sed`, `sort`, `echo`, `touch`, `diff` |
-| Network probe | `curl` (only as last resort when no suitable skills available) |
-
-Note: This environment is Linux/WSL. Commands listed above are available."""
-
-    @property
-    def code_tool_prompt_block(self) -> str:
-        return """### code — Code Execution & Skill Usage & Data Analysis & other codes required scenes
-Use when: Writing or running code to solve problems, invoke skills, process data, or perform actions that require code execution.
-Parameters: code (required, string), language (default: "python"), use_sandbox(default, True)
-
-Important for cmd && code:
-- Always remember to print final key results you need to pass to the next step.
-- Default use_sandbox=True(sandbox, isolated execution with /skills ro + /cached rw).
-- Don't add comments in your codes
-- If you want to write some scripts files, you must write under 'cached/' dir"""
-
-    @property
     def system_info_block(self) -> str:
         return (
             f"**Runtime Environment**: {self.system_name} / bash (sh) / "

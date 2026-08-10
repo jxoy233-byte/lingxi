@@ -1,3 +1,12 @@
+---
+name: data_analysis_database
+description: 数据库只读查询（SQL / MongoDB / schema 探索）
+mount: rw
+module: skills.DataAnalysis.database
+lazy: true
+parent: data_analysis
+---
+
 # DataAnalysis 数据库分析（动态加载文档）
 
 本文件是 DataAnalysis skill 的子模块文档。只有当用户提出数据库相关分析需求时，才加载本文件。

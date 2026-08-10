@@ -2,7 +2,7 @@
 额外的本地 tool 工具（不通过 MCP 暴露）
 
 DEPRECATED：本文件目前仅承载 sub_agent 一个工具，该工具已废弃。
-- prompt（graph_config.PROMPT_TOOLS_DISPATCH / PROMPT_MAIN_FLOW）已不再向 LLM 暴露 sub_agent
+- prompt（PROMPT_MAIN_FLOW）已不再向 LLM 暴露 sub_agent
 - session.py 里 tools.append(sub_agent) 仍保留注册以兼容潜在遗留调用，但不会再被新 prompt 触发
 - 这里仅保留实现 + deprecation 标记，后续清理时可整体删除
 
@@ -257,9 +257,8 @@ def sub_agent(
     session_id: Annotated[str, "Session id"] = ""
 ) -> str:
     """
-    DEPRECATED: sub_agent 工具已废弃，prompt（graph_config.PROMPT_TOOLS_DISPATCH /
-    PROMPT_MAIN_FLOW）不再向 LLM 暴露该能力。仅保留实现以兼容潜在遗留调用，
-    后续清理时可整体删除。
+    DEPRECATED: sub_agent 工具已废弃，prompt（PROMPT_MAIN_FLOW）不再向 LLM 暴露
+    该能力。仅保留实现以兼容潜在遗留调用，后续清理时可整体删除。
 
     Spawn a sub-agent to execute a sub-task (Plan-Execute + ReAct mode; sub-agent runs its own ReAct loop and returns the result text).
 

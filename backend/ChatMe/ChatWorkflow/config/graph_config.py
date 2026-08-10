@@ -51,82 +51,79 @@ Note: Double braces `{{}}` are escape sequences — AI should output single brac
 PROMPT_MAIN_FLOW = """
 ## Decision Flow
 ```
-Task arrives → Is there a skill.md for this?
+Task arrives
 │
 ├─ Time references (today/tomorrow/now/this week/current date)?
 │   YES → ctime FIRST, then proceed
 │
-├─ Matching skill.md? (see examples below)
-│   YES → cat skills/skills.md first; call per the packaged usage guide
-│         ⚠️ Use the skill.md's exposed functions/methods first — do NOT cat the skills source. Read them only when you don't know how to use skills 
+├─ Task could benefit from a packaged skill?
+│   YES → find_skill("keywords") first
+│       ├─ Match found → cmd("cat /skills/<name>/SKILL.md") → code()
+│       └─ No match → find_skill(query, mode="list") to see all options
+│         (or proceed to code() with normal Python libraries)
 │
-├─ Uncertain? → ls skills/ to explore (it's free and safe)
+├─ Complex / large / multi-deliverable task?
+│   YES → split into focused steps and execute them in dependency order
+│
+├─ Need to inspect files or environment? → cmd (ls/cat/grep — only what's needed)
 │
 ├─ Code execution needed? (data processing, calculation, drawing)
 │   YES → code
 │
-├─ Complex / large / multi-deliverable task?
-│   Main agent splits it into N focused sub-tasks first
-│
-├─ All tool calls made → results received → output DONE immediately
+├─ All needed tool results received → output Done immediately
 │
 ├─ Can solve directly from training knowledge?
-│   YES → output DONE
+│   YES → output Done
 │
-└─ None of the above → interrupt (need human confirmation)
+└─ Missing required user information → interrupt
 ```
 
-**Skill examples** (→ go to skills.md first):
-- "latest AI news" / "recent prices" / "search for X" /"search relevant info"→ Tavily/Exa skill.md
-- "analyze this CSV" / "generate a chart" / "visualize this" → DataAnalysis skill.md
-- "ER diagram" / "mermaid" / "flowchart" → DataAnalysis skill.md
-- "parse this image" / "what's in this screenshot" → ImageParser skill.md
+## Skill Discovery (via find_skill tool)
 
-**Skill-first rule**: When in doubt whether a skill.md exists → explore skills/ first.
+`find_skill` is the only way to discover skills — there is no embedded skill index here.
+
+1. `find_skill("keywords")` (mode='match') — keyword search, returns top 3 matches with brief info
+2. If a match looks relevant, read the SKILL.md: `cmd("cat /skills/<name>/SKILL.md")`
+3. If uncertain, escalate: `find_skill(query, mode="list")` to see the full index
+4. Invoke a matched skill via `code()` using the entry's `module`, e.g. `from skills.Exa import exa_search`
+5. Lazy skills (e.g. data_analysis_database) are NOT in the default list — discover them by following their parent SKILL.md
+
+Do not read skill source code before its SKILL.md. Inspect source only if the documented invocation fails.
 
 ## Project Operation Dir
-skills/ — Skill library (read only)
-cached/'sid'/ — Your Own Sid Cached files operation dir (read and write)
+/skills/ — Skill library (read only except manifests marked `mount: rw`)
+/cached/<sid>/ — Current session cached files (read and write)
 
 ## Good Chain Examples
 
-Good (skill.md found):
-cmd("ls skills/") → Found Sum skill.md
-cmd("cat skills/skills.md") → Read Sum MD File
-cmd("cat skills/Exa.py")
-code("python","from Exa import ...")
+Good (matched skill):
+find_skill("search") → match found (exa / tavily)
+cmd("cat /skills/Exa/SKILL.md") → read the packaged usage guide
+code("python", "from skills.Exa import exa_search; result = exa_search(...); print(result)")
+
+Good (no matched skill):
+code("python", "# solve with normal Python libraries")
 
 Good (environment exploration):
-cmd("ls skills/") → No relevant skill.md
-cmd("ls cached/") → Check if needed
-... → execute commands to find files dir
----
-*when file content is truncated and need to know more about it*:
-cmd("ls cached/...") → Check if needed
-cmd("cat cached/.../filename")
----
-*when files need to know about images*:
-cmd("cat skills/ImageParser.py") → ready to process images
-code("python", "From ImageParser import ...")
+cmd("ls /cached/<sid>/") → inspect only when the task needs user files
+cmd("cat /cached/<sid>/filename") → read the required file
+
+Good (image parsing):
+find_skill("image") → match: image_parser
+cmd("cat /skills/ImageParser/SKILL.md")
+code("python", "from skills.ImageParser import parse_image; print(parse_image(...))")
 
 Good (data analysis):
-*execute when user inputs data analysis files*:
-cmd("ls cached/")
-cmd("ls cached/'input_file_name'/...") → ensure files exist and prepare data dirs for the coming data analysis
----
-*if based on the last data analysis*:
-code(python, "...with open(xx.py)as f:code = f.read()")
----
-*core*:
-cmd("ls skills/") → Check skills overview
-cmd("cat skills/DataAnalysis/SKILL.md")  → Read spec first to know about how to input file dirs, output results and so on
-code("python", "from skills.DataAnalysis import ChatDataAnalysisFormat;import pandas as pd, numpy as np; ...")  →
-- libs available both in sandbox and local: pandas, numpy, matplotlib...
-- generate + analyze + save (charts/data/reports/scripts) to 'OUTPUT_DIR' with prepared functions in one pass when possible
+find_skill("数据") → match: data_analysis
+cmd("cat /skills/DataAnalysis/SKILL.md") → read input/output conventions first
+cmd("ls /cached/<sid>/...") → locate the input file when needed
+code("python", "from skills.DataAnalysis import ChatDataAnalysisFormat; import pandas as pd; ...")
+- generate + analyze + save charts/data/reports/scripts to OUTPUT_DIR in one pass when possible
+- for database tasks, follow the parent SKILL.md and lazily read `/skills/DataAnalysis/database/SKILL.md`
 
-*complex tasks (multi-step / multi-file / ML / large data)*:
-code(...) → split into multiple calls, each building on previous
-- read prior output to decide next step (don't blindly retry)
+Complex tasks (multi-step / multi-file / ML / large data):
+code(...) → split into multiple calls, each building on previous output
+- read prior output to decide the next step; do not blindly retry
 
 """
 
@@ -175,22 +172,15 @@ skills/ — Skill library (read only)
 cached/'sid'/ — Your Own Sid Cached files operation dir (read and write)
 """
 
-# ----- TOOLS: 工具定义模块（cmd / code / ctime 已搬到 platform adapter）-----
-# cmd / code / ctime 三个工具的 prompt 片段在 ChatMe.ChatWorkflow.mcps.platforms
-# 下三套独立 adapter（Linux / Darwin / Windows）里维护。
-# 这样 agent_node 启动时通过 get_platform() 拿当前平台对应的 Allowed Commands 表格、
-# 本地 fallback 行为说明、Runtime Environment 信息。
-#
-# interrupt 与平台无关，留在 PROMPT_TOOLS_DISPATCH 统一描述。
-# sub_agent 已废弃，PROMPT_TOOLS_DISPATCH 不再描述。
-
-PROMPT_TOOLS_DISPATCH = """
-### interrupt — Emergency Stop
-Use when: User explicitly asks to stop, or operation is sensitive/dangerous and requires human confirmation before proceeding.
-Note: Calling interrupt will **pause the entire workflow** — the session state is saved and can be resumed later. Use only when truly necessary.
-Parameters:
-- message (required, string): Reason for interruption (will be shown to the user)
-"""
+# ----- TOOLS: 工具定义模块（统一由 platform adapter 提供）-----
+# cmd / code / ctime / interrupt 四个 MCP 工具的 prompt 片段全部走
+# ChatMe.ChatWorkflow.mcps.platforms 的 adapter。
+# - 平台特定工具（cmd / code）由各 adapter 子类各自实现
+# - 跨平台一致工具（ctime / interrupt）由 PlatformAdapter base 默认提供
+# 加新 MCP 工具：在 base 里加 ``<tool>_tool_prompt_block`` property + 在
+# ``all_tool_prompt_blocks`` 列表里按需插入；平台差异才在子类覆盖。
+# 这样 agent_node 启动时只调 ``platform.all_tool_prompt_blocks()`` 拿到当前
+# 平台对应的全套工具说明。
 
 # ----- MAIN_SPECIFIC: 主 agent 专属模块 -----
 
@@ -240,14 +230,12 @@ def get_agent_node_prompt() -> str:
     - WindowsAdapter: cmd.exe + Windows 等价命令 + %TEMP%
     """
     from ChatMe.ChatWorkflow.mcps.platforms import get_platform
+
     platform = get_platform()
     return "\n\n".join([
         "# Agent Node — Task Execution Agent",
         PROMPT_MAIN_ROLE,
-        PROMPT_TOOLS_DISPATCH,
-        platform.cmd_tool_prompt_block,
-        platform.code_tool_prompt_block,
-        platform.ctime_tool_prompt_block,
+        *platform.all_tool_prompt_blocks(),
         PROMPT_MAIN_FLOW,
         PROMPT_COMMON,
         platform.system_info_block,
@@ -266,7 +254,7 @@ def build_sub_agent_prompt(task: str, prompt_addon: str = "") -> str:
     + <platform.ctime_tool_prompt_block> + SUB_EXECUTION + COMMON + 任务注入 + SUB_TERMINATION
 
     sub-agent 不暴露 interrupt / sub_agent（不允许嵌套 sub-agent），
-    所以省略 PROMPT_TOOLS_DISPATCH。
+    所以手工列出 3 个平台 tool block，不调 all_tool_prompt_blocks()。
 
     Args:
         task: 子任务描述（主 agent 下发给 sub-agent 的任务）

@@ -201,7 +201,7 @@
                 <div v-if="tool.result !== null && expandedTools[i]" class="tool-result">{{ tool.result }}</div>
 
                 <!-- 内嵌审批 UI：仅当此 tool 是当前 pending 审批目标时渲染 -->
-                <div v-if="isToolAwaitingApproval(i)" class="tool-inline-approval">
+                <div v-if="isToolAwaitingApproval(i)" class="tool-inline-approval" :class="`tool-inline-approval--${pendingToolApproval.executionEnv || 'sandbox'}`">
                   <div class="tool-inline-approval-header">
                     <svg class="tool-inline-approval-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                       <path d="M12 2L4 6v6c0 5 3.5 9.5 8 10 4.5-.5 8-5 8-10V6l-8-4z"
@@ -3551,6 +3551,7 @@ export default {
   color: #92400e;
 }
 
+/* 批准按钮：sandbox 默认绿色（v0.1.3 保持原样） */
 .tool-btn-approve {
   background: #10b981;
   color: white;
@@ -3560,6 +3561,11 @@ export default {
 .tool-btn-approve:hover:not(:disabled) {
   background: #059669;
   border-color: #059669;
+}
+
+/* local 审核变体：淡红背景叠加（v0.1.3 区分 sandbox vs local，保留原批准按钮绿色） */
+.tool-inline-approval--local {
+  background: rgba(239, 68, 68, 0.06);  /* 淡红底，叠加在黄色边框上 */
 }
 
 /* 反馈模式：textarea + 取消/发送两按钮 */

@@ -1423,6 +1423,7 @@ export default {
                   toolIndex: j,
                   command: data.command || '',
                   action: data.action || 'write',
+                  executionEnv: data.execution_env || 'sandbox',
                   sessionId,
                 }
                 this.stopResponseTimer()
@@ -1561,6 +1562,7 @@ export default {
         toolIndex,
         command: data.command || '',
         action: data.action || 'write',
+        executionEnv: data.execution_env || 'sandbox',
         sessionId,
         // 不再缓存 targetArr 引用：onToolDecision 时按 sessionId + messageIndex/toolIndex
         // 重新解析（snapshot 优先 → 当前 messages 兜底），避免 stale 引用导致写错位置

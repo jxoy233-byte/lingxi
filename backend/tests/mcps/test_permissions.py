@@ -412,6 +412,61 @@ def test_rejected_tool_result_code_tool():
     assert "language=python" in msg
 
 
+# 6.5 _pre_check_cmd 格式（v0.1.3+：与 _rejected_tool_result 风格对齐）
+
+
+def test_pre_check_cmd_dangerous_message_format():
+    """auto-blocked dangerous 命令的 ToolMessage wording 必须：
+    - 不带 Error: 前缀（避免 LLM 误判为可重试的运行时错误）
+    - 包含命令字符串（让 LLM 能溯源）
+    - 明确说"auto-blocked by safety system"
+    - 引导 LLM 不要重试 / 用 interrupt 问用户
+    """
+    from ChatMe.ChatWorkflow.mcps.permissions import _pre_check_cmd
+
+    block_kind, msg = _pre_check_cmd("rm -rf /tmp/foo")
+    assert block_kind == "dangerous"
+    assert not msg.startswith("Error:")
+    assert "auto-blocked" in msg.lower()
+    assert "rm -rf /tmp/foo" in msg
+    assert "was not executed" in msg.lower()
+    # 引导 LLM 不要重试
+    assert "do not retry" in msg.lower()
+    # 引导 LLM 用 interrupt 问用户
+    assert "interrupt" in msg.lower()
+
+
+def test_pre_check_cmd_not_allowed_message_format():
+    """auto-blocked not_allowed 命令的 ToolMessage wording 必须：
+    - 不带 Error: 前缀
+    - 包含命令字符串
+    - 包含 whitelist 信息让 LLM 知道有哪些可用
+    - 明确说"do NOT retry"
+    """
+    from ChatMe.ChatWorkflow.mcps.permissions import _pre_check_cmd
+
+    block_kind, msg = _pre_check_cmd("sysctl hw.memsize hw.physicalcpu")
+    assert block_kind == "not_allowed"
+    assert not msg.startswith("Error:")
+    assert "auto-blocked" in msg.lower()
+    assert "sysctl hw.memsize hw.physicalcpu" in msg
+    assert "whitelist" in msg.lower()
+    # 必须列出可用命令（让 LLM 能找到替代）
+    # Darwin 白名单包含 ls / cat 等
+    assert "ls" in msg or "cat" in msg
+    assert "do not retry" in msg.lower()
+    assert "interrupt" in msg.lower()
+
+
+def test_pre_check_cmd_passes_safe_command():
+    """safe command → block_kind = None"""
+    from ChatMe.ChatWorkflow.mcps.permissions import _pre_check_cmd
+
+    block_kind, msg = _pre_check_cmd("ls -la skills/")
+    assert block_kind is None
+    assert msg == ""
+
+
 # helpers
 
 

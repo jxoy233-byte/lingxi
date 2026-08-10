@@ -180,7 +180,7 @@ uv run chatme_mcp
 | `backend/ChatMe/ChatService/FilesLoaders/core.py`     | 文件加载 + `_maybe_truncate` 大文件截断                                                                                                    |
 | `backend/ChatMe/ChatService/FilesLoaders/config.py`   | 文件大小/类型/截断阈值常量（`TEXT_TRUNCATE_LENGTH=4000`）                                                                                       |
 | `backend/ChatMe/APIRouter/permissions.py`             | `PermissionedToolNode`（`ToolNode` + `_awrap_tool_call` hook）+ Redis `permission:{sid}` hash 存取 + `/permission/decide` / `/permission/resume` 端点；4 档决策：`approve` / `this-time-only` / `deny` / `feedback:<text>`；`code` 工具按 `code_fingerprint` 做永久批准 |
-| `backend/ChatMe/APIRouter/code_fingerprint.py`        | code 工具指纹计算：`imports` + `calls` + `lang` + `sandbox` 五元组 SHA1，作为永久批准的稳定 key（同一段代码不会因行号微调失效）                                              |
+| `backend/ChatMe/APIRouter/code_fingerprint.py`        | code 工具指纹计算：`imports` + `calls` + `lang` + `sandbox`（反向映射 `local` 参数）四元组 SHA1，作为永久批准的稳定 key（同一段代码不会因行号微调失效）                                              |
 | `backend/skills/DataAnalysis/format/`                 | 数据分析规范包（拆分为 `core` / `artifacts` / `manifest` / `database`；保留旧导入兼容）                                                                  |
 | `backend/skills/DataAnalysis/database/`               | 数据库分析子模块：MySQL / SQLite / PostgreSQL / MongoDB 只读查询 + 跨会话配置（`.runtime/`）                                                      |
 | `backend/ChatMe/ChatMeConfig/core.py`                 | 配置加载器；`vl.local` 字段决定是否加载本地 VL 模型到内存（默认 `true`；设 `false` 时 `model_vl` 路由 fallback 到主用 LLM 第一个有效 provider）             |
@@ -295,7 +295,7 @@ claude --cron-delete a09d41ec
 2. **沙盒隐藏文件过滤**：`sandbox/sitecustomize.py` 过滤规则（`.` / `__` 挡、`_` 不挡）+ 只在挂载点根目录一层不递归子目录。
 3. **沙盒 config 同步策略**：用中间文件隔离 skills key，仅在 MCP 启动 / 容器重建时重生成，不做运行时自动同步。
 4. **流式响应滚动 UX**：入场 `easeInOut`；流式 ramp（慢→快）+ 100ms 打断防抖；用户 wheel / touch 立即让出控制权。
-5. **MCP 工具参数前缀被剥**：Python `use_sandbox` 在 MCP schema 里是 `sandbox`；过滤 / 判断要查实际 args key，兼容新旧两种。
+5. **MCP 工具参数前缀被剥（v0.1.3 起改为 `local`）**：Python `local`（旧 `sandbox`/`use_sandbox`）在 MCP schema 里是 `local` 参数；过滤 / 判断要查实际 args key，兼容新旧两种。
 6. **`should_end_node` 设计偏好**：LLM 决策节点的单条喂入 / 完整写回、低频字面量子串匹配、独立 `max_tokens` env、prompt / 解析兜底一致。
 7. **ReAct 流程压缩 4 阶段循环**：**后台异步 + 不阻塞工作流**——
    - 阶段 1 检测：`(tool_call_times - last_compact_at) >= REACT_COMPACT_DETECTION_MIN_ROUNDS=4`（cool-down，距上次压至少 4 轮）+ 最近 4 轮 chars ≥ `REACT_COMPACT_MIN_CHARS=10000`（主驱动）+ 无 pending + ≥ 1 完整 loop（软底）
@@ -310,7 +310,7 @@ claude --cron-delete a09d41ec
     10.1. **AI 思维链日志单开文件**：ChatWorkflow 各节点的 `format_thinking_chain(...)` 类思维链日志（`imp_ipt` / `react_context` / `react_context_after_compact` / `agent_node_in/out` / `should_end_in/decision` / `final_node_in_context/out` 共 9 处）**必须**走 `self.thinking_logger.info(...)`（`LoggingManager.logging_config.get_thinking_chain_logger()` 返回），写到独立文件 `thinking_chain-YYYY-MM-DD.log`，**严禁**写到主日志 `YYYY-MM-DD.log`；目的是让 LLM 决策链日志与业务日志按文件维度隔离，回溯时不被工具调用 / Redis / 文件 IO 等噪声淹没。新增节点若要加思维链日志，沿用 `thinking_logger`；`should_end_decision` / `final_node_out` 等带"决策"性质的简明日志也走 `thinking_logger`（不只是长消息）。
 11. **节点异常统一兜底**：所有 LangGraph 节点（ChatWorkflow 5 个主节点 + 文件图 3 个节点 + sub_agent agent_node）都打 `@node_guard("<name>")`：`except Exception` 捕获后 log + 包装 `RuntimeError` 让 SSE 外层统一返回 `error` 事件；但 `except GraphBubbleUp`（LangGraph 控制流异常的基类，涵盖 `GraphInterrupt` / `ParentCommand` 等）必须**原样 `raise`**，不能包装 —— `interrupt()` 主动中断、`Command` 透传都依赖该异常穿透各层到达 runtime。新加节点必须继承这个分层约定。
 12. **前端错误气泡保护**：App.vue 维护 `_sessionHadError: Set<session_id>`，SSE `error` 事件触发时把 `session_id` 标记为保护态；保护态下 `done` 事件不会覆盖错误气泡，`refreshConversation` / `updateTitleAndRefresh` 跳过 messages 重拉，只更新侧边栏；用户主动发起新一轮请求或续接时清掉保护态。
-13. **`cmd` / `code` 工具默认走沙盒**：`server.py` 的 `cmd` 和 `code` 都默认 `use_sandbox=True`（MCP schema 里是 `sandbox` 参数），沙盒不可用时降级到本机（`cmd` → 本机 subprocess.run，`code` → 本机 venv）；白名单 + 危险检测 + 脚本检测在沙盒 / 本机两边都做。沙盒入口是 `SandboxPool.execute_command(cmd)` / `execute(code, lang)`，分别对应 shell / code 执行；`execute_command` 直接 `docker exec sh -c <cmd>`，命令里可含管道 / 重定向 / glob；`execute` 先写 `/code.py` 再跑再删（避免敏感信息残留）。
+13. **`cmd` / `code` 工具默认走沙盒（v0.1.3 反向命名 `local`）**：`server.py` 的 `cmd` 和 `code` 都默认 `local=False`（**反向 default**：不传 = 沙盒隔离；要本机才显式 `local=True`），内部仍用 `use_sandbox = not local` 变量走原有逻辑。沙盒不可用时降级到本机（`cmd` → 本机 subprocess.run，`code` → 本机 venv）；白名单 + 危险检测 + 脚本检测在沙盒 / 本机两边都做。沙盒入口是 `SandboxPool.execute_command(cmd)` / `execute(code, lang)`，分别对应 shell / code 执行；`execute_command` 直接 `docker exec sh -c <cmd>`，命令里可含管道 / 重定向 / glob；`execute` 先写 `/code.py` 再跑再删（避免敏感信息残留）。**执行环境区分（v0.1.3 新增）**：`_permission_target_for` 推断 `execution_env = "sandbox" if use_sandbox else "local"`；`interrupt()` payload 带 `execution_env` 字段透传到 SSE；前端 `App.vue:handlePermissionRequest` 写入 `pendingToolApproval.executionEnv`，`MessageItem.vue` 容器挂 `tool-inline-approval--local` modifier class，**唯一视觉差异 = 淡红背景叠加** `rgba(239, 68, 68, 0.06)`（叠在原黄色边框上）；标题文案、批准按钮颜色、图标等保持 sandbox 原状，避免视觉过重。
 14. **SandboxPool 池锁必须包住整个 pop → exec → append 周期**：池容量有限（默认 2），并发 N+1（N=池容量）调用时第 N+1 个会撞上空列表报 `No available containers in pool`；**`self.containers.pop()` 必须在 `with self.lock:` 内**，否则 pop 跑在锁外、exec 跑在锁内，N+1 并发下 N 个 pop 完，第 N+1 个直接 `if not self.containers` 报错。`execute(code, lang)` 和 `execute_command(cmd)` 都用同一个 `self.lock`，所有"取出容器 → 跑 → 归还"必须整段锁内。新加执行方法必须继承这个锁结构。
 15. **Electron `file://` 协议拦截必须透传 method/body/headers**：`protocol.handle('file', ...)` 在 `app.whenReady()` 内注册；`/chat/*` 转发到后端时**必须**显式带 `method: request.method, headers: request.headers, ...(request.body && { body: request.body, duplex: 'half' })`，否则 POST `/chat/` 的 body 被丢、后端收到 GET 请求、SSE 流式响应直接退化成一次性；SSE 流必须显式 `new Response(upstream.body, { status, statusText, headers })` 透传 stream，避免 `protocol.handle` 把 stream 当 buffer 处理
 16. **Electron 图标必须放包外**：`nativeImage.createFromPath` 不读 asar 内文件；`build/` 通过 `package.json` 的 `extraResources` 复制到 `app/Contents/Resources/build/`（macOS）/ `app/resources/build/`（Win）/ `app/build/`（Linux），运行时用 `process.resourcesPath` 取真实路径；`paths.icon` / `paths.iconMac` 通过 `app.isPackaged` 切换 dev (`__dirname/build/icon.png`) vs packaged (`process.resourcesPath/build/icon.png`)；`app.dock.setIcon` 和 `BrowserWindow.icon` 都必须是 PNG，传 `.icns` 会得空 image 并 Promise reject
@@ -377,6 +377,13 @@ claude --cron-delete a09d41ec
     - **删除废弃项**：`pending_round_metrics` conversation 字段、`_save_pending_permission_checkpoint` 方法、imp_ipt.additional_kwargs 的 `round_started_at_mono` / `round_started_at_wall` / `token_usage` 字段、前端 `applyPendingRoundMetrics` / `_pendingMetricsTickers` / `msg.startTs` 死代码全部移除。时间锚点完全由 `round_metrics:{sid}.started_at_wall` 承担，imp_ipt 只保留 `additional_kwargs.imp_ipt=True` 作为 draft 切分标志。
     - **删除会话清理**：`delete_conversation` 必须 `DEL round_metrics:{sid}`，避免脏临时键遗留。
     - **前端 metrics 单一权威来源**：流式中由后端 `init` / 实时 SSE 事件的 `elapsed_ms` / `token_usage` 同步到 message（`writeStreamMetrics`），本地 timer 持续 250ms tick；终态走 `cp_meta`；F5 / 刷新走 `get_conversation` 返回的 `cp_meta` 回填。前端不再依赖任何"中途持久化"的字段（`pending_round_metrics` / `applyPendingRoundMetrics` / `startTs` 都已删）。
+28. **v0.1.3 新增约定 — Pre-check 拦截 SSE 兜底**：
+    - **问题**：`PermissionedToolNode._permission_wrap` 在 pre-check（`dangerous` / `whitelist not_allowed`）拦截时直接 `return ToolMessage`，不调 `execute()` —— LangGraph 不发 `on_tool_start` / `on_tool_end`，前端流式响应看不到拦截结果，必须 F5 刷新。
+    - **兜底**：`on_chain_end` 节点为 `tool_execution_node` 时，`data.input.messages` 含 `AIMessage.tool_calls`、`data.output.messages` 含 `ToolMessage`，按 `tool_call_id` 配对补 `tool_call_name` + `tool_call_result` SSE。
+    - **去重**：per-stream `emitted_tool_call_ids: set`；正常路径 `on_tool_end` emit 后写入 set，`on_chain_end` 兜底查 set 跳过避免双发。
+    - **Helper**：`ChatService._build_intercepted_tool_call_events(chunk, emitted_ids, elapsed_ms, token_usage)` 统一封装；3 个 SSE 流（`message_stream` / `resume_permission_stream` / `invoke_interrupted_stream`）都加这套。
+    - **orphan 防御**：`tool_calls_by_id.get(tc_id)` 查不到时跳过，避免 emit 缺 args 的脏事件。
+    - **测试**：`tests/mcps/test_intercepted_tool_call_events.py` 7 个 helper 单测 + 2 个端到端集成（混合正常 / 拦截验证不双发）。
 
 ### 代码 / 提交风格
 
@@ -390,7 +397,7 @@ claude --cron-delete a09d41ec
 1. 5 个 LLM（`llm_core` / `agent_llm` / `summary_llm` / `react_compact_llm` / `llm_imp_ipt`）全部用 `MessagesPlaceholder("messages")`，不要回到字符串 `{messages}` 占位（会导致 SystemMessage 被 `str()`）
 2. 后端 `_filter_thinking_content` 过滤 `<thinking>` 等思考标签，前端再二次过滤
 3. VL 模型只处理图片（`file_process_node` 已跳过非图片文件）
-4. `execute_code` 工具默认 `use_sandbox=True`（即 MCP schema 里看到的是 `sandbox`）
+4. `execute_code` 工具默认 `local=False`（v0.1.3 反向命名：MCP schema 里看到的是 `local` 参数，False = 沙盒）
 5. **`imp_ipt` 是 draft 切分锚点**：`input_parse_node` 输出的 `imp_ipt` 唯一身份是 `additional_kwargs.imp_ipt == True`；ReAct 压缩 / final_node 注入 / 后续扩展都靠这个标志定位本轮意图，不要换成"最后一条 HumanMessage"这种隐式契约
 6. **final_node 不再走 `MessagesPlaceholder`**：imp_ipt 走 `_final_system_template.format(imp_ipt=...)` 注入到 system prompt 独占最高注意力位；context 中要先把 `imp_ipt` pop 出去再喂给 `llm_core`，避免重复注入
 7. **ReAct 压缩失败不要 raise**：`_try_compact_react` 一律返回 `None`，由 `context_assembly_node` 保持原 context 不变；不要让压缩异常把整轮回复炸掉

@@ -132,17 +132,15 @@ def _init_sandbox_pool():
 def code(
     code: Annotated[str, "Code to execute"],
     language: Annotated[Literal["python", "nodejs", "javascript", "js"], "Code language, default python"] = "python",
-    use_sandbox: Annotated[bool, "Whether to execute in sandbox (default True)"] = True,
+    local: Annotated[bool, "Set True to bypass sandbox and run on host. Default False (sandbox)."] = False,
 ) -> Optional[str]:
     """
     Execute code (sandbox by default; sandbox exposes /skills (read-only) and /cached (read-write)).
-    Falls back to local platform venv if sandbox is unavailable.
-
-    Permission: 审批在主进程的 tool_execution_node 里做（interrupt 需要 LangGraph runtime 上下文），
-    MCP 侧只做 platform 硬过滤。
+    Set `local=True` to run on host.
     """
     session_id = current_session_id.get()
     platform = get_platform()
+    use_sandbox = not local
 
     # 沙盒执行
     if use_sandbox and _sandbox_pool is not None:
@@ -165,18 +163,14 @@ def code(
 @server.tool
 def cmd(
         command: Annotated[str, "System command to execute"],
-        use_sandbox: Annotated[bool, "Whether to execute in sandbox (default True)"] = True,
+        local: Annotated[bool, "Set True to bypass sandbox and run on host. Default False (sandbox)."] = False,
 ) -> str:
     """Execute a shell command within the whitelist (sandbox by default; only skills/ and cached/ are exposed).
-
-    Whitelist and danger patterns are determined by the platform adapter
-    (Linux / Darwin / Windows). Windows uses cmd.exe commands (dir / type / findstr / copy / move / del).
-
-    Permission + 静态前置 gate（dangerous / script / whitelist）都在主进程的 PermissionedToolNode
-    里做完；这里只做执行。如果走到这里，说明前置 gate 已经放行。
+    Set `local=True` to run on host.
     """
     session_id = current_session_id.get()
     platform = get_platform()
+    use_sandbox = not local
 
     # 沙盒执行
     if use_sandbox and _sandbox_pool is not None:
@@ -237,6 +231,19 @@ def ctime() -> str:
 
     logger.debug(f"会话{current_session_id.get() or 'unknown'}中获取当前时间成功")
     return json.dumps(result, ensure_ascii=False)
+
+
+@server.tool
+def find_skill(
+    query: Annotated[str, "Search keywords"] = "",
+    mode: Annotated[Literal["match", "list"], "'match' (default, keyword search top 3) | 'list' (full index)"] = "match",
+) -> str:
+    """Discover skills on demand. """
+    from ChatMe.ChatWorkflow.skills.prompt import find_skill_block, available_skills_block
+
+    if mode == "list":
+        return available_skills_block()
+    return find_skill_block(query)
 
 def _stop_redis():
     """停止 redis 容器(使用 docker-compose)"""

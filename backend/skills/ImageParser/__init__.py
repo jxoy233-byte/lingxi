@@ -50,8 +50,8 @@ def _resolve_cached_path(file_path: str) -> str:
     if os.path.isabs(file_path):
         return file_path
 
-    # 获取 backend 目录的绝对路径
-    backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # __file__ 位于 skills/ImageParser/__init__.py，向上三层才是 backend/。
+    backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
     # 含 cached/ 的路径，相对于 backend/
     if "cached/" in file_path or file_path.startswith("cached/"):

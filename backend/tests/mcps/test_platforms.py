@@ -186,29 +186,8 @@ def test_format_string_not_blocked():
 
 
 # =========================================================================
-# 4. 脚本检测
+# 4. 脚本检测（已移除 is_script：cmd 工具现在允许执行脚本）
 # =========================================================================
-
-
-@pytest.mark.parametrize("cmd,lang", [
-    ("python script.py", "Python"),
-    ("python3 -c 'print(1)'", "Python"),
-    ("node app.js", "Node.js"),
-    ("ruby foo.rb", "Ruby"),
-    ("php -r 'echo 1;'", "PHP"),
-    ("perl -e 'print'", "Perl"),
-])
-def test_script_detected(cmd, lang):
-    p = LinuxAdapter()
-    is_s, detected_lang = p.is_script(cmd)
-    assert is_s is True
-    assert detected_lang == lang
-
-
-def test_non_script_not_detected():
-    p = LinuxAdapter()
-    is_s, _ = p.is_script("ls -la")
-    assert is_s is False
 
 
 # =========================================================================
@@ -256,34 +235,56 @@ def test_windows_local_temp_dir_uses_tempfile(tmp_path, monkeypatch):
 # =========================================================================
 
 
-def test_cmd_block_has_allowed_commands():
-    """prompt block 必须列出当前平台可用命令（让 LLM 直接看到）。"""
-    with patch("platform.system", return_value="Windows"):
-        reset_platform_cache()
-        p = init_platform()
-    block = p.cmd_tool_prompt_block
-    assert "Allowed Commands" in block
-    # 至少含 dir + type + findstr
-    assert "dir" in block and "type" in block and "findstr" in block
-    # 必须显式告诉 LLM 平台
-    assert "Windows" in block
-
-
-def test_linux_cmd_block_has_unix_commands():
+def test_cmd_block_no_longer_has_allowed_commands_table():
+    """精简化后 cmd 不再列 Allowed Commands 大表（LLM 训练知识够用）。"""
     with patch("platform.system", return_value="Linux"):
         reset_platform_cache()
         p = init_platform()
     block = p.cmd_tool_prompt_block
-    assert "ls" in block and "cat" in block and "grep" in block
-    assert "Linux" in block or "WSL" in block
+    assert "Allowed Commands" not in block
+    # 精简版特征：只提 sandbox 默认 + 用途
+    assert "Linux sandbox" in block
+    assert "local (default: False)" in block
 
 
-def test_darwin_cmd_block_mentions_macos():
-    with patch("platform.system", return_value="Darwin"):
+def test_code_block_no_longer_has_use_when_prose():
+    """精简化后 code 不再有大段 Use when / Important for cmd && code。"""
+    with patch("platform.system", return_value="Linux"):
         reset_platform_cache()
         p = init_platform()
+    block = p.code_tool_prompt_block
+    assert "Use when:" not in block
+    assert "Important for cmd && code" not in block
+    # 精简版特征
+    assert "Linux sandbox" in block
+
+
+def test_cmd_code_common_notes_present_for_all_platforms():
+    """cmd_code_common_notes 跨平台一致，base 默认提供。"""
+    for adapter_cls in (LinuxAdapter, DarwinAdapter, WindowsAdapter):
+        adapter = adapter_cls()
+        notes = adapter.cmd_code_common_notes
+        assert "Always print final key results" in notes
+        assert "No comments in code" in notes
+        assert "cached/" in notes
+        assert "sandbox" in notes.lower()
+
+
+def test_windows_cmd_block_mentions_windows_fallback():
+    """Windows override 必须提 cmd.exe + Windows 原生命令。"""
+    p = WindowsAdapter()
     block = p.cmd_tool_prompt_block
-    assert "macOS" in block or "Darwin" in block
+    assert "cmd.exe" in block or "Windows" in block
+    # 至少含 dir + type
+    assert "dir" in block and "type" in block
+
+
+def test_windows_code_block_mentions_windows_venv():
+    """Windows override 提本地 fallback 路径。"""
+    p = WindowsAdapter()
+    block = p.code_tool_prompt_block
+    assert "Scripts" in block or "python.exe" in block
+    assert "TEMP" in block or "temp" in block
 
 
 def test_system_info_block_format():
@@ -359,6 +360,55 @@ def test_get_agent_node_prompt_includes_platform_info():
     assert "cmd.exe" in prompt
     assert "Windows" in prompt
     assert "dir" in prompt  # 平台允许命令
+
+
+def test_all_tool_prompt_blocks_canonical_order_for_each_platform():
+    """所有 adapter 都按 interrupt → find_skill → cmd → code → common → ctime 顺序返回 tool 块。"""
+    for adapter_cls in (LinuxAdapter, DarwinAdapter, WindowsAdapter):
+        adapter = adapter_cls()
+        blocks = adapter.all_tool_prompt_blocks()
+        assert len(blocks) == 6
+        joined = "\n".join(blocks)
+        interrupt_idx = joined.find("interrupt — Emergency Stop")
+        find_skill_idx = joined.find("find_skill — Skill Discovery")
+        cmd_idx = joined.find("cmd — Shell Execution")
+        code_idx = joined.find("code — Inline Code")
+        common_idx = joined.find("Common for cmd & code")
+        ctime_idx = joined.find("ctime — Time Reference")
+        assert interrupt_idx != -1, "interrupt 块缺失"
+        assert find_skill_idx != -1, "find_skill 块缺失"
+        assert cmd_idx != -1, "cmd 块缺失"
+        assert code_idx != -1, "code 块缺失"
+        assert common_idx != -1, "common notes 块缺失"
+        assert ctime_idx != -1, "ctime 块缺失"
+        assert (
+            interrupt_idx < find_skill_idx < cmd_idx < code_idx < common_idx < ctime_idx
+        ), f"工具块顺序错了：{adapter_cls.__name__}"
+
+
+def test_interrupt_prompt_lives_on_platform_adapter():
+    """interrupt prompt 必须在 PlatformAdapter 上，graph_config 不再持有。"""
+    from ChatMe.ChatWorkflow.config import graph_config
+
+    assert hasattr(PlatformAdapter, "interrupt_tool_prompt_block")
+    for attr in ("PROMPT_TOOLS_DISPATCH",):
+        assert not hasattr(graph_config, attr), (
+            "PROMPT_TOOLS_DISPATCH 应已被 platform adapter 取代"
+        )
+
+
+def test_agent_prompt_includes_interrupt_block():
+    """主 agent prompt 仍要含 interrupt 描述（顺序在 cmd 之前）。"""
+    from ChatMe.ChatWorkflow.config.graph_config import get_agent_node_prompt
+
+    with patch("platform.system", return_value="Linux"):
+        reset_platform_cache()
+        prompt = get_agent_node_prompt()
+    interrupt_idx = prompt.find("interrupt — Emergency Stop")
+    cmd_idx = prompt.find("cmd — Shell Execution")
+    assert interrupt_idx != -1
+    assert cmd_idx != -1
+    assert interrupt_idx < cmd_idx
 
 
 def test_build_sub_agent_prompt_omits_dispatch_tools():

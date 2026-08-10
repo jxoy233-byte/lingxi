@@ -7,6 +7,7 @@ from collections import deque
 from pathlib import Path
 from typing import Optional, Set, Dict, Deque
 
+from ChatMe.ChatWorkflow.skills.registry import SkillRegistry
 from ChatMe.LoggingManager.logging_config import get_logger
 
 
@@ -134,24 +135,32 @@ class SandboxPool:
         if is_temp:
             self.temp_containers.add(cid)
 
+    def _build_skill_mount_args(self) -> list[str]:
+        use_registry = os.getenv("SANDBOX_USE_SKILL_REGISTRY", "true").lower() not in {
+            "0", "false", "no",
+        }
+        if use_registry:
+            return SkillRegistry(Path(self.skills_path)).build_mount_args()
+
+        return [
+            "-v", f"{self.skills_path}:/skills:ro",
+            "-v", f"{os.path.join(self.skills_path, 'DataAnalysis')}:/skills/DataAnalysis:rw",
+        ]
+
     def _create_container(self) -> Optional[str]:
         """
         启动一个常驻容器：
-        - mount skills(ro) + DataAnalysis(rw) + cached(rw) + sandbox-only config + logs
+        - mount registry skills + cached(rw) + sandbox-only config + logs
         - 容器内能看到：/skills, /cached, /.chatme/config.json（仅 skills 段）, /.chatme/logs
-        - DataAnalysis 目录允许 skill 内配置函数写入跨会话配置，其余 skills 保持只读
+        - mount: rw 的 skill 允许写入，其余 skills 保持只读
         - ChatMeConfig / LoggingManager 已通过 Dockerfile COPY 进 site-packages
-        - DataAnalysis skill.md 已通过 Dockerfile COPY 进 site-packages/skills/DataAnalysis
         """
         try:
             self._generate_sandbox_config()
 
             cmd = [
                 "docker", "run", "-d",
-                # skills 源码默认只读：保护其他 skill；随后单独覆盖 DataAnalysis 为可写
-                "-v", f"{self.skills_path}:/skills:ro",
-                # DataAnalysis 内置配置函数需要保存跨会话数据库配置
-                "-v", f"{os.path.join(self.skills_path, 'DataAnalysis')}:/skills/DataAnalysis:rw",
+                *self._build_skill_mount_args(),
                 # cached 读写：用户上传立即可见，沙盒生成图表立即给用户
                 "-v", f"{self.cached_path}:/cached:rw",
                 # sandbox-only config（仅 skills 段，不含 llm/oss/app）
@@ -167,6 +176,9 @@ class SandboxPool:
                 self.image,
                 "sleep", "infinity"
             ]
+            assert "--add-host=host.docker.internal:host-gateway" in cmd
+            assert "PYTHONPATH=/" in cmd
+            assert cmd[-2:] == ["sleep", "infinity"]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             container_id = result.stdout.strip()
             self._logger.debug(f"[SandboxPool] 创建容器: {container_id}")

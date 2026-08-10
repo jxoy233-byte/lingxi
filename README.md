@@ -183,7 +183,7 @@ OPENAI_PRESENCE_PENALTY=0.0
 {
   "app": {
     "name": "ChatMe",
-    "version": "v0.1.2",
+    "version": "v0.1.3",
     "host": "127.0.0.1",
     "port": 8211
   },
@@ -235,10 +235,14 @@ ChatMe/
 │   │   ├── LoggingManager/               # 异步日志
 │   │   └── test/
 │   ├── skills/
-│   │   └── DataAnalysis/                  # 数据分析 skill
-│   │       ├── SKILL.md                  # 主规范（生成图表 / 报告 / CSV 等）
-│   │       ├── format/                   # ChatDataAnalysisFormat（拆分为 base / artifacts / manifest / database）
-│   │       └── database/                 # 数据库分析（MySQL/SQLite/PostgreSQL/MongoDB 只读查询 + 跨会话配置）
+│   │   ├── DataAnalysis/                  # 数据分析 skill（mount: rw）
+│   │   │   ├── SKILL.md                  # 主规范（生成图表 / 报告 / CSV 等）
+│   │   │   ├── format/                   # ChatDataAnalysisFormat（拆分为 base / artifacts / manifest / database）
+│   │   │   └── database/                 # 数据库分析（MySQL/SQLite/PostgreSQL/MongoDB 只读查询 + 跨会话配置；lazy skill）
+│   │   ├── Exa/                          # 搜索 skill
+│   │   ├── Tavily/                       # 搜索 skill
+│   │   └── ImageParser/                  # 图片解析 skill
+│   ├── ChatMe/ChatWorkflow/skills/       # SkillRegistry（扫描 SKILL.md frontmatter + find_skill 工具 prompt）
 │   ├── .chatme/
 │   ├── pyproject.toml
 │   └── main.py
@@ -327,8 +331,9 @@ MCP 服务器（`mcps/server.py`，FastMCP 3.x，stdio transport）暴露以下�
 
 | 工具          | 说明                                                                  |
 | ----------- | ------------------------------------------------------------------- |
-| `code`      | 默认在 Docker 沙盒中执行 Python / Node.js 代码（`use_sandbox=False` 降级到本机 venv）；执行前 `PermissionedToolNode` 弹审批，可按 imports + calls + lang + sandbox 算 fingerprint 永久批准 |
-| `cmd`       | 默认在 Docker 沙盒中执行白名单内的 shell 命令（`use_sandbox=False` 降级到本机）；带危险命令检测；执行前 `PermissionedToolNode` 弹审批 |
+| `code`      | 默认在 Docker 沙盒中执行 Python / Node.js 代码（`local=True` 降级到本机 venv）；执行前 `PermissionedToolNode` 弹审批，可按 imports + calls + lang + local 算 fingerprint 永久批准 |
+| `cmd`       | 默认在 Docker 沙盒中执行白名单内的 shell 命令（`local=True` 降级到本机）；带危险命令检测；执行前 `PermissionedToolNode` 弹审批 |
+| `find_skill`| 动态发现 skills（`mode='match'` 按关键词返回 top 3，`mode='list'` 返回完整索引）；替代硬编码 skill examples + `cat skills/skills.md` |
 | `interrupt` | 中断当前对话                                                              |
 | `ctime`     | 获取当前日期时间                                                            |
 

@@ -1,3 +1,11 @@
+---
+name: data_analysis
+description: 数据分析（pandas / matplotlib / mermaid / 数据库只读查询）
+mount: rw
+aliases: [DataAnalysis, pandas, numpy, matplotlib, chart, visualization, SQL, MySQL, MongoDB, database, CSV, plot]
+module: skills.DataAnalysis
+---
+
 # 数据分析技能规范
 
 > 方法签名 / 边界条件见 `ChatDataAnalysisFormat` docstring（`format.py`）。

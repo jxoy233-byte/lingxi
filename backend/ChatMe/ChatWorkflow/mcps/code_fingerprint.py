@@ -7,7 +7,7 @@ code 工具语义指纹提取（用于永久批准的 pattern 精确匹配）
   组成 fingerprint，相同结构视为同一调用意图。
 - 匹配语义：**精确相等**（不用 fnmatch glob），避免 `code_fp:*` 把所有 code 都放行。
 - 不变量：
-  - 同 fingerprint = 同样 import 模块集 + 同样函数调用名集 + 同样 language + 同样 use_sandbox
+  - 同 fingerprint = 同样 import 模块集 + 同样函数调用名集 + 同样 language + 同样 local 参数
   - 不含：参数值、变量名、注释、空白差异
 - 支持语言：当前 sandbox 支持 python / nodejs / javascript（js）。
   - python / nodejs / javascript 三者作为独立 lang 字段持久化（filter globals 各自不同）：
@@ -203,7 +203,7 @@ def code_fingerprint(args: dict) -> str:
     """code 工具的语义指纹，用于永久批准的精确匹配。
 
     Args:
-        args: code 工具的 args dict（含 `code` / `source` / `language` / `use_sandbox`）
+        args: code 工具的 args dict（含 `code` / `source` / `language` / `local`）
 
     Returns:
         "code_fp:lang=X|sandbox=Y|imp=a,b|fn=c,d" 形式的稳定字符串。
@@ -216,7 +216,7 @@ def code_fingerprint(args: dict) -> str:
     lang = _LANG_ALIASES.get(lang_raw, lang_raw)
     if lang not in SUPPORTED_LANGUAGES:
         return ""
-    use_sandbox = bool(args.get("use_sandbox", True))
+    use_sandbox = not bool(args.get("local", False))  # 反向读取新参数;local=False(默认) → sandbox=1
 
     if lang == "python":
         imports = _extract_python_imports(code_text)

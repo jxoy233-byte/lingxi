@@ -547,6 +547,107 @@ class ChatService:
             content = str(content)
         return content
 
+    async def _build_intercepted_tool_call_events(
+        self,
+        chunk: Dict[str, Any],
+        emitted_ids: set,
+        elapsed_ms: int,
+        token_usage: Dict[str, Any],
+    ) -> List[str]:
+        """从 on_chain_end 节点为 tool_execution_node 的事件里提取 ToolMessage(s)，
+        补 tool_call_name + tool_call_result SSE 事件（pre-check 拦截路径的兜底）。
+
+        为什么需要：
+        - PermissionedToolNode._permission_wrap 在 pre-check (dangerous / whitelist) 拦截时
+          直接 return ToolMessage，不调 execute()，LangGraph 不会发 on_tool_start / on_tool_end
+        - 但 on_chain_end 会带 data.input (含 AIMessage.tool_calls) + data.output (含 ToolMessage)
+        - 用 tool_call_id 配对，反向找回 args/name emit SSE 事件，前端流式响应才能显示
+        - 正常路径（execute 走通）已经通过 on_tool_start/end emit 过，emitted_ids 集合去重避免双发
+
+        Args:
+            chunk: astream_events 的 on_chain_end event dict
+            emitted_ids: 已被 on_tool_end 处理过的 tool_call_id 集合（per-stream，调用方持有）
+            elapsed_ms: 当前 elapsed_ms（透传到 SSE 事件）
+            token_usage: 当前 token_usage（透传到 SSE 事件）
+
+        Returns:
+            list[str] SSE JSON 字符串列表（已格式化为 "xxx\n\n"），调用方依次 yield
+        """
+        metadata = chunk.get("metadata") or {}
+        node = metadata.get("langgraph_node")
+        if node != "tool_execution_node":
+            return []
+
+        data = chunk.get("data") or {}
+        output = data.get("output") or {}
+        input_data = data.get("input") or {}
+        output_msgs = output.get("messages") if isinstance(output, dict) else []
+        input_msgs = input_data.get("messages") if isinstance(input_data, dict) else []
+        if not output_msgs:
+            return []
+
+        # 从 input 找最近一条 AIMessage 的 tool_calls，按 id 索引（用于反向找 args/name）
+        tool_calls_by_id: Dict[str, Dict[str, Any]] = {}
+        for im in reversed(input_msgs):
+            if isinstance(im, AIMessage) and getattr(im, "tool_calls", None):
+                for tc in im.tool_calls:
+                    tc_id = tc.get("id")
+                    if tc_id:
+                        tool_calls_by_id[tc_id] = tc
+                break  # 只取最近一条 AIMessage
+
+        events: List[str] = []
+        for om in output_msgs:
+            if not isinstance(om, ToolMessage):
+                continue
+            tc_id = getattr(om, "tool_call_id", "") or ""
+            if not tc_id:
+                continue
+            # 正常路径已经 on_tool_end emit 过 → 跳过避免双发
+            if tc_id in emitted_ids:
+                continue
+            # orphan: input AIMessage.tool_calls 找不到对应 id（LangGraph 异常或节点 output
+            # 跟 input 错位）→ 跳过, 避免 emit 缺 args 的事件污染前端
+            tc = tool_calls_by_id.get(tc_id)
+            if tc is None:
+                continue
+            emitted_ids.add(tc_id)
+
+            args = tc.get("args", {}) or {}
+            tool_name = tc.get("name") or getattr(om, "name", "") or ""
+
+            # 1) tool_call_name —— 前端用来建 tool entry
+            name_event = json.dumps(
+                {
+                    "type": "tool_call_name",
+                    "id": tc_id,
+                    "content": {"args": args, "name": tool_name},
+                    "elapsed_ms": elapsed_ms,
+                    "token_usage": token_usage,
+                },
+                ensure_ascii=False,
+                default=str,
+            ) + "\n\n"
+
+            # 2) tool_call_result —— 前端填 tool entry 的 result 字段
+            content = await self._switch_chunk_to_str(om.content)
+            result_event = json.dumps(
+                {
+                    "type": "tool_call_result",
+                    "id": tc_id,
+                    "content": content,
+                    "elapsed_ms": elapsed_ms,
+                    "token_usage": token_usage,
+                },
+                ensure_ascii=False,
+                default=str,
+            ) + "\n\n"
+
+            events.append(name_event)
+            events.append(result_event)
+
+        return events
+
     _WORKFLOW_TOKEN_NODES = ("input_parse_node", "agent_node", "should_end_node", "final_node")
     _ROUND_METRICS_TTL_SECONDS = 24 * 60 * 60
 
@@ -842,6 +943,10 @@ class ChatService:
                     default=str
                 ) + "\n\n"
 
+            # pre-check 拦截 SSE 兜底用的去重 set —— on_tool_end emit 后把 tool_call_id 写进来,
+            # 下面 on_chain_end 看到 set 里有就跳过避免双发 SSE 事件给前端。
+            emitted_tool_call_ids: set = set()
+
             async for chunk in self.chat_workflow.astream(messages=messages, config=input_config):
                 if chunk['event'] == 'on_chat_model_stream':
                     # 最终返回的chunk
@@ -892,6 +997,14 @@ class ChatService:
                     ) + "\n\n"
                 elif chunk['event'] == 'on_tool_end':
                     output = chunk['data'].get('output')
+                    # 记录 tool_call_id 到去重 set ——
+                    # PermissionedToolNode._permission_wrap 在 pre-check (dangerous/whitelist)
+                    # 拦截时直接 return ToolMessage，LangGraph 不发 on_tool_start/on_tool_end；
+                    # 下面 on_chain_end 兜底 emit 时按 tool_call_id 查 set，已发过则跳过避免双发。
+                    if output is not None:
+                        tc_id = getattr(output, "tool_call_id", "") or ""
+                        if tc_id:
+                            emitted_tool_call_ids.add(tc_id)
                     output_content = output.content if hasattr(output, "content") else ""
                     if output_content:
                         content = await self._switch_chunk_to_str(output_content)
@@ -901,6 +1014,18 @@ class ChatService:
                             ensure_ascii=False,
                             default=str
                         ) + "\n\n"
+                elif chunk['event'] == 'on_chain_end' and (chunk.get('metadata') or {}).get('langgraph_node') == 'tool_execution_node':
+                    # pre-check 拦截路径兜底：_permission_wrap 直接 return ToolMessage 时,
+                    # on_tool_start / on_tool_end 不发；从 on_chain_end 的 data.input/output 配对
+                    # ToolMessage ↔ AIMessage.tool_calls, 补 tool_call_name + tool_call_result 事件,
+                    # 前端流式响应才能实时看到拦截结果（不刷新就看得到）。
+                    for evt in await self._build_intercepted_tool_call_events(
+                        chunk,
+                        emitted_tool_call_ids,
+                        self._elapsed_ms_since(start_mono),
+                        token_usage,
+                    ):
+                        yield evt
         except Exception as e:
             error_detail = f"{str(e)}\n{traceback.format_exc()}"
             self.logger.error(f"流式响应异常(session_id:{session_id}): {error_detail}")
@@ -1490,6 +1615,10 @@ class ChatService:
 
         config = {"configurable": {"thread_id": session_id}}
 
+        # pre-check 拦截 SSE 兜底用的去重 set —— on_tool_end emit 后把 tool_call_id 写进来,
+        # 下面 on_chain_end 看到 set 里有就跳过避免双发 SSE 事件给前端。
+        emitted_tool_call_ids: set = set()
+
         try:
             async for chunk in self.chat_workflow.astream(
                 Command(resume=decision),
@@ -1540,6 +1669,11 @@ class ChatService:
                     ) + "\n\n"
                 elif chunk['event'] == 'on_tool_end':
                     output = chunk['data'].get('output')
+                    # 记录 tool_call_id 到去重 set（pre-check 拦截 SSE 兜底用，见 message_stream 同段注释）
+                    if output is not None:
+                        tc_id = getattr(output, "tool_call_id", "") or ""
+                        if tc_id:
+                            emitted_tool_call_ids.add(tc_id)
                     output_content = output.content if hasattr(output, "content") else ""
                     if output_content:
                         content = await self._switch_chunk_to_str(output_content)
@@ -1549,6 +1683,15 @@ class ChatService:
                             ensure_ascii=False,
                             default=str,
                         ) + "\n\n"
+                elif chunk['event'] == 'on_chain_end' and node == 'tool_execution_node':
+                    # pre-check 拦截 SSE 兜底（详见 message_stream 注释）
+                    for evt in await self._build_intercepted_tool_call_events(
+                        chunk,
+                        emitted_tool_call_ids,
+                        self._elapsed_ms_since(start_mono),
+                        token_usage,
+                    ):
+                        yield evt
         except Exception as e:
             error_detail = f"{str(e)}\n{traceback.format_exc()}"
             self.logger.error(f"resume_permission_stream 异常(session_id:{session_id}): {error_detail}")
@@ -1722,6 +1865,10 @@ class ChatService:
             pre_context = state.values.get("context",[]) or []
             merged_context = list(pre_context) + list(reinvoke_message)
 
+            # pre-check 拦截 SSE 兜底用的去重 set —— on_tool_end emit 后把 tool_call_id 写进来,
+            # 下面 on_chain_end 看到 set 里有就跳过避免双发 SSE 事件给前端。
+            emitted_tool_call_ids: set = set()
+
             async for chunk in self.chat_workflow.astream(
                 Command(update={
                     "messages": reinvoke_message,
@@ -1771,6 +1918,11 @@ class ChatService:
                     ) + "\n\n"
                 elif chunk['event'] == 'on_tool_end':
                     output = chunk['data'].get('output')
+                    # 记录 tool_call_id 到去重 set（pre-check 拦截 SSE 兜底用，见 message_stream 同段注释）
+                    if output is not None:
+                        tc_id = getattr(output, "tool_call_id", "") or ""
+                        if tc_id:
+                            emitted_tool_call_ids.add(tc_id)
                     output_content = output.content if hasattr(output, "content") else ""
                     if output_content:
                         content = await self._switch_chunk_to_str(output_content)
@@ -1780,6 +1932,15 @@ class ChatService:
                             ensure_ascii=False,
                             default=str
                         ) + "\n\n"
+                elif chunk['event'] == 'on_chain_end' and (chunk.get('metadata') or {}).get('langgraph_node') == 'tool_execution_node':
+                    # pre-check 拦截 SSE 兜底（详见 message_stream 注释）
+                    for evt in await self._build_intercepted_tool_call_events(
+                        chunk,
+                        emitted_tool_call_ids,
+                        self._elapsed_ms_since(start_mono),
+                        token_usage,
+                    ):
+                        yield evt
         except Exception as e:
             error_detail = f"{str(e)}\n{traceback.format_exc()}"
             self.logger.error(f"流式响应异常(session_id:{session_id}): {error_detail}")

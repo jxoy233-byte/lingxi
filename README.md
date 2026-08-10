@@ -354,13 +354,13 @@ MCP 服务器（`mcps/server.py`，FastMCP 3.x，stdio transport）暴露以下�
 ```bash
 cd backend
 uv build --wheel
-# 输出: dist/ChatMe-0.1.1-py3-none-any.whl
+# 输出: dist/ChatMe-0.1.3-py3-none-any.whl
 ```
 
 ### 安装 wheel
 
 ```bash
-uv pip install dist/ChatMe-0.1.1-py3-none-any.whl
+uv pip install dist/ChatMe-0.1.3-py3-none-any.whl
 # 安装后 chatme_main 和 chatme_mcp 命令全局可用
 ```
 
@@ -393,13 +393,13 @@ npm run electron:build:win      # Windows NSIS（x64）
 npm run electron:build:linux    # Linux AppImage（x64）
 ```
 
-桌面端通过 `electron-builder` 打包，应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.1.1）在 `frontend/electron/electron.config.js` 中配置。
+桌面端通过 `electron-builder` 打包，应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.1.3）在 `frontend/electron/electron.config.js` 中配置。
 
 **输出位置**：`../release/electron-builder/`（项目根，与 Vite 的 `dist/` / `frontend/` 区分开）：
 
 - `mac-arm64/灵析.app` — 直接打开
 - `mac/` — x64 .app
-- `灵析-0.1.1-arm64-mac.zip` / `灵析-0.1.1-mac.zip` — 分发包
+- `灵析-0.1.3-arm64-mac.zip` / `灵析-0.1.3-mac.zip` — 分发包
 - `linux-unpacked/` — Linux 解压目录
 - `win-unpacked.exe` — Windows 安装器
 

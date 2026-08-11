@@ -21,7 +21,7 @@ from .config.graph_config import get_agent_node_config, get_graph_final_node_con
 from .config.models import ChatStateCore2, AIMessageType, FileParseState
 from .Memory.core import MemoryManager
 from .mcps.session import init_mcp, shutdown_mcp, get_mcp_tools
-from .mcps.permissions import (
+from .mcps.permissions.core import (
     PermissionedToolNode,
     init_permissions,
 )

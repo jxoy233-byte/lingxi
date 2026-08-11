@@ -201,14 +201,16 @@
                 <div v-if="tool.result !== null && expandedTools[i]" class="tool-result">{{ tool.result }}</div>
 
                 <!-- 内嵌审批 UI：仅当此 tool 是当前 pending 审批目标时渲染 -->
-                <div v-if="isToolAwaitingApproval(i)" class="tool-inline-approval" :class="`tool-inline-approval--${pendingToolApproval.executionEnv || 'sandbox'}`">
+                <div v-if="isToolAwaitingApproval(i)" class="tool-inline-approval" :class="`tool-inline-approval--${getToolExecutionEnv(tool.name, tool.args) || 'sandbox'}`">
                   <div class="tool-inline-approval-header">
-                    <svg class="tool-inline-approval-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <!-- local 时换成警告符号 ⚠️ 提醒用户走的是本机执行（不是沙盒隔离） -->
+                    <svg v-if="getToolExecutionEnv(tool.name, tool.args) !== 'local'" class="tool-inline-approval-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                       <path d="M12 2L4 6v6c0 5 3.5 9.5 8 10 4.5-.5 8-5 8-10V6l-8-4z"
                         stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
                       <path d="M9 12l2 2 4-4" stroke="currentColor" stroke-width="1.8"
                         stroke-linecap="round" stroke-linejoin="round"/>
                     </svg>
+                    <span v-else class="tool-inline-approval-warn">⚠️</span>
                     <span>需要批准这个 {{ pendingToolApproval.action }} 操作吗？</span>
                   </div>
                   <!-- 默认 4 选项：取消 / 仅本次 / 告诉 AI 怎么做 / 批准 -->
@@ -352,6 +354,12 @@
             <button v-if="isInterrupted && isLatestAiMessage && (isInterruptedSessionId === currentSessionId || isInterruptedSessionId === pendingInterruptSessionId)" class="action-button resume-action" @click="$emit('resume')" title="续接对话">
               <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <polygon points="5 3 19 12 5 21 5 3"/>
+              </svg>
+            </button>
+            <button v-if="isInterrupted && isLatestAiMessage && (isInterruptedSessionId === currentSessionId || isInterruptedSessionId === pendingInterruptSessionId)" class="action-button" @click="$emit('restart-session')" title="重新对话">
+              <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="23 4 23 10 17 10"/>
+                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
               </svg>
             </button>
           </template>
@@ -544,7 +552,7 @@ export default {
       default: false
     }
   },
-  emits: ['restore', 'restream', 'open-link', 'preview-file', 'interrupt', 'resume', 'quote', 'tool-decide'],
+  emits: ['restore', 'restream', 'open-link', 'preview-file', 'interrupt', 'resume', 'restart-session', 'quote', 'tool-decide'],
   components: {
     FilePreviewModal
   },
@@ -2222,9 +2230,10 @@ export default {
     },
     getToolExecutionEnv(toolName, args) {
       // cmd 和 code 都走 use_sandbox；UI 标签统一显示执行环境
+      // v0.1.3 反向命名：args.local === true → 本机执行（覆盖沙盒默认）
       if (toolName !== 'code' && toolName !== 'cmd') return null
       if (!args) return 'sandbox'
-      if (args.sandbox === false || args.use_sandbox === false) return 'local'
+      if (args.local === true) return 'local'
       return 'sandbox'
     },
     getFileTypeLabel(type) {
@@ -3431,7 +3440,8 @@ export default {
 }
 
 .tool-env-label.env-local {
-  color: #d97706;
+  /* local 工具名旁 ::local 标签保持灰色，不和 sandbox 标签色冲突 */
+  color: var(--text-secondary);
 }
 
 .tool-check {
@@ -3563,9 +3573,29 @@ export default {
   border-color: #059669;
 }
 
-/* local 审核变体：淡红背景叠加（v0.1.3 区分 sandbox vs local，保留原批准按钮绿色） */
+/* local 审核变体：淡红背景叠加（v0.1.3 区分 sandbox vs local） */
 .tool-inline-approval--local {
   background: rgba(239, 68, 68, 0.06);  /* 淡红底，叠加在黄色边框上 */
+}
+
+/* local 警告符号 ⚠️ — 比盾牌更直观地传达「本机执行」风险 */
+.tool-inline-approval-warn {
+  font-size: 14px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+/* local 工具的「批准」按钮改为浅红，提示这是本机执行（不是绿色放行） */
+.tool-inline-approval--local .tool-btn-approve {
+  background: rgba(239, 68, 68, 0.12);
+  color: #b91c1c;
+  border-color: rgba(239, 68, 68, 0.45);
+}
+
+.tool-inline-approval--local .tool-btn-approve:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.22);
+  border-color: #ef4444;
+  color: #991b1b;
 }
 
 /* 反馈模式：textarea + 取消/发送两按钮 */

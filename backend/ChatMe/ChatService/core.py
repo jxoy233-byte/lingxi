@@ -1484,7 +1484,17 @@ class ChatService:
         await self.redis_client.delete(f"permission:{session_id}")
 
         try:
-            await self._wait_previous_memory_update(session_id)
+            # 没完成就等待（避免回溯到 target checkpoint 后被晚到的 memory task
+            # 用旧 state 把 current.md 覆盖，导致记忆文件与回溯后状态错位）
+            memory_status = self._get_memory_update_status(session_id)
+            if memory_status == "pending":
+                self.logger.info(
+                    f"会话回溯时检测到上一轮记忆更新未完成，等待中(session_id={session_id})"
+                )
+                memory_status = await self._wait_previous_memory_update(session_id)
+                self.logger.info(
+                    f"会话回溯时上一轮记忆更新已完成(session_id={session_id}, status={memory_status})"
+                )
 
             checkpoints = await self.state_saver.get_checkpoints(session_id)
 
@@ -1503,26 +1513,36 @@ class ChatService:
             # 删除比目标更新的 checkpoints（这些是旧状态，比 backtrack 目标更晚）
             checkpoints_to_del = checkpoints[:target_index] if target_index > 0 else []
 
-            # 获取回溯后的状态
-            backtrack_state = await self.graph.aget_state(config=backtrack_config)
+            # ★ 直接覆写 LangGraph 的 checkpoint_latest 指针到 target cid，
+            # 并删除其他 checkpoint 文档。绕过 graph.aupdate_state 的 artifact cid 副作用
+            # —— 不再产生 cid_E，让后续 message_stream 直接从 target cid 启动。
+            # state_saver / memory 文件名 cid 始终对齐 LangGraph latest 指针，
+            if self.checkpoint_janitor is not None:
+                try:
+                    await self.checkpoint_janitor.retarget_to(
+                        thread_id=session_id,
+                        target_cid=checkpoint_id,
+                    )
+                except ValueError as e:
+                    self.logger.error(
+                        f"retarget_to 失败(session_id={session_id}, target={checkpoint_id}): {e}"
+                    )
+                    return False
 
-            # 更新想要的回溯检查点状态到当前会话状态
-            cur_state = await self.graph.aupdate_state(config=backtrack_config, values=backtrack_state.values)
-            new_checkpoint = cur_state["configurable"]["checkpoint_id"]
-
-            # 删除比目标更新的旧 checkpoints
+            # 删除比目标更新的旧 checkpoints（保留现有 state_saver 清理逻辑）
             for cp in checkpoints_to_del:
                 cp_id_to_del = cp["checkpoint_id"]
                 if cp_id_to_del:
                     await self.state_saver.delete_checkpoint(thread_id=session_id, checkpoint_id=cp_id_to_del)
                     await self._delete_specific_checkpoint(session_id, cp_id_to_del)
 
-            await self.chat_workflow.memory_manager.backtrack_memory(thread_id=session_id, checkpoint_id=checkpoint_id, new_checkpoint_id=new_checkpoint)
+            # memory 文件回溯：保留 target_file 的原文件名 cid（不再重命名为 artifact cid），
+            # 删 ts > target_ts 的文件，写 current.md。多次回溯到同一 cid 都能稳定命中该文件。
+            await self.chat_workflow.memory_manager.backtrack_memory(
+                thread_id=session_id, checkpoint_id=checkpoint_id,
+            )
 
-            # 等待 Redis 状态完全落地，避免前端立即发起的流式请求读到旧数据
-            await asyncio.sleep(0.5)
-
-            self.logger.info(f"会话回溯成功(session_id:{session_id}, checkpoint_id:{checkpoint_id})")
+            self.logger.info(f"会话回溯成功(session_id:{session_id}, checkpoint_id={checkpoint_id})")
 
             return True
 

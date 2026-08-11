@@ -33,6 +33,8 @@ Vue 3 + Vite 单页应用，提供 **Web 端** 和 **Electron 桌面端** 两种
 - **网页预览窗口**：通过 Electron IPC 在独立窗口打开外部链接（生产环境受限）
 - **错误气泡保护**：SSE `error` 事件触发时整条消息渲染为红色错误框，`done` 事件不会复活 AI 内容，避免报错堆栈被当 markdown
 - **权限审批内嵌**：`cmd` / `code` 工具触发审批时把按钮内嵌到对应 `toolCall` 行（高亮上下文），不走独立 modal 弹窗；4 档决策 approve / this-time-only / deny / feedback:<text>
+- **消息排队**：AI 流式期间输入框不再禁用，新消息进 Redis `queue:{sid}` FIFO，本轮 `done` 后自动出队续发；用户切走会话时推迟 drain，切回再发
+- **定时任务面板**：对话区顶部「⏰ N 个定时任务」折叠面板，支持启停 / 立即运行 / 行内二次确认删除；创建走对话（agent 调 Scheduler skill）
 - **头部刷新按钮**：↻ 按钮 + `Cmd/Ctrl+R` + 菜单 → 视图 → 刷新，触发 `window.location.reload()` 走完整重载
 - **Electron 多环境**：开发 / 测试 / 正式三套配置，菜单栏与窗口标题栏上以颜色徽章区分
 - **file:// 协议拦截**：Electron 桌面端用 `protocol.handle('file', ...)` 把 `/chat/*` 和 `/static/*` 转发到后端，等价于 Vite dev 模式的代理
@@ -140,6 +142,8 @@ frontend/
 │       ├── MessageInput.vue
 │       ├── MessageItem.vue
 │       ├── MessageList.vue
+│       ├── ScheduledTaskItem.vue     # 单条定时任务卡片
+│       ├── ScheduledTasksPanel.vue   # 对话区顶部「⏰ N 个定时任务」折叠面板
 │       ├── SearchResults.vue
 │       ├── SettingsDialog.vue       # 设置弹窗（Appearance / Models / Skills / Permissions 4 tab + vl.local 开关 + Save & Restart）
 │       ├── Sidebar.vue
@@ -156,13 +160,15 @@ frontend/
 | `Sidebar.vue` | 会话列表容器，支持新建 / 删除 / 切换会话 |
 | `ConversationItem.vue` | 单个会话项：双击编辑标题、悬停显示删除按钮、相对时间显示（分钟/小时/天数） |
 | `ChatHeader.vue` | 顶部条：主题切换、Checkpoint 面板、**↻ 刷新页面按钮**（与 `DataAnalysisTree` 同款 SVG），新对话按钮 |
-| `MessageList.vue` | 消息列表容器：自动滚动控制（入场 easeInOut + 流式 ramp + 100ms 打断防抖 + 用户 wheel/touch 让出控制权） |
-| `MessageItem.vue` | 单条消息渲染：Markdown / 代码高亮 / 数学公式 / 流程图；`message.error=true` 时渲染为红色错误框 |
-| `MessageInput.vue` | 输入框：Enter 发送、Shift+Enter 换行、文件上传、语音输入 |
+| `MessageList.vue` | 消息列表容器：自动滚动控制（入场 easeInOut + 流式 ramp + 100ms 打断防抖 + 用户 wheel/touch 让出控制权）；顶部挂载 `ScheduledTasksPanel` 并向上转发 `scheduled-task-*` / `restart-session` 事件 |
+| `MessageItem.vue` | 单条消息渲染：Markdown / 代码高亮 / 数学公式 / 流程图；`message.error=true` 时渲染为红色错误框；中断态显示「重新对话」按钮（emit `restart-session`）；内嵌审批 UI 直接按 `tool.args.local` 判执行环境 |
+| `MessageInput.vue` | 输入框：Enter 发送、Shift+Enter 换行、文件上传、语音输入；**流式期间不再禁用发送**——消息由 App.vue 入队，本轮 `done` 后自动续发 |
 | `CheckpointPanel.vue` | 回溯面板：展示历史 checkpoint 节点列表，支持回溯到指定轮 |
 | `ConfirmDialog.vue` | 通用确认弹窗（删除对话、关闭会话等） |
 | `FilePreviewPanel.vue` / `FilePreviewModal.vue` | 文件预览面板 / 弹窗（图片、文本、表格） |
 | `DataAnalysisTree.vue` / `DataTreeNode.vue` | 数据分析生成的目录树（递归节点），面板头部含 reload 按钮 |
+| `ScheduledTasksPanel.vue` | 对话区顶部「⏰ N 个定时任务」折叠面板：仅当 `tasks.length > 0` 渲染、默认收起；含 ↻ 刷新按钮（旋转动画）；**无创建入口**，创建走对话让 agent 调 Scheduler skill |
+| `ScheduledTaskItem.vue` | 单条定时任务卡片：名称 + 启用/暂停徽章、cron、session_id、运行次数、最近运行时间；⏸/▶ 启停、⚡ 立即运行、🗑 行内小红叉二次确认删除 |
 | `SearchResults.vue` | 搜索结果列表渲染 |
 | `SettingsDialog.vue` | 设置弹窗：Appearance / Models / Skills / Permissions 4 tab；VL `local` 开关 + fallback 解释；LLM provider / Skills API Key 脱敏编辑 + Save & Restart；已批准 / 已拒绝命令列表行内删除 |
 | `WebPreviewPanel.vue` | Electron 内嵌网页预览窗口（IPC `open-web-preview`） |
@@ -177,7 +183,31 @@ _sessionHadError: Set<session_id>
 // - SSE done 事件不会用 AI 内容覆盖错误气泡
 // - refreshConversation / updateTitleAndRefresh 跳过 messages 重拉，只更新侧边栏
 // - 用户主动发起新一轮请求或中断续接时清掉保护态
+
+// 排队消息（v0.1.4）：AI 流式期间用户仍可发送，消息进队列而非直接发起新流
+_pendingQueue: Map<session_id, QueueEntry[]>   // 与后端 Redis queue:{sid} 双向同步
+_queueLoaded: Set<session_id>                  // 已拉过队列的会话
+_queueDrainDeferred: Set<session_id>           // 用户不在场，推迟 drain 的会话
+
+// 定时任务（v0.1.4）
+scheduledTasksMap: Map<session_id, ScheduledTask[]>
 ```
+
+### 消息排队 / 自动续发（v0.1.4）
+
+```
+sendMessage 守卫：currentSessionId ∈ _activeStreamingSessions
+  → _enqueueMessage(POST /chat/{sid}/queue) 后 return，不进入流式
+
+drain 触发点（两处 watcher）：
+  1. '_activeStreamingSessions' 变化 → 算出「刚结束流式」的 sid → _tryDrainQueue(sid)
+  2. currentSessionId 变化 → 若新 sid ∈ _queueDrainDeferred → _tryDrainQueue(sid)
+
+_tryDrainQueue：用户不在该会话 → 加入 _queueDrainDeferred 推迟；
+               在该会话 → 出队第一条 + DELETE /chat/{sid}/queue?idx=0 + 走正常 sendMessage
+```
+
+**未新增 SSE 事件类型** —— 排队与定时任务全是客户端逻辑 + REST 接口，事件清单仍是 `init / content / reasoning / tool_call_name / tool_call_result / done / error / interrupt / permission_request`。
 
 ### 刷新页面
 
@@ -230,6 +260,18 @@ Vite dev server 通过代理把 `/chat` 和 `/static` 转发到 `http://127.0.0.
 | `/chat/{session_id}/tree` | GET | 整个 session 工作树（含上传文件 + AI 中间产物） |
 | `/chat/{session_id}/export/artifacts` | GET | 导出 DataAnalysis 产物（`?format=zip\|html`） |
 | `/chat/{session_id}/export/turn/{checkpoint_id}` | GET | 导出截至指定 checkpoint 的对话历史（OpenAI JSON + 完整 state 备份 ZIP） |
+| `/chat/{session_id}/queue` | GET / POST / DELETE | 排队消息（最多 20 条 × 4000 字符）；`DELETE?idx=N` 删单条，不传 `idx` 清空。App.vue 直接用 `fetch` 调，未封进 `api.js` |
+
+### 定时任务接口（`src/utils/api.js` 封装）
+
+| 函数 | 方法 / 路径 | 说明 |
+|------|------------|------|
+| `listScheduledTasks(sessionId)` | GET `/admin/scheduled-tasks?session_id=` | 列任务（可选会话过滤） |
+| `getScheduledTask(taskId, withHistory)` | GET `/admin/scheduled-tasks/{id}?with_history=` | 详情 + 可选执行历史 |
+| `createScheduledTask(payload)` | POST `/admin/scheduled-tasks` | 创建（`{name, cron, prompt, session_id}`） |
+| `updateScheduledTask(taskId, patch)` | PATCH `/admin/scheduled-tasks/{id}` | 部分更新（`enabled` / `cron`） |
+| `deleteScheduledTask(taskId)` | DELETE `/admin/scheduled-tasks/{id}` | 删除 |
+| `runScheduledTask(taskId)` | POST `/admin/scheduled-tasks/{id}/run` | 手动触发一次 |
 
 ### 其它接口
 
@@ -320,7 +362,7 @@ const isTest = process.env.NODE_ENV === 'test'
 | `app.name` | `灵析` | 应用名（菜单栏第一项、`app.getName()`） |
 | `app.title` | `灵析——数据分析智能助手` | 窗口标题 / 关于弹窗 |
 | `app.identifier` | `com.chatme.app` | bundle identifier |
-| `app.version` | `0.1.3` | 同步后端版本号 |
+| `app.version` | `0.1.4` | 同步后端版本号 |
 | `window.width × height` | `1100 × 720` | 主窗口尺寸 |
 | `window.minWidth × minHeight` | `650 × 480` | 最小尺寸 |
 | `devServer.url` | 从 Vite 导入的 `http://localhost:18211` | Electron 开发时加载的 URL |
@@ -454,8 +496,8 @@ DMG 阶段需要 `dmgbuild-bundle-arm64-*.tar.gz` 包，npmmirror 当前缺这�
 release/electron-builder/
 ├── mac-arm64/
 │   └── 灵析.app          ← 直接打开
-├── 灵析-0.1.3-arm64-mac.zip
-└── 灵析-0.1.3-mac.zip
+├── 灵析-0.1.4-arm64-mac.zip
+└── 灵析-0.1.4-mac.zip
 ```
 
 打开方式：
@@ -467,7 +509,7 @@ open ~/coding/projects/ChatMe/release/electron-builder/mac-arm64/灵析.app
 "~/coding/projects/ChatMe/release/electron-builder/mac-arm64/灵析.app/Contents/MacOS/灵析"
 
 # 解压 zip 后再打开
-unzip 灵析-0.1.3-arm64-mac.zip -d ~/Downloads
+unzip 灵析-0.1.4-arm64-mac.zip -d ~/Downloads
 open ~/Downloads/灵析.app
 ```
 

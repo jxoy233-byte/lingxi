@@ -31,7 +31,7 @@ from langgraph.errors import GraphBubbleUp
 from langchain_core.messages import ToolMessage
 
 from ChatMe.LoggingManager.logging_config import get_logger
-from .code_fingerprint import code_fingerprint
+from ..tools.code_fingerprint import code_fingerprint
 
 logger = get_logger("permissions")
 
@@ -554,7 +554,7 @@ def _pre_check_cmd(command: str):
     早期版本还有 `is_script` 拦截（python/node 脚本必须走 code 工具），已解除——
     cmd 工具现在可以直接跑 python/node 等脚本（沙盒默认 Linux 环境本身支持）。
     """
-    from .platforms import get_platform
+    from ..tools.platforms import get_platform
 
     platform = get_platform()
     is_d, reason = platform.is_dangerous(command)

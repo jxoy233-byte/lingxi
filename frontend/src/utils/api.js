@@ -70,3 +70,66 @@ export async function restartBackend() {
 export async function healthCheck() {
   return request('/admin/health', { method: 'GET' })
 }
+
+// =========================================================================
+// Scheduled Tasks（定时任务）
+// =========================================================================
+// 字段对齐 ChatMe/Scheduler/models.py:ScheduledTask.to_api_dict()
+
+/**
+ * 列出任务（按 session_id 过滤；空 = 全部）
+ * Returns: { ok, tasks: [...] }
+ */
+export async function listScheduledTasks(sessionId = '') {
+  const q = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''
+  return request(`/admin/scheduled-tasks${q}`, { method: 'GET' })
+}
+
+/**
+ * 任务详情
+ * Returns: { ok, task, history? }
+ */
+export async function getScheduledTask(taskId, withHistory = false) {
+  const q = withHistory ? '?with_history=true' : ''
+  return request(`/admin/scheduled-tasks/${taskId}${q}`, { method: 'GET' })
+}
+
+/**
+ * 创建任务
+ * payload: { name, cron, prompt, session_id? }
+ * Returns: { ok, task_id }
+ */
+export async function createScheduledTask(payload) {
+  return request('/admin/scheduled-tasks', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+/**
+ * 更新任务（部分字段；enabled / cron）
+ */
+export async function updateScheduledTask(taskId, patch) {
+  return request(`/admin/scheduled-tasks/${taskId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  })
+}
+
+/**
+ * 删除任务
+ */
+export async function deleteScheduledTask(taskId) {
+  return request(`/admin/scheduled-tasks/${taskId}`, {
+    method: 'DELETE',
+  })
+}
+
+/**
+ * 手动触发一次任务
+ */
+export async function runScheduledTask(taskId) {
+  return request(`/admin/scheduled-tasks/${taskId}/run`, {
+    method: 'POST',
+  })
+}

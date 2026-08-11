@@ -48,6 +48,7 @@ def test_registry_scans_current_skills():
         "image_parser",
         "data_analysis",
         "data_analysis_database",
+        "scheduler",
     }
 
 
@@ -58,7 +59,7 @@ def test_registry_mount_args_include_top_level_ro_and_per_skill_rw(monkeypatch):
     3. 嵌套子 skill（如 DataAnalysis/database）如果也是 rw，独立挂载而不是依赖父目录
     4. 宿主机每个挂载源路径都存在
     """
-    from ChatMe.ChatWorkflow.mcps.CodeSandboxPool import SandboxPool
+    from ChatMe.ChatWorkflow.mcps.sandbox.pool import SandboxPool
 
     skills_root = Path(__file__).resolve().parents[2] / "skills"
     pool = SandboxPool.__new__(SandboxPool)
@@ -334,23 +335,64 @@ def test_find_skill_mcp_tool_in_mcp_server():
     assert callable(_fs)
 
 
-def test_agent_prompt_injects_skill_index_and_usage_instructions():
+def test_agent_prompt_includes_find_skill_tool_block():
     from ChatMe.ChatWorkflow.config.graph_config import get_agent_node_prompt
-    from ChatMe.ChatWorkflow.mcps.platforms import init_platform
+    from ChatMe.ChatWorkflow.mcps.tools.platforms import init_platform
 
     init_platform()
     prompt = get_agent_node_prompt()
 
-    # find_skill 工具描述 + Decision Flow 引导
+    # find_skill 工具描述由 platform.all_tool_prompt_blocks() 注入
     assert "find_skill — Skill Discovery" in prompt
-    assert "Skill Discovery (via find_skill tool)" in prompt
-    assert 'find_skill("keywords")' in prompt
-    assert 'find_skill(query, mode="list")' in prompt
+    # Decision Flow 提了 find_skill 引导 LLM
+    assert "find_skill" in prompt
     # 不再嵌入完整 <available_skills> 块（仅 find_skill 工具描述里提到字符串）
     # 完整块格式 = "<available_skills>\n- name: ..." 必须在 prompt 里不出现
     assert "<available_skills>\n" not in prompt
     assert "{{available_skills}}" not in prompt
     assert "skills/skills.md" not in prompt
     assert "skills/Exa.py" not in prompt
-    # skill 的 code 调用示例仍存在
-    assert "from skills.Exa import exa_search" in prompt
+    # MAIN_FLOW 现在的关注点是思维方法（Decision Flow + Good Examples），
+    # 不再硬编码具体工具的调用模式（`find_skill("keywords")` 等已废弃）
+    assert 'find_skill(query, mode="list")' not in prompt
+    assert "from skills.Exa import exa_search" not in prompt
+    # 新增：MAIN_FLOW 应包含思维方法
+    assert "Decision Flow" in prompt
+    assert "Good Chain Examples" in prompt
+
+
+def test_scheduler_skill_in_find_skill_results():
+    """Scheduler skill 已被 SkillRegistry 自动发现（无需手动注册）。
+
+    LLM 用 find_skill(query="cron 定时 任务") 应能匹配到 Scheduler。
+    """
+    from ChatMe.ChatWorkflow.skills.registry import get_skill_registry
+
+    registry = get_skill_registry()
+    matches = registry.search("cron 定时 任务")
+    names = [m.name for m in matches]
+    assert "scheduler" in names, f"Scheduler skill 应在 find_skill 搜索结果中，实际：{names}"
+
+
+def test_main_flow_good_examples_cover_scheduler_skill():
+    """Good Examples 应包含 scheduler skill 的 find_skill + code() 调用模式。
+
+    验证 §6/§7/§8 已切到 skills/Scheduler 顶层函数路径，
+    不再走旧的 scheduler(action=...) MCP 工具 dispatch。
+    """
+    from ChatMe.ChatWorkflow.config.graph_config import get_agent_node_prompt
+    from ChatMe.ChatWorkflow.mcps.tools.platforms import init_platform
+
+    init_platform()
+    prompt = get_agent_node_prompt()
+
+    # 6. 定时任务创建：find_skill + cat SKILL.md + create_scheduled_task
+    assert 'find_skill(query="cron 定时 任务")' in prompt
+    assert "create_scheduled_task" in prompt
+    # 7. 取消：list_scheduled_tasks + cancel_scheduled_task
+    assert "list_scheduled_tasks" in prompt
+    assert "cancel_scheduled_task" in prompt
+    # 8. 立即触发：run_scheduled_task_now
+    assert "run_scheduled_task_now" in prompt
+    # 不应再出现旧的 MCP scheduler(action=...) 形式
+    assert "scheduler(action=" not in prompt

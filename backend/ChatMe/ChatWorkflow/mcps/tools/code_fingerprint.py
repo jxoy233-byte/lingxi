@@ -1,6 +1,12 @@
 """
 code 工具语义指纹提取（用于永久批准的 pattern 精确匹配）
 
+路径：
+- 当前位于 `mcps/tools/code_fingerprint.py`（2026-07 三子包拆分后；
+  原 `mcps/code_fingerprint.py`）
+- 被 `mcps/permissions/core.py` 调用（PermissionedToolNode 拦截到 code 工具
+  决策时算 fingerprint 做永久批准 pattern 匹配）
+
 设计要点：
 - 目的：解决"code 工具每次参数微变（如搜索词不同）就被重批"的痛点。Code 是一次性沙箱跑一段代码，
   完整 args JSON dump 做 fnmatch 几乎不会命中——这里提取 import 模块集 + 调用函数集 + lang/sandbox
@@ -18,7 +24,7 @@ code 工具语义指纹提取（用于永久批准的 pattern 精确匹配）
   - 未知语言返回空字符串（不写 fingerprint，避免误匹配）。
 
 安全：
-- code 工具本身跑在 sandbox（默认）/ docker 池，由 CodeSandboxPool + platforms 包住；
+- code 工具本身跑在 sandbox（默认）/ docker 池，由 sandbox/pool + tools/platforms 包住；
 - sub-tools（如 Tavily / Bocha / shell exec）自己有审批拦截；
 - 这里 fingerprint 持久化做的是"用户已审查过类似代码结构"的持久化，粒度合理。
 """

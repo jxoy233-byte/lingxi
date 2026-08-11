@@ -21,11 +21,14 @@ from ChatMe.APIRouter.checkpoint_janitor import router as checkpoint_janitor_rou
 from ChatMe.APIRouter.static_file import static_file_router
 from ChatMe.APIRouter.data_export import export_router
 from ChatMe.APIRouter.timed_clean import cleanup_lifespan, cleanup_router
+from ChatMe.APIRouter.scheduled_tasks import router as scheduled_tasks_router
+from ChatMe.APIRouter.message_queue import router as message_queue_router
+from skills.Scheduler import scheduler_lifespan
 from ChatMe.LoggingManager.logging_config import set_logger
 
 
 app_config = config.get_app_config()
-version = app_config.get("version", "v0.1.3")
+version = app_config.get("version", "v0.1.4")
 app_name = app_config.get("name", "ChatMe")
 app_description = app_config.get("description", "")
 app_host = app_config.get("host", "127.0.0.1")
@@ -33,10 +36,16 @@ app_port = app_config.get("port", 8211)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """组合多个 lifespan"""
+    """组合多个 lifespan
+
+    顺序：chat_service_lifespan → scheduler_lifespan → cleanup_lifespan
+    - scheduler 必须嵌套在 chat_service 之内（handler 依赖 chat_service.message_stream）
+    - cleanup 在最外层（与业务无关，独立运行）
+    """
     async with chat_service_lifespan(app):
-        async with cleanup_lifespan(app):
-            yield
+        async with scheduler_lifespan(app):
+            async with cleanup_lifespan(app):
+                yield
 
     logger.info(f"\n{'='*60}\n  {app_name} {version} 关闭\n{'='*60}")
 
@@ -103,6 +112,8 @@ app.include_router(static_file_router)
 app.include_router(export_router)
 app.include_router(admin_config_router)
 app.include_router(checkpoint_janitor_router)
+app.include_router(scheduled_tasks_router)
+app.include_router(message_queue_router)
 
 # 仅在 local=true 时加载本地 VL 模型
 # 关键：必须延迟 import —— model_vl.py 顶层会调 Qwen3VLForConditionalGeneration.from_pretrained
@@ -146,7 +157,10 @@ async def health():
 def main():
     # 确保全局配置存在
     ensure_global_config()
-    uvicorn.run("main:app", host=app_host, port=app_port)
+    # 关键：直接传 app 对象，不要传 "main:app" 字符串
+    # —— 字符串写法会让 uvicorn 重新 import 一次 main.py，
+    # 触发模块体二次执行（banner 打两次、LLM 自检跑两遍、VL/OSS 重复检测）
+    uvicorn.run(app, host=app_host, port=app_port)
     # uvicorn.run("main:app", host=app_host, port=app_port, reload=True)
 
 if __name__ == "__main__":

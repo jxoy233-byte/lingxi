@@ -46,85 +46,97 @@ Dependency: Tool B needs Tool A's result → sequential. Independent → paralle
 Note: Double braces `{{}}` are escape sequences — AI should output single braces instead
 """
 
-# ----- MAIN_FLOW: 主 agent 专属决策流程 -----
+# ----- MAIN_FLOW: 主 agent 思维框架 -----
+# 这里讲「怎么想」（思维方法 + 关键决策路径 + Good Chain Examples 锚定）。
+# 具体工具的调用模式由对应的 `<tool>_tool_prompt_block` 承载
+# （platform.all_tool_prompt_blocks() 拼接），LLM 自己会从工具描述里读懂怎么调；
+# MAIN_FLOW 给出的是更高层的执行策略 + 优质示例链。
 
 PROMPT_MAIN_FLOW = """
 ## Decision Flow
 ```
-Task arrives
+User task → Understand intent
 │
-├─ Time references (today/tomorrow/now/this week/current date)?
+├─ Time references (today / tomorrow / now / this week / current time)?
 │   YES → ctime FIRST, then proceed
 │
-├─ Task could benefit from a packaged skill?
-│   YES → find_skill("keywords") first
-│       ├─ Match found → cmd("cat /skills/<name>/SKILL.md") → code()
-│       └─ No match → find_skill(query, mode="list") to see all options
-│         (or proceed to code() with normal Python libraries)
+├─ Need packaged skill (search / data analysis / image parsing / data export / etc.)?
+│   YES → find_skill (match) to discover, then follow the skill's SKILL.md
 │
-├─ Complex / large / multi-deliverable task?
-│   YES → split into focused steps and execute them in dependency order
+├─ Need to explore environment or read files?
+│   YES → cmd (ls / cat / grep)
 │
-├─ Need to inspect files or environment? → cmd (ls/cat/grep — only what's needed)
+├─ Need code execution (data processing / calculation / drawing)?
+│   YES → code (Python / JS inline)
 │
-├─ Code execution needed? (data processing, calculation, drawing)
-│   YES → code
+├─ Need recurring / scheduled work?
+│   YES → scheduler (create / list / cancel)
 │
-├─ All needed tool results received → output Done immediately
+├─ Complex multi-step task (multi-deliverable / real data / multiple steps)?
+│   YES → see example #5 below for the 4-phase loop (Scope → Plan → Execute&Verify → Compose)
 │
-├─ Can solve directly from training knowledge?
-│   YES → output Done
+├─ Tried multiple approaches but still stuck?
+│   YES → interrupt(...) or just `Done`
 │
-└─ Missing required user information → interrupt
+└─ Task complete or no further tools needed?
+    YES → output `Done` (one word, nothing else)
 ```
 
-## Skill Discovery (via find_skill tool)
-
-`find_skill` is the only way to discover skills — there is no embedded skill index here.
-
-1. `find_skill("keywords")` (mode='match') — keyword search, returns top 3 matches with brief info
-2. If a match looks relevant, read the SKILL.md: `cmd("cat /skills/<name>/SKILL.md")`
-3. If uncertain, escalate: `find_skill(query, mode="list")` to see the full index
-4. Invoke a matched skill via `code()` using the entry's `module`, e.g. `from skills.Exa import exa_search`
-5. Lazy skills (e.g. data_analysis_database) are NOT in the default list — discover them by following their parent SKILL.md
-
-Do not read skill source code before its SKILL.md. Inspect source only if the documented invocation fails.
-
 ## Project Operation Dir
-/skills/ — Skill library (read only except manifests marked `mount: rw`)
-/cached/<sid>/ — Current session cached files (read and write)
+- `/skills/` — Skill library (read only)
+- `/cached/<sid>/` — Current session's cached files (read & write); user uploads live here
+- `/skills/<name>/SKILL.md` — Always read this BEFORE invoking a skill; it documents the contract
 
 ## Good Chain Examples
 
-Good (matched skill):
-find_skill("search") → match found (exa / tavily)
-cmd("cat /skills/Exa/SKILL.md") → read the packaged usage guide
-code("python", "from skills.Exa import exa_search; result = exa_search(...); print(result)")
+###1 Match Skill → Read SKILL.md → Follow Contract
+User: "搜索一下今年 AI 行业的并购案例"
+- `find_skill(query="AI 并购 搜索")` → returns `Bocha Search`
+- `cmd("cat /skills/BochaSearch/SKILL.md")` → read the contract
+- call the skill per its contract (usually `code()` to invoke the wrapper, or `cmd` for CLI)
 
-Good (no matched skill):
-code("python", "# solve with normal Python libraries")
+###2 No Skill Needed → Direct Tool Chain
+User: "统计当前目录有多少个 .py 文件"
+- `cmd("ls *.py | wc -l")` → return count directly
 
-Good (environment exploration):
-cmd("ls /cached/<sid>/") → inspect only when the task needs user files
-cmd("cat /cached/<sid>/filename") → read the required file
+###3 Environment Exploration First
+User: "看看 skills 目录里都有什么"
+- `cmd("ls /skills/")` → discover available skills
 
-Good (image parsing):
-find_skill("image") → match: image_parser
-cmd("cat /skills/ImageParser/SKILL.md")
-code("python", "from skills.ImageParser import parse_image; print(parse_image(...))")
+###4 Image Parsing
+User: "分析一下这张图片里的内容" (with image upload)
+- file is already in `/cached/<sid>/` (file_parse_node preprocessed)
+- `find_skill(query="image parsing")` → returns `ImageParser`
+- `cmd("cat /skills/ImageParser/SKILL.md")` → read contract
+- follow contract (likely `code()` to invoke the wrapper)
 
-Good (data analysis):
-find_skill("数据") → match: data_analysis
-cmd("cat /skills/DataAnalysis/SKILL.md") → read input/output conventions first
-cmd("ls /cached/<sid>/...") → locate the input file when needed
-code("python", "from skills.DataAnalysis import ChatDataAnalysisFormat; import pandas as pd; ...")
-- generate + analyze + save charts/data/reports/scripts to OUTPUT_DIR in one pass when possible
-- for database tasks, follow the parent SKILL.md and lazily read `/skills/DataAnalysis/database/SKILL.md`
+###5 Data Analysis — 4-Phase Loop (canonical example for complex multi-step)
+User: "分析一下 sales.csv 里各品类的销售情况，生成柱状图，再写一段 1 页总结"
 
-Complex tasks (multi-step / multi-file / ML / large data):
-code(...) → split into multiple calls, each building on previous output
-- read prior output to decide the next step; do not blindly retry
+A "complex task" = multi-step + real data + multiple deliverables. Don't dump it into one `code()` call — silent failures. Loop:
 
+1. **Scope & Discover** — `cmd("ls /cached/<sid>/")` confirm input; `find_skill` → `DataAnalysis`; **`cmd("cat /skills/DataAnalysis/SKILL.md")`** (never skip — #1 cause of "wrote to wrong path" bugs)
+2. **Plan** (no tool call) — reply with inputs + outputs, e.g. `gen_001/charts/foo.png + gen_001/reports/summary.md`
+3. **Execute & Verify** — `code(...)` per step, then `cmd("ls gen_001/charts/")` to confirm the file landed. If next step is >30 lines, write to `gen_001/scripts/foo.py` and run.
+4. **Compose & Done** — write the report with `[[cached/.../charts/foo.png]]` reference, reply with paths, output `Done`.
+
+Anti-patterns: skipping `cat SKILL.md`; one mega-`code()` call; continuing when `ls` shows the previous artifact missing.
+
+###6 Recurring / Scheduled Work
+User: "每天早上 9 点帮我汇总昨天的销售数据"
+- `find_skill(query="cron 定时 任务")` → returns `Scheduler`
+- `cmd("cat /skills/Scheduler/SKILL.md")` → read contract (4 functions: create/list/cancel/run + **`local=True`**)
+- `code("from skills.Scheduler import create_scheduled_task; print(create_scheduled_task(name='每日销售汇总', cron='0 9 * * *', prompt='分析昨天的 sales.csv ...', session_id='<current>'))", local=True)` → returns task_id
+
+###7 Cancel a Scheduled Task
+User: "把那个销售汇总的定时任务取消"
+- `code("from skills.Scheduler import list_scheduled_tasks; print(list_scheduled_tasks(session_id='<current>'))", local=True)` → find task_id
+- `code("from skills.Scheduler import cancel_scheduled_task; print(cancel_scheduled_task(task_id='...'))", local=True)` → confirm cancellation
+
+###8 Trigger a Task Now (no wait for cron)
+User: "现在帮我跑一次销售汇总，别等明天 9 点"
+- `code("from skills.Scheduler import list_scheduled_tasks; print(list_scheduled_tasks(session_id='<current>'))", local=True)` → find task_id
+- `code("from skills.Scheduler import run_scheduled_task_now; print(run_scheduled_task_now(task_id='...'))", local=True)` → trigger now (cron unchanged)
 """
 
 
@@ -174,7 +186,7 @@ cached/'sid'/ — Your Own Sid Cached files operation dir (read and write)
 
 # ----- TOOLS: 工具定义模块（统一由 platform adapter 提供）-----
 # cmd / code / ctime / interrupt 四个 MCP 工具的 prompt 片段全部走
-# ChatMe.ChatWorkflow.mcps.platforms 的 adapter。
+# ChatMe.ChatWorkflow.mcps.tools.platforms 的 adapter。
 # - 平台特定工具（cmd / code）由各 adapter 子类各自实现
 # - 跨平台一致工具（ctime / interrupt）由 PlatformAdapter base 默认提供
 # 加新 MCP 工具：在 base 里加 ``<tool>_tool_prompt_block`` property + 在
@@ -229,7 +241,7 @@ def get_agent_node_prompt() -> str:
     - DarwinAdapter: zsh + Unix 命令（macOS 备注）
     - WindowsAdapter: cmd.exe + Windows 等价命令 + %TEMP%
     """
-    from ChatMe.ChatWorkflow.mcps.platforms import get_platform
+    from ChatMe.ChatWorkflow.mcps.tools.platforms import get_platform
 
     platform = get_platform()
     return "\n\n".join([
@@ -260,7 +272,7 @@ def build_sub_agent_prompt(task: str, prompt_addon: str = "") -> str:
         task: 子任务描述（主 agent 下发给 sub-agent 的任务）
         prompt_addon: 额外指令（可选，主 agent 给的额外要求）
     """
-    from ChatMe.ChatWorkflow.mcps.platforms import get_platform
+    from ChatMe.ChatWorkflow.mcps.tools.platforms import get_platform
     platform = get_platform()
     parts = [
         "# Sub-Agent — Task Execution Agent",

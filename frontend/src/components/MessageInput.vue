@@ -26,6 +26,10 @@
       </button>
     </div>
 
+    <!-- 排队机制保留在 App.vue 后端（流式中点击发送 → 入 Redis → 上轮结束自动 drain），
+         此处不渲染任何排队卡 / "排队中(N)" 头 / 进度提示 —— 走 ChatGPT/Codex 风格：
+         用户点完「发送」消息透明吸收，看起来就像即时发送，下轮响应自然接上。 -->
+
     <!-- 文件列表显示区域 - 横向紧凑布局 -->
     <div v-if="selectedFiles.length > 0" class="file-list-container">
       <div class="file-list-scroll">
@@ -139,7 +143,7 @@
 
       <button
         @click="handleSend"
-        :disabled="(!inputText.trim() && selectedFiles.filter(f => !f.error && !f.uploading).length === 0) || isLoading || hasUploadingFiles || permissionResumeInFlight"
+        :disabled="(!inputText.trim() && selectedFiles.filter(f => !f.error && !f.uploading).length === 0) || hasUploadingFiles || permissionResumeInFlight"
         class="send-btn"
         :title="hasUploadingFiles ? '文件上传中，请等待' : permissionResumeInFlight ? '权限决策处理中，请等待' : ''"
       >
@@ -191,9 +195,15 @@ export default {
     permissionResumeInFlight: {
       type: Boolean,
       default: false
+    },
+    // 当前会话的排队消息列表（per session FIFO）；空数组时不渲染。
+    // App.vue 的 queueForCurrentSession 计算属性下传。
+    queue: {
+      type: Array,
+      default: () => []
     }
   },
-  emits: ['send', 'files-selected-need-session', 'update:quote'],
+  emits: ['send', 'files-selected-need-session', 'update:quote', 'remove-queue-item', 'clear-queue'],
   data() {
     return {
       inputText: '',
@@ -444,7 +454,12 @@ export default {
     handleSend() {
       const validFiles = this.selectedFiles.filter(f => !f.error && !f.uploading)
 
-      if ((!this.inputText.trim() && validFiles.length === 0) || this.isLoading || this.permissionResumeInFlight) {
+      // 关键：isLoading 不再阻止发送 —— busy 时点击走 App.vue 的入队路径，把消息存到 Redis + 渲染排队卡。
+      // permissionResumeInFlight 仍阻止（审批决策中不应入队，避免和 resume 流抢顺序）。
+      if ((!this.inputText.trim() && validFiles.length === 0) || this.permissionResumeInFlight) {
+        return
+      }
+      if (this.hasUploadingFiles) {
         return
       }
 
@@ -1092,7 +1107,6 @@ export default {
   background: var(--bg-hover);
   color: var(--text-primary);
 }
-
 /* 文件列表容器 - 横向紧凑布局 */
 .file-list-container {
   max-width: 900px;

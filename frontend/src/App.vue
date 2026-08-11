@@ -66,6 +66,8 @@
           :pending-interrupt-session-id="_pendingInterruptSessionId"
           :pending-tool-approval="pendingToolApproval"
           :submitting-tool-decision="submittingToolDecision"
+          :scheduled-tasks="scheduledTasksForCurrentSession"
+          :scheduled-tasks-refreshing="_scheduledTasksRefreshing"
           @tool-decide="onToolDecision"
           @restore="restoreCheckpoint"
           @restream="handleRestream"
@@ -73,7 +75,12 @@
           @preview-file="previewFile"
           @interrupt="handleInterrupt"
           @resume="handleResume"
+          @restart-session="restartConversation"
           @quote="handleQuote"
+          @scheduled-tasks-refresh="onScheduledTasksRefresh"
+          @scheduled-task-toggle="onScheduledTaskToggle"
+          @scheduled-task-run="onScheduledTaskRun"
+          @scheduled-task-delete="onScheduledTaskDelete"
         />
 
         <MessageInput
@@ -81,9 +88,12 @@
           :is-loading="isLoading"
           :session-id="currentSessionId"
           :permission-resume-in-flight="permissionResumeInFlight"
-          v-model:quote="currentQuote"
+          :queue="queueForCurrentSession"
           @send="sendMessage"
+          @remove-queue-item="onRemoveQueueItem"
+          @clear-queue="onClearQueue"
           @files-selected-need-session="handleFilesSelectedNeedSession"
+          v-model:quote="currentQuote"
         />
       </main>
 
@@ -334,12 +344,27 @@ export default {
       _streamingMessages: new Map(),       // session_id -> 当前 messages 数组引用（与 this.messages 同源）
       _streamingMeta: new Map(),           // session_id -> { aiIndex, responseStartTime, userMessage, lastUserMessage }
       _streamTimers: new Map(),            // session_id -> setInterval id；本地读秒（每 250ms 重算 elapsedMs），让 SSE 事件间隙数字也能跳
+      // —— 消息队列（per session 排队发送）——
+      // session_id -> QueueEntry[]，FIFO 顺序；与后端 Redis db1 queue:{sid} 双向同步
+      // QueueEntry: { message, quote, queued_at }（与后端 JSON 字段一致）
+      _pendingQueue: new Map(),
+      // 已从后端拉过队列的 sid 集合（避免每次切会话都重复 GET）
+      _queueLoaded: new Set(),
+      // 等用户切回再 drain 的 sid 集合：
+      // - stream 结束时若用户不在该 sid 上，drain 推迟到 currentSessionId 切回时
+      // - 用 Set 包装：Vue 2 必须整 Set 替换才能触发响应式（add/delete 静默）
+      _queueDrainDeferred: new Set(),
       // —— 后端健康监测 —— null = 还没拉过；true = 健康；false = 失联 → 显示 banner
       backendHealth: null,
       restartingBackend: false,  // 用户点「重新连接」期间 disable 按钮，避免重复触发
       // appReady 从 false→true 触发的 initConversationState 只跑一次，避免 servicesReady
       // 反复变化时（比如重启后端）重复初始化会话
-      _conversationInited: false
+      _conversationInited: false,
+      // —— 定时任务缓存（per session） ——
+      // session_id -> ScheduledTask[]；空数组 = 该 session 无任务（面板不渲染）
+      scheduledTasksMap: new Map(),
+      // 整图 refreshing 标记（驱动面板 ↻ 旋转）
+      _scheduledTasksRefreshing: false,
     }
   },
   mounted() {
@@ -442,7 +467,52 @@ export default {
         }
       },
       immediate: false
+    },
+    // —— 消息队列：流式结束 → 触发 drain（用户切走则推迟） ——
+    // SSE done / error / interrupt 三处都已把 sid 从 _activeStreamingSessions 移除并 new Set() 整体替换，
+    // 这里的 watcher 会拿到 oldSet（移除前）和 newSet（移除后），用 oldSet - newSet 算出"刚流式完的 sid"。
+    // 行为：刚流式完的 sid 若队列非空 → 立即 drain（前提：用户在 sid 上）或推迟（用户不在 sid 上）。
+    // 不用在 15+ done 处理器里各自手写 drain 的原因：watcher 是统一触发点，加新 SSE 入口不必改这里。
+    '_activeStreamingSessions': {
+      handler(newSet, oldSet) {
+        if (!oldSet) return
+        for (const sid of oldSet) {
+          if (newSet.has(sid)) continue
+          // sid 刚离开流式 → 检查是否有排队消息需要 drain
+          this._tryDrainQueue(sid)
+        }
+      }
+    },
+    // 用户切会话时检查新会话是否有待 drain 的排队（覆盖 stream 结束时用户不在该 sid 的延迟场景）
+    currentSessionId: {
+      handler(newSid) {
+        if (newSid && this._queueDrainDeferred.has(newSid)) {
+          this._queueDrainDeferred.delete(newSid)
+          this._queueDrainDeferred = new Set(this._queueDrainDeferred)
+          this.$nextTick(() => this._tryDrainQueue(newSid))
+        }
+      }
     }
+  },
+  computed: {
+    /**
+     * 当前会话的定时任务列表（用于传给 MessageList / ScheduledTasksPanel）
+     * - 无 session 时返 []（避免 map.get 返 undefined）
+     * - 没拉过该 session 时也返 []（首次进会话后 loadConversation 会拉）
+     */
+    scheduledTasksForCurrentSession() {
+      if (!this.currentSessionId) return []
+      return this.scheduledTasksMap.get(this.currentSessionId) || []
+    },
+    /**
+     * 当前会话的排队消息列表（用于 MessageInput 渲染卡片）
+     * - 无 session 时返 []
+     * - loadConversation 会拉一次（首次访问 / 切会话都拉）
+     */
+    queueForCurrentSession() {
+      if (!this.currentSessionId) return []
+      return this._pendingQueue.get(this.currentSessionId) || []
+    },
   },
   methods: {
     setTheme(isDark) {
@@ -1423,7 +1493,7 @@ export default {
                   toolIndex: j,
                   command: data.command || '',
                   action: data.action || 'write',
-                  executionEnv: data.execution_env || 'sandbox',
+                  // 不再缓存 executionEnv —— MessageItem 直接读 toolCall.args.local 渲染
                   sessionId,
                 }
                 this.stopResponseTimer()
@@ -1562,7 +1632,7 @@ export default {
         toolIndex,
         command: data.command || '',
         action: data.action || 'write',
-        executionEnv: data.execution_env || 'sandbox',
+        // 不再缓存 executionEnv —— MessageItem 直接读 toolCall.args.local 渲染
         sessionId,
         // 不再缓存 targetArr 引用：onToolDecision 时按 sessionId + messageIndex/toolIndex
         // 重新解析（snapshot 优先 → 当前 messages 兜底），避免 stale 引用导致写错位置
@@ -1583,6 +1653,11 @@ export default {
       // decision: 'approve' | 'this-time-only' | 'deny' | 'feedback:<text>'
       // 后端 permissions.request_approval 看到 'feedback:' 前缀会返回 ("feedback", text)，
       // 由 _permission_wrap 包成 ToolMessage 让 LLM 看到用户指引并重新尝试调用。
+      // 防止快速双击 / 连点导致跑两次 onToolDecision：第二次会再起一个 resume 流，
+      // 那个流推过来的 tool_call_name 跟第一条 entry 对不上（_pendingApproval 已被第一条
+      // 置 false / id 是另一条 run_id），merge 会再 push 一条新 entry → 重复显示。
+      // :disabled 是 Vue 异步刷 DOM 的，同一 tick 内的连点挡不住，必须在 JS 层再加一道。
+      if (this.submittingToolDecision || this.permissionResumeInFlight) return
       if (!this.pendingToolApproval) return
       const { sessionId } = this.pendingToolApproval
       if (!sessionId) {
@@ -1590,18 +1665,26 @@ export default {
         return
       }
 
-      // deny / feedback 时：先把当前 entry 在前端本地标记为已拒绝 / 已反馈。
-      // 根因：gate 返回 synthetic denied ToolMessage 时 LangGraph 不发 on_tool_end 事件，
-      // ChatService 的 tool_call_result SSE 永远到不了前端，entry 会停在
-      // _pendingApproval=true / result=null。如果不立刻更新，后续同 fingerprint 的
-      // permission_request 会走 handlePermissionRequest 的 `name && result === null`
-      // 匹配命中这条旧 entry，把 _pendingApproval 再次标 true —— 表现为"覆盖"而不是追加。
+      // deny / feedback 时：先把当前 entry 在前端本地写入 synthetic result，
+      // 让用户点完按钮后立刻能看到「rejected / feedback」文案，不必等 resume SSE 几百毫秒延迟。
+      // 后端 resume_permission_stream 走 _build_intercepted_tool_call_events（on_chain_end 兜底）
+      // 会为所有决策（含 deny / feedback）都 emit tool_call_name + tool_call_result，
+      // 其 tool_call_result 会用后端合成的 ToolMessage content 覆盖本地的 result（两者文案对齐）。
       //
       // 文案严格对齐后端 permissions.py:_rejected_tool_result / _feedback_tool_result
-      // 的模板（permissions.py:507 / :520），保证前端展示与后端注入到 LangGraph state
-      // 的 ToolMessage content 完全一致（LLM 看到什么，前端 UI 就展示什么）。
-      // approve / this-time-only 不走这条路径：gate 真正执行 execute(request)，on_tool_start
-      // + on_tool_end 会正常发，mergeToolCallStart / mergeToolCallResult 会正确写 result。
+      // 的模板，保证前端展示与后端注入到 LangGraph state 的 ToolMessage content
+      // 完全一致（LLM 看到什么，前端 UI 就展示什么）。
+      //
+      // ⚠️ 关键：这里必须**保留** _pendingApproval: true（绝对不能置 false）！
+      // resume 流的 tool_call_name 进 mergeToolCallStart 时需要按 step 1
+      // (_pendingApproval && name === data.content.name) 命中这条 entry 原地更新，
+      // 把 id 刷成后端真实 tc_id、_pendingApproval 置 false。如果这里把 _pendingApproval
+      // 置成 false，step 1 失配 → step 2/3 fallback 也都找不到 → 最终 push 一条新 entry
+      // → 重复显示（同 permission 请求会看到两条相同 tool 的结果）。
+      //
+      // approve / this-time-only 不走这条本地写入：gate 真正执行 execute(request)，
+      // on_tool_start + on_tool_end 会正常发，mergeToolCallStart / mergeToolCallResult
+      // 会按正常路径更新 entry，状态完全由 resume 流接管。
       if (decision === 'deny' || (typeof decision === 'string' && decision.startsWith('feedback:'))) {
         const { messageIndex, toolIndex, sessionId } = this.pendingToolApproval
         // 按需解析目标数组：snapshot 优先（用户可能切走过原 session，this.messages 已
@@ -1630,7 +1713,9 @@ export default {
           updatedToolCalls[toolIndex] = {
             ...updatedToolCalls[toolIndex],
             result: syntheticResult,
-            _pendingApproval: false,
+            // 必须保留 _pendingApproval: true（不能置 false）——resume 流到达时
+            // mergeToolCallStart step 1 (_pendingApproval && name) 要命中这条 entry
+            // 原地更新；若置 false 会被 fallback push 一条新 entry → 重复显示。
           }
           arr[messageIndex] = { ...arr[messageIndex], toolCalls: updatedToolCalls }
         }
@@ -2611,6 +2696,32 @@ export default {
         this.$router.push('/')
       }
     },
+    /**
+     * 中断态专属：回溯到最近一段已完成 checkpoint + 重新发送触发该轮的用户消息。
+     *
+     * 与 MessageItem 上「重新生成」按钮的语义完全一致：复用 handleRestream 的标准流程
+     *   1. POST /chat/{sid}/backtrack 把 LangGraph state 回退到上一轮 checkpoint
+     *   2. 重新拉取历史 messages
+     *   3. 把触发中断的用户消息 push 回 messages
+     *   4. 走 /chat/ 重新生成
+     *
+     * 调用时机：MessageItem @restart-session（仅在 isCurrentSessionInterrupted 可见）。
+     */
+    restartConversation() {
+      if (!this.currentSessionId || this.isLoading) return
+      // 找到被中断的最新 AI 消息 —— handleRestream 会自动 fallback 到上一轮 AI 的 checkpointId
+      let interruptedAiMessage = null
+      for (let i = this.messages.length - 1; i >= 0; i--) {
+        const msg = this.messages[i]
+        if (msg.role === 'ai') {
+          interruptedAiMessage = msg
+          break
+        }
+      }
+      if (!interruptedAiMessage) return
+      // 复用 handleRestream：它会自动找上一轮 checkpoint + 找到 user message + backtrack + 重新生成
+      this.handleRestream(undefined, interruptedAiMessage)
+    },
     cleanupLoadingState() {
       // 停止计时器
       this.stopResponseTimer()
@@ -2628,6 +2739,246 @@ export default {
       this.isRestreaming = false
       this.currentAiMessageIndex = null
     },
+
+    // ===== 消息队列：拉取 + 入队 + 删 + 清空 + drain =====
+    // 与后端 /chat/{sid}/queue 端点对齐（FIFO LIST，db1 queue:{sid}）。
+    // local 是 source of truth，但 _pendingQueue 始终以 server 返回的 items 覆盖（避免乐观更新与服务端顺序错位）。
+
+    /**
+     * 拉取指定 session 的排队消息；结果写入 _pendingQueue。
+     * 切会话时由 loadConversation 调一次；enqueue / remove / clear 后也会 re-fetch 同步本地。
+     */
+    async _loadQueueForSession(sid) {
+      if (!sid) return
+      try {
+        const r = await fetch(`/chat/${sid}/queue`)
+        if (r.ok) {
+          const data = await r.json()
+          const m = new Map(this._pendingQueue)
+          m.set(sid, data.items || [])
+          this._pendingQueue = m
+          this._queueLoaded.add(sid)
+        }
+      } catch (e) {
+        console.warn('[queue] load failed:', e)
+      }
+    },
+
+    /**
+     * 把一条消息追加到 sid 的队列尾部（后端 RPUSH + 本地 re-fetch）。
+     * MessageInput.handleSend emit 'send' 之前已清空 inputText / files / quote，本方法只做"加排队卡"一件事。
+     */
+    async _enqueueMessage(sid, payload) {
+      try {
+        const r = await fetch(`/chat/${sid}/queue`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: payload.message,
+            quote: payload.quote ?? null,
+          }),
+        })
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}))
+          console.warn('[queue] enqueue failed:', err.detail || `HTTP ${r.status}`)
+          return false
+        }
+        // 用服务端权威顺序覆盖本地（避免本地 pending 顺序与 Redis 不一致）
+        await this._loadQueueForSession(sid)
+        return true
+      } catch (e) {
+        console.warn('[queue] enqueue error:', e)
+        return false
+      }
+    },
+
+    /**
+     * MessageInput 卡片 × 按钮：按 idx 删单条。idx 是 FIFO 顺序（0 = 最先入队）。
+     */
+    async _removeQueueItem(sid, idx) {
+      if (!sid || idx === undefined || idx === null) return
+      try {
+        const r = await fetch(`/chat/${sid}/queue?idx=${idx}`, { method: 'DELETE' })
+        if (!r.ok) {
+          console.warn('[queue] remove failed:', r.status)
+          return
+        }
+        await this._loadQueueForSession(sid)
+      } catch (e) {
+        console.warn('[queue] remove error:', e)
+      }
+    },
+
+    /**
+     * MessageInput 顶部「全部清空」：DELETE /chat/{sid}/queue（无 idx → 整 key 删除）。
+     */
+    async _clearQueue(sid) {
+      if (!sid) return
+      try {
+        const r = await fetch(`/chat/${sid}/queue`, { method: 'DELETE' })
+        if (!r.ok) {
+          console.warn('[queue] clear failed:', r.status)
+          return
+        }
+        const m = new Map(this._pendingQueue)
+        m.set(sid, [])
+        this._pendingQueue = m
+      } catch (e) {
+        console.warn('[queue] clear error:', e)
+      }
+    },
+
+    /**
+     * 弹队列头并送出去。
+     * 行为：
+     *   1. 从本地 _pendingQueue[sid] 拿 head，slice(1) 留下尾（立即更新 UI，不等后端）
+     *   2. DELETE /chat/{sid}/queue?idx=0（不 await；失败不影响本轮，drain 仍走 sendMessage）
+     *   3. 调 sendMessage 走正常流（push 用户消息 + 起 SSE + _activeStreamingSessions add）
+     *      关键是 sendMessage 顶部那个守卫会再次检查 _activeStreamingSessions.has(sid)：
+     *      此刻 sid 刚从 stream-end 中移除 → has(sid) === false → 走正常路径不重复入队。
+     * 之所以不 await 后端 DELETE：sendMessage 是 fire-and-forget 用户感知操作，
+     *   让 Redis 删除与前端起流同时进行；如果 DELETE 失败，下一次 _loadQueueForSession
+     *   会重新拉到 head，导致重复发送（可接受：drain 的语义是"按 FIFO 发"，掉一条不致命）。
+     */
+    _drainQueueAndSend(sid) {
+      const queue = this._pendingQueue.get(sid) || []
+      if (queue.length === 0) return
+      const head = queue[0]
+      // 立即从本地移除（slice 出新数组触发响应式）
+      const m = new Map(this._pendingQueue)
+      m.set(sid, queue.slice(1))
+      this._pendingQueue = m
+      // 后端删 idx=0（不 await）
+      fetch(`/chat/${sid}/queue?idx=0`, { method: 'DELETE' })
+        .catch(e => console.warn('[queue] drain delete failed:', e))
+      // 调 sendMessage 走正常路径（不走 enqueue 守卫，因为 sid 已不在 _activeStreamingSessions）
+      this.sendMessage({
+        message: head.message,
+        files: [],
+        processedOutputs: [],
+      })
+    },
+
+    /**
+     * drain 的统一入口。
+     * - sid 不在 _activeStreamingSessions（即流式已结束）且队列非空 → 准备 drain
+     * - 用户当前在 sid 上 → 立即 drain
+     * - 用户不在 sid 上 → 推迟到 currentSessionId 切回时（currentSessionId watcher 处理）
+     * 被 _activeStreamingSessions watcher 与 currentSessionId watcher 共用。
+     */
+    _tryDrainQueue(sid) {
+      if (!sid) return
+      // 仍在流式（极端 race：调用方与新发起 sendMessage 之间）→ 不 drain
+      if (this._activeStreamingSessions.has(sid)) return
+      const queue = this._pendingQueue.get(sid) || []
+      if (queue.length === 0) return
+      if (sid !== this.currentSessionId) {
+        // 用户不在该 sid 上 → 推迟（currentSessionId 切回时 watcher 会处理）
+        this._queueDrainDeferred.add(sid)
+        this._queueDrainDeferred = new Set(this._queueDrainDeferred)
+        return
+      }
+      this.$nextTick(() => this._drainQueueAndSend(sid))
+    },
+
+    /** MessageInput 卡片 × 按钮 → 当前会话删 idx */
+    async onRemoveQueueItem(idx) {
+      if (!this.currentSessionId) return
+      await this._removeQueueItem(this.currentSessionId, idx)
+    },
+
+    /** MessageInput 顶部「全部清空」 → 当前会话清空 */
+    async onClearQueue() {
+      if (!this.currentSessionId) return
+      await this._clearQueue(this.currentSessionId)
+    },
+
+    // ===== 定时任务：拉取 + CRUD 转发 =====
+
+    /**
+     * 拉取指定 session 的定时任务列表；结果写入 scheduledTasksMap
+     * - 切会话时由 loadConversation 调用
+     * - 面板 ↻ 按钮触发（让用户主动刷新）
+     * - 失败静默（网络抖动不该让 UI 红屏）
+     */
+    async fetchScheduledTasks(sessionId) {
+      if (!sessionId) return
+      this._scheduledTasksRefreshing = true
+      try {
+        const { listScheduledTasks } = await import('./utils/api.js')
+        const data = await listScheduledTasks(sessionId)
+        const tasks = data.tasks || []
+        // 新 Map 触发响应式（Vue 2 Set/Map 必须整替换）
+        const next = new Map(this.scheduledTasksMap)
+        next.set(sessionId, tasks)
+        this.scheduledTasksMap = next
+      } catch (e) {
+        console.warn('[scheduled-tasks] fetch failed:', e)
+      } finally {
+        this._scheduledTasksRefreshing = false
+      }
+    },
+
+    /** ScheduledTasksPanel ↻ 按钮 → 重拉当前会话任务 */
+    async onScheduledTasksRefresh() {
+      if (this.currentSessionId) {
+        await this.fetchScheduledTasks(this.currentSessionId)
+      }
+    },
+
+    /** 行内 ⏸/▶ 切换 enabled */
+    async onScheduledTaskToggle(taskId, newEnabled) {
+      const { updateScheduledTask } = await import('./utils/api.js')
+      try {
+        await updateScheduledTask(taskId, { enabled: newEnabled })
+        // 本地乐观更新
+        if (this.currentSessionId) {
+          const cur = this.scheduledTasksMap.get(this.currentSessionId) || []
+          const next = cur.map(t =>
+            t.task_id === taskId ? { ...t, enabled: newEnabled } : t
+          )
+          const m = new Map(this.scheduledTasksMap)
+          m.set(this.currentSessionId, next)
+          this.scheduledTasksMap = m
+        }
+      } catch (e) {
+        console.error('[scheduled-tasks] toggle failed:', e)
+        // 失败回滚：重新拉
+        if (this.currentSessionId) await this.fetchScheduledTasks(this.currentSessionId)
+      }
+    },
+
+    /** ⚡ 立即运行一次 */
+    async onScheduledTaskRun(taskId) {
+      const { runScheduledTask } = await import('./utils/api.js')
+      try {
+        await runScheduledTask(taskId)
+        // 给一个简短反馈（不弹 toast，保持简洁）
+        console.info(`[scheduled-tasks] 触发任务 ${taskId.slice(0, 8)}`)
+      } catch (e) {
+        console.error('[scheduled-tasks] run failed:', e)
+      }
+    },
+
+    /** 🗑 删除（小红叉二次确认后由 ScheduledTaskItem emit） */
+    async onScheduledTaskDelete(taskId) {
+      const { deleteScheduledTask } = await import('./utils/api.js')
+      try {
+        await deleteScheduledTask(taskId)
+        // 本地立即移除（不 reload）
+        if (this.currentSessionId) {
+          const cur = this.scheduledTasksMap.get(this.currentSessionId) || []
+          const next = cur.filter(t => t.task_id !== taskId)
+          const m = new Map(this.scheduledTasksMap)
+          m.set(this.currentSessionId, next)
+          this.scheduledTasksMap = m
+        }
+      } catch (e) {
+        console.error('[scheduled-tasks] delete failed:', e)
+        if (this.currentSessionId) await this.fetchScheduledTasks(this.currentSessionId)
+      }
+    },
+
     async loadConversation(sessionId) {
       // 防止加载无效的 sessionId
       if (!sessionId || sessionId.trim() === '') {
@@ -2723,6 +3074,7 @@ export default {
                 command: conversation.pending_permission.command,
                 action: conversation.pending_permission.action,
                 tool_call_name: conversation.pending_permission.tool_call_name,  // 让幂等去重守卫生效
+                // 不再透传 execution_env —— 前端按 toolCall.args.local 在 MessageItem 渲染时直接判断
               }, sessionId)
             }
           } else if (response.status === 404) {
@@ -2733,6 +3085,11 @@ export default {
           console.error('加载对话失败:', error)
         }
       }
+
+      // 拉取当前会话的定时任务（不阻塞主流程；面板会基于 Map 渲染）
+      this.fetchScheduledTasks(sessionId)
+      // 拉取当前会话的排队消息（不阻塞；UI 卡片基于 _pendingQueue 渲染）
+      this._loadQueueForSession(sessionId)
     },
 
     // 静默刷新消息内容，不触发自动滚动（用于对话结束后同步 checkpointId）
@@ -2766,6 +3123,7 @@ export default {
               command: conversation.pending_permission.command,
               action: conversation.pending_permission.action,
               tool_call_name: conversation.pending_permission.tool_call_name,  // 让幂等去重守卫生效
+              // 不再透传 execution_env —— 前端按 toolCall.args.local 在 MessageItem 渲染时直接判断
             }, this.currentSessionId)
           }
         }
@@ -2854,6 +3212,11 @@ export default {
         this._streamingMessages.delete(sessionId)
         this._streamingMeta.delete(sessionId)
         this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+        // 清理队列 map + 延迟 drain 标记（避免孤儿 ID 引用）
+        this._pendingQueue.delete(sessionId)
+        this._pendingQueue = new Map(this._pendingQueue)
+        this._queueDrainDeferred.delete(sessionId)
+        this._queueDrainDeferred = new Set(this._queueDrainDeferred)
         // 清理侧栏状态点（防孤儿 ID；ConversationItem 已 unmount，渲染上看不到残留）
         this._completedSessions.delete(sessionId)
         this._completedSessions = new Set(this._completedSessions)
@@ -2887,6 +3250,21 @@ export default {
       const message = typeof data === 'string' ? data : data.message
       const files = typeof data === 'object' ? data.files : []
       const processedOutputs = typeof data === 'object' ? data.processedOutputs : []
+
+      // —— 消息队列守卫 ——
+      // 如果目标 session 正在流式响应（且不是当前 sendMessage 触发的——本函数下面会 set isLoading 之前），
+      // 把消息入队持久化到 Redis（db1，queue:{sid}），UI 显示卡片；
+      // 输入框已由 MessageInput.handleSend 在 emit 前清空，currentQuote 也已由 update:quote 清空，
+      // 所以入队路径只需 POST + re-fetch。
+      // 为什么不在 isLoading 上做判断：isLoading 可能因 race / 时序 false（切走前的 stream 已被别的代码清过），
+      // 用 _activeStreamingSessions.has(sid) 更稳——只要 SSE 还在跑就算忙。
+      if (this.currentSessionId && this._activeStreamingSessions.has(this.currentSessionId)) {
+        await this._enqueueMessage(this.currentSessionId, {
+          message: message,
+          quote: this.currentQuote?.content || null,
+        })
+        return
+      }
 
       // 构建文件消息（只包含 files 信息）
       if (files && files.length > 0) {
@@ -2967,6 +3345,44 @@ export default {
       // 用户主动发起新一轮请求 → 视为恢复，清掉旧错误保护态
       this._sessionHadError.delete(requestSessionId)
       this.markSessionErrorResolved(requestSessionId)
+
+      // 用户主动发起新一轮请求 → 清掉旧审批状态：
+      //   后端新 message_stream 已经清理了对应 permission 逻辑（不再等用户决定），
+      //   但前端不主动清会让旧审批 UI + 旧黄点一直挂着，
+      //   且下次新流再来 permission_request 会被 pendingToolApproval singleton 挡掉（早返）。
+      //   只清当前会话的 pending；跨 session 切走的 pending 等 loadConversation 那边处理。
+      if (this.pendingToolApproval && this.pendingToolApproval.sessionId === requestSessionId) {
+        const oldMessageIndex = this.pendingToolApproval.messageIndex
+        const oldToolIndex = this.pendingToolApproval.toolIndex
+        if (this.messages[oldMessageIndex] && this.messages[oldMessageIndex].toolCalls && this.messages[oldMessageIndex].toolCalls[oldToolIndex]) {
+          const oldToolCalls = [...this.messages[oldMessageIndex].toolCalls]
+          const oldToolEntry = oldToolCalls[oldToolIndex]
+          const toolName = oldToolEntry.name || 'tool'
+          const argsSummary = JSON.stringify(oldToolEntry.args || {}).slice(0, 200)
+          oldToolCalls[oldToolIndex] = {
+            ...oldToolEntry,
+            _pendingApproval: false,
+            // 用户发了新消息离开这个审批决策——给个明确的本地占位 result，
+            // 让 tool UI 从「awaiting-approval」转成「tool-done」（显示 ✓ 而不是 running dot）
+            result: oldToolEntry.result || (
+              `User sent a new message without approving this ${toolName} call (${argsSummary}); ` +
+              `the ${toolName} was not executed and no side effects occurred. ` +
+              `Continue with the new request.`
+            )
+          }
+          this.messages[oldMessageIndex] = {
+            ...this.messages[oldMessageIndex],
+            toolCalls: oldToolCalls
+          }
+        }
+        this.pendingToolApproval = null
+      }
+      if (this._approvalPendingSessions.delete(requestSessionId)) {
+        this._approvalPendingSessions = new Set(this._approvalPendingSessions)
+      }
+      // 重置 in-flight 标志（用户已离开审批态，按钮不必再卡）
+      this.submittingToolDecision = false
+      this.permissionResumeInFlight = false
 
       // 立即把当前会话加入侧边栏顶部，让用户马上看到「最新对话」
       // 占位标题「新对话」会在 AI 回复后由 updateTitleAndRefresh 校正

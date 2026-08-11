@@ -55,6 +55,7 @@ class LinuxAdapter(PlatformAdapter):
         "cp", "mv", "mkdir", "rm", "find", "sed",
         "awk", "sort", "echo", "touch", "diff", "tar", "gzip",
         "curl",
+        "python3", "python", "node", "sh", "bash",
     }
 
     def __init__(self):
@@ -92,9 +93,7 @@ class LinuxAdapter(PlatformAdapter):
     @property
     def system_info_block(self) -> str:
         return (
-            f"**Runtime Environment**: {self.system_name} / bash (sh) / "
-            f"sandbox: chatme-python-sandbox (Linux container) | "
-            f"native fallback: local venv (.venv/bin)"
+            "**Runtime Environment**: sandbox (Linux container) | local=Linux"
         )
 
     def local_venv_bin(self) -> Path:

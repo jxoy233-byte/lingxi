@@ -20,7 +20,7 @@ _BACKEND = Path(__file__).resolve().parents[2]
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
-from ChatMe.ChatWorkflow.mcps.code_fingerprint import (  # noqa: E402
+from ChatMe.ChatWorkflow.mcps.tools.code_fingerprint import (  # noqa: E402
     CODE_FP_PREFIX,
     SUPPORTED_LANGUAGES,
     _extract_function_calls,

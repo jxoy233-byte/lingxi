@@ -15,7 +15,7 @@ _BACKEND = Path(__file__).resolve().parents[2]
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
-from ChatMe.ChatWorkflow.mcps.permissions import (  # noqa: E402
+from ChatMe.ChatWorkflow.mcps.permissions.core import (  # noqa: E402
     ActionType,
     ApprovalPolicy,
     ApprovedCommand,
@@ -252,7 +252,7 @@ def test_request_approval_read_action_returns_approved_directly(tmp_config):
     p.set_policy(ApprovalPolicy.DEFAULT)
 
     # interrupt 不应被调用
-    with patch("ChatMe.ChatWorkflow.mcps.permissions.interrupt") as mock_interrupt:
+    with patch("ChatMe.ChatWorkflow.mcps.permissions.core.interrupt") as mock_interrupt:
         decision = request_approval("ls -la", ActionType.READ, "test_sid")
 
     assert decision == ("approved", None)
@@ -265,7 +265,7 @@ def test_yolo_bypasses_all_questions(tmp_config):
     p = get_permissions_callable()
     p.set_policy(ApprovalPolicy.YOLO)
 
-    with patch("ChatMe.ChatWorkflow.mcps.permissions.interrupt") as mock_interrupt:
+    with patch("ChatMe.ChatWorkflow.mcps.permissions.core.interrupt") as mock_interrupt:
         decision = request_approval("rm -rf build/", ActionType.WRITE, "test_sid")
     assert decision == ("approved", None)
     mock_interrupt.assert_not_called()
@@ -277,7 +277,7 @@ def test_glob_approved_skips_interrupt(tmp_config):
     p = get_permissions_callable()
     p.approve("rm -rf build/*", reason="cleanup", scope="global", session_id="")
 
-    with patch("ChatMe.ChatWorkflow.mcps.permissions.interrupt") as mock_interrupt:
+    with patch("ChatMe.ChatWorkflow.mcps.permissions.core.interrupt") as mock_interrupt:
         decision = request_approval("rm -rf build/foo", ActionType.WRITE, "test_sid")
     assert decision == ("approved", None)
     mock_interrupt.assert_not_called()
@@ -289,7 +289,7 @@ def test_glob_denied_returns_denied_directly(tmp_config):
     p = get_permissions_callable()
     p.deny("rm -rf /", reason="too dangerous")
 
-    with patch("ChatMe.ChatWorkflow.mcps.permissions.interrupt") as mock_interrupt:
+    with patch("ChatMe.ChatWorkflow.mcps.permissions.core.interrupt") as mock_interrupt:
         decision = request_approval("rm -rf /", ActionType.WRITE, "test_sid")
     assert decision == ("denied", None)
     mock_interrupt.assert_not_called()
@@ -303,7 +303,7 @@ def test_approve_decision_writes_to_config(tmp_config):
     p.denied.clear()
     p.save()
 
-    with patch("ChatMe.ChatWorkflow.mcps.permissions.interrupt",
+    with patch("ChatMe.ChatWorkflow.mcps.permissions.core.interrupt",
                return_value="approve") as mock_interrupt:
         decision = request_approval("rm -rf build/foo", ActionType.WRITE, "test_sid")
 
@@ -323,7 +323,7 @@ def test_this_time_only_does_not_write_to_config(tmp_config):
     p.denied.clear()
     p.save()
 
-    with patch("ChatMe.ChatWorkflow.mcps.permissions.interrupt",
+    with patch("ChatMe.ChatWorkflow.mcps.permissions.core.interrupt",
                return_value="this-time-only") as mock_interrupt:
         decision = request_approval("rm -rf build/foo", ActionType.WRITE, "test_sid")
 
@@ -345,7 +345,7 @@ def test_deny_decision_does_not_write_to_config(tmp_config):
     p.denied.clear()
     p.save()
 
-    with patch("ChatMe.ChatWorkflow.mcps.permissions.interrupt",
+    with patch("ChatMe.ChatWorkflow.mcps.permissions.core.interrupt",
                return_value="deny") as mock_interrupt:
         decision = request_approval("rm -rf build/foo", ActionType.WRITE, "test_sid")
 
@@ -360,7 +360,7 @@ def test_unknown_decision_defaults_to_deny(tmp_config):
     """未知 decision 值（如 LLM 决策 API 返回异常）按 deny 处理（保守兜底）。"""
     init_permissions(config_path=tmp_config)
 
-    with patch("ChatMe.ChatWorkflow.mcps.permissions.interrupt",
+    with patch("ChatMe.ChatWorkflow.mcps.permissions.core.interrupt",
                return_value="totally_made_up_value"):
         decision = request_approval("rm -rf build/foo", ActionType.WRITE, "test_sid")
 
@@ -380,7 +380,7 @@ def test_interrupt_payload_contains_metadata(tmp_config):
         captured.update(value)
         return "approve"
 
-    with patch("ChatMe.ChatWorkflow.mcps.permissions.interrupt", side_effect=fake_interrupt):
+    with patch("ChatMe.ChatWorkflow.mcps.permissions.core.interrupt", side_effect=fake_interrupt):
         request_approval("rm -rf build/foo", ActionType.WRITE, "test_sid")
 
     assert captured["type"] == "permission_request"
@@ -422,7 +422,7 @@ def test_pre_check_cmd_dangerous_message_format():
     - 明确说"auto-blocked by safety system"
     - 引导 LLM 不要重试 / 用 interrupt 问用户
     """
-    from ChatMe.ChatWorkflow.mcps.permissions import _pre_check_cmd
+    from ChatMe.ChatWorkflow.mcps.permissions.core import _pre_check_cmd
 
     block_kind, msg = _pre_check_cmd("rm -rf /tmp/foo")
     assert block_kind == "dangerous"
@@ -443,7 +443,7 @@ def test_pre_check_cmd_not_allowed_message_format():
     - 包含 whitelist 信息让 LLM 知道有哪些可用
     - 明确说"do NOT retry"
     """
-    from ChatMe.ChatWorkflow.mcps.permissions import _pre_check_cmd
+    from ChatMe.ChatWorkflow.mcps.permissions.core import _pre_check_cmd
 
     block_kind, msg = _pre_check_cmd("sysctl hw.memsize hw.physicalcpu")
     assert block_kind == "not_allowed"
@@ -460,7 +460,7 @@ def test_pre_check_cmd_not_allowed_message_format():
 
 def test_pre_check_cmd_passes_safe_command():
     """safe command → block_kind = None"""
-    from ChatMe.ChatWorkflow.mcps.permissions import _pre_check_cmd
+    from ChatMe.ChatWorkflow.mcps.permissions.core import _pre_check_cmd
 
     block_kind, msg = _pre_check_cmd("ls -la skills/")
     assert block_kind is None
@@ -472,5 +472,5 @@ def test_pre_check_cmd_passes_safe_command():
 
 def get_permissions_callable():
     """拿当前 init 过的 Permissions 单例（fixture 每次会 reset）"""
-    from ChatMe.ChatWorkflow.mcps.permissions import get_permissions
+    from ChatMe.ChatWorkflow.mcps.permissions.core import get_permissions
     return get_permissions()

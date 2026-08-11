@@ -18,7 +18,7 @@ from shutil import which
 from typing import Optional, Set, Tuple, Dict, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ChatMe.ChatWorkflow.mcps.CodeSandboxPool import SandboxPool
+    from ChatMe.ChatWorkflow.mcps.sandbox.pool import SandboxPool
 
 
 # 通用危险检测：设备重定向 + format 盘符 + sudo 提升
@@ -42,8 +42,8 @@ class PlatformAdapter(ABC):
     和执行说明）。
 
     interrupt_tool_prompt_block 是 base 默认提供（跨平台一致），
-    与 ctime 同一类，工具提示词全部通过 platform.all_tool_prompt_blocks()
-    聚合。子工具是否覆盖同名属性由具体平台决定，目前没有覆盖需求。
+    工具提示词全部通过 platform.all_tool_prompt_blocks() 聚合。
+    子工具是否覆盖同名属性由具体平台决定，目前没有覆盖需求。
     """
 
     def __init__(
@@ -171,8 +171,8 @@ Parameters:
 
         顺序：interrupt → find_skill → cmd → code → cmd_code_common_notes → ctime
         （与原 graph_config 拼装顺序一致，改动会改变 LLM 看到的相对位置，所以锁定）。
-        find_skill 放在 cmd/code 之前，让 LLM 先考虑有无现成 skill；cmd_code_common_notes
-        是 cmd/code 共享约束提示，单独成块方便扩展。
+        find_skill 是「先查现成能力」类工具，摆在 cmd/code 之前让 LLM 优先考虑；
+        cmd_code_common_notes 是 cmd/code 共享约束提示，单独成块方便扩展。
 
         加新工具时：
         1. base 加一个 ``<tool>_tool_prompt_block`` property（跨平台一致）

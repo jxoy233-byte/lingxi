@@ -340,7 +340,7 @@ class MemoryManager:
                 self.logger.error(f"删除记忆目录失败: {e}")
                 return False
 
-    async def backtrack_memory(self, thread_id: str, checkpoint_id: str, new_checkpoint_id: str) -> bool:
+    async def backtrack_memory(self, thread_id: str, checkpoint_id: str) -> bool:
         """
         回溯指定 thread_id 的记忆到指定检查点
 
@@ -352,7 +352,6 @@ class MemoryManager:
         Args:
             thread_id: 对话线程 ID
             checkpoint_id: 回溯目标的检查点 ID
-            new_checkpoint_id: 回溯更新后的检查点 ID
 
         Returns:
             回溯是否成功
@@ -427,10 +426,10 @@ class MemoryManager:
                     except Exception as e:
                         self.logger.error(f"删除文件失败 {filename}: {e}")
 
-                # 将备份文件名重命名为新 checkpoint id（保留原时间戳）
-                new_target_filename = f"{target_timestamp}_{new_checkpoint_id}.md"
-                new_target_path = os.path.join(path_with_thread, new_target_filename)
-                os.replace(target_file_path, new_target_path)
+                # 不再重命名 target_file —— 让文件名里的 cid 保持最初触发写入的 round cid，
+                # 后续多次回溯到同一 cid 都能命中这个文件（之前用 aupdate_state 会产生 artifact cid_E，
+                # 再回溯到原 cid_A 时文件已被改名成 cid_E，导致「未找到 checkpoint 文件」bug）。
+                # 同时保留 target_file 的 cid 语义一致：filename cid ↔ state_saver user_saved cid。
 
                 # 将目标 checkpoint 内容写入 current.md
                 current_file_path = self._get_memory_file_path(thread_id)

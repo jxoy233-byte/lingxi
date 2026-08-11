@@ -19,6 +19,13 @@ class SandboxPool:
     """
     沙盒容器池（共享容器 + 每容器 N 并发）。
 
+    路径历史：
+    - 原 `mcps/CodeSandboxPool.py` 单文件，2026-07 三子包拆分重构时
+      移到 `mcps/sandbox/pool.py`（与 tools/ + permissions/ 形成语义布局）；
+      类名也由 `CodeSandboxPool` 改为 `SandboxPool`（去掉前缀，名字本身已经
+      在 sandbox/ 命名空间下表达清晰）
+    - 历史引用请用 git log --follow 跟
+
     并发模型（v2，2026-07）：
     - 池里有 K 个长跑容器（min_size ≤ K ≤ max_size）
     - 每个容器挂一个 threading.Semaphore(per_container_concurrency) 控制单容器并发
@@ -55,11 +62,11 @@ class SandboxPool:
     ):
         self.image = image
 
-        # __file__ = backend/ChatMe/ChatWorkflow/mcps/CodeSandboxPool.py
-        # 4 层 .parent 上去 = backend/
-        backend_root = Path(__file__).resolve().parents[3]
-        # 5 层 .parent 上去 = 项目根（用来定位 sandbox/）
-        top_root = Path(__file__).resolve().parents[4]
+        # __file__ = backend/ChatMe/ChatWorkflow/mcps/sandbox/pool.py
+        # 移入 sandbox/ 子包后路径深度 +1：原 CodeSandboxPool.py 在 parents[3] 拿到 backend/，
+        # 现在 pool.py 要 parents[4] 才能拿到 backend/，parents[5] 是项目根。
+        backend_root = Path(__file__).resolve().parents[4]
+        top_root = Path(__file__).resolve().parents[5]
         self.skills_path = os.path.abspath(skills_path or backend_root / "skills")
         self.cached_path = os.path.abspath(cached_path or backend_root / "cached")
         self.config_path = os.path.abspath(config_path or backend_root / ".chatme" / "config.json")

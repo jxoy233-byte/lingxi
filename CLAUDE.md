@@ -13,9 +13,10 @@ ChatMe（产品名「灵析」Lingxi）是一个基于 LangGraph 的多智能体
 - **框架**: FastAPI + LangGraph + LangChain
 - **状态管理**: Redis (checkpointer + state saver)
 - **MCP**: FastMCP 3.x
-- **代码沙盒**: Docker 容器池（`mcps/CodeSandboxPool.py`）
+- **代码沙盒**: Docker 容器池（`mcps/sandbox/pool.py` 的 `SandboxPool`）
 - **文档解析**: docling + qwen-vl-utils + unstructured
 - **对象存储**: oss2（阿里云 OSS）
+- **定时任务**: APScheduler `AsyncIOScheduler + RedisJobStore`（Asia/Shanghai，重启可恢复）
 - **LLM**: OpenAI 兼容 API（OpenAI / DeepSeek / 本地 VL 模型多 provider）
 - **包管理**: uv
 
@@ -34,17 +35,20 @@ ChatMe（产品名「灵析」Lingxi）是一个基于 LangGraph 的多智能体
 ChatMe/
 ├── backend/
 │   ├── ChatMe/
-│   │   ├── APIRouter/                    # /chat /static /api /admin 4 个 Router
+│   │   ├── APIRouter/                    # /chat /static /api /admin 4 个 Router + scheduled_tasks + message_queue
 │   │   ├── ChatMeConfig/                 # 配置加载器
 │   │   ├── ChatService/                  # 聊天服务层（SSE 流式）
 │   │   │   └── FilesLoaders/             # 文件加载 + 大文件截断
 │   │   ├── ChatWorkflow/                 # LangGraph 工作流核心
 │   │   │   ├── config/                   # 图配置 / prompts / state TypedDict
-│   │   │   ├── mcps/                     # MCP 工具服务 + Docker 沙盒池
+│   │   │   ├── mcps/                     # MCP 服务（server.py / session.py）
+│   │   │   │   ├── tools/                # 工具实现 + code_fingerprint + platforms/ 跨平台 adapter
+│   │   │   │   ├── sandbox/pool.py       # Docker 沙盒容器池 SandboxPool
+│   │   │   │   └── permissions/core.py   # PermissionedToolNode + 中断审批
 │   │   │   └── Memory/                   # 长期记忆管理
 │   │   ├── LoggingManager/
 │   │   └── test/
-│   ├── skills/                           # Bocha / Exa / Tavily / ImageParser / DataAnalysis
+│   ├── skills/                           # Bocha / Exa / Tavily / ImageParser / DataAnalysis / Scheduler
 │   ├── .chatme/                          # 局部配置（仓库内已含）
 │   ├── pyproject.toml
 │   └── main.py                           # FastAPI 入口
@@ -133,11 +137,12 @@ uv run chatme_mcp
 
 | 组件                                              | 职责                                                                                                                       |
 | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `App.vue`                                       | 全局状态管理，SSE 事件分发；维护 `_sessionHadError` 集合做"错误气泡保护态"（出错后该 session 不再被右侧刷新覆盖）；`refreshPage()` 触发 `window.location.reload()` |
+| `App.vue`                                       | 全局状态管理，SSE 事件分发；维护 `_sessionHadError` 集合做"错误气泡保护态"（出错后该 session 不再被右侧刷新覆盖）；`refreshPage()` 触发 `window.location.reload()`；消息排队 `_pendingQueue` / `_queueLoaded` / `_queueDrainDeferred` + 定时任务 `scheduledTasksMap`（见偏好 29） |
 | `Sidebar.vue` / `ConversationItem.vue`          | 会话列表（全量入 DOM + `overflow-y: scroll` + 自定义 webkit 滚动条）；ConversationItem 维护删除会话行内二次确认状态机（小红叉，见偏好 21）                       |
-| `MessageList.vue`                               | 消息列表容器 + 滚动控制                                                                                                            |
-| `MessageItem.vue`                               | 单条消息渲染（思考过程 / Markdown / 代码高亮），`message.error=true` 时渲染为红色错误框（避免报错堆栈被当 markdown）                                         |
-| `MessageInput.vue`                              | 输入框 + 文件上传 + 语音输入                                                                                                        |
+| `MessageList.vue`                               | 消息列表容器 + 滚动控制；顶部挂载 `ScheduledTasksPanel`，向上转发 `scheduled-task-*` / `restart-session`                                       |
+| `MessageItem.vue`                               | 单条消息渲染（思考过程 / Markdown / 代码高亮），`message.error=true` 时渲染为红色错误框（避免报错堆栈被当 markdown）；中断态显示「重新对话」按钮（emit `restart-session`）；审批 UI 直接读 `tool.args.local` 判执行环境（不再依赖后端透传 `execution_env`） |
+| `MessageInput.vue`                              | 输入框 + 文件上传 + 语音输入；**流式期间不禁用发送**，消息由 App.vue 入队（见偏好 29）                                                                    |
+| `ScheduledTasksPanel.vue` / `ScheduledTaskItem.vue` | 对话区顶部「⏰ N 个定时任务」折叠面板 + 单条任务卡片；⏸/▶ 启停、⚡ 立即运行、🗑 行内二次确认删除；**无创建入口**（创建走对话让 agent 调 Scheduler skill）                    |
 | `ChatHeader.vue`                                | 头部 + 主题切换 + ↻ 刷新页面按钮（与 `DataAnalysisTree` 同款 SVG path：`M20.49 15a9 9 0 1 1-2.12-9.36L23 10` + polyline 箭头）               |
 | `CheckpointPanel.vue`                           | 回溯面板                                                                                                                     |
 | `FilePreviewPanel.vue` / `FilePreviewModal.vue` | 文件预览                                                                                                                     |
@@ -166,25 +171,30 @@ uv run chatme_mcp
 
 | 文件                                                    | 职责                                                                                                                                |
 | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `backend/main.py`                                     | FastAPI 入口，挂载 4 个 Router                                                                                                          |
+| `backend/main.py`                                     | FastAPI 入口，挂载全部 Router；lifespan 嵌套顺序 `chat_service → scheduler → cleanup`（scheduler handler 依赖 `chat_service.message_stream`）；`uvicorn.run(app, ...)` 传对象**不传** `"main:app"` 字符串（字符串会二次 import main.py，banner / LLM 自检跑两遍） |
 | `backend/ChatMe/ChatWorkflow/core.py`                 | 工作流定义、节点逻辑、5 个 LLM 实例（`MessagesPlaceholder` 处理）、ReAct 流程压缩、final_node dynamic system prompt 注入                                    |
 | `backend/ChatMe/ChatWorkflow/decorators.py`           | `node_guard` 装饰器：所有节点统一异常捕获 + 重抛，functools.wraps 保留 `__wrapped__` 让 LangGraph 仍按 `(state, config)` 注入                       |
-| `backend/ChatMe/ChatWorkflow/platforms/`              | 多平台 prompt adapter：`base.py` 抽象 + `darwin.py` / `linux.py` / `windows.py` 三套 + `registry.py` 按 `platform.system()` 选；用于 `cmd` / `code` / `ctime` 工具的 shell 风格差异（macOS `ls -G` vs Linux `ls --color`、Windows cmd.exe 语法等） |
-| `backend/ChatMe/ChatWorkflow/config/graph_config.py`  | prompts 与模型配置（含 `get_react_compact_config`）                                                                                       |
+| `backend/ChatMe/ChatWorkflow/mcps/tools/platforms/`   | 多平台 prompt adapter：`base.py` 抽象（含各工具默认 prompt block + `all_tool_prompt_blocks()`）+ `darwin.py` / `linux.py` / `windows.py` 三套 + `registry.py` 按 `platform.system()` 选；用于 `cmd` / `code` / `ctime` 工具的 shell 风格差异（macOS `ls -G` vs Linux `ls --color`、Windows cmd.exe 语法等） |
+| `backend/ChatMe/ChatWorkflow/config/graph_config.py`  | prompts 与模型配置（含 `get_react_compact_config`）；`PROMPT_MAIN_FLOW` 只讲「怎么想」（决策流 + 8 条 Good Chain Examples），具体工具调用模式由 `platforms/base.py` 的 `<tool>_tool_prompt_block` 承载 |
 | `backend/ChatMe/ChatWorkflow/config/models.py`        | 图状态 TypedDict（含 `context_summary_text` / `last_compact_at_tool_calls`）                                                            |
 | `backend/ChatMe/ChatWorkflow/Memory/core.py`          | 长期记忆管理：per-thread `asyncio.Lock` + 临时文件原子写（`fsync` + `os.replace`）                                                                |
-| `backend/ChatMe/ChatWorkflow/mcps/server.py`          | FastMCP 工具入口（`code` / `cmd` / `ctime`）；`cmd` / `code` 默认走 `PermissionedToolNode` 弹审批                                             |
-| `backend/ChatMe/ChatWorkflow/mcps/tools.py`           | sub_agent 工具已 deprecated（保留导入兼容但不再 prompt 中暴露）；新代码不要引入                                                              |
-| `backend/ChatMe/ChatWorkflow/mcps/CodeSandboxPool.py` | Docker 沙盒容器池；`execute(code, lang)` 跑 Python/Node（先写 `/code.<py\|js>` 再跑再删），`execute_command(cmd)` 跑 shell（直接 `docker exec sh -c`） |
-| `backend/ChatMe/ChatService/core.py`                  | 聊天服务，SSE 流式输出 + 记忆任务调度（`_memory_update_tasks` 串行队列 + `memory_wait_*` 事件）；`resume_permission_stream` 路径与 `message_stream` 同构（init / interrupt detection / full_response in done） |
+| `backend/ChatMe/ChatWorkflow/mcps/server.py`          | FastMCP 工具入口（`code` / `cmd` / `ctime` / `interrupt` / `find_skill`）；`cmd` / `code` 默认走 `PermissionedToolNode` 弹审批                 |
+| `backend/ChatMe/ChatWorkflow/mcps/session.py`         | MCP stdio session：长生命周期子进程 + `ClientSession` 常驻复用，工具调用不再每次重开连接                                                                    |
+| `backend/ChatMe/ChatWorkflow/mcps/tools/deprecated.py` | sub_agent 工具已 deprecated（保留实现以备回滚，session.py 仍 import 但 prompt 已不暴露）；新代码不要引入 |
+| `backend/ChatMe/ChatWorkflow/mcps/sandbox/pool.py`   | Docker 沙盒容器池 `SandboxPool`（v2：K 容器 × N 并发）；`execute(code, lang)` 跑 Python/Node（先写 `/code.<py\|js>` 再跑再删），`execute_command(cmd)` 跑 shell（直接 `docker exec sh -c`） |
+| `backend/ChatMe/ChatService/core.py`                  | 聊天服务，SSE 流式输出 + 记忆任务调度（`_memory_update_tasks` 串行队列 + `memory_wait_*` 事件）；`resume_permission_stream` 路径与 `message_stream` 同构（init / interrupt detection / full_response in done）；回溯前等待未完成 memory 更新，走 `CheckpointJanitor.retarget_to()` 直接覆写 latest 指针（不再产 artifact checkpoint） |
+| `backend/ChatMe/ChatWorkflow/CheckpointJanitor.py`    | `retarget_to(thread_id, checkpoint_id)`：校验目标 checkpoint → 覆写 LangGraph latest 指针 → 删除其余 checkpoint / write 数据；修复多次回溯与 memory 文件 cid 错位 |
 | `backend/ChatMe/ChatService/FilesLoaders/core.py`     | 文件加载 + `_maybe_truncate` 大文件截断                                                                                                    |
 | `backend/ChatMe/ChatService/FilesLoaders/config.py`   | 文件大小/类型/截断阈值常量（`TEXT_TRUNCATE_LENGTH=4000`）                                                                                       |
-| `backend/ChatMe/APIRouter/permissions.py`             | `PermissionedToolNode`（`ToolNode` + `_awrap_tool_call` hook）+ Redis `permission:{sid}` hash 存取 + `/permission/decide` / `/permission/resume` 端点；4 档决策：`approve` / `this-time-only` / `deny` / `feedback:<text>`；`code` 工具按 `code_fingerprint` 做永久批准 |
-| `backend/ChatMe/APIRouter/code_fingerprint.py`        | code 工具指纹计算：`imports` + `calls` + `lang` + `sandbox`（反向映射 `local` 参数）四元组 SHA1，作为永久批准的稳定 key（同一段代码不会因行号微调失效）                                              |
+| `backend/ChatMe/ChatWorkflow/mcps/permissions/core.py` | `PermissionedToolNode`（`ToolNode` + `_awrap_tool_call` hook）+ Redis `permission:{sid}` hash 存取；4 档决策：`approve` / `this-time-only` / `deny` / `feedback:<text>`；`code` 工具按 `code_fingerprint` 做永久批准；未知工具名走 `ToolNode._validate_tool_call` 返回错误 ToolMessage 不崩 |
+| `backend/ChatMe/ChatWorkflow/mcps/tools/code_fingerprint.py` | code 工具指纹计算：`imports` + `calls` + `lang` + `local` 四元组 SHA1，作为永久批准的稳定 key（同一段代码不会因行号微调失效）                                              |
 | `backend/skills/DataAnalysis/format/`                 | 数据分析规范包（拆分为 `core` / `artifacts` / `manifest` / `database`；保留旧导入兼容）                                                                  |
 | `backend/skills/DataAnalysis/database/`               | 数据库分析子模块：MySQL / SQLite / PostgreSQL / MongoDB 只读查询 + 跨会话配置（`.runtime/`）                                                      |
+| `backend/skills/Scheduler/`                           | 定时任务 skill：`core` / `models` / `handlers` / `registry` + `SKILL.md`；4 个顶层函数（create / list / cancel / run now）走 HTTP 调 `/admin/scheduled-tasks/*`，**必须 `code(..., local=True)`**；`scheduler_lifespan` 由 main.py 挂载 |
 | `backend/ChatMe/ChatMeConfig/core.py`                 | 配置加载器；`vl.local` 字段决定是否加载本地 VL 模型到内存（默认 `true`；设 `false` 时 `model_vl` 路由 fallback 到主用 LLM 第一个有效 provider）             |
 | `backend/ChatMe/APIRouter/main.py`                    | `/chat` 前缀主对话路由                                                                                                                   |
+| `backend/ChatMe/APIRouter/scheduled_tasks.py`         | `/admin/scheduled-tasks` CRUD + `/{task_id}/run` 立即触发；APScheduler `AsyncIOScheduler + RedisJobStore`（Asia/Shanghai），Redis key `scheduled:tasks` / `scheduled:meta:{tid}` / `scheduled:history:{tid}` / `scheduled:lock:{tid}` |
+| `backend/ChatMe/APIRouter/message_queue.py`           | `/chat/{sid}/queue` GET / POST / DELETE；Redis `queue:{sid}` FIFO（≤20 条 × 4000 字符），只做持久化不主动 drain，前端在 SSE `done` 后自行出队续发 |
 | `backend/ChatMe/APIRouter/model_vl.py`                | `/api` VL 模型路由；`local=false` 时 `_resolve_vl_fallback()` 取主 provider                                                            |
 | `backend/ChatMe/APIRouter/timed_clean.py`             | 定时清理任务                                                                                                                            |
 | `backend/ChatMe/APIRouter/data_export.py`             | `/chat/{sid}/export/artifacts`（DataAnalysis 产物 ZIP/HTML 预览）+ `/chat/{sid}/export/turn/{checkpoint_id}`（截至该轮的 OpenAI JSON + 完整 state 备份 ZIP） |
@@ -343,7 +353,7 @@ claude --cron-delete a09d41ec
 24. **DataAnalysis 数据库分析（只读 + 跨会话配置 + 自动中断）**：
     - **能力边界**：`skills/DataAnalysis/database/` 提供 MySQL / SQLite / PostgreSQL / MongoDB 4 个引擎的只读分析，写操作（SQL `INSERT/UPDATE/DELETE/DROP/ALTER/CREATE/TRUNCATE/GRANT/REVOKE/MERGE/CALL/REPLACE` + Mongo `$out/$merge/$where/$function/$accumulator/mapReduce/eval`）一律拦截。
     - **跨会话配置存储**：DB 连接配置写入 `skills/DataAnalysis/database/.runtime/`（fcntl 文件锁 + 临时文件 + 原子替换）；LLM 只能看到 alias / engine / host / database 等非敏感信息，密码不进入 prompt / checkpoint / 日志。
-    - **沙盒挂载**：DataAnalysis 目录 `:rw` 覆盖在 `/skills` 只读挂载之上（`CodeSandboxPool`），保证其他 skill 文件仍只读。
+    - **沙盒挂载**：DataAnalysis 目录 `:rw` 覆盖在 `/skills` 只读挂载之上（`mcps/sandbox/pool.py` 的 `SandboxPool`），保证其他 skill 文件仍只读。
     - **SKILL.md 动态加载**：主 `SKILL.md` 不直接列数据库指引；agent 识别到「数据库/SQL/MySQL/Mongo」等关键词时 `cmd("cat /skills/DataAnalysis/database/SKILL.md")` 动态加载子文档，避免占用主上下文 token。
     - **agent 主动中断**：`need_db_credentials` 中断事件携带 `db_type` / 字段列表，用户在 UI 输入凭据后 resume；中断机制沿用现有 SSE `interrupt` 通道。
     - **`ChatDataAnalysisFormat` 包结构**：`format.py` 已拆分为 `format/` 包（`base` / `artifacts` / `manifest` / `database`），保留旧 `format.py` 路径的导入兼容；数据库查询结果通过 `save_database_result` 落到 `data_analysis/gen_xxx/data/` 后走主流程。
@@ -384,6 +394,17 @@ claude --cron-delete a09d41ec
     - **Helper**：`ChatService._build_intercepted_tool_call_events(chunk, emitted_ids, elapsed_ms, token_usage)` 统一封装；3 个 SSE 流（`message_stream` / `resume_permission_stream` / `invoke_interrupted_stream`）都加这套。
     - **orphan 防御**：`tool_calls_by_id.get(tc_id)` 查不到时跳过，避免 emit 缺 args 的脏事件。
     - **测试**：`tests/mcps/test_intercepted_tool_call_events.py` 7 个 helper 单测 + 2 个端到端集成（混合正常 / 拦截验证不双发）。
+29. **v0.1.4 新增约定**：
+    - **`mcps/` 三包重构**：`mcps/permissions/core.py`（原 `permissions.py`）/ `mcps/sandbox/pool.py`（原 `CodeSandboxPool.py`）/ `mcps/tools/`（`code_fingerprint.py` + `deprecated.py` + `platforms/`）。**各包 `__init__.py` 只写说明不 re-export**（除 `tools/platforms/__init__.py` 导出 adapter），所以 import 必须写到具体模块：`from ...mcps.permissions.core import PermissionedToolNode`，不能 `from ...mcps.permissions import`。
+    - **定时任务 = Skill + REST，不是 MCP 工具**：`skills/Scheduler/` 4 个顶层函数走 HTTP 调 `/admin/scheduled-tasks/*`，agent 用 `code(..., local=True)` 调用（沙盒网络不可靠 + 缺 `apscheduler` / `redis` 包，`local=False` 会卡死或 ModuleNotFoundError）。触发时 handler 直接调 `chat_service.message_stream()` 跑完整一轮，**不走消息队列、不推 SSE**。Redis key：`scheduled:tasks` / `scheduled:meta:{tid}` / `scheduled:history:{tid}` / `scheduled:lock:{tid}`。新增类似「后台调度 + 注入对话」的能力沿用这个形态。
+    - **lifespan 嵌套顺序不可换**：`chat_service_lifespan → scheduler_lifespan → cleanup_lifespan`。scheduler 的 handler 依赖 `chat_service.message_stream`，必须嵌在 chat_service 之内；cleanup 与业务无关放最外层。
+    - **`uvicorn.run(app, ...)` 传对象不传字符串**：`"main:app"` 会让 uvicorn 重新 import 一次 `main.py`，模块体二次执行（banner 打两次、LLM 自检跑两遍、VL / OSS 重复检测）。
+    - **消息排队（前端 drain，后端只存）**：`/chat/{sid}/queue` 只做 Redis `queue:{sid}` FIFO 持久化（≤20 条 × 4000 字符），**不主动 drain**。前端 `sendMessage` 开头守卫 `currentSessionId ∈ _activeStreamingSessions` 则入队 return；两个 watcher 触发 drain（`_activeStreamingSessions` 变化算「刚结束」的 sid / `currentSessionId` 变化查 `_queueDrainDeferred`）；用户不在该会话时推迟到 `_queueDrainDeferred`，切回再发。`cleanupLoadingState` 要同步清 `_pendingQueue` / `_queueDrainDeferred`。**未新增 SSE 事件类型**，纯客户端逻辑 + REST。
+    - **发新消息必须清旧审批 singleton**：`sendMessage` 里把旧 `_pendingApproval` 置 false 并塞合成 result，否则残留的 singleton 会阻塞新一轮 `permission_request`。`onToolDecision` 同时用 `submittingToolDecision || permissionResumeInFlight` 早返做 JS 层去重。
+    - **回溯走 `CheckpointJanitor.retarget_to()`**：直接覆写 LangGraph latest 指针 + 删除其余 checkpoint / write，**不再产 artifact checkpoint**；Memory 回溯时保持原 cid 不重命名（支持重复回溯，修复 memory 文件 cid 错位）。回溯前先 `_wait_previous_memory_update`。
+    - **未知工具名不崩**：LLM 调未注册工具时走 LangGraph `ToolNode._validate_tool_call` 返回错误 `ToolMessage`（含未知工具名 + 可用工具列表）让模型重试；已知工具仍过权限 gate，`GraphInterrupt` / `GraphBubbleUp` 不被吞。
+    - **MAIN_FLOW 只讲「怎么想」**：`PROMPT_MAIN_FLOW` 承载决策流 + 8 条 Good Chain Examples（含 4 阶段复杂任务循环 Scope → Plan → Execute&Verify → Compose）；**具体工具调用模式下沉到 `platforms/base.py` 的 `<tool>_tool_prompt_block`**，由 `all_tool_prompt_blocks()` 拼接。新增工具的用法说明写 prompt block，不要塞回 MAIN_FLOW。
+    - **MCP session 长生命周期**：`session.py` 的 stdio 子进程 + `ClientSession` 常驻复用，工具调用不再每次重开连接。
 
 ### 代码 / 提交风格
 

@@ -54,6 +54,7 @@ class WindowsAdapter(PlatformAdapter):
         "curl",
         "where",       # which 的等价
         "tar",         # Windows 10+ 内置
+        "python", "python3", "node", "node.exe", "powershell", "pwsh",
     }
 
     def __init__(self):
@@ -95,9 +96,7 @@ Parameters: code (required, string), language (default: "python"), local (defaul
     @property
     def system_info_block(self) -> str:
         return (
-            f"**Runtime Environment**: {self.system_name} / cmd.exe / "
-            f"sandbox: chatme-python-sandbox (Linux container) | "
-            f"native fallback: local venv (.venv\\Scripts\\python.exe)"
+            "**Runtime Environment**: sandbox (Linux container) | local=Windows"
         )
 
     def local_venv_bin(self) -> Path:

@@ -24,7 +24,7 @@ _BACKEND = Path(__file__).resolve().parents[2]
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
-from ChatMe.ChatWorkflow.mcps.platforms import (  # noqa: E402
+from ChatMe.ChatWorkflow.mcps.tools.platforms import (  # noqa: E402
     DarwinAdapter,
     LinuxAdapter,
     PlatformAdapter,
@@ -33,7 +33,7 @@ from ChatMe.ChatWorkflow.mcps.platforms import (  # noqa: E402
     init_platform,
     reset_platform_cache,
 )
-from ChatMe.ChatWorkflow.mcps.platforms import registry as _registry  # noqa: E402
+from ChatMe.ChatWorkflow.mcps.tools.platforms import registry as _registry  # noqa: E402
 
 
 # =========================================================================
@@ -95,6 +95,31 @@ def test_linux_allows_unix_commands(cmd):
     p = LinuxAdapter()
     ok, _ = p.is_allowed(cmd)
     assert ok is True, f"Linux should allow {cmd!r}"
+
+
+@pytest.mark.parametrize("cmd", [
+    "python3 -c \"import redis\"",
+    "python3 -c \"import apscheduler\"",
+    "python -c 'print(1)'",
+    "node -e 'console.log(1)'",
+    "sh -c 'echo hi'",
+    "bash -c 'echo hi'",
+])
+def test_linux_allows_script_interpreters(cmd):
+    p = LinuxAdapter()
+    ok, reason = p.is_allowed(cmd)
+    assert ok is True, f"Linux should allow {cmd!r} ({reason})"
+
+
+@pytest.mark.parametrize("cmd", [
+    "python -c \"import redis\"",
+    "python3 -c 'print(1)'",
+    "node -e 'console.log(1)'",
+])
+def test_windows_allows_script_interpreters(cmd):
+    p = WindowsAdapter()
+    ok, _ = p.is_allowed(cmd)
+    assert ok is True, f"Windows should allow {cmd!r}"
 
 
 @pytest.mark.parametrize("cmd", ["dir", "dir C:\\Users", "type foo.txt", "findstr pattern file.txt", "where python", "del temp.txt"])
@@ -288,25 +313,22 @@ def test_windows_code_block_mentions_windows_venv():
 
 
 def test_system_info_block_format():
-    p = LinuxAdapter()
-    info = p.system_info_block
-    assert info.startswith("**Runtime Environment**:")
-    # 必须含 sandbox + native fallback 两条路径
-    assert "sandbox" in info.lower()
-    assert "fallback" in info.lower() or "native" in info.lower()
-
-
-def test_windows_system_info_uses_cmd_exe():
-    p = WindowsAdapter()
-    info = p.system_info_block
-    assert "cmd.exe" in info
-    assert "Scripts" in info  # .venv\Scripts\python.exe
-
-
-def test_darwin_system_info_uses_zsh():
-    p = DarwinAdapter()
-    info = p.system_info_block
-    assert "zsh" in info
+    """精简版：sandbox (Linux container) | local=<os>。无路径 / shell 细节。"""
+    expected_local = {
+        LinuxAdapter: "Linux",
+        DarwinAdapter: "macOS",
+        WindowsAdapter: "Windows",
+    }
+    for adapter_cls, local_label in expected_local.items():
+        info = adapter_cls().system_info_block
+        assert info.startswith("**Runtime Environment**:")
+        assert "sandbox (Linux container)" in info
+        assert f"local={local_label}" in info
+        # 不再含路径 / shell 细节
+        assert ".venv" not in info
+        assert "bash" not in info
+        assert "zsh" not in info
+        assert "cmd.exe" not in info
 
 
 # =========================================================================
@@ -363,7 +385,10 @@ def test_get_agent_node_prompt_includes_platform_info():
 
 
 def test_all_tool_prompt_blocks_canonical_order_for_each_platform():
-    """所有 adapter 都按 interrupt → find_skill → cmd → code → common → ctime 顺序返回 tool 块。"""
+    """所有 adapter 都按 interrupt → find_skill → cmd → code → common → ctime 顺序返回 tool 块。
+
+    scheduler 工具已转 skill 模块（skills/Scheduler），不再作为 MCP tool 暴露。
+    """
     for adapter_cls in (LinuxAdapter, DarwinAdapter, WindowsAdapter):
         adapter = adapter_cls()
         blocks = adapter.all_tool_prompt_blocks()
@@ -377,6 +402,7 @@ def test_all_tool_prompt_blocks_canonical_order_for_each_platform():
         ctime_idx = joined.find("ctime — Time Reference")
         assert interrupt_idx != -1, "interrupt 块缺失"
         assert find_skill_idx != -1, "find_skill 块缺失"
+        assert "scheduler — Scheduled Tasks" not in joined, "scheduler 块应已从 MCP tool 移除"
         assert cmd_idx != -1, "cmd 块缺失"
         assert code_idx != -1, "code 块缺失"
         assert common_idx != -1, "common notes 块缺失"

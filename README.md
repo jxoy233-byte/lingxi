@@ -1,6 +1,6 @@
-# ChatMe（灵析 Lingxi）
+# Lingxi（灵析）
 
-基于 LangGraph 的多智能体数据分析对话系统。支持流式响应、工具调用、对话记忆管理、文档/图片多模态解析，以及基于 Docker 沙盒的安全 Python 代码执行。同时提供 Web 端和 Electron 桌面端两种运行形态。
+基于 LangGraph 的单智能体 + 多 LLM 角色数据分析对话系统。支持流式响应、工具调用、对话记忆管理、文档/图片多模态解析，以及基于 Docker 沙盒的安全 Python 代码执行。同时提供 Web 端和 Electron 桌面端两种运行形态。
 
 > 贡献者 / 开发者 / AI 协作者请阅读 [`docs/contributing.md`](docs/contributing.md) 与 [`CLAUDE.md`](CLAUDE.md)：前者汇总开发约定、踩坑记录与 AI 自动化工具，后者是 AI 协作者的工作流指南。
 
@@ -18,6 +18,7 @@
 - [API 概览](#api-概览)
 - [代码沙盒](#代码沙盒)
 - [MCP 工具](#mcp-工具)
+- [定时任务（Scheduler skill）](#定时任务scheduler-skill)
 - [效果展示](#效果展示)
 - [部署打包](#部署打包)
 - [开发注意事项](#开发注意事项)
@@ -27,7 +28,7 @@
 
 ## 项目特性
 
-- **多智能体工作流**：基于 LangGraph StateGraph 实现 `input_parse → context_assembly → agent_node ↔ tool_execution_node → final_node` 循环
+- **单智能体 + 多 LLM 角色工作流**：基于 LangGraph StateGraph 实现 `input_parse → context_assembly → agent_node ↔ tool_execution_node → final_node` 循环；5 个独立 LLM（core / agent / summary / react_compact / imp_ipt）各司其职，共用一个图状态
 - **ReAct 流程压缩**：`context_assembly_node` 按 4 阶段循环自动压缩长 ReAct 轨迹，后台 LLM 异步推进不阻塞工作流，`imp_ipt` 标记做切分锚点，最近 keep 轮原文保留；`final_node` 用 dynamic system prompt 把 `imp_ipt` 注入 system 层独占最高注意力位（详见 CLAUDE.md）
 - **流式 SSE 响应**：前端通过 EventSource 实时接收 `content` / `reasoning` / `tool_call_*` / `memory_wait_*` 事件
 - **多模态文件解析**：图片（OSS / base64）、文本（CSV / JSON / MD / TXT / XML）、文档（PDF / Word / PowerPoint / Excel），docling + qwen-vl-utils + unstructured
@@ -42,6 +43,8 @@
 - **一键导出**：
   - 文件树「会话文件」面板头部的 ⬇ / 👁 按钮把 `data_analysis/` 产物打包成 ZIP 或单文件 HTML 预览（marked.js + mermaid.js CDN，PNG/SVG 转 base64 内嵌，CSV/JSON 转 HTML 表格）
   - AI 消息气泡下方按钮排的 ⬇ 「导出到本轮」按钮，截至该 checkpoint 导出 OpenAI Chat Completions 格式 JSON + 自家完整 state 备份 JSON（ZIP 下载，后续可恢复）
+- **定时任务**：`Scheduler` skill 把一段 prompt 配成 cron，到点自动注入指定 session 跑完整一轮 LangGraph agent；APScheduler `AsyncIOScheduler + RedisJobStore`（Asia/Shanghai）持久化，后端重启自动恢复；对话区顶部「⏰ N 个定时任务」折叠面板可启停 / 立即运行 / 删除
+- **消息排队**：AI 流式期间用户仍可输入，消息进 Redis `queue:{sid}` FIFO（最多 20 条 × 4000 字符），本轮 `done` 后自动出队续发；用户切走会话时推迟 drain，切回再发
 
 ## 界面预览
 
@@ -150,7 +153,7 @@ npm run electron:dev:all    # 同时启动 Vite + Electron
 ```bash
 docker-compose build sandbox
 # 镜像名：chatme-python-sandbox:latest
-# 容器池默认 2 个常驻容器，CodeSandboxPool 自动按需取用
+# 容器池默认 2 个常驻容器，SandboxPool（mcps/sandbox/pool.py）自动按需取用
 ```
 
 ## 配置说明
@@ -183,7 +186,7 @@ OPENAI_PRESENCE_PENALTY=0.0
 {
   "app": {
     "name": "ChatMe",
-    "version": "v0.1.3",
+    "version": "v0.1.4",
     "host": "127.0.0.1",
     "port": 8211
   },
@@ -211,7 +214,6 @@ OPENAI_PRESENCE_PENALTY=0.0
 ChatMe/
 ├── backend/
 │   ├── ChatMe/
-│   │   ├── APIRouter/                   # 4 个 Router + data_export
 │   │   ├── ChatMeConfig/                 # 配置加载器
 │   │   ├── ChatService/
 │   │   │   ├── core.py                   # ChatService，SSE 流式输出 + 记忆任务调度
@@ -224,13 +226,23 @@ ChatMe/
 │   │   │   │   ├── graph_config.py       # prompts 与模型配置
 │   │   │   │   └── models.py             # ChatStateCore2 / FileParseState
 │   │   │   ├── mcps/
-│   │   │   │   ├── server.py             # FastMCP 工具入口
-│   │   │   │   └── CodeSandboxPool.py    # Docker 容器池
+│   │   │   │   ├── server.py             # FastMCP 入口（CLI: chatme_mcp）
+│   │   │   │   ├── session.py            # MCP stdio session
+│   │   │   │   ├── tools/                # 工具实现
+│   │   │   │   │   ├── code_fingerprint.py
+│   │   │   │   │   ├── deprecated.py     # (sub_agent 废弃保留)
+│   │   │   │   │   └── platforms/        # 跨平台 adapter（darwin/linux/windows）
+│   │   │   │   ├── sandbox/              # 沙盒基础设施
+│   │   │   │   │   └── pool.py           # Docker 容器池
+│   │   │   │   └── permissions/          # 权限系统
+│   │   │   │       └── core.py           # PermissionedToolNode + 中断审批
 │   │   │   └── Memory/                   # 长期记忆
 │   │   ├── APIRouter/
 │   │   │   ├── main.py                   # /chat 前缀主对话路由 + 会话树
 │   │   │   ├── static_file.py            # /static 静态文件 + 文件树接口
 │   │   │   ├── data_export.py            # /export/artifacts + /export/turn（DataAnalysis ZIP/HTML 预览 + 对话历史导出）
+│   │   │   ├── scheduled_tasks.py        # /admin/scheduled-tasks CRUD + 立即运行
+│   │   │   ├── message_queue.py          # /chat/{sid}/queue 排队消息 FIFO
 │   │   │   └── admin_config / timed_clean / model_vl
 │   │   ├── LoggingManager/               # 异步日志
 │   │   └── test/
@@ -239,6 +251,7 @@ ChatMe/
 │   │   │   ├── SKILL.md                  # 主规范（生成图表 / 报告 / CSV 等）
 │   │   │   ├── format/                   # ChatDataAnalysisFormat（拆分为 base / artifacts / manifest / database）
 │   │   │   └── database/                 # 数据库分析（MySQL/SQLite/PostgreSQL/MongoDB 只读查询 + 跨会话配置；lazy skill）
+│   │   ├── Scheduler/                    # 定时任务 skill（APScheduler + RedisJobStore，core/models/handlers/registry）
 │   │   ├── Exa/                          # 搜索 skill
 │   │   ├── Tavily/                       # 搜索 skill
 │   │   └── ImageParser/                  # 图片解析 skill
@@ -285,6 +298,7 @@ ChatMe/
 | `/chat/{session_id}/tree`                     | GET       | 整个 session 工作树（data_analysis + 上传文件 + AI 中间产物） |
 | `/chat/{session_id}/export/artifacts`         | GET       | 导出 DataAnalysis 产物（`?format=zip\|html`） |
 | `/chat/{session_id}/export/turn/{checkpoint_id}` | GET     | 导出截至指定 checkpoint 的对话历史（OpenAI JSON + 完整 state 备份，打包 ZIP） |
+| `/chat/{session_id}/queue`                    | GET / POST / DELETE | 排队消息（Redis `queue:{sid}` FIFO，最多 20 条 × 4000 字符）；`DELETE?idx=N` 删单条，不传 `idx` 清空。队列不主动 drain，前端在 SSE `done` 后自行出队续发 |
 
 ### 其它接口
 
@@ -294,6 +308,19 @@ ChatMe/
 | `/api/v1/chat/completions`        | POST | 视觉语言模型服务（本地 Qwen3-VL）                               |
 | `/admin/cleanup`                  | POST | 手动触发清理任务                                            |
 | `/admin/cleanup/status`           | GET  | 获取清理状态                                              |
+
+### 定时任务接口（`/admin/scheduled-tasks` 前缀）
+
+| 接口                                | 方法    | 说明                                              |
+| --------------------------------- | ----- | ----------------------------------------------- |
+| `/admin/scheduled-tasks`          | POST  | 创建 cron 定时任务（`name` / `cron` / `prompt` / `session_id`；5-field cron，Asia/Shanghai） |
+| `/admin/scheduled-tasks`          | GET   | 列出任务，`?session_id=` 可按会话过滤                       |
+| `/admin/scheduled-tasks/{task_id}` | GET   | 任务详情，`?with_history=true` 附带最近执行记录               |
+| `/admin/scheduled-tasks/{task_id}` | PATCH | 修改 `enabled` 或 `cron`                            |
+| `/admin/scheduled-tasks/{task_id}` | DELETE | 删除任务 + 历史 + 调度锁                                 |
+| `/admin/scheduled-tasks/{task_id}/run` | POST | 立即异步执行一次，**不改变原 cron**                        |
+
+Redis key：`scheduled:tasks`（索引）/ `scheduled:meta:{task_id}` / `scheduled:history:{task_id}` / `scheduled:lock:{task_id}`，APScheduler 自身用 `apscheduler.jobs` + `apscheduler.run_times`。触发时 handler 直接调 `chat_service.message_stream()` 跑完整 LangGraph 一轮，不走消息队列、不推 SSE。
 
 #### 静态文件 fallback
 
@@ -312,7 +339,7 @@ ChatMe/
 
 ## 代码沙盒
 
-`backend/ChatMe/ChatWorkflow/mcps/CodeSandboxPool.py` 提供基于 Docker 容器的安全代码执行：
+`backend/ChatMe/ChatWorkflow/mcps/sandbox/pool.py`（`SandboxPool` 类）提供基于 Docker 容器的安全代码执行：
 
 - **预启动容器池**：默认 2 个常驻容器（`sleep infinity`），按需取用 / 归还
 - **隔离环境**：tmpfs 限制 `/tmp`、`/sandbox`（各 64m，noexec）
@@ -337,7 +364,26 @@ MCP 服务器（`mcps/server.py`，FastMCP 3.x，stdio transport）暴露以下�
 | `interrupt` | 中断当前对话                                                              |
 | `ctime`     | 获取当前日期时间                                                            |
 
-> **stdio transport**：MCP 由 `chatme_main` 自动 fork 作为子进程，父子通过 stdin/stdout 通信；不需要 port / URL 配置。`session_id` 不再是工具参数 — 客户端 interceptor 自动从 LangGraph runtime 的 `thread_id` 注入，工具函数通过 `current_session_id.get()` 取。
+> **stdio transport**：MCP 由 `chatme_main` 自动 fork 作为子进程，父子通过 stdin/stdout 通信；不需要 port / URL 配置。`session_id` 不再是工具参数 — 客户端 interceptor 自动从 LangGraph runtime 的 `thread_id` 注入，工具函数通过 `current_session_id.get()` 取。MCP session 为长生命周期（子进程 + `ClientSession` 常驻复用），工具调用不再每次重开连接。
+
+> **未知工具名兜底**：LLM 调到未注册的工具时 `PermissionedToolNode` 不崩，走 LangGraph `ToolNode._validate_tool_call` 返回错误 `ToolMessage`（含未知工具名 + 可用工具列表）让模型重试；已知工具仍照常过权限 gate，`GraphInterrupt` / `GraphBubbleUp` 不被吞。
+
+## 定时任务（Scheduler skill）
+
+`backend/skills/Scheduler/` 把一段 prompt 配成 cron，到点自动注入指定 session 跑完整一轮 LangGraph agent。**不是 MCP 工具**，是 Skill + REST API 组合：agent 通过 `find_skill("定时")` 发现，`cmd("cat /skills/Scheduler/SKILL.md")` 读契约，再用 `code(..., local=True)` 调 4 个顶层函数。
+
+| 函数                                                    | 用途                            |
+| ----------------------------------------------------- | ----------------------------- |
+| `create_scheduled_task(name, cron, prompt, session_id="")` | 创建（`session_id=""` = 触发时自动新建会话） |
+| `list_scheduled_tasks(session_id="")`                 | 列出（可按会话过滤），返回全 12 位 task_id   |
+| `cancel_scheduled_task(task_id)`                      | 取消，支持 task_id 前缀匹配            |
+| `run_scheduled_task_now(task_id)`                     | 立即触发一次，不改 cron                |
+
+- **必须 `local=True`**：4 个函数内部走 HTTP 调 `127.0.0.1:8211/admin/scheduled-tasks/*`，沙盒网络不可靠且缺 `apscheduler` / `redis` 包
+- **调度器**：APScheduler `AsyncIOScheduler + RedisJobStore`，时区 `Asia/Shanghai`，后端重启从 Redis 恢复全部任务
+- **lifespan 嵌套顺序**：`chat_service_lifespan → scheduler_lifespan → cleanup_lifespan`——scheduler 的 handler 依赖 `chat_service.message_stream`，必须嵌在 chat_service 之内
+- **错误格式**：统一 `[类型] 描述 | 建议`（`[BadRequest]` / `[NotFound]` / `[ServiceUnavailable]` / `[ConnectionError]`），LLM 看前缀就知道换策略
+- **前端**：对话区顶部「⏰ N 个定时任务」折叠面板（`ScheduledTasksPanel.vue`），支持 ⏸/▶ 启停、⚡ 立即运行、🗑 行内二次确认删除；**面板不提供创建入口**，创建走对话（让 agent 调 skill）
 
 ## 效果展示
 
@@ -354,13 +400,13 @@ MCP 服务器（`mcps/server.py`，FastMCP 3.x，stdio transport）暴露以下�
 ```bash
 cd backend
 uv build --wheel
-# 输出: dist/ChatMe-0.1.3-py3-none-any.whl
+# 输出: dist/ChatMe-0.1.4-py3-none-any.whl
 ```
 
 ### 安装 wheel
 
 ```bash
-uv pip install dist/ChatMe-0.1.3-py3-none-any.whl
+uv pip install dist/ChatMe-0.1.4-py3-none-any.whl
 # 安装后 chatme_main 和 chatme_mcp 命令全局可用
 ```
 
@@ -393,13 +439,13 @@ npm run electron:build:win      # Windows NSIS（x64）
 npm run electron:build:linux    # Linux AppImage（x64）
 ```
 
-桌面端通过 `electron-builder` 打包，应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.1.3）在 `frontend/electron/electron.config.js` 中配置。
+桌面端通过 `electron-builder` 打包，应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.1.4）在 `frontend/electron/electron.config.js` 中配置。
 
 **输出位置**：`../release/electron-builder/`（项目根，与 Vite 的 `dist/` / `frontend/` 区分开）：
 
 - `mac-arm64/灵析.app` — 直接打开
 - `mac/` — x64 .app
-- `灵析-0.1.3-arm64-mac.zip` / `灵析-0.1.3-mac.zip` — 分发包
+- `灵析-0.1.4-arm64-mac.zip` / `灵析-0.1.4-mac.zip` — 分发包
 - `linux-unpacked/` — Linux 解压目录
 - `win-unpacked.exe` — Windows 安装器
 

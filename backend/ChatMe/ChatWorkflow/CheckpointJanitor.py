@@ -246,6 +246,93 @@ class CheckpointJanitor:
             results.append(r)
         return results
 
+    # ----- 回溯专用：指针覆写 -----
+
+    async def retarget_to(self, thread_id: str, target_cid: str) -> Dict[str, Any]:
+        """覆写 ``checkpoint_latest`` 指针到 ``target_cid``，并删除其他 checkpoint 文档。
+
+        用于 backtrack：绕过 ``graph.aupdate_state`` 的 artifact cid 副作用。
+        后续 ``message_stream`` 从 ``LATEST_POINTER`` 读取，自然以 ``target_cid`` 启动，
+        不再产生新的 artifact checkpoint（cid_E），避免 state_saver / memory 文件名 cid
+        三方错位。
+
+        与 ``prune_thread`` 的区别：
+        - 不依赖 state_saver 的 user_saved（backtrack 时 state_saver 还没更新）
+        - 保留集合写死为 ``{target_cid}``，其他全删
+
+        Args:
+            thread_id: 会话 ID
+            target_cid: 目标 cid（必须已存在于 LangGraph storage）
+
+        Returns:
+            ``{thread_id, target_cid, scanned, deleted, keys_deleted}``
+
+        Raises:
+            ValueError: target_cid 不存在
+        """
+        # 1. SCAN 拿全部 checkpoint 文档
+        all_checkpoints = await self._scan_checkpoints(thread_id)
+
+        # 2. 找 target_cid 的 ns（cid 可能跨 namespace）
+        target_doc = next(
+            (c for c in all_checkpoints if c["cid"] == target_cid), None
+        )
+        if target_doc is None:
+            raise ValueError(
+                f"[CheckpointJanitor] retarget_to: target_cid={target_cid} 不存在 "
+                f"(thread={thread_id}, scanned={len(all_checkpoints)})"
+            )
+
+        # 3. 覆写 LATEST_POINTER（值格式与 LangGraph aio.py 的 latest pointer 一致：
+        #    ``checkpoint:{tid}:{ns_safe}:{cid}``）
+        ns = target_doc["ns"]
+        ns_s = self._ns_safe(ns)
+        lk = f"{LATEST_POINTER_PREFIX}:{thread_id}:{ns_s}"
+        value = f"{CHECKPOINT_PREFIX}:{thread_id}:{ns_s}:{target_cid}"
+        await self._redis.set(lk, value)
+
+        # 4. 删除除 target 之外的所有 checkpoint 文档 + 关联 write data。
+        # 保留 parent chain 不必要——aget_tuple(cid) 只读 cid 自己的 JSON，
+        # parent_checkpoint_id 字段悬空不影响消息显示（与 prune_thread 同款约束）。
+        to_delete = [c for c in all_checkpoints if c["cid"] != target_cid]
+        keys_to_delete: List[str] = []
+        for c in to_delete:
+            cid = c["cid"]
+            c_ns_s = self._ns_safe(c["ns"])
+            keys_to_delete.append(
+                f"{CHECKPOINT_PREFIX}:{thread_id}:{c_ns_s}:{cid}"
+            )
+            keys_to_delete.append(
+                f"{WRITE_KEYS_ZSET_PREFIX}:{thread_id}:{c_ns_s}:{cid}"
+            )
+            pattern = (
+                f"{CHECKPOINT_WRITE_PREFIX}:{thread_id}:{c_ns_s}:{cid}:*"
+            )
+            async for k in self._redis.scan_iter(match=pattern, count=200):
+                ks = k.decode() if isinstance(k, bytes) else k
+                keys_to_delete.append(ks)
+
+        # 5. 分批 delete（pipeline 500/批，避免阻塞 Redis）
+        keys_deleted = 0
+        if keys_to_delete:
+            for i in range(0, len(keys_to_delete), 500):
+                batch = keys_to_delete[i:i + 500]
+                keys_deleted += await self._redis.delete(*batch)
+
+        logger.info(
+            f"[CheckpointJanitor] retarget_to thread={thread_id[:12]}... "
+            f"target={target_cid} 扫描={len(all_checkpoints)} 删除={len(to_delete)} "
+            f"keys={keys_deleted}"
+        )
+
+        return {
+            "thread_id": thread_id,
+            "target_cid": target_cid,
+            "scanned": len(all_checkpoints),
+            "deleted": len(to_delete),
+            "keys_deleted": keys_deleted,
+        }
+
     # ----- 内部工具 -----
 
     @staticmethod

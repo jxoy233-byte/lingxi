@@ -40,7 +40,7 @@ def init_platform() -> PlatformAdapter:
 def get_platform() -> PlatformAdapter:
     """懒加载：第一次调 init_platform()。
 
-    用法：在业务代码中 from .platforms import get_platform; p = get_platform()。
+    用法：在业务代码中 from ChatMe.ChatWorkflow.mcps.tools.platforms import get_platform; p = get_platform()。
     如果想保证启动时就检测（比如想 fail-fast 报 platform 错误），在 main() 调 init_platform()。
     """
     if _cached is None:

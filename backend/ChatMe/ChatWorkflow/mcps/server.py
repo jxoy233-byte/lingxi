@@ -19,8 +19,8 @@ import signal
 
 from ChatMe.LoggingManager.logging_config import get_logger
 from ChatMe.ChatMeConfig import get_redis_checkpointer_url
-from ChatMe.ChatWorkflow.mcps.CodeSandboxPool import SandboxPool
-from ChatMe.ChatWorkflow.mcps.platforms import get_platform, init_platform
+from ChatMe.ChatWorkflow.mcps.sandbox.pool import SandboxPool
+from ChatMe.ChatWorkflow.mcps.tools.platforms import get_platform, init_platform
 
 server = FastMCP(name="ChatMe Agent Core Skills")
 
@@ -108,7 +108,7 @@ def _init_sandbox_pool():
     """初始化沙盒容器池"""
     global _sandbox_pool
     try:
-        from ChatMe.ChatWorkflow.mcps.CodeSandboxPool import SandboxPool
+        from ChatMe.ChatWorkflow.mcps.sandbox.pool import SandboxPool
         _sandbox_pool = SandboxPool()  # 默认 size=1（min_size=1, max_size=3, per_container_concurrency=8）
         logger.info("沙盒容器池初始化成功")
     except Exception as e:
@@ -119,7 +119,7 @@ def _init_sandbox_pool():
 # cmd / code 工具：业务逻辑统一走 platform adapter
 # =========================================================================
 # 危险检测 / 白名单 / 脚本识别 / 本地 fallback / prompt 片段全部在
-# ChatMe.ChatWorkflow.mcps.platforms 模块下三套独立 adapter 里：
+# ChatMe.ChatWorkflow.mcps.tools.platforms 模块下三套独立 adapter 里：
 # - LinuxAdapter: 通用 + Unix 危险模式 + /bin/sh + /tmp
 # - DarwinAdapter: macOS 专属 + /bin/zsh
 # - WindowsAdapter: Windows 等价命令 + cmd.exe + %TEMP%
@@ -244,6 +244,7 @@ def find_skill(
     if mode == "list":
         return available_skills_block()
     return find_skill_block(query)
+
 
 def _stop_redis():
     """停止 redis 容器(使用 docker-compose)"""

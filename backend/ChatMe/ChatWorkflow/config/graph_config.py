@@ -33,6 +33,8 @@ PROMPT_COMMON = """
 | Command error | Check syntax, find alternative |
 | Tool call failed | Try different parameters or alternative tool, don't give up immediately |
 | Cannot solve with one approach | Try another approach before stopping |
+| Sandbox skill fails (missing pkg / can't reach host backend) | Retry `code(..., local=True)` |
+| Sandbox can't see host (processes / port / services) | Retry `cmd(..., local=True)` |
 
 ## Output Format
 
@@ -57,7 +59,7 @@ PROMPT_MAIN_FLOW = """
 ```
 User task → Understand intent
 │
-├─ Time references (today / tomorrow / now / this week / current time)?
+├─ Time references (today / tomorrow / now / this week / latest)?
 │   YES → ctime FIRST, then proceed
 │
 ├─ Need packaged skill (search / data analysis / image parsing / data export / etc.)?
@@ -65,12 +67,13 @@ User task → Understand intent
 │
 ├─ Need to explore environment or read files?
 │   YES → cmd (ls / cat / grep)
+│       └─ Querying host state (processes / services)?
+│           → `cmd(..., local=True)`
 │
 ├─ Need code execution (data processing / calculation / drawing)?
 │   YES → code (Python / JS inline)
-│
-├─ Need recurring / scheduled work?
-│   YES → scheduler (create / list / cancel)
+│       └─ Sandbox fails with env error (missing pkg / host unreachable)?
+│           → retry once with `code(..., local=True)`
 │
 ├─ Complex multi-step task (multi-deliverable / real data / multiple steps)?
 │   YES → see example #5 below for the 4-phase loop (Scope → Plan → Execute&Verify → Compose)
@@ -122,21 +125,27 @@ A "complex task" = multi-step + real data + multiple deliverables. Don't dump it
 
 Anti-patterns: skipping `cat SKILL.md`; one mega-`code()` call; continuing when `ls` shows the previous artifact missing.
 
-###6 Recurring / Scheduled Work
+###6 Schedule Recurring Work
 User: "每天早上 9 点帮我汇总昨天的销售数据"
 - `find_skill(query="cron 定时 任务")` → returns `Scheduler`
-- `cmd("cat /skills/Scheduler/SKILL.md")` → read contract (4 functions: create/list/cancel/run + **`local=True`**)
+- `cmd("cat /skills/Scheduler/SKILL.md")` → read contract (**`local=True`**)
 - `code("from skills.Scheduler import create_scheduled_task; print(create_scheduled_task(name='每日销售汇总', cron='0 9 * * *', prompt='分析昨天的 sales.csv ...', session_id='<current>'))", local=True)` → returns task_id
 
-###7 Cancel a Scheduled Task
-User: "把那个销售汇总的定时任务取消"
-- `code("from skills.Scheduler import list_scheduled_tasks; print(list_scheduled_tasks(session_id='<current>'))", local=True)` → find task_id
-- `code("from skills.Scheduler import cancel_scheduled_task; print(cancel_scheduled_task(task_id='...'))", local=True)` → confirm cancellation
+###7 Save a Persistent Fact or Preference
+User: "我常在北京出差，回答用中文"
+- `find_skill(query="记住 偏好 事实")` → returns `Memory`
+- `cmd("cat /skills/Memory/SKILL.md")` → read contract (**`local=True`**)
+- Log them inline:
+  - `code("from skills.Memory import remember; print(remember(key='所在城市', value='北京', thread_id='<current>', category='preference'))", local=True)`
+  - `code("from skills.Memory import remember; print(remember(key='回答语言', value='中文', thread_id='<current>', category='preference'))", local=True)`
 
-###8 Trigger a Task Now (no wait for cron)
-User: "现在帮我跑一次销售汇总，别等明天 9 点"
-- `code("from skills.Scheduler import list_scheduled_tasks; print(list_scheduled_tasks(session_id='<current>'))", local=True)` → find task_id
-- `code("from skills.Scheduler import run_scheduled_task_now; print(run_scheduled_task_now(task_id='...'))", local=True)` → trigger now (cron unchanged)
+###8 Create a New Reusable Skill
+User: "帮我做个能查天气的技能"
+- `find_skill(query="创建技能")` → returns `SkillForge`
+- `cmd("cat /skills/SkillForge/SKILL.md")` → read contract (**`local=True`**)
+- Write a Python wrapper in `functions_py` (can wrap any external API / CLI / DB), then:
+  `code("from skills.SkillForge import create_skill; print(create_skill(name='weather', description='天气查询', functions_py='def get_weather(city): return f\"{{city}}: 晴\"'))", local=True)`
+- New skill is immediately discoverable via `find_skill` (registry auto-rescans mtime, no restart needed)
 """
 
 
@@ -1054,59 +1063,75 @@ def get_llm_memory_config():
         "extra_body": distinguish_extra_body(model_name),
     }
 
-    prompt = """你是记忆管理助手。请根据新对话更新记忆文件。
+    prompt = """你是会话记忆的整理助手。每轮对话后把 current.md 重新评估一次 —— 上一版里有价值的信息要保留，无关噪声要丢弃，新对话里有持久意义的内容要写入。
 
-## 当前记忆文件
+# 数据
+
+## 上一版 current.md
+
 {existing_memory}
 
-## 新对话
+## 本轮新对话
 
-### 用户消息
+时间：{timestamp}
+
+用户：
 {user_message}
 
-### AI 回复
+AI：
 {ai_response}
 
-### 工具调用
+工具调用：
 {tool_calls_str}
 
-### 工具结果
+工具结果：
 {tool_results_str}
 
-## 更新规则
+# 原则
 
-1. **核心摘要**：必须用一句话重写，反映本次对话的核心主题
-2. **关键事实**：提取对未来对话有价值的事实，去重，不超过10条
-3. **待办事项**：识别出待完成的任务，更新已完成的状态
-4. **技术要点**：如有代码、配置、技术决策，记录关键信息
+**审视策略** — 不要默认"上一版全保留"。把每一段当成「待重新评估清单」：这条对未来对话还有价值吗？有的留下 + 必要时更新；没的果断删除。判定节奏由你把握 —— 对话密集时多删少留，对话稀疏时多保留一些上下文。
 
-## 记忆文件格式
+**current.md 的范围** — 只记录对未来对话「真的会用到」的信息。技术要点 / 关键事实 / 待办事项按需保留，避免把缓存目录、文件路径、调试过程这种机械信息当作必填字段填充。
+
+**抗噪过滤** — 写入前每条都过一遍：① 这一条对未来对话有实际信号吗？② 是否和已有条目重复？③ 写入后未来能不能用得上而不是已经过期？三条任一不满足就跳过。
+
+**密度原则** — 详略不靠字数凑，靠内容本身。当下主线写得具体一点；只是背景或已完结的事，一句话带过即可。
+
+**硬约束** — 总字数 500 以内优先、1500 上限；结构跟随内容，不要硬塞「核心摘要 / 关键事实 / 待办事项 / 技术要点 / 缓存文件目录」所有段，无内容就整段去掉。
+
+# 输出
+
+若本轮对话无任何值得长期保留的信息（闲聊、问候、确认、重复问题），单独输出 `无更新`。
+
+否则按 markdown 输出完整记忆文件，章节标题自拟，每章节下用要点或短段落：
 
 ```markdown
 # 对话记忆
-
 > 会话ID: {session_id}
 > 最后更新：{timestamp}
 
-## 核心摘要
-一句话概括对话主题
-
-## 关键事实
-- 事实1
-- 事实2
-
-## 待办事项
-- [ ] 未完成任务
-- [x] 已完成任务
-
-## 技术要点
-- 技术点（如有）
-
-## 缓存文件目录
-- cached/
+[按需写章节，例：核心摘要 / 关键事实 / 待办事项 / 技术要点 / 用户偏好]
 ```
 
-请输出更新后的完整记忆文件内容，不要输出其他内容。"""
+# 示例
+
+**输入摘要**
+- 上一版：用户偏好中文回答、目前在北京、最近任务是分析 Q1 销售数据
+- 本轮用户：「把 Q1 销售汇总改成 Q2」
+- 本轮 AI：取消 Q1 任务 + 创建 Q2 任务
+
+**输出**
+```markdown
+# 对话记忆
+> 会话ID: abc123
+> 最后更新：2026-08-12 14:30
+
+用户偏好中文回答，目前在北京。
+
+Q1 销售数据分析已完结，转为 Q2 销售汇总任务（待执行）。
+
+技术要点：销售数据来自 `cached/abc123/sales.csv`，聚合口径按月 + 品类。
+```"""
 
     return llm_config, prompt
 

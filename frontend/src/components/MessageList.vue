@@ -1,14 +1,5 @@
 <template>
   <div class="messages-container" ref="messagesContainer">
-    <ScheduledTasksPanel
-      v-if="currentSessionId"
-      :tasks="scheduledTasks || []"
-      :refreshing="scheduledTasksRefreshing"
-      @refresh="$emit('scheduled-tasks-refresh')"
-      @toggle="(...args) => $emit('scheduled-task-toggle', ...args)"
-      @run="(tid) => $emit('scheduled-task-run', tid)"
-      @delete="(tid) => $emit('scheduled-task-delete', tid)"
-    />
     <div class="messages-column">
       <div v-if="messages.length === 0" class="welcome-message">
         <h2>你好！我是灵析——数据分析智能助手</h2>
@@ -52,7 +43,6 @@
 
 <script>
 import MessageItem from './MessageItem.vue'
-import ScheduledTasksPanel from './ScheduledTasksPanel.vue'
 
 // 滚动相关 tuning 常量（统一在这里好调）
 const ENTRY_SCROLL_MS       = 800
@@ -72,7 +62,6 @@ export default {
   name: 'MessageList',
   components: {
     MessageItem,
-    ScheduledTasksPanel,
   },
   props: {
     messages: {
@@ -113,20 +102,9 @@ export default {
       type: Boolean,
       default: false
     },
-    scheduledTasks: {
-      // 当前会话的定时任务列表（来自 App.vue.scheduledTasksMap）
-      type: Array,
-      default: () => [],
-    },
-    scheduledTasksRefreshing: {
-      // true = 正在调 GET 拉刷新（驱动面板 ↻ 旋转）
-      type: Boolean,
-      default: false,
-    },
   },
   emits: [
     'restore', 'restream', 'open-link', 'preview-file', 'interrupt', 'resume', 'restart-session', 'quote', 'tool-decide',
-    'scheduled-tasks-refresh', 'scheduled-task-toggle', 'scheduled-task-run', 'scheduled-task-delete',
   ],
   data() {
     return {

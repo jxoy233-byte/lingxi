@@ -2,9 +2,8 @@
   ScheduledTaskItem.vue
 
   单条定时任务行。展示：
-  - 任务名 + enabled 状态徽章
-  - cron 表达式 + 下次运行时间（如果有）
-  - 上次运行状态（success / error / interrupted）+ 时长
+  - 状态圆点 + 任务名
+  - cron 表达式 · 上次运行时间 · 累计次数（单行 meta，保持行高紧凑）
   - 操作按钮：暂停/启用 / 立即运行 / 删除（带行内二次确认小红叉）
 
   Props:
@@ -21,23 +20,16 @@
     <div class="task-row">
       <div class="task-main">
         <div class="task-name-line">
+          <span class="status-dot" :class="task.enabled ? 'on' : 'off'"></span>
           <span class="task-name">{{ task.name }}</span>
-          <span class="task-badge" :class="task.enabled ? 'on' : 'off'">
-            {{ task.enabled ? '启用' : '暂停' }}
-          </span>
         </div>
         <div class="task-meta">
-          <span class="cron">⏰ {{ task.cron }}</span>
+          <span class="cron">{{ task.cron }}</span>
           <span class="dot">·</span>
-          <span class="session">session: {{ task.session_id || '<auto>' }}</span>
-        </div>
-        <div class="task-stats">
-          <span v-if="lastRunLabel" class="last-run" :class="lastRunStatus">
-            {{ lastRunLabel }}
-          </span>
-          <span v-else class="last-run none">尚未运行</span>
+          <span v-if="lastRunLabel" :class="lastRunStatus">{{ lastRunLabel }}</span>
+          <span v-else class="none">尚未运行</span>
           <span class="dot">·</span>
-          <span class="run-count">累计 {{ task.run_count || 0 }} 次</span>
+          <span>{{ task.run_count || 0 }} 次</span>
         </div>
       </div>
 
@@ -48,8 +40,13 @@
           :disabled="busy"
           @click.stop="onToggle"
         >
-          <span v-if="task.enabled">⏸</span>
-          <span v-else>▶</span>
+          <svg v-if="task.enabled" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="9" y1="5" x2="9" y2="19" />
+            <line x1="15" y1="5" x2="15" y2="19" />
+          </svg>
+          <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="6 4 20 12 6 20 6 4" />
+          </svg>
         </button>
         <button
           class="icon-btn"
@@ -57,7 +54,9 @@
           :disabled="busy"
           @click.stop="$emit('run', task.task_id)"
         >
-          ⚡
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="13 2 4 14 11 14 10 22 20 10 13 10 13 2" />
+          </svg>
         </button>
         <button
           class="icon-btn delete"
@@ -66,7 +65,11 @@
           :disabled="busy"
           @click.stop="onDelete"
         >
-          🗑
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="3 6 21 6" />
+            <path d="M8 6V4h8v2" />
+            <path d="M6 6l1 14h10l1-14" />
+          </svg>
         </button>
       </div>
     </div>
@@ -144,97 +147,127 @@ export default {
 
 <style scoped>
 .task-item {
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--border-color, #e5e7eb);
-  font-size: 13px;
+  padding: 6px 12px;     /* 紧凑：左右 12 / 上下 6，单条 task 高度 ~36px（不含右侧按钮列时） */
+  border-bottom: 1px solid var(--border-color);
+  font-size: 13px;       /* 紧凑：略缩，配合侧栏窄宽度 */
   transition: background 0.15s ease;
 }
+.task-item:last-child {
+  border-bottom: none;
+}
 .task-item:hover {
-  background: var(--hover-bg, rgba(0, 0, 0, 0.03));
+  background: var(--bg-hover);
 }
 .task-item.disabled {
-  opacity: 0.7;
+  opacity: 0.6;
 }
 .task-row {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
+  align-items: center;
+  gap: 8px;
 }
 .task-main {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;   /* 让 name + meta 整体在 task-row 高度内垂直居中（与右侧按钮列对齐） */
 }
 .task-name-line {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 4px;
+  gap: 6px;
+  min-width: 0;
+}
+.status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.status-dot.on {
+  background: #22c55e;
+}
+.status-dot.off {
+  background: var(--text-secondary);
+  opacity: 0.5;
 }
 .task-name {
+  font-size: 13.5px;
   font-weight: 500;
-  color: var(--text-primary, #1f2937);
+  color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.task-badge {
-  padding: 1px 6px;
-  border-radius: 4px;
-  font-size: 10px;
-  font-weight: 500;
-  flex-shrink: 0;
-}
-.task-badge.on {
-  background: rgba(34, 197, 94, 0.12);
-  color: rgb(34, 197, 94);
-}
-.task-badge.off {
-  background: rgba(156, 163, 175, 0.15);
-  color: rgb(107, 114, 128);
-}
-.task-meta,
-.task-stats {
+.task-meta {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--text-secondary, #6b7280);
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
   margin-top: 2px;
+  padding-left: 12px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.cron {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 .dot {
-  opacity: 0.5;
+  opacity: 0.4;
 }
-.last-run.ok { color: rgb(34, 197, 94); }
-.last-run.paused { color: var(--text-secondary, #6b7280); }
-.last-run.none { color: var(--text-tertiary, #9ca3af); }
+.ok { color: #22c55e; }
+.none { opacity: 0.7; }
+
+/* 操作按钮：紧凑竖排，作为 .task-row 的 flex 子项；
+   默认 opacity: 0 隐藏，task-row / task-actions hover 时显出（保留常驻位置，仅淡入） */
 .task-actions {
   display: flex;
-  gap: 4px;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
   flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.task-row:hover .task-actions,
+.task-actions:hover,
+.task-actions:focus-within {
+  opacity: 1;
 }
 .icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   background: transparent;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  padding: 4px 6px;
+  border: none;
+  border-radius: 3px;
+  padding: 2px;
   cursor: pointer;
-  font-size: 14px;
-  line-height: 1;
-  color: var(--text-secondary, #6b7280);
-  transition: all 0.15s ease;
+  color: var(--text-secondary);
+  transition: background 0.15s ease, color 0.15s ease;
 }
 .icon-btn:hover:not(:disabled) {
-  background: var(--hover-bg, rgba(0, 0, 0, 0.05));
-  color: var(--text-primary, #1f2937);
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 .icon-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }
+.icon-btn.delete:hover:not(:disabled) {
+  color: #ef4444;
+}
+/* 行内二次确认：变红常显（见 CLAUDE.md 偏好 21） */
 .icon-btn.delete.confirming {
   color: #ef4444;
   background: rgba(239, 68, 68, 0.12);
   opacity: 1;
+}
+
+/* 触屏无 hover：操作按钮常显 */
+@media (hover: none) {
+  .task-actions { opacity: 1; }
 }
 </style>

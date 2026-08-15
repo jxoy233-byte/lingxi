@@ -43,6 +43,67 @@ class ApprovalPolicy(str, Enum):
     YOLO = "yolo"
 
 
+# approved_commands 里 code_fp pattern 的特殊子集匹配规则：
+# - `imp=` 段：pattern 的 imp 集合 ⊆ fingerprint 的 imp 集合 → 命中（用于
+#   "该 skill 所有调用"形式的预批准）
+# - 其他段（lang/sandbox/fn）：pattern 写了 → 必须在 fingerprint 里精确相等；
+#   pattern 没写 → 该段任意 fingerprint 值都允许（典型用法：per-skill pattern
+#   不写 sandbox= 段，让 skill 在 sandbox 和 local 两种执行环境下都命中；
+#   不写 fn= 段，让 skill 的多个函数都能命中）
+# - 不允许 wildcard `code_fp:*` / `imp=*` 通配 — pattern 必须显式列每段
+def _match_code_fp_pattern(pattern: str, fingerprint: str) -> bool:
+    """code_fp pattern 子集匹配：仅 `imp=` 段子集；其他段要么精确相等要么 pattern 不写。
+
+    三种典型 pattern 形式：
+    1. per-skill 预批准（推荐）：
+       pattern    = `code_fp:lang=python|imp=Memory`
+       fingerprint = `code_fp:lang=python|sandbox=1|imp=Memory,skills|fn=remember`
+       → lang 精确相等；imp ⊆；sandbox/fn pattern 没写 → 任意值都允许 → 命中
+
+    2. per-skill 限定本机（罕见）：
+       pattern    = `code_fp:lang=python|sandbox=0|imp=Scheduler`
+       fingerprint = `code_fp:lang=python|sandbox=0|imp=Scheduler,skills|fn=create_scheduled_task`
+       → lang/sandbox 精确相等；imp ⊆ → 命中
+       （用于 Scheduler 这种"必须 local=True 才能跑"的 skill）
+
+    3. 全 fingerprint 精确相等（历史行为）：
+       pattern = fingerprint = `code_fp:lang=python|sandbox=0|imp=skills|fn=remember`
+       → 直接字符串相等，主流程用 `a.pattern == fingerprint` 走，兜底走这里
+
+    Args:
+        pattern: approved_commands 条目的 pattern（code_fp: 开头）
+        fingerprint: code 工具实际指纹
+
+    Returns:
+        True = pattern 命中 fingerprint
+    """
+    if not pattern.startswith("code_fp:") or not fingerprint.startswith("code_fp:"):
+        return False
+    # 拆 `|` 段；imp= 段独立处理，其他段精确相等
+    pat_parts = pattern.split("|")
+    fp_parts = fingerprint.split("|")
+    for pp in pat_parts:
+        if not pp:
+            continue
+        if pp.startswith("imp="):
+            # imp 段：pattern 的 imp 集合是 fingerprint 的 imp 集合的子集
+            pat_imp = set(pp[4:].split(","))
+            matched = False
+            for fp in fp_parts:
+                if fp.startswith("imp="):
+                    fp_imp = set(fp[4:].split(","))
+                    if pat_imp.issubset(fp_imp):
+                        matched = True
+                        break
+            if not matched:
+                return False
+        else:
+            # 其他段（lang / sandbox / fn）：精确相等
+            if pp not in fp_parts:
+                return False
+    return True
+
+
 class ActionType(str, Enum):
     """命令分类：read 白名单内默认不问；write/code/network 在 default policy 下都问。"""
 
@@ -170,6 +231,40 @@ class Permissions:
             self.approved = []
             self.denied = []
 
+    def force_reload(self) -> bool:
+        """强制从磁盘重读 config.json 的 permissions 段，更新内存单例。
+
+        用于 Settings → Save 改完 approved/denied 后，让 PermissionedToolNode
+        下一次执行（interrupt gate）立刻拿到新列表，不用重启后端。
+        单例引用不变，调用方拿到的还是同一个 Permissions 对象。
+
+        Returns:
+            True = 重读成功；False = 文件不存在 / 解析失败（保留旧状态）
+
+        为什么不放在每次 is_approved_code_fingerprint 调用时自动 mtime check：
+        - 每次 code() call 都 stat() 磁盘太贵
+        - Settings UI 保存是显式触发点（用户点 Save 按钮），在那里 reload 一次
+          就够了；外部直接编辑 config.json 的场景属于"知道自己在做什么"，
+          用户重启后端即可
+        """
+        try:
+            old_policy = self.policy
+            old_approved_count = len(self.approved)
+            old_denied_count = len(self.denied)
+            self._load()
+            if (self.policy != old_policy
+                    or len(self.approved) != old_approved_count
+                    or len(self.denied) != old_denied_count):
+                logger.info(
+                    f"permissions 热重载: policy {old_policy.value}→{self.policy.value}, "
+                    f"approved {old_approved_count}→{len(self.approved)}, "
+                    f"denied {old_denied_count}→{len(self.denied)}"
+                )
+            return True
+        except Exception as e:
+            logger.error(f"permissions force_reload 失败: {e}")
+            return False
+
     def save(self) -> None:
         """原子写回 config.json。PID 后缀的 tmp 文件名避免覆盖仓库里的 config.json.tmp 模板。"""
         try:
@@ -225,22 +320,27 @@ class Permissions:
     def is_approved_code_fingerprint(
         self, fingerprint: str, session_id: str = ""
     ) -> Tuple[bool, str]:
-        """code 工具专用：精确匹配 approved list 里的 code fingerprint（不用 fnmatch glob）。
+        """code 工具专用：匹配 approved list 里的 code fingerprint。
 
-        不走 fnmatch 是为了避免 `code_fp:*` 这种过宽 pattern 把所有 code 都放行——
-        只在用户实际 approve 那个具体 fingerprint 时才能通过。
+        匹配规则（详见 `_match_code_fp_pattern`）：
+        1. pattern 与 fingerprint 字符串完全相等（历史行为，保留）
+        2. pattern 是 code_fp: 形式：
+           - `imp=` 段：pattern ⊆ fingerprint
+           - 其他段（lang/sandbox/fn）：pattern 写了必须精确相等；pattern 没写任意值都允许
+           → 让 per-skill 预批准 pattern 既能在 sandbox 跑也能在 local 跑，
+              又能区分不同 skill / 不同函数
 
-        scope=global 跨 sid；scope=session 仅当前 sid（command fingerprint 字符串精确相等）。
+        scope=global 跨 sid；scope=session 仅当前 sid。
         """
         if not fingerprint:
             return False, ""
         for a in self.approved:
-            if a.pattern != fingerprint:
+            if a.scope == "session" and a.session_id != session_id:
                 continue
-            if a.scope == "global":
+            if a.pattern == fingerprint:
                 return True, a.reason or "user previously approved"
-            if a.scope == "session" and a.session_id == session_id:
-                return True, a.reason or "user previously approved in this session"
+            if _match_code_fp_pattern(a.pattern, fingerprint):
+                return True, a.reason or "user previously approved"
         return False, ""
 
     def should_ask(self, command: str, action: ActionType) -> bool:

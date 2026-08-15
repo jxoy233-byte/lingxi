@@ -467,6 +467,315 @@ def test_pre_check_cmd_passes_safe_command():
     assert msg == ""
 
 
+# 7. code_fp pattern 子集匹配（imp= 段允许 pattern 是 fingerprint 的子集）
+
+
+def test_match_code_fp_pattern_exact_match():
+    """精确相等：pattern 与 fingerprint 字符串完全一致 → 命中。"""
+    from ChatMe.ChatWorkflow.mcps.permissions.core import _match_code_fp_pattern
+
+    fp = "code_fp:lang=python|sandbox=0|imp=Memory,skills|fn=remember"
+    assert _match_code_fp_pattern(fp, fp) is True
+
+
+def test_match_code_fp_pattern_imp_subset():
+    """imp= 段子集匹配：pattern 的 imp 是 fingerprint 的 imp 的子集 → 命中。"""
+    from ChatMe.ChatWorkflow.mcps.permissions.core import _match_code_fp_pattern
+
+    pattern = "code_fp:lang=python|sandbox=0|imp=Memory"
+    fingerprint = "code_fp:lang=python|sandbox=0|imp=Memory,skills|fn=remember"
+    assert _match_code_fp_pattern(pattern, fingerprint) is True
+
+
+def test_match_code_fp_pattern_imp_not_subset():
+    """imp= 段非子集：pattern 的 imp 不在 fingerprint 中 → 不命中。"""
+    from ChatMe.ChatWorkflow.mcps.permissions.core import _match_code_fp_pattern
+
+    pattern = "code_fp:lang=python|sandbox=0|imp=Memory"
+    fingerprint = "code_fp:lang=python|sandbox=0|imp=DataAnalysis,skills|fn=foo"
+    assert _match_code_fp_pattern(pattern, fingerprint) is False
+
+
+def test_match_code_fp_pattern_other_segments_must_match():
+    """其他段（lang / sandbox / fn）必须精确相等，不允许子集。"""
+    from ChatMe.ChatWorkflow.mcps.permissions.core import _match_code_fp_pattern
+
+    # lang 不匹配 → 不命中
+    pattern = "code_fp:lang=nodejs|sandbox=0|imp=Memory"
+    fingerprint = "code_fp:lang=python|sandbox=0|imp=Memory,skills|fn=remember"
+    assert _match_code_fp_pattern(pattern, fingerprint) is False
+
+    # sandbox 不匹配 → 不命中
+    pattern = "code_fp:lang=python|sandbox=1|imp=Memory"
+    fingerprint = "code_fp:lang=python|sandbox=0|imp=Memory,skills|fn=remember"
+    assert _match_code_fp_pattern(pattern, fingerprint) is False
+
+
+def test_match_code_fp_pattern_non_code_fp_returns_false():
+    """非 code_fp: 开头 → 不命中（cmd glob pattern 不要走到这里）。"""
+    from ChatMe.ChatWorkflow.mcps.permissions.core import _match_code_fp_pattern
+
+    assert _match_code_fp_pattern("rm -rf build/*", "code_fp:lang=python|sandbox=0") is False
+    assert _match_code_fp_pattern("code_fp:lang=python", "rm -rf build/*") is False
+
+
+# 8. is_approved_code_fingerprint 端到端：per-skill pattern 命中实际 fingerprint
+
+
+def test_is_approved_code_fingerprint_per_skill_pattern_hits(tmp_config):
+    """per-skill pattern（imp=Memory 无 |fn=）→ 命中 `from skills.Memory import remember` 的实际 fingerprint。"""
+    p = Permissions(tmp_config)
+    p.approve_code_fingerprint(
+        "code_fp:lang=python|sandbox=0|imp=Memory",
+        reason="Memory skill — 全部调用预批准",
+        scope="global",
+        session_id="",
+    )
+
+    actual_fp = "code_fp:lang=python|sandbox=0|imp=Memory,skills|fn=remember"
+    approved, reason = p.is_approved_code_fingerprint(actual_fp, session_id="any_sid")
+    assert approved is True
+    assert reason == "Memory skill — 全部调用预批准"
+
+
+def test_is_approved_code_fingerprint_per_skill_pattern_misses_other_skill(tmp_config):
+    """per-skill pattern 只放行特定 skill，其他 skill 的 fingerprint 不命中。"""
+    p = Permissions(tmp_config)
+    p.approve_code_fingerprint(
+        "code_fp:lang=python|sandbox=0|imp=Memory",
+        reason="Memory skill 预批准",
+        scope="global",
+        session_id="",
+    )
+
+    # 别的 skill（如 Exa）→ 不命中
+    other_fp = "code_fp:lang=python|sandbox=0|imp=Exa,skills|fn=exa_search"
+    approved, _ = p.is_approved_code_fingerprint(other_fp, session_id="any_sid")
+    assert approved is False
+
+
+def test_is_approved_code_fingerprint_per_skill_pattern_hits_diff_func(tmp_config):
+    """per-skill pattern 对同一 skill 不同函数调用都生效（imp= 子集匹配的核心价值）。"""
+    p = Permissions(tmp_config)
+    p.approve_code_fingerprint(
+        "code_fp:lang=python|imp=Memory",
+        reason="Memory skill 预批准",
+        scope="global",
+        session_id="",
+    )
+
+    # recall、remember 两种不同函数都命中（pattern 没写 fn= → 任意 fn 都放行）
+    for fp in (
+        "code_fp:lang=python|sandbox=0|imp=Memory,skills|fn=remember",
+        "code_fp:lang=python|sandbox=0|imp=Memory,skills|fn=recall",
+    ):
+        approved, _ = p.is_approved_code_fingerprint(fp, session_id="any_sid")
+        assert approved is True, f"{fp} 应该被 per-skill pattern 批准"
+
+
+def test_is_approved_code_fingerprint_per_skill_hits_both_sandbox_and_local(tmp_config):
+    """per-skill pattern 不写 sandbox= 段 → sandbox (1) + local (0) 两种执行环境都命中。
+
+    回归测试：v0.1.4 早期版本 pattern 写成 `sandbox=0` → 用户在沙盒（默认）调用
+    Tavily 时 fingerprint 是 sandbox=1 → 精确匹配不上 → 弹审批 UI。本测试确保
+    pattern 不带 sandbox 段 → 两种环境都放行。
+    """
+    p = Permissions(tmp_config)
+    p.approve_code_fingerprint(
+        "code_fp:lang=python|imp=Tavily",
+        reason="Tavily skill — 全部调用预批准",
+        scope="global",
+        session_id="",
+    )
+
+    # 沙盒调用（默认，local=False）
+    fp_sandbox = "code_fp:lang=python|sandbox=1|imp=Tavily,skills|fn=tavily_search"
+    approved, _ = p.is_approved_code_fingerprint(fp_sandbox, session_id="any_sid")
+    assert approved is True, "沙盒调用必须命中"
+
+    # 本机调用（local=True）
+    fp_local = "code_fp:lang=python|sandbox=0|imp=Tavily,skills|fn=tavily_search"
+    approved, _ = p.is_approved_code_fingerprint(fp_local, session_id="any_sid")
+    assert approved is True, "本机调用必须命中"
+
+
+def test_match_code_fp_pattern_missing_segment_means_any(tmp_config):
+    """pattern 里不写 sandbox= / fn= 段 → fingerprint 里任意 sandbox/fn 都允许。
+
+    是 per-skill pattern 的核心语义：用户信任这个 skill，但不在意它具体在哪个
+    执行环境跑、也不在意它调哪个函数。
+    """
+    from ChatMe.ChatWorkflow.mcps.permissions.core import _match_code_fp_pattern
+
+    # pattern 没写 sandbox → sandbox=0 和 sandbox=1 都命中
+    pat = "code_fp:lang=python|imp=Tavily"
+    assert _match_code_fp_pattern(pat, "code_fp:lang=python|sandbox=0|imp=Tavily,skills|fn=tavily_search") is True
+    assert _match_code_fp_pattern(pat, "code_fp:lang=python|sandbox=1|imp=Tavily,skills|fn=tavily_search") is True
+
+    # pattern 没写 fn= → 任意 fn 值都命中
+    pat2 = "code_fp:lang=python|imp=Memory"
+    assert _match_code_fp_pattern(pat2, "code_fp:lang=python|sandbox=0|imp=Memory,skills|fn=remember") is True
+    assert _match_code_fp_pattern(pat2, "code_fp:lang=python|sandbox=0|imp=Memory,skills|fn=recall") is True
+
+    # 但 lang 必须精确相等（pattern 写了）
+    pat3 = "code_fp:lang=python|imp=Tavily"
+    assert _match_code_fp_pattern(pat3, "code_fp:lang=nodejs|sandbox=1|imp=Tavily,skills|fn=tavily_search") is False
+
+
+def test_match_code_fp_pattern_wildcard_prefix_rejected(tmp_config):
+    """`code_fp:*` / `imp=*` 通配符必须被拒绝（防止有人想偷懒通配所有）。"""
+    from ChatMe.ChatWorkflow.mcps.permissions.core import _match_code_fp_pattern
+
+    # pattern 以 code_fp: 开头但后面是 * → 应该当作字面 pattern，匹配不到
+    assert _match_code_fp_pattern("code_fp:*", "code_fp:lang=python|sandbox=1|imp=Tavily") is False
+
+    # imp=* 不当作通配：字面比较就是 {*}, 与 {Tavily, skills} 非子集
+    assert _match_code_fp_pattern("code_fp:lang=python|imp=*", "code_fp:lang=python|sandbox=1|imp=Tavily,skills") is False
+
+
+# 9. 单例热重载（save_config 后下次 code() call 立刻生效，不用重启）
+
+
+def test_permissions_force_reload_reads_disk_updates(tmp_config):
+    """force_reload() 必须从磁盘重读 approved/denied，覆盖内存中的旧列表。
+
+    回归测试：v0.1.4 早期版本 save_config() 写完 config.json 后，Permissions
+    单例没 reload → 用户 Settings 加预批准后，下一次 code() call 仍走旧列表
+    → interrupt() 弹审批 UI。fix: save_config() 后调 force_reload() 让单例
+    立即同步磁盘。
+    """
+    p = Permissions(tmp_config)
+    assert len(p.approved) == 0
+
+    # 外部模拟 Settings UI 的 PUT /admin/config → 写磁盘
+    new_cfg = {
+        "permissions": {
+            "approval_policy": "default",
+            "approved_commands": [
+                {"pattern": "code_fp:lang=python|imp=Tavily", "scope": "global", "reason": "ui save"}
+            ],
+            "denied_commands": [],
+        }
+    }
+    tmp_config.write_text(json.dumps(new_cfg), encoding="utf-8")
+
+    # 关键：调 force_reload() 后内存立刻反映磁盘新内容
+    p.force_reload()
+    assert len(p.approved) == 1
+    assert p.approved[0].pattern == "code_fp:lang=python|imp=Tavily"
+
+    # 单例引用不变（force_reload 不重建对象）
+    assert p is p
+
+
+def test_permissions_force_reload_preserves_singleton_reference(tmp_config):
+    """force_reload 必须 in-place 更新，不能让 get_permissions() 返回新对象。
+
+    PermissionedToolNode 在 ChatWorkflow 启动期捕获了 _permissions 引用，
+    若 force_reload 替换了对象，runtime 里的引用就过期了。所以必须在原对象上
+    更新 approved/denied 字段。
+    """
+    p = Permissions(tmp_config)
+    original_id = id(p)
+    original_approved_list_id = id(p.approved)
+
+    # 写新内容
+    new_cfg = {
+        "permissions": {
+            "approval_policy": "default",
+            "approved_commands": [{"pattern": "code_fp:lang=python|imp=X", "scope": "global"}],
+            "denied_commands": [{"pattern": "rm -rf /"}],
+        }
+    }
+    tmp_config.write_text(json.dumps(new_cfg), encoding="utf-8")
+
+    p.force_reload()
+
+    # 对象同一，approved/denied 列表 in-place 更新
+    assert id(p) == original_id
+    # _load() 是 [from_dict(d) for d in ...] → 新 list 对象；字段名同但 id 不同
+    # 业务关心 approved 字段内容，不依赖 list id
+    assert p.approved[0].pattern == "code_fp:lang=python|imp=X"
+    assert p.denied[0].pattern == "rm -rf /"
+
+
+def test_permissions_force_reload_handles_missing_file(tmp_config):
+    """force_reload() 在文件被外部删除时不能崩，保留旧状态。"""
+    p = Permissions(tmp_config)
+    p.approve_code_fingerprint(
+        "code_fp:lang=python|imp=X",
+        reason="existing",
+        scope="global",
+        session_id="",
+    )
+    assert len(p.approved) == 1
+
+    tmp_config.unlink()
+    # 不抛异常，旧 approved 保留
+    assert p.force_reload() is True
+    assert len(p.approved) == 1
+
+
+def test_save_config_triggers_permissions_hot_reload(tmp_config, monkeypatch):
+    """ChatMeConfig.save_config() 保存 permissions 段后必须触发 Permissions 单例 force_reload。
+
+    端到端验证：admin_config.py 的 PUT /admin/config 路径走完后，下次 is_approved_code_fingerprint
+    立即拿到新列表（不需要重启后端）。
+    """
+    import ChatMe.ChatMeConfig.core as chatme_cfg_mod
+    import ChatMe.ChatWorkflow.mcps.permissions.core as perm_mod
+
+    # 1. 初始化两个单例（模拟 ChatWorkflow 启动）
+    monkeypatch.setattr(perm_mod, "_permissions", None)
+    monkeypatch.setattr(chatme_cfg_mod.config, "_instance", None)
+    monkeypatch.setattr(chatme_cfg_mod.config, "_config", {})
+    monkeypatch.setattr(chatme_cfg_mod.config, "_loaded", False)
+    monkeypatch.setattr(chatme_cfg_mod.config, "_config_file_mtime", None)
+
+    # 写一份仅 permissions 段的初始 config（approved 空）
+    tmp_config.write_text(json.dumps({
+        "app": {"name": "x"},
+        "llm_providers": {},
+        "permissions": {
+            "approval_policy": "default",
+            "approved_commands": [],
+            "denied_commands": [],
+        },
+    }), encoding="utf-8")
+
+    # 把 ChatMeConfig._find_config_file / Permissions._find_config_file 都指到 tmp_config
+    monkeypatch.setattr(
+        chatme_cfg_mod.ChatMeConfig, "_find_config_file", lambda self: tmp_config
+    )
+    # Permissions 走 init_permissions(config_path=...) 直接指定，不依赖 _find_config_file
+
+    # 启动期 init → Permissions 单例加载空列表
+    perms = perm_mod.init_permissions(config_path=tmp_config)
+    assert len(perms.approved) == 0
+
+    # 2. 模拟 Settings UI PUT /admin/config → 调 save_config
+    chatme_cfg = chatme_cfg_mod.ChatMeConfig()
+    chatme_cfg._load()
+    save_result = chatme_cfg.save_config({
+        "permissions": {
+            "approval_policy": "default",
+            "approved_commands": [
+                {"pattern": "code_fp:lang=python|imp=Tavily", "scope": "global",
+                 "reason": "Tavily skill 预批准"}
+            ],
+            "denied_commands": [],
+        }
+    })
+
+    assert "permissions" in save_result["saved_segments"]
+
+    # 3. 关键：下一次 is_approved_code_fingerprint 立即拿到新列表
+    fp = "code_fp:lang=python|sandbox=1|imp=Tavily,skills|fn=tavily_search"
+    approved, reason = perms.is_approved_code_fingerprint(fp, session_id="any")
+    assert approved is True, "save_config 后 Permissions 单例应已热重载"
+    assert reason == "Tavily skill 预批准"
+
+
 # helpers
 
 

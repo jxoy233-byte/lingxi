@@ -14,6 +14,9 @@ class ChatMeConfig:
     _instance: Optional["ChatMeConfig"] = None
     _config: dict = {}
     _loaded: bool = False
+    # 上次 _load() 读到的 config.json mtime；下一次 _load() 对比这个决定是否重读
+    # None = 从未读过（首加载必须跑一次）
+    _config_file_mtime: Optional[float] = None
 
     def __new__(cls) -> "ChatMeConfig":
         if cls._instance is None:
@@ -42,24 +45,69 @@ class ChatMeConfig:
         return global_path
 
     def _load(self) -> None:
-        """加载配置"""
-        if self._loaded:
+        """加载配置（带 mtime 失效：磁盘文件改了会自动重读）
+
+        行为：
+        - 首加载（_loaded=False）→ 必然读文件
+        - 后续加载：磁盘 mtime == 已缓存 mtime → 直接 return（最常见路径，零开销）
+        - 后续加载：磁盘 mtime 变了 → 重读文件 + 刷新 _config（支持 save_config + 外部编辑热加载）
+        - 文件被外部删除（exists()=False）：
+          * 首加载 → 生成默认
+          * 已加载过 → 保留旧 _config，不破坏运行（外部误删可恢复）
+
+        测试 fixture 约定：
+        - 测试直接注入 cfg._config + cfg._loaded=True 模拟"已加载"状态
+        - 这种情况下 _config_file_mtime=None（从未读过磁盘）
+        - 直接 return，避免注入数据被真实磁盘内容覆盖
+
+        重读失败的兜底：
+        - 首加载失败 → 走 _generate_default_config 兜底（与旧行为一致）
+        - 已加载过的再次失败 → 保留旧 _config（不覆盖有效内存数据）
+        """
+        config_file = self._find_config_file()
+        try:
+            current_mtime = config_file.stat().st_mtime
+        except OSError:
+            current_mtime = None
+
+        # 测试 fixture 注入的"已加载"状态：从未读过磁盘 → 不重读
+        # （_loaded=True 但 _config_file_mtime=None 表示这是测试直注的）
+        if self._loaded and self._config_file_mtime is None:
             return
 
-        config_file = self._find_config_file()
+        # 内存已是磁盘最新状态 → 直接 return（每次 get() 的最常见路径）
+        if self._loaded and current_mtime == self._config_file_mtime:
+            return
 
         if config_file.exists():
             try:
                 with open(config_file, "r", encoding="utf-8") as f:
                     self._config = json.load(f)
-                self._loaded = True
-                return
             except Exception as e:
                 print(f"加载配置文件失败: {e}")
+                if not self._loaded:
+                    # 首加载失败：兜底生成默认
+                    self._generate_default_config(config_file)
+                # 已加载过的再次失败：保留旧 _config（不要清零）
+        else:
+            if not self._loaded:
+                # 首加载无文件：生成默认
+                self._generate_default_config(config_file)
+            # 已加载过但文件被外部删除：保留旧 _config（不破坏运行）
 
-        # config.json 不存在，自动生成
-        self._generate_default_config(config_file)
+        self._config_file_mtime = current_mtime
         self._loaded = True
+
+    def force_reload(self) -> None:
+        """强制下次 _load() 重读磁盘（即使 mtime 没变）。
+
+        典型场景：save_config() 写完后，业务希望"绝对下一次 get_* 就拿到新值"，
+        而不是依赖 stat() 的 mtime 检测（极少数 fs / 容器场景下 mtime 不可靠）。
+
+        注意：会同时清掉 _config_file_mtime，让 _load() 走「首加载」分支重读。
+        """
+        self._loaded = False
+        self._config_file_mtime = None
 
     def _generate_default_config(self, config_file: Path) -> None:
         """从环境变量生成默认配置文件"""
@@ -68,7 +116,7 @@ class ChatMeConfig:
         default_config = {
             "app": {
                 "name": "ChatMe",
-                "version": "v0.1.4",
+                "version": "v0.1.5",
                 "description": "ChatMe LangGraph Workflow",
                 "host": "127.0.0.1",
                 "port": 8211,
@@ -93,7 +141,40 @@ class ChatMeConfig:
             },
             "permissions": {
                 "approval_policy": "default",
-                "approved_commands": [],
+                # 5 个核心 skill 的预批准（per-skill pattern，imp= 子集匹配）：
+                # 用户首次启动时不需要为 Tavily / Exa / DataAnalysis / ImageParser /
+                # Memory 的常用调用再走一遍审批 UI。详见
+                # ChatMe/ChatWorkflow/mcps/permissions/core.py:_match_code_fp_pattern。
+                "approved_commands": [
+                    {
+                        # pattern 里不写 sandbox= 段 → matcher 视为"任意执行环境都批准"
+                        # （local=True 走本机 / 不传 local 走沙盒 都命中）。详见
+                        # ChatMe/ChatWorkflow/mcps/permissions/core.py:_match_code_fp_pattern。
+                        "pattern": "code_fp:lang=python|imp=Memory",
+                        "reason": "Memory skill — 全部调用预批准（default policy 跳过审批 UI；含 sandbox + local 两种执行环境）",
+                        "scope": "global",
+                    },
+                    {
+                        "pattern": "code_fp:lang=python|imp=Tavily",
+                        "reason": "Tavily skill — 全部调用预批准（含 sandbox + local）",
+                        "scope": "global",
+                    },
+                    {
+                        "pattern": "code_fp:lang=python|imp=Exa",
+                        "reason": "Exa skill — 全部调用预批准（含 sandbox + local）",
+                        "scope": "global",
+                    },
+                    {
+                        "pattern": "code_fp:lang=python|imp=ImageParser",
+                        "reason": "ImageParser skill — 全部调用预批准（含 sandbox + local）",
+                        "scope": "global",
+                    },
+                    {
+                        "pattern": "code_fp:lang=python|imp=DataAnalysis",
+                        "reason": "DataAnalysis skill — 全部调用预批准（含 sandbox + local）",
+                        "scope": "global",
+                    },
+                ],
                 "denied_commands": [],
             },
         }
@@ -433,7 +514,9 @@ class ChatMeConfig:
     # 前端表单允许编辑的顶层 key 白名单；其他节点（app/redis/dirs/oss）禁止修改
     EDITABLE_TOP_KEYS = ("llm_providers", "skills", "permissions")
 
-    # 修改后必须重启后端才能生效的字段（langchain client / mcp client 是常驻对象）
+    # 已弃用：v0.1.5 起 save_config() 按修改的段动态决定 restart_required
+    # （permissions / skills 立即生效；llm_providers 需重启）。保留此常量仅为
+    # 向后兼容——外部代码读取过的属性，删除会破坏 import。
     RESTART_REQUIRED = True
 
     @staticmethod
@@ -518,7 +601,9 @@ class ChatMeConfig:
         current = json.loads(json.dumps(self._config))  # 深拷贝
 
         saved_keys = []
+        saved_segments: list[str] = []
         # === llm_providers ===
+        llm_keys = []
         if "llm_providers" in updates:
             current.setdefault("llm_providers", {})
             for prov_name, prov_cfg in updates["llm_providers"].items():
@@ -531,8 +616,12 @@ class ChatMeConfig:
                         continue
                     current["llm_providers"][prov_name][field] = value
                     saved_keys.append(f"llm_providers.{prov_name}.{field}")
+                    llm_keys.append(f"llm_providers.{prov_name}.{field}")
+        if llm_keys:
+            saved_segments.append("llm_providers")
 
         # === skills ===
+        skills_keys = []
         if "skills" in updates:
             current.setdefault("skills", {})
             for field, value in updates["skills"].items():
@@ -541,8 +630,12 @@ class ChatMeConfig:
                     continue
                 current["skills"][field] = value
                 saved_keys.append(f"skills.{field}")
+                skills_keys.append(f"skills.{field}")
+        if skills_keys:
+            saved_segments.append("skills")
 
         # === permissions ===
+        permissions_keys = []
         if "permissions" in updates:
             current.setdefault("permissions", {})
             for field, value in updates["permissions"].items():
@@ -551,13 +644,17 @@ class ChatMeConfig:
                         raise ValueError(f"approval_policy 必须是 'default' 或 'yolo'，实际是 {value!r}")
                     current["permissions"]["approval_policy"] = value
                     saved_keys.append("permissions.approval_policy")
+                    permissions_keys.append("permissions.approval_policy")
                 elif field in ("approved_commands", "denied_commands"):
                     if not isinstance(value, list):
                         raise ValueError(f"{field} 必须是 list，实际是 {type(value).__name__}")
                     current["permissions"][field] = value
                     saved_keys.append(f"permissions.{field}")
+                    permissions_keys.append(f"permissions.{field}")
                 else:
                     raise ValueError(f"permissions 段不允许的字段: {field!r}")
+        if permissions_keys:
+            saved_segments.append("permissions")
 
         # 原子写：tmp + os.replace（不写 .bak 副本，避免污染用户配置目录 / git untracked 列表）
         # 关键：tmp 文件名带进程 PID，避免与仓库里提交的 config.json.tmp 模板重名
@@ -581,13 +678,40 @@ class ChatMeConfig:
                 pass
             raise RuntimeError(f"写入 config.json 失败: {e}")
 
-        # 不调用 self._load(force=True)：所有运行时使用的对象都是启动时构造的，
-        # 热加载意义不大，让前端提示用户重启即可。
+        # 热加载策略：
+        # - permissions / skills 段：每次 get() 重读磁盘（mtime check），保存后下一次
+        #   get_skills_config() / get_permissions_config() 自动拿到新值 → restart_required=False
+        # - llm_providers 段：ChatOpenAI / Redis client / VL model weights 都是启动期
+        #   构造的长生命周期对象，写文件不会影响已构造的 client → restart_required=True
+        restart_required = "llm_providers" in saved_segments
+
+        # 清掉 mtime 缓存 → 下次 _load() 必然重读（即使 stat() 拿到的 mtime 与
+        # 写之前一样——某些 fs mtime 精度只到秒，os.replace 后新 inode 的 mtime
+        # 可能等于旧 mtime）
+        self.force_reload()
+
+        # 同步热重载 Permissions 单例（PermissionedToolNode 的审批 gate 用）——
+        # Permissions 单例是启动期从 config.json 加载的，旧实现没暴露 reload，
+        # 导致用户 Settings 改 approved/denied 后必须重启后端才生效。
+        # save_config 时主动 force_reload 让下次 code() call 立即拿到新列表。
+        # （skills 段也有类似问题——但 skills 的访问路径走 get_skills_config()
+        # → ChatMeConfig._load() 已经 mtime check 热加载，不需要这一步。）
+        if "permissions" in saved_segments:
+            try:
+                from ChatMe.ChatWorkflow.mcps.permissions.core import (
+                    init_permissions, get_permissions,
+                )
+                get_permissions().force_reload()
+            except Exception as e:
+                # Permissions 模块未初始化（极端情况，如只在 ChatMeConfig 单测中调）
+                # 不影响主流程
+                logger.warning(f"permissions 热重载跳过: {e}")
 
         return {
             "ok": True,
-            "applied": False,  # 不热加载
-            "restart_required": self.RESTART_REQUIRED,
+            "applied": not restart_required,  # permissions/skills 改动立即生效
+            "restart_required": restart_required,
+            "saved_segments": saved_segments,  # 给前端做粒度更细的提示
             "saved_keys": saved_keys,
         }
 

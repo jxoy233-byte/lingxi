@@ -71,6 +71,8 @@ class SandboxPool:
         self.cached_path = os.path.abspath(cached_path or backend_root / "cached")
         self.config_path = os.path.abspath(config_path or backend_root / ".chatme" / "config.json")
         self.logs_path = os.path.abspath(config_path or backend_root / ".chatme" / "logs")
+        # 记忆目录（ro 挂到 /memory）—— 沙盒可读不可写，写仍走 host 的 remember
+        self.memory_path = os.path.abspath(backend_root / ".chatme" / "memory")
         # 自动生成的 sandbox-only config（只含 skills 段，权限 600，不入 git）
         self.sandbox_config_path = os.path.abspath(top_root / "sandbox" / ".sandbox-config.json")
 
@@ -150,16 +152,15 @@ class SandboxPool:
             return SkillRegistry(Path(self.skills_path)).build_mount_args()
 
         return [
-            "-v", f"{self.skills_path}:/skills:ro",
-            "-v", f"{os.path.join(self.skills_path, 'DataAnalysis')}:/skills/DataAnalysis:rw",
+            "-v", f"{self.skills_path}:/skills:rw",
         ]
 
     def _create_container(self) -> Optional[str]:
         """
         启动一个常驻容器：
-        - mount registry skills + cached(rw) + sandbox-only config + logs
-        - 容器内能看到：/skills, /cached, /.chatme/config.json（仅 skills 段）, /.chatme/logs
-        - mount: rw 的 skill 允许写入，其余 skills 保持只读
+        - mount registry skills + cached(rw) + sandbox-only config + logs + memory(ro)
+        - 容器内能看到：/skills, /cached, /.chatme/config.json（仅 skills 段）, /.chatme/logs, /memory
+        - mount: rw 的 skill 允许写入，其余 skills 保持只读；memory 全部 ro（写入走 host remember）
         - ChatMeConfig / LoggingManager 已通过 Dockerfile COPY 进 site-packages
         """
         try:
@@ -174,6 +175,8 @@ class SandboxPool:
                 "-v", f"{self.sandbox_config_path}:/.chatme/config.json:ro",
                 # 日志：容器内写 /.chatme/logs，host 上落到 backend/.chatme/logs
                 "-v", f"{self.logs_path}:/.chatme/logs:rw",
+                # 记忆文件：ro 挂载 —— 沙盒可读不可写，写入走 host 的 remember (local=True)
+                "-v", f"{self.memory_path}:/memory:ro",
                 # 工作目录约束：PYTHONPATH=/ 让 /cached、/skills 直接可 import，
                 # WORKDIR=/ 让代码中的相对路径（如 open('cached/xxx')）也能解析。
                 # 不再挂 tmpfs —— 代码直接写到根目录 /code.py，跟 /cached、/skills 同级

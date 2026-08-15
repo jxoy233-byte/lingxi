@@ -66,6 +66,10 @@ class SkillRegistry:
     def __init__(self, skills_root: Path) -> None:
         self.skills_root = Path(skills_root).resolve()
         self._skills: dict[str, SkillManifest] = {}
+        # 上次 scan 时每个 SKILL.md 的 mtime，用于检测磁盘变动（SkillForge
+        # 创建 / 修改 skill 后无需重启后端即可被 find_skill 发现）。
+        # macOS APFS 修改现有文件不更新父目录 mtime，所以必须按文件 stat。
+        self._last_file_mtimes: dict[Path, float] = {}
 
     def scan(self) -> list[SkillManifest]:
         """Scan skills_root and populate the cached manifest dict. Idempotent."""
@@ -73,6 +77,7 @@ class SkillRegistry:
         if not self.skills_root.is_dir():
             logger.warning(f"skills 目录不存在: {self.skills_root}")
             self._skills = manifests
+            self._last_file_mtimes = {}
             return []
 
         # 顶层目录式 skill
@@ -90,12 +95,33 @@ class SkillRegistry:
                 manifests[manifest.name] = manifest
 
         self._skills = manifests
+        # 记录本次每个 SKILL.md 的 mtime，让 _maybe_rescan() 能识别「磁盘未变」
+        self._last_file_mtimes = self._stat_all_skill_mds()
         return list(manifests.values())
 
+    def _stat_all_skill_mds(self) -> dict[Path, float]:
+        """Return {path: mtime} for every SKILL.md under skills_root. 找不到的视为 -1。"""
+        result: dict[Path, float] = {}
+        for skill_md in sorted(self.skills_root.glob("*/SKILL.md")):
+            try:
+                result[skill_md] = skill_md.stat().st_mtime
+            except OSError:
+                result[skill_md] = -1.0
+        for skill_md in sorted(self.skills_root.glob("*/**/SKILL.md")):
+            if skill_md.parent.parent == self.skills_root:
+                continue
+            try:
+                result[skill_md] = skill_md.stat().st_mtime
+            except OSError:
+                result[skill_md] = -1.0
+        return result
+
     def get(self, name: str) -> Optional[SkillManifest]:
+        self._maybe_rescan()
         return self._skills.get(name)
 
     def names(self) -> list[str]:
+        self._maybe_rescan()
         return list(self._skills)
 
     def search(self, query: str, top_k: int = 3) -> list[SkillManifest]:
@@ -109,6 +135,7 @@ class SkillRegistry:
             registry.search("搜索") → [exa, tavily]  (CJK char-token 命中)
             registry.search("mysql") → [data_analysis]  (alias 命中)
         """
+        self._maybe_rescan()
         if not query or not query.strip():
             return []
         query_tokens = _tokenize_for_search(query)
@@ -136,6 +163,17 @@ class SkillRegistry:
         scored.sort(key=lambda x: (-x[1], x[0].name))
         return [skill for skill, _ in scored[:top_k]]
 
+    def _maybe_rescan(self) -> None:
+        """若任意 SKILL.md mtime 变了（SkillForge 新建/修改/删除 skill），自动 rescan。
+
+        macOS APFS 修改现有文件不更新父目录 mtime，所以必须按每个 SKILL.md
+        自己 stat（O(n) 但 n ≤ 几十，仍比 glob+读文件便宜两个数量级）。
+        """
+        current = self._stat_all_skill_mds()
+        if current != self._last_file_mtimes:
+            self.scan()
+            # scan() 已经更新了 _last_file_mtimes
+
     @functools.lru_cache(maxsize=1)
     def build_mount_args(self) -> list[str]:
         """Build aggregate read-only mount plus explicit writable overrides.
@@ -151,7 +189,7 @@ class SkillRegistry:
         """
         if not self._skills:
             self.scan()
-        args = ["-v", f"{self.skills_root}:/skills:ro"]
+        args = ["-v", f"{self.skills_root}:/skills:rw"]
         writable_paths = sorted(
             {skill.path.resolve() for skill in self._skills.values() if skill.mount_mode == "rw"},
             key=lambda path: (len(path.parts), str(path)),
@@ -237,14 +275,12 @@ def get_skill_registry() -> SkillRegistry:
 def reset_skill_registry(skills_root: Optional[Path] = None) -> SkillRegistry:
     """Test-only: rebuild the singleton with a fresh skills_root.
 
-    同步清掉所有 lru_cache（build_mount_args / available_skills_block），
-    否则旧 cache 让后续测试拿到陈旧结果。
+    同步清掉 build_mount_args lru_cache（mount args 跟目录绑定）。
+    available_skills_block / find_skill_block 已经在 v0.1.5 去掉 lru_cache，
+    每次调用自动走 mtime check，不需要清。
     """
     global _registry
     _registry = SkillRegistry(skills_root or _DEFAULT_SKILLS_ROOT)
     _registry.scan()
     _registry.build_mount_args.cache_clear()
-    # prompt.py 反向依赖 registry，避免循环 import 用 lazy import
-    from ChatMe.ChatWorkflow.skills.prompt import available_skills_block
-    available_skills_block.cache_clear()
     return _registry

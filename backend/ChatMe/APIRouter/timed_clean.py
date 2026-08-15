@@ -102,6 +102,9 @@ def clean_logs(days: int = 2) -> tuple[int, float]:
     for file in log_dir.iterdir():
         if not file.is_file():
             continue
+        # thinking_chain-* 日志走专用 clean_thinking_chain_logs，不在这里删
+        if file.stem.startswith("thinking_chain-"):
+            continue
         try:
             file_date = datetime.strptime(file.stem, "%Y-%m-%d").date()
         except ValueError:
@@ -111,6 +114,50 @@ def clean_logs(days: int = 2) -> tuple[int, float]:
             file.unlink()
             removed += 1
             freed_size += size
+
+    return removed, freed_size
+
+
+def clean_thinking_chain_logs() -> tuple[int, float]:
+    """清理 thinking_chain-YYYY-MM-DD.log，只保留最新 1 个；只剩 1 个时不清理。
+
+    thinking_chain 日志按 CLAUDE.md 偏好 10.1 单开文件，9 个节点调用 + 每次
+    ReAct 压缩都打一条；量远大于主日志（每天可能 50-200MB），所以只保留最新
+    一个文件。
+
+    「只剩 1 个不动」的兜底：避免极端情况（如第一次跑、新装机目录只有当天
+    一个文件）误删后无任何日志可看。
+    """
+    log_dir = get_log_dir()
+    if not log_dir.exists():
+        return 0, 0
+
+    # 收集所有 thinking_chain-YYYY-MM-DD.log（按日期排序）
+    candidates: list[tuple[Path, object]] = []
+    for file in log_dir.iterdir():
+        if not file.is_file():
+            continue
+        if not (file.suffix == ".log" and file.stem.startswith("thinking_chain-")):
+            continue
+        date_str = file.stem[len("thinking_chain-"):]
+        try:
+            file_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        candidates.append((file, file_date))
+
+    if len(candidates) <= 1:
+        return 0, 0
+
+    # 按日期降序，保留最新的 1 个，删其余
+    candidates.sort(key=lambda pair: pair[1], reverse=True)
+    removed = 0
+    freed_size = 0
+    for file, _ in candidates[1:]:
+        size = file.stat().st_size
+        file.unlink()
+        removed += 1
+        freed_size += size
 
     return removed, freed_size
 
@@ -219,6 +266,13 @@ async def _cleanup_task():
             f"释放 {log_freed / 1024 / 1024:.2f} MB"
         )
 
+    tc_removed, tc_freed = clean_thinking_chain_logs()
+    if tc_removed > 0:
+        logger.info(
+            f"思维链日志清理完成: 删除 {tc_removed} 个文件，"
+            f"释放 {tc_freed / 1024 / 1024:.2f} MB"
+        )
+
     memory_removed, memory_freed = clean_memory(days=30)
     if memory_removed > 0:
         logger.info(
@@ -232,7 +286,13 @@ async def _cleanup_task():
     else:
         logger.debug("无孤立会话目录需要清理")
 
-    if cache_removed == 0 and log_removed == 0 and memory_removed == 0 and orphaned_removed == 0:
+    if (
+        cache_removed == 0
+        and log_removed == 0
+        and tc_removed == 0
+        and memory_removed == 0
+        and orphaned_removed == 0
+    ):
         logger.debug("无文件需要清理")
 
 
@@ -304,6 +364,14 @@ async def get_cleanup_status():
 
     cache_count = sum(1 for f in cache_dir.iterdir() if f.is_file()) if cache_dir.exists() else 0
     log_count = sum(1 for f in log_dir.iterdir() if f.is_file() and f.suffix == ".log") if log_dir.exists() else 0
+    thinking_chain_count = (
+        sum(
+            1 for f in log_dir.iterdir()
+            if f.is_file() and f.suffix == ".log" and f.stem.startswith("thinking_chain-")
+        )
+        if log_dir.exists()
+        else 0
+    )
 
     # 统计 session 目录数量（排除保留目录 .fonts/ 等）
     session_count = sum(
@@ -316,6 +384,7 @@ async def get_cleanup_status():
         "cache_files": cache_count,
         "log_dir": str(log_dir),
         "log_files": log_count,
+        "thinking_chain_logs": thinking_chain_count,
         "cached_session_dirs": session_count,
         "scheduler_running": _scheduler is not None and _scheduler.running,
     }

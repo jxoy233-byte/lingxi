@@ -100,7 +100,11 @@ export default {
     displayUrl() {
       try {
         const u = new URL(this.url)
-        return u.hostname + (u.pathname !== '/' ? u.pathname : '')
+        // 本机 / 内网 host 统一显示成「灵析」，避免泄露 localhost:18211 等端口细节给用户
+        const hostname = (u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '0.0.0.0')
+          ? '灵析'
+          : u.hostname
+        return hostname + (u.pathname !== '/' ? u.pathname : '')
       } catch {
         return this.url
       }

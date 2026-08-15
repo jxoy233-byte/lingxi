@@ -1,6 +1,9 @@
 <template>
   <div
-    :class="['conversation-item', { 'active': isActive, 'streaming': isStreaming }]"
+    :class="['conversation-item', {
+      'active': isActive,
+      'streaming': isStreaming
+    }]"
     @click="$emit('select')"
     @contextmenu.prevent="$emit('refresh')"
   >
@@ -34,7 +37,62 @@
         ref="titleInput"
       />
     </div>
-    <div class="conv-time">{{ formattedTime }}</div>
+    <div class="conv-meta-row">
+      <!-- 定时任务触发：放在底部时间行，点击 inline 展开该会话的任务列表 -->
+      <button
+        v-if="hasScheduledTasks"
+        class="scheduled-trigger"
+        :class="{ active: isScheduledTasksExpanded }"
+        :title="isScheduledTasksExpanded ? '收起定时任务' : '展开定时任务'"
+        @click.stop="$emit('toggle-scheduled-tasks')"
+      >
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <circle cx="12" cy="12" r="10" />
+          <polyline points="12 6 12 12 16 14" />
+        </svg>
+        <svg
+          class="caret"
+          :class="{ up: isScheduledTasksExpanded }"
+          width="9"
+          height="9"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2.6"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+        <span v-if="tasks.length > 1" class="badge">{{ tasks.length }}</span>
+      </button>
+      <span class="conv-time">{{ formattedTime }}</span>
+    </div>
+
+    <!-- 内嵌展开的任务列表（不在浮层里，直接渲染在 conv-item 下方） -->
+    <transition name="scheduled-expand">
+      <div v-if="isScheduledTasksExpanded" class="scheduled-inline" @click.stop>
+        <ScheduledTaskItem
+          v-for="task in scheduledTasks"
+          :key="task.task_id"
+          :task="task"
+          :busy="scheduledTasksBusy"
+          @toggle="(tid, en) => $emit('scheduled-task-toggle', tid, en)"
+          @run="(tid) => $emit('scheduled-task-run', tid)"
+          @delete="(tid) => $emit('scheduled-task-delete', tid)"
+        />
+      </div>
+    </transition>
+
     <button
       @click.stop="handleDeleteClick"
       :class="['delete-btn', { 'confirming': isConfirmingDelete }]"
@@ -44,8 +102,11 @@
 </template>
 
 <script>
+import ScheduledTaskItem from './ScheduledTaskItem.vue'
+
 export default {
   name: 'ConversationItem',
+  components: { ScheduledTaskItem },
   props: {
     conversation: {
       type: Object,
@@ -73,9 +134,28 @@ export default {
       // SSE error 触发，用户还没点进去看过——红点
       type: Boolean,
       default: false
+    },
+    scheduledTasks: {
+      // 该会话的定时任务列表；空数组 = 没有任务
+      type: Array,
+      default: () => []
+    },
+    scheduledTasksBusy: {
+      // 是否正在请求（驱动 task 操作按钮的 busy 态）
+      type: Boolean,
+      default: false
+    },
+    isScheduledTasksExpanded: {
+      // 该会话的定时任务列表是否展开（由 Sidebar 中央管理 + localStorage 缓存）
+      type: Boolean,
+      default: false
     }
   },
-  emits: ['select', 'delete', 'update-title', 'refresh'],
+  emits: [
+    'select', 'delete', 'update-title', 'refresh',
+    'scheduled-task-toggle', 'scheduled-task-run', 'scheduled-task-delete',
+    'toggle-scheduled-tasks'
+  ],
   data() {
     return {
       isEditing: false,
@@ -114,6 +194,12 @@ export default {
       if (this.isErrored) return '会话出错（点击查看）'
       if (this.isCompletedUnread) return '已完成（点击查看）'
       return ''
+    },
+    hasScheduledTasks() {
+      return this.scheduledTasks && this.scheduledTasks.length > 0
+    },
+    tasks() {
+      return this.scheduledTasks
     }
   },
   mounted() {
@@ -276,9 +362,106 @@ export default {
   min-width: 0;
 }
 
+.conv-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
 .conv-time {
   font-size: 12px;
   color: var(--text-secondary);
+}
+
+/* ⏰ 触发按钮：紧凑、内嵌于 12px 时间行左侧 */
+.scheduled-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  position: relative;
+  height: 18px;
+  padding: 0 5px;
+  border: none;
+  background: transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 11px;
+  transition: all 0.15s ease;
+}
+.scheduled-trigger:hover {
+  background: var(--bg-hover);
+  color: var(--button-bg);
+}
+.scheduled-trigger.active {
+  background: var(--button-bg);
+  color: #fff;
+}
+.scheduled-trigger .caret {
+  opacity: 0.7;
+  transition: transform 0.18s ease;
+}
+.scheduled-trigger .caret.up {
+  transform: rotate(180deg);
+}
+
+.badge {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  margin-left: 2px;
+  opacity: 0.85;
+}
+.scheduled-trigger.active .badge {
+  opacity: 0.9;
+}
+
+/* 内嵌展开的定时任务列表 */
+.scheduled-inline {
+  margin-top: 6px;
+  border-top: 1px solid var(--border-color);
+  /* 与会话名字区域的横向分割线（上面 6px 间距 + 1px 实线） */
+  /* 3 条 task 自然高度 = ~110px；超过 3 条就滚动，避免侧栏被撑得很长 */
+  max-height: 110px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* 紧凑滚动条：默认不可见，hover 才显出（与侧栏主滚动条风格一致） */
+.scheduled-inline::-webkit-scrollbar {
+  width: 0;
+}
+.scheduled-inline:hover::-webkit-scrollbar {
+  width: 4px;
+}
+.scheduled-inline::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scheduled-inline::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 2px;
+  min-height: 20px;
+}
+.scheduled-inline::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+}
+
+/* 展开 / 收起动画：高度 + 透明度（max-height 与 .scheduled-inline 保持一致） */
+.scheduled-expand-enter-active,
+.scheduled-expand-leave-active {
+  transition: max-height 0.2s ease, opacity 0.18s ease;
+  overflow: hidden;
+}
+.scheduled-expand-enter-from,
+.scheduled-expand-leave-to {
+  max-height: 0;
+  opacity: 0;
+}
+.scheduled-expand-enter-to,
+.scheduled-expand-leave-from {
+  max-height: 110px;
+  opacity: 1;
 }
 
 .delete-btn {
@@ -318,4 +501,5 @@ export default {
   color: #dc2626;
   background: rgba(239, 68, 68, 0.22);
 }
+
 </style>

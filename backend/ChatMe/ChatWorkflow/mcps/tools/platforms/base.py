@@ -125,7 +125,7 @@ Parameters: code (required, string), language (default: "python"), local (defaul
 - Always print final key results you need to pass to the next step
 - No comments in code
 - Write script files under `cached/` dir
-- Sandbox: Linux container with `/skills` ro + `/cached` rw"""
+- Sandbox: Linux container with `/skills` rw + `/cached` rw"""
 
     # =========================================================================
     # 通用：跨平台一致

@@ -140,6 +140,35 @@ def test_python_extract_imports_with_dot():
     assert imports == {"a", "x", "p"}
 
 
+def test_python_extract_imports_skills_submodule():
+    """`from skills.<X> import ...` → 把子模块 X 也加入集合，让 fingerprint 能区分不同 skill 调用。
+
+    配合 permissions matcher 的 `imp=` 子集匹配（如 `imp=Memory` 命中
+    `imp=Memory,skills` 的实际 fingerprint）。
+    """
+    imports = _extract_python_imports("from skills.Memory import remember\n")
+    assert "skills" in imports
+    assert "Memory" in imports
+
+
+def test_python_extract_imports_skills_submodule_no_double_count():
+    """`from skills.Memory import ...` 在同一文件多次出现 → 子模块去重（Set 语义）。"""
+    imports = _extract_python_imports(
+        "from skills.Memory import remember\n"
+        "from skills.Memory import recall\n"
+        "from skills import other_helper\n"
+    )
+    assert imports == {"skills", "Memory"}
+
+
+def test_python_extract_imports_skills_submodule_deep():
+    """`from skills.X.Y import ...` → 顶层 + 二级子模块都加（保持向后兼容）。"""
+    imports = _extract_python_imports("from skills.X.Y import z\n")
+    assert "skills" in imports
+    assert "X" in imports
+    assert "Y" not in imports  # 只取第二段，不无限向下拆
+
+
 # ---------------------------------------------------------------------------
 # nodejs 路径
 # ---------------------------------------------------------------------------

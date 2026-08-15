@@ -1,7 +1,7 @@
 {
   "app": {
     "name": "Lingxi",
-    "version": "v0.1.3",
+    "version": "v0.1.5",
     "description": "AI data-analysis chat assistant with tool use, command approval, code execution, and persistent memory across conversations",
     "host": "127.0.0.1",
     "port": 8211
@@ -37,5 +37,36 @@
     "access_key_secret": "optional",
     "bucket": "optional",
     "endpoint": "optional"
+  },
+  "permissions": {
+    "approval_policy": "default",
+    "approved_commands": [
+      {
+        "pattern": "code_fp:lang=python|imp=Memory",
+        "reason": "Memory skill — 全部调用预批准（default policy 跳过审批 UI；含 sandbox + local 两种执行环境）",
+        "scope": "global"
+      },
+      {
+        "pattern": "code_fp:lang=python|imp=Tavily",
+        "reason": "Tavily skill — 全部调用预批准（含 sandbox + local）",
+        "scope": "global"
+      },
+      {
+        "pattern": "code_fp:lang=python|imp=Exa",
+        "reason": "Exa skill — 全部调用预批准（含 sandbox + local）",
+        "scope": "global"
+      },
+      {
+        "pattern": "code_fp:lang=python|imp=ImageParser",
+        "reason": "ImageParser skill — 全部调用预批准（含 sandbox + local）",
+        "scope": "global"
+      },
+      {
+        "pattern": "code_fp:lang=python|imp=DataAnalysis",
+        "reason": "DataAnalysis skill — 全部调用预批准（含 sandbox + local）",
+        "scope": "global"
+      }
+    ],
+    "denied_commands": []
   }
 }

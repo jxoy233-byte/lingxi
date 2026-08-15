@@ -35,20 +35,22 @@ ChatMe（产品名「灵析」Lingxi）是一个基于 LangGraph 的多智能体
 ChatMe/
 ├── backend/
 │   ├── ChatMe/
-│   │   ├── APIRouter/                    # /chat /static /api /admin 4 个 Router + scheduled_tasks + message_queue
-│   │   ├── ChatMeConfig/                 # 配置加载器
+│   │   ├── APIRouter/                    # /chat /static /api /admin (admin_config + scheduled_tasks + checkpoint_janitor + message_queue)
+│   │   ├── ChatMeConfig/                 # 配置加载器（_load mtime + force_reload 热加载）
 │   │   ├── ChatService/                  # 聊天服务层（SSE 流式）
 │   │   │   └── FilesLoaders/             # 文件加载 + 大文件截断
 │   │   ├── ChatWorkflow/                 # LangGraph 工作流核心
 │   │   │   ├── config/                   # 图配置 / prompts / state TypedDict
+│   │   │   ├── skills/                   # SkillRegistry（扫描 SKILL.md frontmatter + find_skill 检索）
 │   │   │   ├── mcps/                     # MCP 服务（server.py / session.py）
 │   │   │   │   ├── tools/                # 工具实现 + code_fingerprint + platforms/ 跨平台 adapter
 │   │   │   │   ├── sandbox/pool.py       # Docker 沙盒容器池 SandboxPool
 │   │   │   │   └── permissions/core.py   # PermissionedToolNode + 中断审批
-│   │   │   └── Memory/                   # 长期记忆管理
+│   │   │   ├── CheckpointJanitor.py      # LangGraph checkpoint prune 业务（hook 进 _save_round_checkpoint）
+│   │   │   └── Memory/                   # 长期记忆（Memory skill 写文件）+ scheduler_lifespan 跨会话引用
 │   │   ├── LoggingManager/
 │   │   └── test/
-│   ├── skills/                           # Bocha / Exa / Tavily / ImageParser / DataAnalysis / Scheduler
+│   ├── skills/                           # Bocha / Exa / Tavily / ImageParser / DataAnalysis / Scheduler / Memory / SkillForge
 │   ├── .chatme/                          # 局部配置（仓库内已含）
 │   ├── pyproject.toml
 │   └── main.py                           # FastAPI 入口
@@ -137,19 +139,19 @@ uv run chatme_mcp
 
 | 组件                                              | 职责                                                                                                                       |
 | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `App.vue`                                       | 全局状态管理，SSE 事件分发；维护 `_sessionHadError` 集合做"错误气泡保护态"（出错后该 session 不再被右侧刷新覆盖）；`refreshPage()` 触发 `window.location.reload()`；消息排队 `_pendingQueue` / `_queueLoaded` / `_queueDrainDeferred` + 定时任务 `scheduledTasksMap`（见偏好 29） |
-| `Sidebar.vue` / `ConversationItem.vue`          | 会话列表（全量入 DOM + `overflow-y: scroll` + 自定义 webkit 滚动条）；ConversationItem 维护删除会话行内二次确认状态机（小红叉，见偏好 21）                       |
-| `MessageList.vue`                               | 消息列表容器 + 滚动控制；顶部挂载 `ScheduledTasksPanel`，向上转发 `scheduled-task-*` / `restart-session`                                       |
+| `App.vue`                                       | 全局状态管理，SSE 事件分发；维护 `_sessionHadError` 集合做"错误气泡保护态"（出错后该 session 不再被右侧刷新覆盖）；`refreshPage()` 触发 `window.location.reload()`；消息排队 `_pendingQueue` / `_queueLoaded` / `_queueDrainDeferred` + 定时任务 `scheduledTasksMap` / `_scheduledTasksRefreshing`（v0.1.5 起 see 偏好 30）；三色侧栏状态点驱动 `_activeStreamingSessions` / `_approvalPendingSessions` / `_completedSessions` / `_errorSessions`（并行非 union） |
+| `Sidebar.vue` / `ConversationItem.vue`          | 会话列表（全量入 DOM + `overflow-y: scroll` + 自定义 webkit 滚动条）；ConversationItem 维护删除会话行内二次确认状态机（小红叉，见偏好 21）；**v0.1.5 起每个会话底部内嵌 ⏰ 触发按钮 + 展开任务列表**（仅 `tasks.length > 0` 渲染；展开状态按 `lingxi.scheduledTasksExpanded` localStorage 持久化；`max-height: 110px`、超过 3 条滚动）；侧栏顶部四色状态圆点（streaming 蓝闪 / approval 黄脉冲 / errored 红常 / completed 绿常）；dotTitle tooltip 优先级 `streaming > approval > errored > completed` |
+| `MessageList.vue`                               | 消息列表容器 + 滚动控制；向上转发 `scheduled-task-*` / `restart-session`                                       |
 | `MessageItem.vue`                               | 单条消息渲染（思考过程 / Markdown / 代码高亮），`message.error=true` 时渲染为红色错误框（避免报错堆栈被当 markdown）；中断态显示「重新对话」按钮（emit `restart-session`）；审批 UI 直接读 `tool.args.local` 判执行环境（不再依赖后端透传 `execution_env`） |
 | `MessageInput.vue`                              | 输入框 + 文件上传 + 语音输入；**流式期间不禁用发送**，消息由 App.vue 入队（见偏好 29）                                                                    |
-| `ScheduledTasksPanel.vue` / `ScheduledTaskItem.vue` | 对话区顶部「⏰ N 个定时任务」折叠面板 + 单条任务卡片；⏸/▶ 启停、⚡ 立即运行、🗑 行内二次确认删除；**无创建入口**（创建走对话让 agent 调 Scheduler skill）                    |
+| `ScheduledTaskItem.vue`                         | **v0.1.5 起** 单条定时任务卡片（原 ScheduledTasksPanel 已删除，移到 ConversationItem 内嵌）；状态圆点 + cron + 上次运行时间 + 累计次数；⏸/▶ 启停、⚡ 立即运行、🗑 行内小红叉二次确认删除（参考偏好 21 模式：`confirmingDelete` 状态机 + document click 取消） |
 | `ChatHeader.vue`                                | 头部 + 主题切换 + ↻ 刷新页面按钮（与 `DataAnalysisTree` 同款 SVG path：`M20.49 15a9 9 0 1 1-2.12-9.36L23 10` + polyline 箭头）               |
 | `CheckpointPanel.vue`                           | 回溯面板                                                                                                                     |
 | `FilePreviewPanel.vue` / `FilePreviewModal.vue` | 文件预览                                                                                                                     |
 | `DataAnalysisTree.vue` / `DataTreeNode.vue`     | 数据分析树形结构展示；`DataAnalysisTree` 面板头部 reload 按钮与 `ChatHeader` 共用同款 SVG；头部新增 ⬇ ZIP 导出 + 👁 HTML 预览按钮（见偏好 26）                                              |
 | `WebPreviewPanel.vue`                           | 网页预览窗口（Electron IPC 触发）                                                                                                  |
 | `SearchResults.vue`                             | 搜索结果展示                                                                                                                   |
-| `SettingsDialog.vue`                            | 设置弹窗：Appearance / Models / Skills / Permissions 4 tab；VL 模型 `local` 开关（控制是否加载本地 VL 模型 + fallback 主用 LLM 解释）；LLM provider / Skills API Key 脱敏编辑 + Save & Restart；已批准 / 已拒绝命令列表行内删除 |
+| `SettingsDialog.vue`                            | 设置弹窗：Appearance / Models / Skills / Permissions 4 tab；VL 模型 `local` 开关（控制是否加载本地 VL 模型 + fallback 主用 LLM 解释）；LLM provider / Skills API Key 脱敏编辑 + Save & Restart（**只有 `llm_providers` 段需要重启**，permissions/skills 改动立即生效）；已批准 / 已拒绝命令列表行内删除；**v0.1.5 新增**「立即清理 checkpoint」按钮（POST `/admin/checkpoints/prune?dry_run=false`）；`buildPayload()` 维护 `originalConfig` 快照 + `_deepDiff()` + `_stripEmptyObjects()` 只发修改段 |
 | `ConfirmDialog.vue`                             | 确认对话框（会话删除行内二次确认已替换，详见偏好 21）                                                                                            |
 
 ### Electron 主进程能力
@@ -177,24 +179,29 @@ uv run chatme_mcp
 | `backend/ChatMe/ChatWorkflow/mcps/tools/platforms/`   | 多平台 prompt adapter：`base.py` 抽象（含各工具默认 prompt block + `all_tool_prompt_blocks()`）+ `darwin.py` / `linux.py` / `windows.py` 三套 + `registry.py` 按 `platform.system()` 选；用于 `cmd` / `code` / `ctime` 工具的 shell 风格差异（macOS `ls -G` vs Linux `ls --color`、Windows cmd.exe 语法等） |
 | `backend/ChatMe/ChatWorkflow/config/graph_config.py`  | prompts 与模型配置（含 `get_react_compact_config`）；`PROMPT_MAIN_FLOW` 只讲「怎么想」（决策流 + 8 条 Good Chain Examples），具体工具调用模式由 `platforms/base.py` 的 `<tool>_tool_prompt_block` 承载 |
 | `backend/ChatMe/ChatWorkflow/config/models.py`        | 图状态 TypedDict（含 `context_summary_text` / `last_compact_at_tool_calls`）                                                            |
-| `backend/ChatMe/ChatWorkflow/Memory/core.py`          | 长期记忆管理：per-thread `asyncio.Lock` + 临时文件原子写（`fsync` + `os.replace`）                                                                |
+| `backend/ChatMe/ChatWorkflow/Memory/core.py`          | 长期记忆文件管理：per-thread `asyncio.Lock` + 临时文件原子写（`fsync` + `os.replace`）；**v0.1.5 起作为 Memory skill 写入目标**（`remember()` / `recall()`） |
+| `backend/ChatMe/ChatWorkflow/skills/registry.py`      | `SkillRegistry` 扫描 `backend/skills/` 下所有 `SKILL.md` + frontmatter 解析（`name` / `description` / `aliases` / `mount` / `module` / `lazy`）；`_maybe_rescan()` 按每个 SKILL.md `stat()` mtime 检测变更（macOS APFS 修改现有文件**不**更新父目录 mtime）；`build_mount_args()` 加 `@functools.lru_cache(maxsize=1)`；`reset_skill_registry()` 时必须 `cache_clear()` |
 | `backend/ChatMe/ChatWorkflow/mcps/server.py`          | FastMCP 工具入口（`code` / `cmd` / `ctime` / `interrupt` / `find_skill`）；`cmd` / `code` 默认走 `PermissionedToolNode` 弹审批                 |
 | `backend/ChatMe/ChatWorkflow/mcps/session.py`         | MCP stdio session：长生命周期子进程 + `ClientSession` 常驻复用，工具调用不再每次重开连接                                                                    |
 | `backend/ChatMe/ChatWorkflow/mcps/tools/deprecated.py` | sub_agent 工具已 deprecated（保留实现以备回滚，session.py 仍 import 但 prompt 已不暴露）；新代码不要引入 |
 | `backend/ChatMe/ChatWorkflow/mcps/sandbox/pool.py`   | Docker 沙盒容器池 `SandboxPool`（v2：K 容器 × N 并发）；`execute(code, lang)` 跑 Python/Node（先写 `/code.<py\|js>` 再跑再删），`execute_command(cmd)` 跑 shell（直接 `docker exec sh -c`） |
 | `backend/ChatMe/ChatService/core.py`                  | 聊天服务，SSE 流式输出 + 记忆任务调度（`_memory_update_tasks` 串行队列 + `memory_wait_*` 事件）；`resume_permission_stream` 路径与 `message_stream` 同构（init / interrupt detection / full_response in done）；回溯前等待未完成 memory 更新，走 `CheckpointJanitor.retarget_to()` 直接覆写 latest 指针（不再产 artifact checkpoint） |
-| `backend/ChatMe/ChatWorkflow/CheckpointJanitor.py`    | `retarget_to(thread_id, checkpoint_id)`：校验目标 checkpoint → 覆写 LangGraph latest 指针 → 删除其余 checkpoint / write 数据；修复多次回溯与 memory 文件 cid 错位 |
+| `backend/ChatMe/ChatWorkflow/CheckpointJanitor.py`    | **业务层** LangGraph checkpoint prune：`prune_thread(thread_id, dry_run=True)` / `prune_all_threads(dry_run, min_scanned)`；保留 `checkpoint_latest:{tid}:{ns}` + `threads:{tid}:checkpoints` HASH 所有 cid；`retarget_to(thread_id, checkpoint_id)` 覆写 LangGraph latest 指针 + 删除其余 checkpoint / write；hook 进 `_save_round_checkpoint` 每轮 round 收尾时异步 prune |
+| `backend/ChatMe/APIRouter/checkpoint_janitor.py`      | **HTTP 层** 唯一路由 `POST /admin/checkpoints/prune`；pydantic `PruneRequest` 含 `session_id` / `dry_run` / `min_scanned`；前端 Settings「立即清理」按钮调用 |
 | `backend/ChatMe/ChatService/FilesLoaders/core.py`     | 文件加载 + `_maybe_truncate` 大文件截断                                                                                                    |
 | `backend/ChatMe/ChatService/FilesLoaders/config.py`   | 文件大小/类型/截断阈值常量（`TEXT_TRUNCATE_LENGTH=4000`）                                                                                       |
-| `backend/ChatMe/ChatWorkflow/mcps/permissions/core.py` | `PermissionedToolNode`（`ToolNode` + `_awrap_tool_call` hook）+ Redis `permission:{sid}` hash 存取；4 档决策：`approve` / `this-time-only` / `deny` / `feedback:<text>`；`code` 工具按 `code_fingerprint` 做永久批准；未知工具名走 `ToolNode._validate_tool_call` 返回错误 ToolMessage 不崩 |
+| `backend/ChatMe/ChatWorkflow/mcps/permissions/core.py` | `PermissionedToolNode`（`ToolNode` + `_awrap_tool_call` hook）+ Redis `permission:{sid}` hash 存取；4 档决策：`approve` / `this-time-only` / `deny` / `feedback:<text>`；`code` 工具按 `code_fingerprint` 做永久批准；未知工具名走 `ToolNode._validate_tool_call` 返回错误 ToolMessage 不崩；`save_config()` 改完 permissions 后 `get_permissions().force_reload()` 同步生效 |
 | `backend/ChatMe/ChatWorkflow/mcps/tools/code_fingerprint.py` | code 工具指纹计算：`imports` + `calls` + `lang` + `local` 四元组 SHA1，作为永久批准的稳定 key（同一段代码不会因行号微调失效）                                              |
 | `backend/skills/DataAnalysis/format/`                 | 数据分析规范包（拆分为 `core` / `artifacts` / `manifest` / `database`；保留旧导入兼容）                                                                  |
 | `backend/skills/DataAnalysis/database/`               | 数据库分析子模块：MySQL / SQLite / PostgreSQL / MongoDB 只读查询 + 跨会话配置（`.runtime/`）                                                      |
-| `backend/skills/Scheduler/`                           | 定时任务 skill：`core` / `models` / `handlers` / `registry` + `SKILL.md`；4 个顶层函数（create / list / cancel / run now）走 HTTP 调 `/admin/scheduled-tasks/*`，**必须 `code(..., local=True)`**；`scheduler_lifespan` 由 main.py 挂载 |
-| `backend/ChatMe/ChatMeConfig/core.py`                 | 配置加载器；`vl.local` 字段决定是否加载本地 VL 模型到内存（默认 `true`；设 `false` 时 `model_vl` 路由 fallback 到主用 LLM 第一个有效 provider）             |
+| `backend/skills/Scheduler/`                           | 定时任务 skill：`core` / `models` / `handlers` / `registry` + `SKILL.md`；4 个顶层函数（create / list / cancel / run now）走 HTTP 调 `/admin/scheduled-tasks/*`，**必须 `code(..., local=True)`**；`scheduler_lifespan` 由 main.py 挂载；handlers 走 lazy import 避免循环 |
+| `backend/skills/Memory/`                              | **v0.1.5 新增**：跨会话持久化记忆 skill（mount=ro，lazy=false）；`remember()` / `recall()` 写入 `.chatme/memory/{tid\|global}/{facts\|preference}.md`；**写入必须 `code(..., local=True)`**；`context_assembly_node` 每轮开头自动合并注入 |
+| `backend/skills/SkillForge/`                          | **v0.1.5 新增**：动态创建 skill skill（mount=rw）；`create_skill()` / `list_skills()` / `read_skill()`；`SkillRegistry._maybe_rescan()` 按 mtime 自动发现，无需重启 |
+| `backend/ChatMe/ChatMeConfig/core.py`                 | 配置加载器；`_load()` mtime 失效 + `force_reload()` 热加载；`save_config()` 原子写（tmp + os.replace）+ 按段决定 `restart_required`（permissions/skills 立即生效；llm_providers 需重启）；`get_public_config()` 密钥脱敏；`vl.local` 字段决定是否加载本地 VL 模型到内存（默认 `true`；设 `false` 时 `_resolve_vl_fallback()` 无条件用主用 LLM 三元组） |
 | `backend/ChatMe/APIRouter/main.py`                    | `/chat` 前缀主对话路由                                                                                                                   |
 | `backend/ChatMe/APIRouter/scheduled_tasks.py`         | `/admin/scheduled-tasks` CRUD + `/{task_id}/run` 立即触发；APScheduler `AsyncIOScheduler + RedisJobStore`（Asia/Shanghai），Redis key `scheduled:tasks` / `scheduled:meta:{tid}` / `scheduled:history:{tid}` / `scheduled:lock:{tid}` |
 | `backend/ChatMe/APIRouter/message_queue.py`           | `/chat/{sid}/queue` GET / POST / DELETE；Redis `queue:{sid}` FIFO（≤20 条 × 4000 字符），只做持久化不主动 drain，前端在 SSE `done` 后自行出队续发 |
+| `backend/ChatMe/APIRouter/admin_config.py`            | **`/admin/config` GET / PUT（白名单 llm_providers / skills / permissions）+ `/admin/restart` POST（写 marker + os.execv）+ `/admin/health` GET**；pydantic `ConfigUpdate` `extra="forbid"` 防止静默吞字段 |
 | `backend/ChatMe/APIRouter/model_vl.py`                | `/api` VL 模型路由；`local=false` 时 `_resolve_vl_fallback()` 取主 provider                                                            |
 | `backend/ChatMe/APIRouter/timed_clean.py`             | 定时清理任务                                                                                                                            |
 | `backend/ChatMe/APIRouter/data_export.py`             | `/chat/{sid}/export/artifacts`（DataAnalysis 产物 ZIP/HTML 预览）+ `/chat/{sid}/export/turn/{checkpoint_id}`（截至该轮的 OpenAI JSON + 完整 state 备份 ZIP） |
@@ -405,6 +412,33 @@ claude --cron-delete a09d41ec
     - **未知工具名不崩**：LLM 调未注册工具时走 LangGraph `ToolNode._validate_tool_call` 返回错误 `ToolMessage`（含未知工具名 + 可用工具列表）让模型重试；已知工具仍过权限 gate，`GraphInterrupt` / `GraphBubbleUp` 不被吞。
     - **MAIN_FLOW 只讲「怎么想」**：`PROMPT_MAIN_FLOW` 承载决策流 + 8 条 Good Chain Examples（含 4 阶段复杂任务循环 Scope → Plan → Execute&Verify → Compose）；**具体工具调用模式下沉到 `platforms/base.py` 的 `<tool>_tool_prompt_block`**，由 `all_tool_prompt_blocks()` 拼接。新增工具的用法说明写 prompt block，不要塞回 MAIN_FLOW。
     - **MCP session 长生命周期**：`session.py` 的 stdio 子进程 + `ClientSession` 常驻复用，工具调用不再每次重开连接。
+
+30. **v0.1.5 新增约定**：
+    - **Memory skill 跨会话持久化**：新增 `backend/skills/Memory/`（mount=ro，lazy=false），提供 `remember(key, value, thread_id, category, scope)` / `recall(thread_id, category, scope)` 两个顶层函数（4 个变体维度：`facts`/`preference` × `thread`/`global`）。**写入必须 `code(..., local=True)`** —— 沙盒挂 ro；**recall / cmd("cat /memory/...") 沙盒也支持** —— `.chatme/memory/` 在沙盒里挂到 `/memory` ro。`context_assembly_node` 每轮开头把当前会话 + global 记忆合并注入，所以**只管写、读不用主动调**（写语义：同名 key 替换旧值）。文件路径表：`thread|global × facts|preference` → `.chatme/memory/{tid|global}/{category}.md`，沙盒映射 `/memory/{tid|global}/{category}.md`。**写入原则**：去重优先（先 `cat` 看是否已存在）；key 短而稳（主谓宾短语，不写代词）；value 自包含；不写中间过程；global 慎用。新增类似「跨会话事实/偏好」能力沿用这个形态。
+    - **SkillForge 动态创建 skill**：新增 `backend/skills/SkillForge/`（mount=rw），提供 `create_skill(name, description, functions_py, aliases, skill_md_body, overwrite)` / `list_skills()` / `read_skill(name)` 三个顶层函数。**registry mtime 自动重扫，无需重启后端**：macOS APFS 修改现有文件**不**更新父目录 mtime，所以 `SkillRegistry._maybe_rescan()` 按每个 SKILL.md 自己 `stat()` 检测变更（`glob("*/SKILL.md").stat()` O(n)）。`/skills/SkillForge/` 走 rw mount（其余走默认 ro）。**必须 `code(..., local=True)`** —— 写入主进程文件系统。**保留名禁用**：`SkillForge` / `_xxx` 前缀不能用来做 skill 名（防覆盖核心逻辑）。新加「允许 agent / 用户写代码挂载」的能力沿用这个形态。
+    - **`/skills/<name>/SKILL.md` frontmatter 规范**：扫描 `backend/skills/` 时按 YAML frontmatter 解析，支持字段：`name`（必填）/ `description`（必填，find_skill 检索字段）/ `aliases`（list[str]，额外检索 keyword）/ `mount`（`ro`/`rw`，默认 ro；rw 段路径会单独 `-v :rw` 覆盖在 `/skills:ro` 聚合挂载之上）/ `module`（Python import 路径，默认 `skills.<相对路径>`）/ `lazy`（bool，true 时不进入 find_skill 检索索引，常驻的还是会被注入）。`SkillManifest` 字段：`name` / `path` / `frontmatter` / `summary`（正文去掉 code block + 标题后取前 800 字）/ `mount_mode` / `lazy` / `import_aliases` / `module_path`。**`build_mount_args()` 加 `@functools.lru_cache(maxsize=1)`** —— registry 启动后只读；mount args 与目录绑定，`reset_skill_registry()` 时必须 `cache_clear()`。
+    - **Scheduler 模块重组为 4 层**：`backend/skills/Scheduler/` 现拆成 `models.py`（`ScheduledTask` dataclass + Redis key 常量）/ `handlers.py`（`handle_send_message(task_id)` 异步执行入口）/ `registry.py`（CRUD：add/list/get/update/delete/run_now —— 唯一权威写元数据 + 同步 APScheduler）/ `core.py`（`get_scheduler()` + `get_redis()` + `scheduler_lifespan()`）。**`core.py` 不暴露内部单例对象**——`get_scheduler()` 单值快照可能错过 lifespan 启动后的重新赋值；新增代码走 `get_scheduler()` 函数而**不是** `from .core import _scheduler`。handlers 走 lazy import（避免 registry ↔ handlers 循环）。
+    - **CheckpointJanitor 拆分为两层**：`ChatWorkflow/CheckpointJanitor.py`（业务类，注入 `chat_service` 供 hook）+ `APIRouter/checkpoint_janitor.py`（HTTP 层，唯一路由 `POST /admin/checkpoints/prune`，pydantic `PruneRequest` 含 `session_id` / `dry_run` / `min_scanned`）。返回结构：`{ok, dry_run, thread_count, total_scanned, total_user_saved, total_deleted, total_keys_deleted, per_thread[]}`。保护规则：保留 `checkpoint_latest:{tid}:{ns}` + `threads:{tid}:checkpoints` HASH 所有 cid；删其余 `checkpoint:{tid}:*` / `checkpoint_write:{tid}:*` / `write_keys_zset:{tid}:*`。**前端 Settings dialog「立即清理」按钮**走 POST `/admin/checkpoints/prune?dry_run=false`。**main.py 多注册一个 router**（`checkpoint_janitor_router`）。
+    - **SettingsDialog 4 tab 改造**：
+      - **VL `local` 开关 + fallback 主用 LLM**：`vl.local=False` 时连接三元组 fallback 到主用 LLM（`_resolve_vl_fallback()` 无条件覆盖 `model_name`/`api_key`/`base_url`，无视 vl 段自己填的）。前端 Settings `vl` 字段显示 checkbox + 三层说明（勾选 / 不勾选 fallback / 改动需重启）。
+      - **`/admin/config` 热加载（segment 级）**：
+        * **permissions / skills 段立即生效**：`ChatMeConfig._load()` 带 mtime check（首加载必然读 / 后续 `current_mtime == cached_mtime → return`）；`save_config()` 后立即 `force_reload()` 清 mtime cache → 下次 `get()` 必然重读。
+        * **permissions 单例同步**：`save_config()` 检测到改 permissions 时同步 `get_permissions().force_reload()`（Permissions 单例是启动期缓存的，没这一步改完得重启）。
+        * **llm_providers 段需重启**：ChatOpenAI / Redis client / VL model weights 都是启动期构造的长生命周期对象；`restart_required = "llm_providers" in saved_segments`（v0.1.5 起按修改段动态决定，**不再** 一刀切 `True`）。
+        * **前端 `buildPayload()` diff-only**：`SettingsDialog` 维护 `originalConfig` 快照 + `_deepDiff()` + `_stripEmptyObjects()`，只发有修改的段；在 Permissions tab 改一字段不会把 llm_providers 全部带上 → 后端不会误判 `restart_required=true`。
+        * 原子写：`tmp + os.replace`，tmp 文件名带 PID（`config.json.{pid}.tmp`）避免与仓库里提交的 `config.json.tmp` 重名覆盖。
+      - **`/admin/restart` + `/admin/health` + `/admin/config` REST**：`POST /admin/restart` 写 marker `.restart_pending` + 0.3s sleep + `os.execv` 替换进程；`GET /admin/health` 前端 `pollHealth(90s)` 轮询等待；恢复后 `window.location.reload()`。
+    - **Sidebar / ConversationItem 内嵌定时任务**：v0.1.4 的 `ScheduledTasksPanel`（对话区顶部浮层）已**删除**；v0.1.5 改为在 `ConversationItem` 底部内嵌 ⏰ 触发按钮（仅 `tasks.length > 0` 时渲染）+ `<transition name="scheduled-expand">` 展开任务列表（`max-height: 0 → 110px`，超过 3 条滚动）。展开状态按 `lingxi.scheduledTasksExpanded` localStorage 持久化（per-user 配置）。App.vue data 加 `scheduledTasksMap: Map<session_id, ScheduledTask[]>` + `_scheduledTasksRefreshing: bool`。Sidebar 转发 `scheduled-task-toggle/run/delete` 事件给 App.vue。
+    - **三色侧栏状态点（ConversationItem 顶部圆点）**：
+      - **streaming 蓝闪**（`@keyframes blink 1.2s`，opacity 0.3 ↔ 1，CSS 自带）
+      - **approval 黄脉冲**（`@keyframes pulse-yellow 2s`，box-shadow 0 0 0 0 → 4px 0 0 0；`pulse-yellow` 类）
+      - **errored 红常显**（`#ef4444` 实色）
+      - **completed 绿常显**（`#22c55e`），仅在 clean done 后等用户点进去看的窗口期
+      - **`dotTitle` tooltip 优先级**：`streaming > approval > errored > completed`（v-if 链 `!isStreaming && X`）；空状态返回空字符串
+      - **App.vue 三 Set 独立维护**：`_activeStreamingSessions`（蓝闪驱动）+ `_approvalPendingSessions`（黄点驱动）+ `_completedSessions`（绿点驱动）+ `_errorSessions`（红点驱动）。**注意**：三 Set 是独立状态，**不是** union；`_sessionHadError`（红点的「未点进去看」保护态）与 `_errorSessions`（红点的视觉驱动）是并行而非耦合；UI 保护职责留给前者。
+    - **`ScheduledTaskItem` 行内小红叉二次确认**：参考偏好 21 的 `_pendingApproval` 状态机：第一次点 🗑 → `confirmingDelete = true`（按钮变红 `rgba(239,68,68,0.12)` 底常显）；第二次点红 🗑 → `confirmingDelete = false` 再 emit `delete`（先重置防止 document click 冒泡再触发 cancel）。`mounted` 绑 `document.click` + `keydown(Escape)` 取消，`beforeUnmount` 解绑。
+    - **`ChatMeConfig._load()` mtime 失效 + `force_reload()`**：每次 `get()` 先 `_load()`，行为：磁盘 `current_mtime == cached_mtime` → 直接 return（最常见路径零开销）；变了 → 重读 + 刷新 `_config`；不存在文件时按需生成默认 / 保留旧 `_config`（外部误删可恢复，**不破坏运行**）；首加载失败 → 兜底生成默认。**`force_reload()`** 把 `_loaded=False` + `_config_file_mtime=None`，让下次 `_load()` 走「首加载」分支。**测试 fixture 路径**：`cfg._config + cfg._loaded=True` 注入时 `_config_file_mtime=None`（从未读过磁盘），`_load()` 直接 return 不被真实磁盘内容覆盖。
+    - **PRNG skill 重构成包 + `image_parser` regex 更稳健**：`backend/skills/Exa.py` / `ImageParser.py` / `Tavily.py` 单文件 → `Exa/{__init__.py,SKILL.md}` / `ImageParser/{__init__.py,SKILL.md}` / `Tavily/{__init__.py,SKILL.md}` 包结构（每个子 skill 暴露 `SKILL.md` 才是 find_skill 检索字段）。**保留旧 `Exa.py` / `Tavily.py` / `ImageParser.py` 兼容旧 `import skills.Exa` 这种路径**，新代码走 `from skills.Exa import exa_search`。
 
 ### 代码 / 提交风格
 

@@ -1,5 +1,3 @@
-import functools
-
 from ChatMe.ChatWorkflow.skills.manifest import SkillManifest
 from ChatMe.ChatWorkflow.skills.registry import get_skill_registry
 from ChatMe.LoggingManager.logging_config import get_logger
@@ -47,13 +45,11 @@ def _format_skill_brief(skill: SkillManifest) -> str:
     )
 
 
-@functools.lru_cache(maxsize=1)
 def available_skills_block() -> str:
     """Generate the full <available_skills> prompt block (mode='list' response).
 
-    Cached: registry is read-only after init, so repeated calls during a
-    session return the same string. `reset_skill_registry()` clears this
-    cache for tests.
+    不缓存：registry 走 mtime 自动 rescan，SkillForge 创建新 skill 后下一次
+    find_skill(mode='list') 即可见，无需重启后端。
     """
     try:
         skills = [s for s in get_skill_registry().scan() if not s.lazy]
@@ -73,14 +69,13 @@ def available_skills_block() -> str:
     )
 
 
-@functools.lru_cache(maxsize=32)
 def find_skill_block(query: str, top_k: int = 3) -> str:
     """Tool response for find_skill(query, mode='match').
 
     Returns brief matches by token overlap. 0 matches → suggest mode='list'.
 
-    缓存：相同 query 重复调用返回同一字符串（find_skill 工具可能被 LLM
-    在同一会话多次调用避免重复计算）。
+    不缓存：相同 query 重复调用也走 registry mtime check，SkillForge 新建 skill
+    后立即可见。
     """
     try:
         matches = get_skill_registry().search(query, top_k=top_k)

@@ -258,6 +258,9 @@
         <div class="settings-footer">
           <div class="footer-hint">
             <span v-if="activeTab === 'appearance'">主题实时生效</span>
+            <span v-else-if="activeTab === 'llm'">模型配置改动需重启后端</span>
+            <span v-else-if="activeTab === 'skills'">API key 改动后下次调用立即生效（无需重启）</span>
+            <span v-else-if="activeTab === 'permissions'">审批配置改动后下次执行立即生效（无需重启）</span>
             <span v-else>配置改动需重启后端</span>
           </div>
           <div class="footer-actions">
@@ -265,7 +268,10 @@
             <button class="btn-text" @click="saveOnly" :disabled="saving || restarting || activeTab === 'appearance'">
               {{ saving ? 'Saving...' : 'Save' }}
             </button>
-            <button class="btn-primary" @click="saveAndRestart" :disabled="saving || restarting || activeTab === 'appearance'">
+            <!-- Save & Restart 只在 llm tab 显示：模型连接字段（ChatOpenAI / Redis / VL weights
+                 是启动期常驻对象，写 config 不影响已构造的 client，必须重启才生效。
+                 permissions / skills / appearance 都是热加载，不需要重启按钮。 -->
+            <button v-if="activeTab === 'llm'" class="btn-primary" @click="saveAndRestart" :disabled="saving || restarting">
               {{ restarting ? 'Restarting...' : 'Save & Restart' }}
             </button>
           </div>
@@ -323,6 +329,11 @@ export default {
         skills: {},
         permissions: { approval_policy: 'default', approved_commands: [], denied_commands: [] }
       },
+      // loadConfig 拉到的初始快照（脱敏前的版本，用于 buildPayload 计算 diff）
+      // 用户编辑 formConfig 时不动这个；保存时只发有差异的段，避免"在 permissions tab
+      // 改一字段却把 llm_providers 全部字段带上去"导致后端误判为 llm 段变更
+      // （saved_segments=['llm_providers'] → restart_required=true 的根因）。
+      originalConfig: null,
 
       showKey: {},
 
@@ -367,6 +378,12 @@ export default {
         cfg.permissions.approved_commands = cfg.permissions.approved_commands || []
         cfg.permissions.denied_commands = cfg.permissions.denied_commands || []
 
+        // 存一份脱敏前的快照给 buildPayload 做 diff：
+        // originalConfig 里 api_key 是 masked 串（真值的 4*4 形式），
+        // formConfig 里 api_key 是空字符串——diff 时两边都是"未修改"状态（用户输入新值
+        // 后 formConfig 里的空字符串会被替换，diff 能识别）。
+        this.originalConfig = JSON.parse(JSON.stringify(cfg))
+
         // 脱敏的 api_key 不入 form（masked 串带回会被当新 key 覆盖真值，401）
         // 留空让 placeholder "留空表示不修改" 显示，buildPayload 会 delete 掉，后端 save_config 跳过
         for (const prov of Object.values(cfg.llm_providers)) {
@@ -395,12 +412,42 @@ export default {
       try {
         const payload = this.buildPayload()
         const result = await putConfig(payload)
-        this.flashTip(result.restart_required ? '已保存，重启后端后生效' : '已保存')
+        this.flashTip(this._tipForResult(result))
+        // 保存成功即关闭 dialog（permissions / skills 等可热加载段无需重启），
+        // 下次打开 dialog 时 watch.visible 钩子会自动 loadConfig() 拉最新脱敏状态。
+        // ⚠️ 不要在这里 await loadConfig() 重拉：会覆盖用户当前正在编辑的 input
+        // 里的真值为空字符串（脱敏不入 form），看起来像"点了没反应"。
+        this.close()
       } catch (e) {
         alert('保存失败：' + (e.message || e))
       } finally {
+        // 必须 finally 重置：dialog 是单例组件（v-if 控制可见），close 后 saving 仍
+        // 是 true 会让下次打开 dialog 时所有按钮 disabled。原来的 finally 被去掉
+        // 是个 bug，现在补回。
         this.saving = false
       }
+    },
+    _tipForResult(result) {
+      // 后端可能未升级（缺 saved_segments 字段）→ 兼容 fallback 到 restart_required
+      const segments = result.saved_segments || []
+      const hasLlm = segments.includes('llm_providers')
+      const hotSegments = segments.filter(s => s !== 'llm_providers')
+
+      if (segments.length === 0) {
+        return '已保存'
+      }
+      if (hasLlm && hotSegments.length > 0) {
+        // 混合：permissions/skills 立即生效 + llm 重启生效
+        const hotLabels = hotSegments.map(s =>
+          s === 'permissions' ? '审批配置' : 'API key'
+        ).join(' + ')
+        return `已保存：${hotLabels} 立即生效，模型配置重启后端后生效`
+      }
+      if (hasLlm) {
+        return '已保存，重启后端后生效'
+      }
+      // 纯 permissions / 纯 skills / 两者皆有 → 都热加载
+      return '已保存，立即生效'
     },
     async saveAndRestart() {
       this.saving = true
@@ -435,10 +482,26 @@ export default {
       }
     },
     buildPayload() {
-      const payload = JSON.parse(JSON.stringify(this.formConfig))
+      // 只发跟 originalConfig 对比有修改的段（llm_providers / skills / permissions）。
+      // 旧实现把整个 formConfig 都 PUT 出去，导致在 Permissions tab 改一个字段
+      // 也会把 llm_providers 全部字段带上 → 后端 saved_segments=['llm_providers']
+      // → restart_required=true（实际上 llm 段值没变，但后端无法区分）。
+      const payload = {}
+      const original = this.originalConfig || {}
+      for (const topKey of ['llm_providers', 'skills', 'permissions']) {
+        const cur = this.formConfig[topKey] || {}
+        const orig = original[topKey] || {}
+        const diff = this._deepDiff(cur, orig)
+        if (diff !== null) {
+          payload[topKey] = diff
+        }
+      }
+
+      // 保留旧逻辑：脱敏后的空 api_key 不入 payload
+      // （用户没填 key 时空字符串不能当真值发出去，会覆盖后端真值）
       if (payload.llm_providers) {
         for (const prov of Object.values(payload.llm_providers)) {
-          if (prov.api_key === '') delete prov.api_key
+          if (prov && prov.api_key === '') delete prov.api_key
         }
       }
       if (payload.skills) {
@@ -448,7 +511,78 @@ export default {
           }
         }
       }
-      return payload
+
+      // 段级别二次过滤：清空空 api_key 后某段可能完全无字段（如 skills 段只改了
+      // 一个空 api_key）→ 不计入 saved_segments
+      for (const topKey of ['llm_providers', 'skills', 'permissions']) {
+        if (payload[topKey] && Object.keys(payload[topKey]).length === 0) {
+          delete payload[topKey]
+        }
+      }
+
+      // 递归清空空对象：_deepDiff 后可能产出像
+      // `{llm_providers: {model1: {}, model2: {}, vl: {}}, permissions: {approval_policy: 'yolo'}}`
+      // —— llm_providers 段还在但所有 provider 都是空对象（用户没改 llm 任何字段，只
+      // 改了 api_key 被二次过滤删了）。递归剥掉空对象，让 payload 干净：
+      // `{permissions: {approval_policy: 'yolo'}}`。
+      // 空数组保留（approved_commands=[] 是有意义的状态）。
+      return this._stripEmptyObjects(payload)
+    },
+    _stripEmptyObjects(obj) {
+      // 递归清空空对象（仅剥"无子字段"的 {}；非空对象、标量、数组包括空数组都保留）
+      // 必须递归：例如 payload.llm_providers = {model1: {}, model2: {}, vl: {}}
+      // 顶层 llm_providers 非空（3 个 key），但内部每个 provider 都是空对象——需要
+      // 一路剥到叶子，让 llm_providers 自身也变 {}，再被段级过滤删掉。
+      if (Array.isArray(obj)) return obj
+      if (typeof obj !== 'object' || obj === null) return obj
+
+      const result = {}
+      for (const [k, v] of Object.entries(obj)) {
+        const processed = (typeof v === 'object' && v !== null && !Array.isArray(v))
+          ? this._stripEmptyObjects(v)
+          : v
+        if (typeof processed === 'object' && processed !== null && !Array.isArray(processed) && Object.keys(processed).length === 0) {
+          continue
+        }
+        result[k] = processed
+      }
+      return result
+    },
+    _deepDiff(current, original) {
+      // 递归计算 current 相对 original 的差异：
+      // - 完全一致 → 返回 null（调用方据此跳过该段）
+      // - 有差异 → 返回 current 里不一致的部分（含子对象递归）
+      // - 数组：用 JSON.stringify 整段对比（顺序敏感）
+      // - 标量：直接 !==
+      if (current === original) return null
+
+      if (Array.isArray(current)) {
+        return JSON.stringify(current) !== JSON.stringify(original || [])
+          ? current
+          : null
+      }
+
+      if (typeof current !== 'object' || current === null) {
+        return current !== original ? current : null
+      }
+
+      // 对象：递归对比每个 key
+      const result = {}
+      let hasDiff = false
+      const allKeys = new Set([
+        ...Object.keys(current || {}),
+        ...Object.keys(original || {}),
+      ])
+      for (const k of allKeys) {
+        const curVal = current?.[k]
+        const origVal = original?.[k]
+        const subDiff = this._deepDiff(curVal, origVal)
+        if (subDiff !== null) {
+          result[k] = subDiff
+          hasDiff = true
+        }
+      }
+      return hasDiff ? result : null
     },
     async pollHealth(maxWaitSec = 90) {
       // 每 2s 一次：本机启动 VL 模型冷启动可能耗 1 分钟，60s 不够
@@ -1010,8 +1144,9 @@ export default {
   bottom: 24px;
   left: 50%;
   transform: translateX(-50%);
-  background: var(--text-primary);
-  color: var(--bg-primary);
+  /* 固定中灰背景（不跟主题翻黑/翻白）—— 用户偏好柔和的提示色调 */
+  background: #6b7280;
+  color: #ffffff;
   padding: 8px 16px;
   border-radius: 6px;
   font-size: 13px;

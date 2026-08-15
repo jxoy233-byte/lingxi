@@ -15,6 +15,7 @@ Scheduler 单元测试（Step 1：核心骨架 + 模型序列化 + Redis URL 解
 import json
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -303,6 +304,187 @@ def test_stop_scheduler_safe_when_not_started():
 
 
 # =========================================================================
+# 6.1 _sync_paused_jobs_on_start（启动时按 Redis meta 同步 job 暂停态）
+# =========================================================================
+# Bug 背景：
+#   registry.update_task 先写 Redis meta.enabled 再调 job.pause()（registry.py:213-221）。
+#   中间进程崩溃 → meta 写了、APScheduler job 没 pause；下次启动 scheduler 按 active
+#   加载，与 meta 不一致 → "前端显示暂停但任务还在跑"。
+#   修复：core.start_scheduler 启动后调 _sync_paused_jobs_on_start()，以 Redis meta 为
+#   单一真相对所有 loaded job 做 pause/resume 双向同步。
+# =========================================================================
+
+
+def test_sync_pauses_job_when_meta_enabled_zero_but_job_active(monkeypatch):
+    """meta.enabled=0 但 job 有 next_run_time → 调 job.pause()。"""
+    from skills.Scheduler import core as core_module
+    from skills.Scheduler.core import _sync_paused_jobs_on_start
+
+    redis = _FakeRedis()
+    _seed_task(redis, "tid_pause", "x", "s")
+    # 把 enabled 改成 0（模拟 user 暂停后进程崩溃，meta 写了但 job 没 pause）
+    redis.store[SCHEDULED_META_PREFIX + "tid_pause"][b"enabled"] = b"0"
+
+    fake_scheduler = MagicMock()
+    fake_job = MagicMock()
+    fake_job.id = "tid_pause"
+    fake_job.next_run_time = "2026-08-13 09:00:00"  # 非 None → 模拟 active
+    fake_scheduler.get_jobs.return_value = [fake_job]
+    monkeypatch.setattr(core_module, "_scheduler", fake_scheduler)
+    monkeypatch.setattr(core_module, "get_redis", lambda: redis)
+
+    _sync_paused_jobs_on_start()
+
+    assert fake_job.pause.called, "应调 job.pause() 让 paused 状态对齐 meta"
+    assert not fake_job.resume.called, "不应调 resume"
+
+
+def test_sync_resumes_job_when_meta_enabled_one_but_job_paused(monkeypatch):
+    """meta.enabled=1 但 job.next_run_time is None（paused）→ 调 job.resume()。"""
+    from skills.Scheduler import core as core_module
+    from skills.Scheduler.core import _sync_paused_jobs_on_start
+
+    redis = _FakeRedis()
+    _seed_task(redis, "tid_resume", "x", "s")  # 默认 enabled=1
+
+    fake_scheduler = MagicMock()
+    fake_job = MagicMock()
+    fake_job.id = "tid_resume"
+    fake_job.next_run_time = None  # 已暂停（罕见但兜底）
+    fake_scheduler.get_jobs.return_value = [fake_job]
+    monkeypatch.setattr(core_module, "_scheduler", fake_scheduler)
+    monkeypatch.setattr(core_module, "get_redis", lambda: redis)
+
+    _sync_paused_jobs_on_start()
+
+    assert fake_job.resume.called, "应调 job.resume() 重新算 next_run_time"
+    assert not fake_job.pause.called
+
+
+def test_sync_noop_when_states_consistent(monkeypatch):
+    """meta 与 job 状态一致（active + enabled=1）→ 不调 pause/resume。"""
+    from skills.Scheduler import core as core_module
+    from skills.Scheduler.core import _sync_paused_jobs_on_start
+
+    redis = _FakeRedis()
+    _seed_task(redis, "tid_ok", "x", "s")
+
+    fake_scheduler = MagicMock()
+    fake_job = MagicMock()
+    fake_job.id = "tid_ok"
+    fake_job.next_run_time = "2026-08-13 09:00:00"  # active
+    fake_scheduler.get_jobs.return_value = [fake_job]
+    monkeypatch.setattr(core_module, "_scheduler", fake_scheduler)
+    monkeypatch.setattr(core_module, "get_redis", lambda: redis)
+
+    _sync_paused_jobs_on_start()
+
+    assert not fake_job.pause.called
+    assert not fake_job.resume.called
+
+
+def test_sync_skips_job_without_redis_meta(monkeypatch):
+    """Redis meta 没了（外部 DEL）→ 跳过，不主动删 APScheduler job。"""
+    from skills.Scheduler import core as core_module
+    from skills.Scheduler.core import _sync_paused_jobs_on_start
+
+    redis = _FakeRedis()
+    # 不 seed meta
+    fake_scheduler = MagicMock()
+    fake_job = MagicMock()
+    fake_job.id = "tid_orphan"
+    fake_job.next_run_time = "2026-08-13 09:00:00"
+    fake_scheduler.get_jobs.return_value = [fake_job]
+    monkeypatch.setattr(core_module, "_scheduler", fake_scheduler)
+    monkeypatch.setattr(core_module, "get_redis", lambda: redis)
+
+    _sync_paused_jobs_on_start()
+
+    assert not fake_job.pause.called, "meta 缺失应跳过"
+    assert not fake_job.resume.called
+
+
+def test_sync_skips_garbage_enabled_value(monkeypatch):
+    """enabled 字段被外部写成 'abc' → 跳过，不抛异常。"""
+    from skills.Scheduler import core as core_module
+    from skills.Scheduler.core import _sync_paused_jobs_on_start
+
+    redis = _FakeRedis()
+    _seed_task(redis, "tid_garbage", "x", "s")
+    redis.store[SCHEDULED_META_PREFIX + "tid_garbage"][b"enabled"] = b"abc"
+
+    fake_scheduler = MagicMock()
+    fake_job = MagicMock()
+    fake_job.id = "tid_garbage"
+    fake_job.next_run_time = "2026-08-13 09:00:00"
+    fake_scheduler.get_jobs.return_value = [fake_job]
+    monkeypatch.setattr(core_module, "_scheduler", fake_scheduler)
+    monkeypatch.setattr(core_module, "get_redis", lambda: redis)
+
+    _sync_paused_jobs_on_start()  # 不应抛
+
+    assert not fake_job.pause.called
+    assert not fake_job.resume.called
+
+
+def test_sync_handles_mixed_jobs_in_one_pass(monkeypatch):
+    """混合：active / paused / orphan / 一致 → 各 job 各自被正确处理。"""
+    from skills.Scheduler import core as core_module
+    from skills.Scheduler.core import _sync_paused_jobs_on_start
+
+    redis = _FakeRedis()
+    _seed_task(redis, "tid_a", "x", "s")  # enabled=1
+    _seed_task(redis, "tid_b", "x", "s")  # enabled=1
+    redis.store[SCHEDULED_META_PREFIX + "tid_b"][b"enabled"] = b"0"  # 改 paused
+    _seed_task(redis, "tid_c", "x", "s")  # enabled=1
+
+    fake_scheduler = MagicMock()
+    job_a = MagicMock(id="tid_a", next_run_time="2026-08-13 09:00:00")  # 一致
+    job_b = MagicMock(id="tid_b", next_run_time="2026-08-13 09:00:00")  # meta=0 但 active → 应 pause
+    job_c = MagicMock(id="tid_c", next_run_time=None)                  # meta=1 但 paused → 应 resume
+    job_d = MagicMock(id="tid_orphan", next_run_time="2026-08-13 09:00:00")  # meta 缺失 → 跳过
+    fake_scheduler.get_jobs.return_value = [job_a, job_b, job_c, job_d]
+    monkeypatch.setattr(core_module, "_scheduler", fake_scheduler)
+    monkeypatch.setattr(core_module, "get_redis", lambda: redis)
+
+    _sync_paused_jobs_on_start()
+
+    assert not job_a.pause.called and not job_a.resume.called, "一致不应动"
+    assert job_b.pause.called and not job_b.resume.called, "meta=0 → pause"
+    assert job_c.resume.called and not job_c.pause.called, "meta=1 但 paused → resume"
+    assert not job_d.pause.called and not job_d.resume.called, "meta 缺失 → 跳过"
+
+
+def test_start_scheduler_calls_sync_after_start(monkeypatch):
+    """start_scheduler 启动后必须调 _sync_paused_jobs_on_start（防回归）。"""
+    from skills.Scheduler import core as core_module
+
+    fake_scheduler = MagicMock()
+    fake_scheduler.running = False
+    monkeypatch.setattr(core_module, "_scheduler", None)
+    monkeypatch.setattr(core_module, "AsyncIOScheduler", MagicMock(return_value=fake_scheduler))
+    monkeypatch.setattr(core_module, "RedisJobStore", MagicMock())
+    monkeypatch.setattr(core_module, "get_redis_checkpointer_url", lambda: "redis://:123456@localhost:6024/0")
+
+    sync_called = []
+
+    def _spy_sync():
+        sync_called.append(True)
+
+    monkeypatch.setattr(core_module, "_sync_paused_jobs_on_start", _spy_sync)
+
+    import asyncio
+    asyncio.run(_async_run_start_scheduler(core_module))
+
+    assert sync_called, "start_scheduler 必须调 _sync_paused_jobs_on_start"
+
+
+async def _async_run_start_scheduler(core_module):
+    """把同步的 start_scheduler 包到 async 里（避免再开一个事件循环）"""
+    core_module.start_scheduler()
+
+
+# =========================================================================
 # 7. handle_send_message（Step 2：handler 执行逻辑）
 # =========================================================================
 # 用 mock Redis + mock chat_service，避免真连 Redis / 跑 LangGraph。
@@ -374,6 +556,16 @@ class _FakeRedis:
 
     def hgetall(self, key):
         return self._hash_get(key)
+
+    def hget(self, key, field):
+        h = self._hash_get(key)
+        # str field → 转 bytes 后查 dict（keys from _seed_task 全是 k.encode()）
+        if isinstance(field, str):
+            field = field.encode()
+        if field not in h:
+            return None
+        v = h[field]
+        return v if isinstance(v, bytes) else str(v).encode()
 
     def hincrby(self, key, field, amount=1):
         cur = int(self._hash_get(key).get(field, 0))
@@ -829,6 +1021,64 @@ def test_handle_send_message_lock_released_even_on_history_write_failure(monkeyp
         await handlers.handle_send_message("tid007")  # 不应抛
 
     asyncio.run(_go())
+
+
+# =========================================================================
+# run_task_now — APScheduler modify_job 需 datetime 而非 float
+# 回归：v0.1.4 实测发现 APScheduler 3.11.2 的 modify_job(next_run_time=float) 抛
+# TypeError: Unsupported type for next_run_time: float，导致 API 返 500。
+# 修复：run_task_now 用 datetime.fromtimestamp(_now(), tz=timezone.utc)。
+# =========================================================================
+
+
+def test_run_task_now_passes_datetime_to_modify_job(monkeypatch):
+    """run_task_now 必须把 next_run_time 包成 tz-aware datetime（APScheduler 3.11+ 拒绝 float）。"""
+    from datetime import datetime, timezone
+
+    from skills.Scheduler import registry
+
+    redis = _FakeRedis()
+    _seed_task(redis, "tid_run", "x", "s")
+    monkeypatch.setattr(registry, "get_redis", lambda: redis)
+
+    captured = {}
+
+    class _FakeScheduler:
+        def get_job(self, tid):
+            class _J:
+                pass
+            j = _J()
+            j.next_run_time = "2026-08-13 09:00:00"  # 已注册、非 None
+            return j
+
+        def modify_job(self, tid, **changes):
+            captured["tid"] = tid
+            captured["next_run_time"] = changes["next_run_time"]
+            return None
+
+    fake_sched = _FakeScheduler()
+    monkeypatch.setattr(registry, "get_scheduler", lambda: fake_sched)
+
+    ok = registry.run_task_now("tid_run")
+    assert ok is True
+    assert captured["tid"] == "tid_run"
+
+    nrt = captured["next_run_time"]
+    # 必须是 tz-aware datetime，不能是 float
+    assert isinstance(nrt, datetime), f"expected datetime, got {type(nrt).__name__}"
+    assert nrt.tzinfo is not None, "next_run_time 必须是 tz-aware（APScheduler 会按 scheduler TZ 转换）"
+
+
+def test_run_task_now_404_when_task_missing(monkeypatch):
+    """不存在的 task_id → 返 False（→ API 404），不抛异常。"""
+    from skills.Scheduler import registry
+
+    redis = _FakeRedis()
+    monkeypatch.setattr(registry, "get_redis", lambda: redis)
+    monkeypatch.setattr(registry, "get_scheduler", lambda: MagicMock())
+
+    ok = registry.run_task_now("nonexistent")
+    assert ok is False
 
     # 锁仍释放（最关键）
     assert "scheduled:lock:tid007" not in redis.lock_held

@@ -25,15 +25,22 @@
         :is-completed-unread="completedSessions.has(conv.session_id)"
         :is-approval-pending="approvalPendingSessions.has(conv.session_id)"
         :is-errored="errorSessions.has(conv.session_id)"
+        :scheduled-tasks="scheduledTasksMap.get(conv.session_id) || []"
+        :scheduled-tasks-busy="scheduledTasksBusy"
+        :is-scheduled-tasks-expanded="expandedScheduledTasks.has(conv.session_id)"
         @select="$emit('select-conversation', conv.session_id)"
         @delete="$emit('delete-conversation', conv.session_id)"
         @update-title="$emit('update-title', $event)"
         @refresh="$emit('refresh-conversation', conv.session_id)"
+        @scheduled-task-toggle="(...args) => $emit('scheduled-task-toggle', ...args)"
+        @scheduled-task-run="(tid) => $emit('scheduled-task-run', tid)"
+        @scheduled-task-delete="(tid) => $emit('scheduled-task-delete', tid)"
+        @toggle-scheduled-tasks="toggleScheduledTasksExpanded(conv.session_id)"
       />
       <div v-if="loadError" class="empty-state load-error">
         <div>加载对话列表失败</div>
         <div class="load-error-detail">{{ loadError }}</div>
-        <div class="load-error-hint">请确认后端服务已启动（端口 8211）</div>
+        <div class="load-error-hint">请确认灵析后端服务已启动</div>
       </div>
       <div v-else-if="conversations.length === 0" class="empty-state">
         暂无历史对话
@@ -91,15 +98,40 @@ export default {
       // loadConversations 失败时的错误消息（App.vue 写入），空字符串 = 没有错误
       type: String,
       default: ''
+    },
+    scheduledTasksMap: {
+      // session_id -> tasks[] 的 Map（由 App.vue 整 Map 替换触发响应式）
+      type: Map,
+      default: () => new Map()
+    },
+    scheduledTasksBusy: {
+      // 是否有正在发起的 scheduled-tasks 请求（驱动各 ConversationItem 内 panel 的 busy 态）
+      type: Boolean,
+      default: false
     }
   },
   data() {
     return {
       hasOverflow: false,
-      _resizeObserver: null
+      _resizeObserver: null,
+      // 已展开的会话定时任务列表（session_id Set）—— 简单前端缓存：刷新页面后保留
+      expandedScheduledTasks: new Set()
     }
   },
   mounted() {
+    // 从 localStorage 恢复展开状态（per-user 配置，简单 key）
+    try {
+      const raw = localStorage.getItem('lingxi.scheduledTasksExpanded')
+      if (raw) {
+        const arr = JSON.parse(raw)
+        if (Array.isArray(arr)) {
+          this.expandedScheduledTasks = new Set(arr)
+        }
+      }
+    } catch (e) {
+      // localStorage 不可用（隐私模式 / SSR）静默降级，状态不持久即可
+    }
+
     // 等 DOM 渲染后再测一次，避免第一次拿到的 clientHeight 还是 0
     this.$nextTick(() => this.checkOverflow())
     // 监听内容尺寸变化（conversations 增删 / 窗口大小变化），重新检测是否溢出
@@ -123,6 +155,20 @@ export default {
     },
     collapsed() {
       this.$nextTick(() => this.checkOverflow())
+    },
+    // expandedScheduledTasks 变化时同步到 localStorage（deep 监视 Set.add / Set.delete）
+    expandedScheduledTasks: {
+      handler(newSet) {
+        try {
+          localStorage.setItem(
+            'lingxi.scheduledTasksExpanded',
+            JSON.stringify(Array.from(newSet))
+          )
+        } catch (e) {
+          // 写不进去（配额 / 隐私模式）静默
+        }
+      },
+      deep: true
     }
   },
   methods: {
@@ -139,9 +185,23 @@ export default {
       if (overflow !== this.hasOverflow) {
         this.hasOverflow = overflow
       }
+    },
+    /**
+     * 切换指定会话的定时任务列表展开状态
+     * —— Vue 2 Set 不响应式追踪 .add / .delete，必须整 Set 替换触发子组件重渲染
+     */
+    toggleScheduledTasksExpanded(sessionId) {
+      if (!sessionId) return
+      const next = new Set(this.expandedScheduledTasks)
+      if (next.has(sessionId)) {
+        next.delete(sessionId)
+      } else {
+        next.add(sessionId)
+      }
+      this.expandedScheduledTasks = next
     }
   },
-  emits: ['toggle', 'new-chat', 'select-conversation', 'delete-conversation', 'update-title', 'refresh-conversation']
+  emits: ['toggle', 'new-chat', 'select-conversation', 'delete-conversation', 'update-title', 'refresh-conversation', 'scheduled-task-toggle', 'scheduled-task-run', 'scheduled-task-delete']
 }
 </script>
 

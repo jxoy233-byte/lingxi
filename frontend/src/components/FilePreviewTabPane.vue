@@ -325,8 +325,23 @@ export default {
 .truncation-notice { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; padding: 9px 12px; border: 1px solid #f59e0b; border-radius: 6px; color: #92400e; background: rgba(245, 158, 11, 0.12); font-size: 12px; }
 .truncation-notice button { flex-shrink: 0; border: none; background: transparent; color: var(--button-bg); cursor: pointer; font-weight: 500; }
 .content-body { font-size: 14px; line-height: 1.7; color: var(--text-primary); word-wrap: break-word; overflow-wrap: anywhere; min-height: 0; width: 100%; max-width: 100%; box-sizing: border-box; }
-.content-body.image-preview { display: flex; align-items: center; justify-content: center; padding: 12px; background: var(--bg-secondary, #f9fafb); }
-.content-body.image-preview img { max-width: 100%; max-height: 70vh; object-fit: contain; border-radius: 4px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08); }
+.content-body.image-preview {
+  /* flex 列布局 + align-items: center → 窄图水平居中；移除 max-height / justify-content: center
+     → 长图按容器宽度渲染，溢出时由 .content-container 的 overflow-y: auto 自然滚动（不再被 70vh 截掉变迷你） */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 12px;
+  background: var(--bg-secondary, #f9fafb);
+  min-height: 100%;
+}
+.content-body.image-preview img {
+  display: block;
+  max-width: 100%;
+  height: auto;            /* 长宽比锁定；不再用 max-height 卡死，让长图自然撑高 */
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
 .html-render-area { position: relative; width: 100%; height: calc(100vh - 150px); overflow: hidden; isolation: isolate; contain: layout paint style; }
 .html-preview-iframe { display: block; width: 100%; height: 100%; border: none; border-radius: 6px; background: var(--bg-primary); transform: translateZ(0); }
 .html-raw-content { width: 100%; height: 100%; overflow-y: auto; overflow-x: hidden; box-sizing: border-box; }

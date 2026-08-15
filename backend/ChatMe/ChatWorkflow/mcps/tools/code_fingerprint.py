@@ -143,12 +143,22 @@ def _extract_python_imports(code_text: str) -> Set[str]:
     - `import X` / `import X as Y` / `import X.Y`
     - `from X import Y` / `from X.Y import Z`
     收集的是顶层模块名（`import X.Y.Z` → `X`）。
+
+    特殊：`from skills.<X> import ...` 会额外把 `<X>` 也加入集合
+    —— 让 fingerprint 能区分不同 skill 的调用，配合 permissions matcher
+    的 `imp=` 子集匹配（如 `imp=Memory` 模式命中 `imp=Memory,skills` 的实际 fingerprint）。
     """
     imports: Set[str] = set()
     for m in re.finditer(r"^\s*import\s+([\w.]+)(?:\s+as\s+\w+)?", code_text, re.MULTILINE):
         imports.add(m.group(1).split(".")[0])
     for m in re.finditer(r"^\s*from\s+([\w.]+)\s+import", code_text, re.MULTILINE):
-        imports.add(m.group(1).split(".")[0])
+        parts = m.group(1).split(".")
+        top = parts[0]
+        imports.add(top)
+        # skills 框架的子模块（如 skills.Memory）把子段也加进来
+        # —— 让 fingerprint 能区分不同 skill 的调用，配合 matcher 子集匹配
+        if top == "skills" and len(parts) >= 2:
+            imports.add(parts[1])
     return imports
 
 

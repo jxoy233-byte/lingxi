@@ -269,6 +269,58 @@ class MemoryManager:
         memory_content = self.read_memory(thread_id)
         return SystemMessage(content=f"【历史记忆】\n{memory_content}")
 
+    # ====================================================================
+    # 分层上下文（current.md + facts.md + preference.md + global/*）
+    # ====================================================================
+
+    def _thread_memory_file(self, thread_id: str, category: str) -> str:
+        """facts.md / preference.md 路径。"""
+        return os.path.join(self._memory_dir, thread_id, f"{category}.md")
+
+    def _global_memory_file(self, category: str) -> str:
+        """global/facts.md / global/preference.md 路径。"""
+        return os.path.join(self._memory_dir, "global", f"{category}.md")
+
+    def _read_optional(self, file_path: str) -> str:
+        """读取可选文件 —— 不存在或读失败返回 ''。不会抛异常。"""
+        if not os.path.exists(file_path):
+            return ""
+        try:
+            return open(file_path, "r", encoding="utf-8").read().strip()
+        except Exception as e:
+            self.logger.warning(f"读取 {file_path} 失败: {e}")
+            return ""
+
+    def read_layered_context(self, thread_id: str) -> SystemMessage:
+        """合并 current.md + thread facts/preference + global facts/preference
+        为单一 SystemMessage，由 context_assembly_node 注入到每轮开头。
+
+        5 段结构（每段独立 heading，缺失显示「（空）」）：
+
+            【本会话记忆】     current.md  —— LLM 维护的叙事性总结
+            【本会话事实】     facts.md    —— remember category="facts" scope="thread"
+            【本会话偏好】     preference.md —— remember category="preference" scope="thread"
+            【全局事实】      global/facts.md —— remember scope="global" category="facts"
+            【全局偏好】      global/preference.md —— remember scope="global" category="preference"
+
+        写入路径见 skills/memory/__init__.py 的 _memory_file_path。
+        """
+        current = self.read_memory(thread_id)
+        thread_facts = self._read_optional(self._thread_memory_file(thread_id, "facts"))
+        thread_pref = self._read_optional(self._thread_memory_file(thread_id, "preference"))
+        global_facts = self._read_optional(self._global_memory_file("facts"))
+        global_pref = self._read_optional(self._global_memory_file("preference"))
+
+        sections = [
+            f"【本会话记忆】\n{current}",
+            f"【本会话事实】\n{thread_facts or '（空）'}",
+            f"【本会话偏好】\n{thread_pref or '（空）'}",
+            f"【全局事实】\n{global_facts or '（空）'}",
+            f"【全局偏好】\n{global_pref or '（空）'}",
+        ]
+
+        return SystemMessage(content="\n\n".join(sections))
+
     def clear_memory(self, thread_id: str) -> bool:
         """
         清空指定 thread_id 的记忆

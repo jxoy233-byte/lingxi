@@ -75,7 +75,7 @@ logs/
 *.log.*
 
 # memory
-memory/
+backend/.chatme/memory/
 *.memory.*
 
 docker_data/

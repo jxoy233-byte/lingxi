@@ -28,6 +28,7 @@ from ChatMe.LoggingManager.logging_config import get_logger
 from .models import (
     APSCHEDULER_JOBS_KEY,
     APSCHEDULER_RUN_TIMES_KEY,
+    SCHEDULED_META_PREFIX,
 )
 
 logger = get_logger("Scheduler")
@@ -122,7 +123,54 @@ def start_scheduler() -> AsyncIOScheduler:
         f"redis={conn_args.get('host')}:{conn_args.get('port')}/{conn_args.get('db')}, "
         f"TZ=Asia/Shanghai, misfire_grace=300s, coalesce=True, max_instances=1"
     )
+    _sync_paused_jobs_on_start()
     return _scheduler
+
+
+def _sync_paused_jobs_on_start() -> None:
+    """scheduler 启动后按 Redis meta.enabled 同步 job 暂停态
+
+    为什么需要：
+    registry.update_task 先写 Redis meta.enabled 再调 job.pause()（registry.py:213-221）。
+    中间进程崩溃 → meta 写了、APScheduler job 没 pause；下次启动 scheduler 按 active
+    加载，与 meta 不一致 → "前端显示暂停但任务还在跑"。
+    反向（meta=1 但 job paused）虽然罕见但同样兜底：把 Redis meta 作为单一真相。
+
+    APScheduler pause 语义：job.next_run_time == None ⟺ paused；
+    resume() 会按 trigger 重新算 next_run_time。
+    """
+    scheduler = _scheduler
+    if scheduler is None:
+        return
+    redis_client = get_redis()
+    synced_pause = 0
+    synced_resume = 0
+    skipped = 0
+    for job in scheduler.get_jobs():
+        enabled_raw = redis_client.hget(SCHEDULED_META_PREFIX + job.id, "enabled")
+        if enabled_raw is None:
+            # Redis meta 没了（外部 DEL 或 scheduler 重启前已被删）——
+            # APScheduler 这里的 job 留着也无害，下次触发 handler 时取不到 meta
+            # 会失败；这里只做同步，不主动删 APScheduler job
+            skipped += 1
+            continue
+        try:
+            meta_enabled = int(enabled_raw)
+        except (ValueError, TypeError):
+            skipped += 1
+            continue
+        # APScheduler: job.next_run_time is None ⟺ 已暂停
+        if meta_enabled == 0 and job.next_run_time is not None:
+            job.pause()
+            synced_pause += 1
+        elif meta_enabled == 1 and job.next_run_time is None:
+            job.resume()
+            synced_resume += 1
+    if synced_pause or synced_resume or skipped:
+        logger.info(
+            f"[scheduler] 启动时同步 paused/resume: "
+            f"paused={synced_pause} resumed={synced_resume} skipped={skipped}"
+        )
 
 
 def stop_scheduler() -> None:

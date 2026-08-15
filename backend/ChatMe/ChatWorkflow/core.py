@@ -884,7 +884,7 @@ class ChatWorkflow:
 
             user_input: List[HumanMessage] = await self._get_current_round_conversation_except_files( messages)
             # history_messages = await self._get_validate_history_message(messages,2)
-            history_memory: SystemMessage = self.memory_manager.get_relevant_memory(thread_id)
+            history_memory: SystemMessage = self.memory_manager.read_layered_context(thread_id)
 
             # 如果在这里中断时，续接时注入的中断原因 SystemMessage 需要加到 input_msg 最前面，否则 LLM 看不到
             for msg in messages:
@@ -944,7 +944,7 @@ class ChatWorkflow:
 
             if not state["context"]:
                 # 新会话：组装 memory + imp_ipt，逐条打印（不一次性 dump 整段 context）
-                memory_message :SystemMessage = self.memory_manager.get_relevant_memory(thread_id)
+                memory_message :SystemMessage = self.memory_manager.read_layered_context(thread_id)
                 context.append(memory_message)
                 self._write_thinking(thread_id, f"[react_context] +memory:\n{format_thinking_chain([memory_message])}")
 

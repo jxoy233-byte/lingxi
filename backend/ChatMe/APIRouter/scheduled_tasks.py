@@ -74,10 +74,8 @@ async def create_task(body: TaskCreate = Body(...)):
         )
         return {"ok": True, "task_id": tid}
     except ValueError as e:
-        # cron 非法
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
-        # scheduler 未启动（lifespan 异常）
         raise HTTPException(status_code=503, detail=str(e))
 
 
@@ -129,7 +127,6 @@ async def update_task_endpoint(
             cron=body.cron,
         )
     except ValueError as e:
-        # cron 非法
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))

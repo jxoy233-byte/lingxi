@@ -34,7 +34,7 @@ Vue 3 + Vite 单页应用，提供 **Web 端** 和 **Electron 桌面端** 两种
 - **错误气泡保护**：SSE `error` 事件触发时整条消息渲染为红色错误框，`done` 事件不会复活 AI 内容，避免报错堆栈被当 markdown
 - **权限审批内嵌**：`cmd` / `code` 工具触发审批时把按钮内嵌到对应 `toolCall` 行（高亮上下文），不走独立 modal 弹窗；4 档决策 approve / this-time-only / deny / feedback:<text>
 - **消息排队**：AI 流式期间输入框不再禁用，新消息进 Redis `queue:{sid}` FIFO，本轮 `done` 后自动出队续发；用户切走会话时推迟 drain，切回再发
-- **定时任务面板**：对话区顶部「⏰ N 个定时任务」折叠面板，支持启停 / 立即运行 / 行内二次确认删除；创建走对话（agent 调 Scheduler skill）
+- **定时任务内嵌**：v0.1.5 起改为**每个会话底部内嵌** ⏰ 触发按钮（仅 `tasks.length > 0` 渲染）+ 展开任务列表；支持启停 / 立即运行 / 行内二次确认删除；展开状态按 `lingxi.scheduledTasksExpanded` localStorage 持久化；创建走对话（agent 调 Scheduler skill）
 - **头部刷新按钮**：↻ 按钮 + `Cmd/Ctrl+R` + 菜单 → 视图 → 刷新，触发 `window.location.reload()` 走完整重载
 - **Electron 多环境**：开发 / 测试 / 正式三套配置，菜单栏与窗口标题栏上以颜色徽章区分
 - **file:// 协议拦截**：Electron 桌面端用 `protocol.handle('file', ...)` 把 `/chat/*` 和 `/static/*` 转发到后端，等价于 Vite dev 模式的代理
@@ -142,10 +142,9 @@ frontend/
 │       ├── MessageInput.vue
 │       ├── MessageItem.vue
 │       ├── MessageList.vue
-│       ├── ScheduledTaskItem.vue     # 单条定时任务卡片
-│       ├── ScheduledTasksPanel.vue   # 对话区顶部「⏰ N 个定时任务」折叠面板
+│       ├── ScheduledTaskItem.vue     # 单条定时任务卡片（v0.1.5 起移入 ConversationItem 内嵌展开）
 │       ├── SearchResults.vue
-│       ├── SettingsDialog.vue       # 设置弹窗（Appearance / Models / Skills / Permissions 4 tab + vl.local 开关 + Save & Restart）
+│       ├── SettingsDialog.vue       # 设置弹窗（Appearance / Models / Skills / Permissions 4 tab + vl.local 开关 + 按段热加载 + 立即清理 checkpoint 按钮 v0.1.5）
 │       ├── Sidebar.vue
 │       └── WebPreviewPanel.vue
 ├── tips/                       # 用户提示插图（img.png 等）
@@ -156,21 +155,20 @@ frontend/
 
 | 组件 | 职责 |
 |------|------|
-| `App.vue` | 全局状态中心；维护 SSE 连接、错误气泡保护集合 `_sessionHadError: Set<session_id>`、当前会话切换；`refreshPage()` 触发 `window.location.reload()` |
-| `Sidebar.vue` | 会话列表容器，支持新建 / 删除 / 切换会话 |
-| `ConversationItem.vue` | 单个会话项：双击编辑标题、悬停显示删除按钮、相对时间显示（分钟/小时/天数） |
+| `App.vue` | 全局状态中心；维护 SSE 连接、错误气泡保护集合 `_sessionHadError: Set<session_id>`、当前会话切换；`refreshPage()` 触发 `window.location.reload()`；v0.1.5 起维护 `scheduledTasksMap: Map<session_id, ScheduledTask[]>` + `_scheduledTasksRefreshing: bool` + 三 Set 侧栏状态点（`_activeStreamingSessions` / `_approvalPendingSessions` / `_completedSessions` / `_errorSessions`） |
+| `Sidebar.vue` | 会话列表容器，支持新建 / 删除 / 切换会话；v0.1.5 起把每个会话的定时任务触发状态、展开按钮下发给 ConversationItem |
+| `ConversationItem.vue` | 单个会话项：双击编辑标题、悬停显示删除按钮、相对时间显示（分钟/小时/天数）、四色侧栏状态点（streaming 蓝闪 / approval 黄脉冲 / errored 红常 / completed 绿常）；**v0.1.5 起** 底部内嵌 ⏰ 触发按钮（仅 `tasks.length > 0` 渲染）+ `<transition name="scheduled-expand">` 展开任务列表（`max-height: 0 → 110px`，超过 3 条滚动）；展开状态按 `lingxi.scheduledTasksExpanded` localStorage 持久化 |
 | `ChatHeader.vue` | 顶部条：主题切换、Checkpoint 面板、**↻ 刷新页面按钮**（与 `DataAnalysisTree` 同款 SVG），新对话按钮 |
-| `MessageList.vue` | 消息列表容器：自动滚动控制（入场 easeInOut + 流式 ramp + 100ms 打断防抖 + 用户 wheel/touch 让出控制权）；顶部挂载 `ScheduledTasksPanel` 并向上转发 `scheduled-task-*` / `restart-session` 事件 |
+| `MessageList.vue` | 消息列表容器：自动滚动控制（入场 easeInOut + 流式 ramp + 100ms 打断防抖 + 用户 wheel/touch 让出控制权）；向上转发 `scheduled-task-*` / `restart-session` 事件 |
 | `MessageItem.vue` | 单条消息渲染：Markdown / 代码高亮 / 数学公式 / 流程图；`message.error=true` 时渲染为红色错误框；中断态显示「重新对话」按钮（emit `restart-session`）；内嵌审批 UI 直接按 `tool.args.local` 判执行环境 |
 | `MessageInput.vue` | 输入框：Enter 发送、Shift+Enter 换行、文件上传、语音输入；**流式期间不再禁用发送**——消息由 App.vue 入队，本轮 `done` 后自动续发 |
 | `CheckpointPanel.vue` | 回溯面板：展示历史 checkpoint 节点列表，支持回溯到指定轮 |
 | `ConfirmDialog.vue` | 通用确认弹窗（删除对话、关闭会话等） |
 | `FilePreviewPanel.vue` / `FilePreviewModal.vue` | 文件预览面板 / 弹窗（图片、文本、表格） |
 | `DataAnalysisTree.vue` / `DataTreeNode.vue` | 数据分析生成的目录树（递归节点），面板头部含 reload 按钮 |
-| `ScheduledTasksPanel.vue` | 对话区顶部「⏰ N 个定时任务」折叠面板：仅当 `tasks.length > 0` 渲染、默认收起；含 ↻ 刷新按钮（旋转动画）；**无创建入口**，创建走对话让 agent 调 Scheduler skill |
-| `ScheduledTaskItem.vue` | 单条定时任务卡片：名称 + 启用/暂停徽章、cron、session_id、运行次数、最近运行时间；⏸/▶ 启停、⚡ 立即运行、🗑 行内小红叉二次确认删除 |
+| `ScheduledTaskItem.vue` | **v0.1.5 起** 单条定时任务卡片：状态圆点 + cron + 上次运行时间 + 累计次数；⏸/▶ 启停、⚡ 立即运行、🗑 行内小红叉二次确认删除（参考偏好 21 状态机：`confirmingDelete` + document click 取消） |
 | `SearchResults.vue` | 搜索结果列表渲染 |
-| `SettingsDialog.vue` | 设置弹窗：Appearance / Models / Skills / Permissions 4 tab；VL `local` 开关 + fallback 解释；LLM provider / Skills API Key 脱敏编辑 + Save & Restart；已批准 / 已拒绝命令列表行内删除 |
+| `SettingsDialog.vue` | 设置弹窗：Appearance / Models / Skills / Permissions 4 tab；VL `local` 开关 + fallback 解释；LLM provider / Skills API Key 脱敏编辑 + Save & Restart（**只有 `llm_providers` 段需要重启**，permissions/skills 改动立即生效）；`buildPayload()` diff-only（`_deepDiff` + `_stripEmptyObjects`，避免「改一字段把整个 llm_providers 都带上」误判）；已批准 / 已拒绝命令列表行内删除；**v0.1.5 新增**「立即清理 checkpoint」按钮（POST `/admin/checkpoints/prune`） |
 | `WebPreviewPanel.vue` | Electron 内嵌网页预览窗口（IPC `open-web-preview`） |
 
 ### 全局状态（App.vue）
@@ -193,7 +191,7 @@ _queueDrainDeferred: Set<session_id>           // 用户不在场，推迟 drain
 scheduledTasksMap: Map<session_id, ScheduledTask[]>
 ```
 
-### 消息排队 / 自动续发（v0.1.4）
+### 消息排队 / 自动续发（v0.1.4 引入；v0.1.5 起每个会话底部内嵌 ⏰）
 
 ```
 sendMessage 守卫：currentSessionId ∈ _activeStreamingSessions
@@ -362,7 +360,7 @@ const isTest = process.env.NODE_ENV === 'test'
 | `app.name` | `灵析` | 应用名（菜单栏第一项、`app.getName()`） |
 | `app.title` | `灵析——数据分析智能助手` | 窗口标题 / 关于弹窗 |
 | `app.identifier` | `com.chatme.app` | bundle identifier |
-| `app.version` | `0.1.4` | 同步后端版本号 |
+| `app.version` | `0.1.5` | 同步后端版本号 |
 | `window.width × height` | `1100 × 720` | 主窗口尺寸 |
 | `window.minWidth × minHeight` | `650 × 480` | 最小尺寸 |
 | `devServer.url` | 从 Vite 导入的 `http://localhost:18211` | Electron 开发时加载的 URL |
@@ -496,8 +494,8 @@ DMG 阶段需要 `dmgbuild-bundle-arm64-*.tar.gz` 包，npmmirror 当前缺这�
 release/electron-builder/
 ├── mac-arm64/
 │   └── 灵析.app          ← 直接打开
-├── 灵析-0.1.4-arm64-mac.zip
-└── 灵析-0.1.4-mac.zip
+├── 灵析-0.1.5-arm64-mac.zip
+└── 灵析-0.1.5-mac.zip
 ```
 
 打开方式：
@@ -509,7 +507,7 @@ open ~/coding/projects/ChatMe/release/electron-builder/mac-arm64/灵析.app
 "~/coding/projects/ChatMe/release/electron-builder/mac-arm64/灵析.app/Contents/MacOS/灵析"
 
 # 解压 zip 后再打开
-unzip 灵析-0.1.4-arm64-mac.zip -d ~/Downloads
+unzip 灵析-0.1.5-arm64-mac.zip -d ~/Downloads
 open ~/Downloads/灵析.app
 ```
 

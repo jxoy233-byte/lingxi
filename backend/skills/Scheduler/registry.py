@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Optional
 
 from apscheduler.triggers.cron import CronTrigger
@@ -308,7 +309,7 @@ def run_task_now(task_id: str) -> bool:
             replace_existing=True,
         )
 
-    get_scheduler().modify_job(tid, next_run_time=_now())
+    get_scheduler().modify_job(tid, next_run_time=datetime.fromtimestamp(_now(), tz=timezone.utc))
     logger.info(f"[scheduler] run_task_now: id={tid[:8]}")
     return True
 

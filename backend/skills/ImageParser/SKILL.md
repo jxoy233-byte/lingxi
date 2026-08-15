@@ -47,8 +47,6 @@ from ImageParser import parse_image
 - `xxx.png`（默认相对于 backend/cached）
 - `data:image/...;base64,...`
 
-图片会等比压缩到最大 512px，再以标准 OpenAI 多模态消息格式发送给当前 VL 配置。
-
 ### `parse_images_batch(image_sources, prompt=None, max_tokens=2048, temperature=0.7, **kwargs)`
 
 按顺序解析多张图片，返回与输入一一对应的结果列表；单张失败不会终止整个批次。

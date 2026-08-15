@@ -49,12 +49,14 @@ def test_registry_scans_current_skills():
         "data_analysis",
         "data_analysis_database",
         "scheduler",
+        "skillforge",  # v0.1.5 新增：用于动态创建 skill
+        "memory",      # v0.1.5 新增：精确事实 / 用户偏好持久化
     }
 
 
-def test_registry_mount_args_include_top_level_ro_and_per_skill_rw(monkeypatch):
+def test_registry_mount_args_include_top_level_rw_and_per_skill_rw(monkeypatch):
     """registry 输出必须：
-    1. 含 /skills:ro 顶层 aggregate mount（兼容 `from Exa import ...` 风格）
+    1. 含 /skills:rw 顶层 aggregate mount（兼容 `from Exa import ...` 风格 + 支持 SkillForge 写新 skill）
     2. 每个 mount_mode=rw 的 skill 单独 :rw 挂载
     3. 嵌套子 skill（如 DataAnalysis/database）如果也是 rw，独立挂载而不是依赖父目录
     4. 宿主机每个挂载源路径都存在
@@ -68,13 +70,13 @@ def test_registry_mount_args_include_top_level_ro_and_per_skill_rw(monkeypatch):
     monkeypatch.setenv("SANDBOX_USE_SKILL_REGISTRY", "true")
     registry_args = pool._build_skill_mount_args()
 
-    # 1. 顶层 /skills:ro 必须存在
+    # 1. 顶层 /skills:rw 必须存在（v0.1.5 起 /skills 默认 rw，给 SkillForge 写新 skill 用）
     assert "-v" in registry_args
-    ro_idx = next(
+    rw_idx = next(
         i for i, a in enumerate(registry_args)
-        if a.endswith(":/skills:ro")
+        if a.endswith(":/skills:rw")
     )
-    assert registry_args[ro_idx - 1] == "-v"
+    assert registry_args[rw_idx - 1] == "-v"
 
     # 2. DataAnalysis 必须独立 rw 挂载
     assert any(
@@ -138,8 +140,12 @@ def test_available_skills_block(tmp_path: Path):
     assert "usage_hints: Demo" in block
 
 
-def test_available_skills_block_cached(tmp_path: Path):
-    """available_skills_block() 走 lru_cache，重复调用返回同一对象。"""
+def test_available_skills_block_no_cache(tmp_path: Path):
+    """v0.1.5 起 available_skills_block() 不再缓存，重复调用重新渲染。
+
+    之前 lru_cache(maxsize=1) 锁住结果，SkillForge 创建新 skill 后必须重启
+    后端才能发现。去掉 cache 后走 registry mtime check，每次都拿最新磁盘状态。
+    """
     skill_dir = tmp_path / "Cached"
     skill_dir.mkdir()
     (skill_dir / "SKILL.md").write_text(
@@ -150,7 +156,9 @@ def test_available_skills_block_cached(tmp_path: Path):
 
     first = available_skills_block()
     second = available_skills_block()
-    assert first is second  # lru_cache 命中返回同一对象
+    # 不再是同一对象，但内容一致（registry 缓存命中）
+    assert first == second
+    assert first is not second  # 不缓存，每次重新渲染
 
 
 def test_build_mount_args_uses_cached_skills(tmp_path: Path):
@@ -164,9 +172,9 @@ def test_build_mount_args_uses_cached_skills(tmp_path: Path):
     registry = SkillRegistry(tmp_path)
     registry.scan()
     args = registry.build_mount_args()
-    # 顶层 aggregate ro + skill 自身 rw
+    # 顶层 aggregate rw（v0.1.5 起默认 rw，SkillForge 写新 skill 需要）
     assert args[0] == "-v"
-    assert args[1].endswith(":/skills:ro")
+    assert args[1].endswith(":/skills:rw")
     assert any(":rw" in a for a in args)
 
 
@@ -223,6 +231,75 @@ def test_fallback_block_when_registry_empty(tmp_path: Path):
 # =========================================================================
 # search() / find_skill_block() — keyword 检索
 # =========================================================================
+
+
+def test_registry_picks_up_new_skill_without_restart(tmp_path: Path):
+    """v0.1.5 回归：SkillForge 创建新 skill 后 registry 自动发现，无需重启。
+
+    旧行为：registry 在 lifespan 启动时 scan 一次，新 skill 必须重启后端才可见。
+    新行为：search/get/names 每次先 stat skills_root mtime，变了就 rescan。
+    """
+    from ChatMe.ChatWorkflow.skills.registry import get_skill_registry
+
+    skill_dir = tmp_path / "HotReloadTest"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: hotreloadtest\ndescription: 热加载测试\naliases: [热加载]\n---\nbody",
+        encoding="utf-8",
+    )
+    reset_skill_registry(tmp_path)
+
+    # 1) 初始：能找到
+    registry = get_skill_registry()
+    assert "hotreloadtest" in registry.names()
+
+    # 2) 删除现有 skill，再创建同名目录（模拟 SkillForge 创建新 skill）
+    import shutil, time
+    shutil.rmtree(skill_dir)
+    # 时间戳精度：某些文件系统 mtime 精度只到秒，调慢一点确保 mtime 真的变了
+    time.sleep(0.05)
+    new_skill = tmp_path / "BrandNewSkill"
+    new_skill.mkdir()
+    (new_skill / "SKILL.md").write_text(
+        "---\nname: brandnewskill\ndescription: 新建测试\n---\nbody",
+        encoding="utf-8",
+    )
+
+    # 3) 不重启，registry.names() 应包含新 skill
+    names = registry.names()
+    assert "brandnewskill" in names, f"新 skill 应自动被发现，实际 names={names}"
+    assert "hotreloadtest" not in names  # 旧的已删
+
+
+def test_registry_picks_up_modified_skill(tmp_path: Path):
+    """修改现有 SKILL.md 的 mtime → registry 也应重新扫到新内容。"""
+    from ChatMe.ChatWorkflow.skills.registry import get_skill_registry
+
+    skill_dir = tmp_path / "Modified"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: modified\ndescription: 初始\n---\nbody",
+        encoding="utf-8",
+    )
+    reset_skill_registry(tmp_path)
+    registry = get_skill_registry()
+    # description 在 frontmatter，summary 来自 body（"body"）
+    initial = registry.get("modified")
+    assert initial.frontmatter.get("description") == "初始"
+    assert initial.summary == "body"
+
+    # 修改 SKILL.md（触发 mtime 变化）
+    import time
+    time.sleep(0.05)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: modified\ndescription: 修改后\n---\n更新后的 body",
+        encoding="utf-8",
+    )
+
+    # 不重启，应拿到新内容
+    manifest = registry.get("modified")
+    assert manifest.frontmatter.get("description") == "修改后"
+    assert manifest.summary == "更新后的 body"
 
 
 def test_search_finds_skill_by_english_keyword():
@@ -295,11 +372,13 @@ def test_find_skill_block_no_match_suggests_list_mode():
     assert "mode='list'" in block or 'mode="list"' in block
 
 
-def test_find_skill_block_cached():
-    """find_skill_block 走 lru_cache，同 query 返同一对象。"""
+def test_find_skill_block_no_cache():
+    """v0.1.5 起 find_skill_block() 不缓存，重复调用重新渲染。"""
     a = find_skill_block("search")
     b = find_skill_block("search")
-    assert a is b
+    # 不再是同一对象，但内容一致
+    assert a == b
+    assert a is not b
 
 
 def test_find_skill_mcp_tool_match_mode():
@@ -377,8 +456,9 @@ def test_scheduler_skill_in_find_skill_results():
 def test_main_flow_good_examples_cover_scheduler_skill():
     """Good Examples 应包含 scheduler skill 的 find_skill + code() 调用模式。
 
-    验证 §6/§7/§8 已切到 skills/Scheduler 顶层函数路径，
-    不再走旧的 scheduler(action=...) MCP 工具 dispatch。
+    验证 scheduler 已切到 skills/Scheduler 顶层函数路径（不再走旧的
+    scheduler(action=...) MCP 工具 dispatch）。具体函数集合由 SKILL.md
+    承载，prompt 主例只露出 canonical create_scheduled_task。
     """
     from ChatMe.ChatWorkflow.config.graph_config import get_agent_node_prompt
     from ChatMe.ChatWorkflow.mcps.tools.platforms import init_platform
@@ -386,13 +466,8 @@ def test_main_flow_good_examples_cover_scheduler_skill():
     init_platform()
     prompt = get_agent_node_prompt()
 
-    # 6. 定时任务创建：find_skill + cat SKILL.md + create_scheduled_task
+    # 主例：定时任务创建：find_skill + cat SKILL.md + create_scheduled_task
     assert 'find_skill(query="cron 定时 任务")' in prompt
     assert "create_scheduled_task" in prompt
-    # 7. 取消：list_scheduled_tasks + cancel_scheduled_task
-    assert "list_scheduled_tasks" in prompt
-    assert "cancel_scheduled_task" in prompt
-    # 8. 立即触发：run_scheduled_task_now
-    assert "run_scheduled_task_now" in prompt
     # 不应再出现旧的 MCP scheduler(action=...) 形式
     assert "scheduler(action=" not in prompt

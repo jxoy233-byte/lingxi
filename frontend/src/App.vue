@@ -22,6 +22,8 @@
         :completed-sessions="_completedSessions"
         :approval-pending-sessions="_approvalPendingSessions"
         :error-sessions="_errorSessions"
+        :scheduled-tasks-map="scheduledTasksMap"
+        :scheduled-tasks-busy="_scheduledTasksRefreshing"
         :load-error="conversationsLoadError"
         @toggle="toggleSidebar"
         @new-chat="createNewChat"
@@ -29,6 +31,9 @@
         @delete-conversation="deleteConversation"
         @update-title="updateConversationTitle"
         @refresh-conversation="refreshConversation"
+        @scheduled-task-toggle="onScheduledTaskToggle"
+        @scheduled-task-run="onScheduledTaskRun"
+        @scheduled-task-delete="onScheduledTaskDelete"
       />
 
       <!-- 移动端侧边栏遮罩 -->
@@ -66,8 +71,6 @@
           :pending-interrupt-session-id="_pendingInterruptSessionId"
           :pending-tool-approval="pendingToolApproval"
           :submitting-tool-decision="submittingToolDecision"
-          :scheduled-tasks="scheduledTasksForCurrentSession"
-          :scheduled-tasks-refreshing="_scheduledTasksRefreshing"
           @tool-decide="onToolDecision"
           @restore="restoreCheckpoint"
           @restream="handleRestream"
@@ -77,10 +80,6 @@
           @resume="handleResume"
           @restart-session="restartConversation"
           @quote="handleQuote"
-          @scheduled-tasks-refresh="onScheduledTasksRefresh"
-          @scheduled-task-toggle="onScheduledTaskToggle"
-          @scheduled-task-run="onScheduledTaskRun"
-          @scheduled-task-delete="onScheduledTaskDelete"
         />
 
         <MessageInput
@@ -496,9 +495,9 @@ export default {
   },
   computed: {
     /**
-     * 当前会话的定时任务列表（用于传给 MessageList / ScheduledTasksPanel）
+     * 当前会话的定时任务列表（侧栏 ConversationItem 用 scheduledTasksMap.get(id) 拿）
+     * - 仍保留这个 computed 备用，部分老代码可能还在引用；侧栏已切到 Map 直查
      * - 无 session 时返 []（避免 map.get 返 undefined）
-     * - 没拉过该 session 时也返 []（首次进会话后 loadConversation 会拉）
      */
     scheduledTasksForCurrentSession() {
       if (!this.currentSessionId) return []
@@ -2661,6 +2660,12 @@ export default {
           // 后端返回完整会话列表，前端一次性展示，CSS 溢出时显示滚动条
           this.conversations = data
           this.conversationsLoadError = ''
+          // 并行拉每个会话的定时任务，写入 scheduledTasksMap
+          // ——侧栏每行的 ⏰ 指示靠这个 Map 渲染，单拉当前会话不够
+          // 失败静默由 fetchScheduledTasks 内部 console.warn 兜底
+          await Promise.all(
+            data.map(c => this.fetchScheduledTasks(c.session_id))
+          )
         } else {
           // 非 2xx：留个话到 UI 提示用户「后端没起」/「端口被占」等常见原因（否则静默失败用户一脸懵）
           this.conversationsLoadError = `HTTP ${response.status} ${response.statusText}`
@@ -2919,11 +2924,15 @@ export default {
       }
     },
 
-    /** ScheduledTasksPanel ↻ 按钮 → 重拉当前会话任务 */
-    async onScheduledTasksRefresh() {
-      if (this.currentSessionId) {
-        await this.fetchScheduledTasks(this.currentSessionId)
+    /**
+     * 找出 task_id 所属的 session_id（用于 toggle/run/delete 的本地乐观更新 +
+     * 失败回滚重拉）。侧栏展开后用户可能在任意会话的任务上点 ⏸/▶/⚡/🗑，不能用 currentSessionId 推断。
+     */
+    _findSessionForTask(taskId) {
+      for (const [sid, tasks] of this.scheduledTasksMap.entries()) {
+        if (tasks && tasks.some(t => t.task_id === taskId)) return sid
       }
+      return null
     },
 
     /** 行内 ⏸/▶ 切换 enabled */
@@ -2931,20 +2940,21 @@ export default {
       const { updateScheduledTask } = await import('./utils/api.js')
       try {
         await updateScheduledTask(taskId, { enabled: newEnabled })
-        // 本地乐观更新
-        if (this.currentSessionId) {
-          const cur = this.scheduledTasksMap.get(this.currentSessionId) || []
+        // 本地乐观更新：找到 task 所属 session，更新那条 list
+        const sessionId = this._findSessionForTask(taskId)
+        if (sessionId) {
+          const cur = this.scheduledTasksMap.get(sessionId) || []
           const next = cur.map(t =>
             t.task_id === taskId ? { ...t, enabled: newEnabled } : t
           )
           const m = new Map(this.scheduledTasksMap)
-          m.set(this.currentSessionId, next)
+          m.set(sessionId, next)
           this.scheduledTasksMap = m
         }
       } catch (e) {
         console.error('[scheduled-tasks] toggle failed:', e)
-        // 失败回滚：重新拉
-        if (this.currentSessionId) await this.fetchScheduledTasks(this.currentSessionId)
+        const sessionId = this._findSessionForTask(taskId)
+        if (sessionId) await this.fetchScheduledTasks(sessionId)
       }
     },
 
@@ -2955,6 +2965,9 @@ export default {
         await runScheduledTask(taskId)
         // 给一个简短反馈（不弹 toast，保持简洁）
         console.info(`[scheduled-tasks] 触发任务 ${taskId.slice(0, 8)}`)
+        // 触发后任务状态可能改变（status / last_run），重拉该 session 让 UI 跟上
+        const sessionId = this._findSessionForTask(taskId)
+        if (sessionId) await this.fetchScheduledTasks(sessionId)
       } catch (e) {
         console.error('[scheduled-tasks] run failed:', e)
       }
@@ -2966,16 +2979,18 @@ export default {
       try {
         await deleteScheduledTask(taskId)
         // 本地立即移除（不 reload）
-        if (this.currentSessionId) {
-          const cur = this.scheduledTasksMap.get(this.currentSessionId) || []
+        const sessionId = this._findSessionForTask(taskId)
+        if (sessionId) {
+          const cur = this.scheduledTasksMap.get(sessionId) || []
           const next = cur.filter(t => t.task_id !== taskId)
           const m = new Map(this.scheduledTasksMap)
-          m.set(this.currentSessionId, next)
+          m.set(sessionId, next)
           this.scheduledTasksMap = m
         }
       } catch (e) {
         console.error('[scheduled-tasks] delete failed:', e)
-        if (this.currentSessionId) await this.fetchScheduledTasks(this.currentSessionId)
+        const sessionId = this._findSessionForTask(taskId)
+        if (sessionId) await this.fetchScheduledTasks(sessionId)
       }
     },
 

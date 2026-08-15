@@ -43,8 +43,12 @@
 - **一键导出**：
   - 文件树「会话文件」面板头部的 ⬇ / 👁 按钮把 `data_analysis/` 产物打包成 ZIP 或单文件 HTML 预览（marked.js + mermaid.js CDN，PNG/SVG 转 base64 内嵌，CSV/JSON 转 HTML 表格）
   - AI 消息气泡下方按钮排的 ⬇ 「导出到本轮」按钮，截至该 checkpoint 导出 OpenAI Chat Completions 格式 JSON + 自家完整 state 备份 JSON（ZIP 下载，后续可恢复）
-- **定时任务**：`Scheduler` skill 把一段 prompt 配成 cron，到点自动注入指定 session 跑完整一轮 LangGraph agent；APScheduler `AsyncIOScheduler + RedisJobStore`（Asia/Shanghai）持久化，后端重启自动恢复；对话区顶部「⏰ N 个定时任务」折叠面板可启停 / 立即运行 / 删除
+- **定时任务**：`Scheduler` skill 把一段 prompt 配成 cron，到点自动注入指定 session 跑完整一轮 LangGraph agent；APScheduler `AsyncIOScheduler + RedisJobStore`（Asia/Shanghai）持久化，后端重启自动恢复；**v0.1.5 起**每个会话底部内嵌 ⏰ 触发按钮 + 展开任务列表（仅 `tasks.length > 0` 渲染；展开状态 localStorage 持久化）
 - **消息排队**：AI 流式期间用户仍可输入，消息进 Redis `queue:{sid}` FIFO（最多 20 条 × 4000 字符），本轮 `done` 后自动出队续发；用户切走会话时推迟 drain，切回再发
+- **Memory 跨会话记忆（v0.1.5 新增）**：`Memory` skill 把精确事实 / 用户偏好持久化到 `.chatme/memory/{tid|global}/{facts|preference}.md`，`context_assembly_node` 每轮开头自动合并注入，让未来对话开箱即用。**remember 必须 `code(..., local=True)`**（沙盒挂 ro）；recall 在沙盒里也支持（挂到 `/memory`）。
+- **SkillForge 动态创建 skill（v0.1.5 新增）**：`SkillForge` skill 让 agent / 用户写一段 Python wrapper 落到 `/skills/<name>/`，立即被 `find_skill` 发现（registry 按 mtime 自动重扫，无需重启）。
+- **Settings 4 tab + 热加载（v0.1.5 新增）**：`vl.local` 开关决定是否加载本地 VL 模型 + fallback 主用 LLM；`/admin/config` GET / PUT（白名单 llm_providers / skills / permissions）；**按段决定 `restart_required`** —— permissions / skills 改动立即生效，llm_providers 需重启；`/admin/restart` + `/admin/health` 支持前端轮询等待重启恢复。**前端 `buildPayload()` diff-only**（`_deepDiff` + `_stripEmptyObjects`），避免「在 Permissions 改一字段把 llm_providers 全部带上」的误判。
+- **Checkpoint 清理端点（v0.1.5 新增）**：LangGraph `AsyncRedisSaver` 每节点 aput 会攒几十～几百个 checkpoint，dump.rdb 膨胀且启动慢；`POST /admin/checkpoints/prune` 手动清理（dry_run 预览 / 真删两种），前端 Settings「立即清理」按钮调用；后台已自动 hook 进 `_save_round_checkpoint` 每轮 round 收尾时异步 prune。
 
 ## 界面预览
 
@@ -186,7 +190,7 @@ OPENAI_PRESENCE_PENALTY=0.0
 {
   "app": {
     "name": "ChatMe",
-    "version": "v0.1.4",
+    "version": "v0.1.5",
     "host": "127.0.0.1",
     "port": 8211
   },
@@ -242,8 +246,10 @@ ChatMe/
 │   │   │   ├── static_file.py            # /static 静态文件 + 文件树接口
 │   │   │   ├── data_export.py            # /export/artifacts + /export/turn（DataAnalysis ZIP/HTML 预览 + 对话历史导出）
 │   │   │   ├── scheduled_tasks.py        # /admin/scheduled-tasks CRUD + 立即运行
+│   │   │   ├── checkpoint_janitor.py     # /admin/checkpoints/prune（v0.1.5 新增；checkpoint prune HTTP 层）
+│   │   │   ├── admin_config.py           # /admin/config GET / PUT + /admin/restart + /admin/health（v0.1.5 新增）
 │   │   │   ├── message_queue.py          # /chat/{sid}/queue 排队消息 FIFO
-│   │   │   └── admin_config / timed_clean / model_vl
+│   │   │   └── timed_clean / model_vl
 │   │   ├── LoggingManager/               # 异步日志
 │   │   └── test/
 │   ├── skills/
@@ -251,11 +257,16 @@ ChatMe/
 │   │   │   ├── SKILL.md                  # 主规范（生成图表 / 报告 / CSV 等）
 │   │   │   ├── format/                   # ChatDataAnalysisFormat（拆分为 base / artifacts / manifest / database）
 │   │   │   └── database/                 # 数据库分析（MySQL/SQLite/PostgreSQL/MongoDB 只读查询 + 跨会话配置；lazy skill）
-│   │   ├── Scheduler/                    # 定时任务 skill（APScheduler + RedisJobStore，core/models/handlers/registry）
+│   │   ├── Scheduler/                    # 定时任务 skill（APScheduler + RedisJobStore；models/handlers/registry/core 四层）
+│   │   ├── Memory/                       # 跨会话记忆 skill（v0.1.5 新增；remember/recall）
+│   │   ├── SkillForge/                   # 动态创建 skill skill（v0.1.5 新增；create_skill/list_skills/read_skill）
 │   │   ├── Exa/                          # 搜索 skill
 │   │   ├── Tavily/                       # 搜索 skill
 │   │   └── ImageParser/                  # 图片解析 skill
-│   ├── ChatMe/ChatWorkflow/skills/       # SkillRegistry（扫描 SKILL.md frontmatter + find_skill 工具 prompt）
+│   ├── ChatMe/ChatWorkflow/
+│   │   ├── skills/                       # SkillRegistry（v0.1.5 起扫描 SKILL.md frontmatter + find_skill 工具 prompt）
+│   │   ├── CheckpointJanitor.py          # checkpoint prune 业务（v0.1.5 起 hook 进 _save_round_checkpoint 自动 prune）
+│   │   └── ...（其余业务节点）
 │   ├── .chatme/
 │   ├── pyproject.toml
 │   └── main.py
@@ -305,9 +316,14 @@ ChatMe/
 | 接口                                | 方法   | 说明                                                  |
 | --------------------------------- | ---- | --------------------------------------------------- |
 | `/static/cached/{file_path:path}` | GET  | 访问 cached 目录静态文件；详见 [静态文件 fallback](#静态文件-fallback) |
-| `/api/v1/chat/completions`        | POST | 视觉语言模型服务（本地 Qwen3-VL）                               |
+| `/api/v1/chat/completions`        | POST | 视觉语言模型服务（本地 Qwen3-VL，`vl.local=false` 时 fallback 到主用 LLM） |
 | `/admin/cleanup`                  | POST | 手动触发清理任务                                            |
 | `/admin/cleanup/status`           | GET  | 获取清理状态                                              |
+| `/admin/config`                   | GET  | 读取可编辑配置（v0.1.5 新增；密钥脱敏）                              |
+| `/admin/config`                   | PUT  | 保存配置（白名单 `llm_providers` / `skills` / `permissions` 段；v0.1.5 起按段决定 `restart_required`） |
+| `/admin/restart`                  | POST | 触发后端重启（写 `.restart_pending` marker + `os.execv`）         |
+| `/admin/health`                   | GET  | 健康检查（前端轮询等待重启完成）                                    |
+| `/admin/checkpoints/prune`        | POST | 手动清理 LangGraph 冗余 checkpoint（v0.1.5 新增；dry_run 预览 / 真删）  |
 
 ### 定时任务接口（`/admin/scheduled-tasks` 前缀）
 
@@ -383,7 +399,7 @@ MCP 服务器（`mcps/server.py`，FastMCP 3.x，stdio transport）暴露以下�
 - **调度器**：APScheduler `AsyncIOScheduler + RedisJobStore`，时区 `Asia/Shanghai`，后端重启从 Redis 恢复全部任务
 - **lifespan 嵌套顺序**：`chat_service_lifespan → scheduler_lifespan → cleanup_lifespan`——scheduler 的 handler 依赖 `chat_service.message_stream`，必须嵌在 chat_service 之内
 - **错误格式**：统一 `[类型] 描述 | 建议`（`[BadRequest]` / `[NotFound]` / `[ServiceUnavailable]` / `[ConnectionError]`），LLM 看前缀就知道换策略
-- **前端**：对话区顶部「⏰ N 个定时任务」折叠面板（`ScheduledTasksPanel.vue`），支持 ⏸/▶ 启停、⚡ 立即运行、🗑 行内二次确认删除；**面板不提供创建入口**，创建走对话（让 agent 调 skill）
+- **前端**：v0.1.5 起改为**每个会话底部内嵌** ⏰ 触发按钮（仅 `tasks.length > 0` 渲染）+ 展开任务列表（`ScheduledTaskItem.vue`，单条卡片含 ⏸/▶ 启停、⚡ 立即运行、🗑 行内二次确认删除）；展开状态按 `lingxi.scheduledTasksExpanded` localStorage 持久化。**面板不提供创建入口**，创建走对话（让 agent 调 skill）
 
 ## 效果展示
 
@@ -400,13 +416,13 @@ MCP 服务器（`mcps/server.py`，FastMCP 3.x，stdio transport）暴露以下�
 ```bash
 cd backend
 uv build --wheel
-# 输出: dist/ChatMe-0.1.4-py3-none-any.whl
+# 输出: dist/ChatMe-0.1.5-py3-none-any.whl
 ```
 
 ### 安装 wheel
 
 ```bash
-uv pip install dist/ChatMe-0.1.4-py3-none-any.whl
+uv pip install dist/ChatMe-0.1.5-py3-none-any.whl
 # 安装后 chatme_main 和 chatme_mcp 命令全局可用
 ```
 
@@ -439,13 +455,13 @@ npm run electron:build:win      # Windows NSIS（x64）
 npm run electron:build:linux    # Linux AppImage（x64）
 ```
 
-桌面端通过 `electron-builder` 打包，应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.1.4）在 `frontend/electron/electron.config.js` 中配置。
+桌面端通过 `electron-builder` 打包，应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.1.5）在 `frontend/electron/electron.config.js` 中配置。
 
 **输出位置**：`../release/electron-builder/`（项目根，与 Vite 的 `dist/` / `frontend/` 区分开）：
 
 - `mac-arm64/灵析.app` — 直接打开
 - `mac/` — x64 .app
-- `灵析-0.1.4-arm64-mac.zip` / `灵析-0.1.4-mac.zip` — 分发包
+- `灵析-0.1.5-arm64-mac.zip` / `灵析-0.1.5-mac.zip` — 分发包
 - `linux-unpacked/` — Linux 解压目录
 - `win-unpacked.exe` — Windows 安装器
 

@@ -20,6 +20,7 @@
         :pending-interrupt-session-id="pendingInterruptSessionId"
         :pending-tool-approval="pendingToolApproval"
         :submitting-tool-decision="submittingToolDecision"
+        :can-withdraw="canWithdrawFor(index)"
         @restore="$emit('restore', $event)"
         @restream="(...args) => $emit('restream', ...args)"
         @open-link="$emit('open-link', $event)"
@@ -29,6 +30,7 @@
         @restart-session="$emit('restart-session', $event)"
         @quote="$emit('quote', $event)"
         @tool-decide="(decision) => $emit('tool-decide', decision)"
+        @withdraw="$emit('withdraw', $event)"
       />
 
       <div v-if="isLoading" class="loading-message" :class="{ 'interrupted': isInterrupted && isInterruptedSessionId === currentSessionId }">
@@ -104,7 +106,7 @@ export default {
     },
   },
   emits: [
-    'restore', 'restream', 'open-link', 'preview-file', 'interrupt', 'resume', 'restart-session', 'quote', 'tool-decide',
+    'restore', 'restream', 'open-link', 'preview-file', 'interrupt', 'resume', 'restart-session', 'quote', 'tool-decide', 'withdraw',
   ],
   data() {
     return {
@@ -165,6 +167,24 @@ export default {
         }
       }
       return true
+    },
+
+    // 撤回按钮是否可点：
+    // 必须存在「上一轮 AI 消息」且其 checkpointId/last_checkpoint_id 非空
+    // （首条用户消息前面没有 AI，回溯无目标 → 禁用）
+    canWithdrawFor(index) {
+      const flattened = this.flattenedMessages
+      const msg = flattened[index]
+      if (!msg || msg.role !== 'user') return false
+      // 向前找最近的 AI 消息
+      for (let i = index - 1; i >= 0; i--) {
+        const prev = flattened[i]
+        if (prev && prev.role === 'ai') {
+          const cid = prev.additional_kwargs?.last_checkpoint_id || prev.checkpointId
+          return Boolean(cid)
+        }
+      }
+      return false
     },
 
     // 用户是否在底部（50px 容差）

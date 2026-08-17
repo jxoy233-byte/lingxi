@@ -256,24 +256,40 @@ class CheckpointJanitor:
         不再产生新的 artifact checkpoint（cid_E），避免 state_saver / memory 文件名 cid
         三方错位。
 
-        与 ``prune_thread`` 的区别：
-        - 不依赖 state_saver 的 user_saved（backtrack 时 state_saver 还没更新）
-        - 保留集合写死为 ``{target_cid}``，其他全删
+        保留集合语义（与 ``prune_thread`` 一致）：
+            ``{target_cid} ∪ user_saved``，其中 ``user_saved`` 是 RedisStateSaver 的
+            ``threads:{tid}:checkpoints`` HASH 里全部 cid字段（HASH 字段本身不会被本方法动，
+            这里是保护其指向的 LangGraph storage 文档不被误删）。中间 parent chain 节点
+            （不在 HASH 里、又 ≠ target）才允许删——这些节点的 parent_checkpoint_id 字段
+            即使指向已删 cid 也不影响消息显示（``aget_tuple(cid)`` 只读该 cid 自己的 JSON）。
+
+        state_saver 必须已绑定（``bind_state_saver``）：未绑定时空 user_saved 等于「全部 cid 都
+        当中间节点删」，会破坏 HASH 索引 → storage 文档的耦合。这种情况直接 raise 让 caller
+        决定怎么处理，而不是悄悄破坏一致性。
 
         Args:
             thread_id: 会话 ID
             target_cid: 目标 cid（必须已存在于 LangGraph storage）
 
         Returns:
-            ``{thread_id, target_cid, scanned, deleted, keys_deleted}``
+            ``{thread_id, target_cid, scanned, deleted, kept_cids, keys_deleted}``
 
         Raises:
+            RuntimeError: state_saver 未绑定
             ValueError: target_cid 不存在
         """
-        # 1. SCAN 拿全部 checkpoint 文档
+        # 1. state_saver 必须先绑定：未绑定时空 user_saved 会破坏 HASH → storage 耦合
+        if self._state_saver is None:
+            raise RuntimeError(
+                f"[CheckpointJanitor] retarget_to: state_saver 未绑定 "
+                f"(thread={thread_id[:12]}...)，无法保护 HASH 索引指向的 storage 文档，"
+                f"拒绝执行以避免破坏 HASH → storage 文档耦合"
+            )
+
+        # 2. SCAN 拿全部 checkpoint 文档
         all_checkpoints = await self._scan_checkpoints(thread_id)
 
-        # 2. 找 target_cid 的 ns（cid 可能跨 namespace）
+        # 3. 找 target_cid 的 ns（cid 可能跨 namespace）
         target_doc = next(
             (c for c in all_checkpoints if c["cid"] == target_cid), None
         )
@@ -283,7 +299,13 @@ class CheckpointJanitor:
                 f"(thread={thread_id}, scanned={len(all_checkpoints)})"
             )
 
-        # 3. 覆写 LATEST_POINTER（值格式与 LangGraph aio.py 的 latest pointer 一致：
+        # 4. 拿 RedisStateSaver 的 user_saved 集合（HASH 里的全部 cid 字段）
+        user_saved: Set[str] = await self._load_user_saved_cids(thread_id)
+
+        # 5. 保留集合：target + user_saved（HASH 里全部 cid）
+        keep: Set[str] = {target_cid} | user_saved
+
+        # 6. 覆写 LATEST_POINTER（值格式与 LangGraph aio.py 的 latest pointer 一致：
         #    ``checkpoint:{tid}:{ns_safe}:{cid}``）
         ns = target_doc["ns"]
         ns_s = self._ns_safe(ns)
@@ -291,10 +313,8 @@ class CheckpointJanitor:
         value = f"{CHECKPOINT_PREFIX}:{thread_id}:{ns_s}:{target_cid}"
         await self._redis.set(lk, value)
 
-        # 4. 删除除 target 之外的所有 checkpoint 文档 + 关联 write data。
-        # 保留 parent chain 不必要——aget_tuple(cid) 只读 cid 自己的 JSON，
-        # parent_checkpoint_id 字段悬空不影响消息显示（与 prune_thread 同款约束）。
-        to_delete = [c for c in all_checkpoints if c["cid"] != target_cid]
+        # 7. 只删「既不在 HASH 里、又不是 target」的 storage 文档 + 关联 write data
+        to_delete = [c for c in all_checkpoints if c["cid"] not in keep]
         keys_to_delete: List[str] = []
         for c in to_delete:
             cid = c["cid"]
@@ -312,7 +332,7 @@ class CheckpointJanitor:
                 ks = k.decode() if isinstance(k, bytes) else k
                 keys_to_delete.append(ks)
 
-        # 5. 分批 delete（pipeline 500/批，避免阻塞 Redis）
+        # 8. 分批 delete（pipeline 500/批，避免阻塞 Redis）
         keys_deleted = 0
         if keys_to_delete:
             for i in range(0, len(keys_to_delete), 500):
@@ -321,8 +341,9 @@ class CheckpointJanitor:
 
         logger.info(
             f"[CheckpointJanitor] retarget_to thread={thread_id[:12]}... "
-            f"target={target_cid} 扫描={len(all_checkpoints)} 删除={len(to_delete)} "
-            f"keys={keys_deleted}"
+            f"target={target_cid} 扫描={len(all_checkpoints)} "
+            f"保留={len(keep)}(target+user_saved={len(user_saved)}) "
+            f"删除={len(to_delete)} keys={keys_deleted}"
         )
 
         return {
@@ -330,6 +351,7 @@ class CheckpointJanitor:
             "target_cid": target_cid,
             "scanned": len(all_checkpoints),
             "deleted": len(to_delete),
+            "kept_cids": sorted(keep),
             "keys_deleted": keys_deleted,
         }
 

@@ -1,9 +1,11 @@
 import asyncio
 import json
+import operator
 import re
 import time
 from collections import defaultdict
 from datetime import datetime
+from functools import reduce
 from pathlib import Path
 from typing import Optional, Dict, Any, AsyncGenerator, List
 
@@ -464,14 +466,42 @@ class ChatWorkflow:
         """
         检查当前session_id下的对话是否被中断
         如果Redis中存在中断标记，返回interrupt事件
+
+        优化点：先 HEXISTS 预检（~0.5ms），无中断时跳过 HGETALL（~1-2ms）；
+        astream 中段每 N chunks 调一次，避免每 token 都打 Redis。
         """
         interrupt_key = f"interrupt:{session_id}"
-        # 检查中断
+        # Fast guard：仅检查 reason 字段存在性，避免每次 HGETALL
+        if not await self.redis_client.hexists(interrupt_key, "reason"):
+            return None
         key_value = await self.redis_client.hgetall(interrupt_key)
         if key_value:
             return interrupt(value=key_value)
 
         return None
+
+    @staticmethod
+    def _merge_chunks(chunks: List[Any]) -> AIMessage:
+        """
+        把 astream 累积的 AIMessageChunk 列表合并成单个 AIMessage。
+
+        为什么必须用 reduce(operator.add) 而不是 chunks[-1]：
+        OpenAI streaming 最后一帧是 usage_metadata（content 通常为空），直接拿最后 chunk
+        会丢主体内容。reduce 触发 AIMessageChunk.__add__，逐 chunk 累加 content /
+        tool_calls / tool_call_chunks，最后取 id / response_metadata / usage_metadata
+        跟 ainvoke 等价的完整 AIMessage。
+        """
+        if not chunks:
+            return AIMessage(content="")
+        merged = reduce(operator.add, chunks)
+        # AIMessageChunk → AIMessage 升级（保留 tool_calls / id / usage）
+        return AIMessage(
+            content=merged.content,
+            tool_calls=merged.tool_calls,
+            id=merged.id,
+            usage_metadata=merged.usage_metadata,
+            response_metadata=merged.response_metadata,
+        )
 
     # =========================================================================
     # ReAct 流程压缩 helper
@@ -899,7 +929,16 @@ class ChatWorkflow:
             self.logger.debug(f"会话 {thread_id} 文件输入:{files_input}")
             self.logger.debug(f"会话 {thread_id} 用户输入:{user_input}")
 
-            imp_ipt = await self.llm_imp_ipt.ainvoke({"messages": input_msg})
+            imp_ipt_chunks = []
+            interrupt_check_interval = 4
+            interrupt_check_counter = 0
+            async for chunk in self.llm_imp_ipt.astream({"messages": input_msg}):
+                imp_ipt_chunks.append(chunk)
+                interrupt_check_counter += 1
+                if interrupt_check_counter >= interrupt_check_interval:
+                    interrupt_check_counter = 0
+                    await self.check_and_trigger_interrupt(thread_id)
+            imp_ipt = self._merge_chunks(imp_ipt_chunks)
 
             imp_ipt = filter_thinking_content(imp_ipt)
 
@@ -1084,7 +1123,19 @@ class ChatWorkflow:
                 interrupt_msg = SystemMessage(content=f"已超过{TOOL_CALL_TIMES}次调用工具次数，请停止工具调用提前结束对话")
                 input_msg.append(interrupt_msg)
 
-            response = await self.agent_llm.ainvoke({"messages": input_msg})
+            response_chunks = []
+            # agent_node 输出可能含 tool_calls，中段 interrupt 检查不能打断正常 tool 决策：
+            # 8 chunks 间隔对应 ~160 tokens，对 agent 决策流（通常 200-500 tokens 总长）
+            # 足够在 1-2s 内感知中断，又不会在单次决策里反复打断。
+            interrupt_check_interval = 4
+            interrupt_check_counter = 0
+            async for chunk in self.agent_llm.astream({"messages": input_msg}):
+                response_chunks.append(chunk)
+                interrupt_check_counter += 1
+                if interrupt_check_counter >= interrupt_check_interval:
+                    interrupt_check_counter = 0
+                    await self.check_and_trigger_interrupt(thread_id)
+            response = self._merge_chunks(response_chunks)
 
             response = filter_thinking_content(response)
 
@@ -1200,13 +1251,21 @@ class ChatWorkflow:
             escaped_imp_ipt = imp_ipt_msg.content.replace("{", "{{").replace("}", "}}")
             system_prompt = self._final_system_template.format(imp_ipt=escaped_imp_ipt)
 
-            response = await self.llm_core.ainvoke(
-                [
-                    SystemMessage(content=system_prompt),
-                    *context,
-                    HumanMessage(content="请生成回复"),
-                ]
-            )
+            response_chunks = []
+            interrupt_check_interval = 8
+            interrupt_check_counter = 0
+            final_messages = [
+                SystemMessage(content=system_prompt),
+                *context,
+                HumanMessage(content="请生成回复"),
+            ]
+            async for chunk in self.llm_core.astream(final_messages):
+                response_chunks.append(chunk)
+                interrupt_check_counter += 1
+                if interrupt_check_counter >= interrupt_check_interval:
+                    interrupt_check_counter = 0
+                    await self.check_and_trigger_interrupt(thread_id)
+            response = self._merge_chunks(response_chunks)
 
             response = filter_thinking_content( response)
 

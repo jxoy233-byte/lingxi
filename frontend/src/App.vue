@@ -80,6 +80,7 @@
           @resume="handleResume"
           @restart-session="restartConversation"
           @quote="handleQuote"
+          @withdraw="handleWithdraw"
         />
 
         <MessageInput
@@ -232,6 +233,19 @@
       @enter-app="onEnterApp"
     />
   </transition>
+
+  <!--
+    NotFound 浮层：访问不存在的 URL 时浮现 10 秒，倒计时 + 进度条 + 像素鹿跳动。
+    z-index 1800（NotFoundView 内部样式）比 SetUpView 1500 高，确保盖住所有 UI。
+    任何点击 → _navigateHome → hide + location.replace('/')，跳回主页并清理 pathname。
+  -->
+  <transition name="not-found-fade">
+    <NotFoundView
+      v-if="_notFoundActive"
+      :remaining="_notFoundRemaining"
+      @click-anywhere="_navigateHome"
+    />
+  </transition>
   </template>
 </template>
 
@@ -247,6 +261,7 @@ import WebPreviewPanel from './components/WebPreviewPanel.vue'
 import FilePreviewPanel from './components/FilePreviewPanel.vue'
 import DataAnalysisTree from './components/DataAnalysisTree.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
+import NotFoundView from './components/NotFoundView.vue'
 import mermaid from 'mermaid'
 import {
   MAX_TEXT_PREVIEW_BYTES,
@@ -272,7 +287,8 @@ export default {
     WebPreviewPanel,
     FilePreviewPanel,
     DataAnalysisTree,
-    SettingsDialog
+    SettingsDialog,
+    NotFoundView
   },
   data() {
     return {
@@ -364,6 +380,11 @@ export default {
       scheduledTasksMap: new Map(),
       // 整图 refreshing 标记（驱动面板 ↻ 旋转）
       _scheduledTasksRefreshing: false,
+      // —— NotFoundView 浮层（不存在的 URL 触发的 10s 动画）——
+      _notFoundActive: false,        // 浮层是否显示
+      _notFoundTimer: null,          // 10s 自动跳转 setTimeout handle
+      _notFoundTickInterval: null,   // 100ms tick interval 驱动进度条
+      _notFoundRemaining: 10,        // 倒计时剩余秒数（驱动模板 + 进度条）
     }
   },
   mounted() {
@@ -448,6 +469,12 @@ export default {
   watch: {
     '$route.params.sessionId'(newSessionId) {
       // 监听 URL 变化
+      // 格式不合法（非 12/32 位 hex，如 #/garbage、#/abc、#/12345）
+      // → 立即触发动画，不进 loadConversation（避免后端再走一圈 404）
+      if (newSessionId && !this.isValidSessionId(newSessionId)) {
+        this.showNotFound()
+        return
+      }
       if (newSessionId && newSessionId !== this.currentSessionId && newSessionId.trim() !== '') {
         this.loadConversation(newSessionId)
       } else if (!newSessionId || newSessionId.trim() === '') {
@@ -556,6 +583,27 @@ export default {
       this.loadConversations()
       this.$nextTick(() => {
         const initialSessionId = this.$route.params.sessionId
+        // —— 检测 pathname 形式的坏 URL ——
+        // Electron/Vite protocol.handle fallback：不存在的 /<anything> 路径会被
+        // serve index.html，但 URL bar 的 pathname 残留 /<anything>。hash 留空 →
+        // Vue Router 走 createNewChat() → URL 变成 /<anything>#/ → 用户看到主页，
+        // 意识不到自己访问的是坏 URL。
+        // 这里主动检测：pathname 不是根也不是 index.html（即 Vite SPA fallback 留下的
+        // 单 segment），就视为坏 URL → 直接触发动画。
+        // 排除 /index.html 是因为 _navigateHome() 会跳到 /index.html 清理 pathname，
+        // 那个是「正常 reload 后的入口」，不该再触发动画。
+        const path = window.location.pathname
+        const isRootPath = path === '/' || path === '/index.html'
+        if (!isRootPath && !initialSessionId) {
+          this.showNotFound()
+          return
+        }
+        // App 启动时 URL 就是非法 hash → 直接触发动画，不进 loadConversation
+        // （启动时不会经过 watcher，所以这里必须显式校验）
+        if (initialSessionId && !this.isValidSessionId(initialSessionId)) {
+          this.showNotFound()
+          return
+        }
         if (initialSessionId) {
           this.loadConversation(initialSessionId)
         } else {
@@ -1147,6 +1195,90 @@ export default {
     handleQuote(quoteData) {
       if (quoteData && quoteData.content) {
         this.currentQuote = { content: quoteData.content }
+      }
+    },
+
+    /**
+     * 撤回用户消息：
+     * 1. 找「此用户消息之前最近的 AI 消息」的 checkpointId 作为回溯目标
+     * 2. POST /interrupt → 让后台 workflow 立即停（astream 中段会 1-2s 内感知）
+     * 3. POST /backtrack → langgraph 指针回溯（CheckpointJanitor.retarget_to）
+     * 4. 拉 get_conversation → messages 数组刷新（这条用户消息和后面的 AI 都消失）
+     * 5. 把原 message.content 写到 MessageInput 输入框（files v1 不恢复）
+     */
+    async handleWithdraw(userMessage) {
+      if (!userMessage || !this.currentSessionId) return
+
+      const sid = this.currentSessionId
+      const msgIndex = this.messages.findIndex(m => m === userMessage)
+      if (msgIndex === -1) return
+
+      // 1. 找前一轮 AI 的 checkpointId
+      let backtrackCid = null
+      for (let i = msgIndex - 1; i >= 0; i--) {
+        const prev = this.messages[i]
+        if (prev && prev.role === 'ai') {
+          backtrackCid = prev.additional_kwargs?.last_checkpoint_id || prev.checkpointId
+          if (backtrackCid) break
+        }
+      }
+      if (!backtrackCid) {
+        console.warn('[handleWithdraw] 没有前一轮 checkpoint，无法撤回')
+        return
+      }
+
+      try {
+        // 2. 先中断（让后台 workflow 不要再执行到底；astream 中段会感知）
+        await fetch(`/chat/${sid}/interrupt`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ interrupt_reason: 'user_withdraw_message' })
+        })
+
+        // 给中断留 ~500ms 让 astream 真正进入 GraphInterrupt 抛点（fast guard 8/16 chunks 即触发）
+        await new Promise(r => setTimeout(r, 500))
+
+        // 3. 回溯
+        const btResp = await fetch(`/chat/${sid}/backtrack`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ backtrack_id: backtrackCid })
+        })
+        if (!btResp.ok) throw new Error('回溯失败')
+
+        // 4. 拉新 conversation（这条 user message 和后续 AI/工具消息都消失）
+        const convResp = await fetch(`/chat/${sid}/conversation`)
+        if (!convResp.ok) throw new Error('获取回溯后状态失败')
+        const conv = await convResp.json()
+        this.$refs.messageList?.suppressNextScroll()
+        this.messages = this.processConversationMessages(conv.messages)
+
+        // 同步文件树 + 侧栏
+        this.$refs.dataAnalysisTree?.reload()
+
+        // 5. 把原消息文本回填到输入框
+        this.$refs.messageInput?.setInputText(userMessage.content || '')
+
+        // 清掉流式相关状态（消息已变）
+        this.isLoading = false
+        this._pendingQueue = []
+        this._activeStreamingSessions.delete(sid)
+        this._streamingMessages.delete(sid)
+        this._streamingMeta.delete(sid)
+        this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+        this.isInterrupted = false
+        this.isInterruptedSessionId = null
+        this.interruptReason = ''
+        this.cleanupLoadingState()
+
+        // 侧栏 refresh（标题可能不变，但对话状态变了）
+        await this.refreshSession(sid)
+
+        this.$nextTick(() => {
+          this.$refs.messageList?.scrollToBottom()
+        })
+      } catch (err) {
+        console.error('[handleWithdraw] 撤回失败:', err)
       }
     },
     async previewFile(file) {
@@ -2702,6 +2834,78 @@ export default {
       }
     },
     /**
+     * 校验 sessionId 是否合法（同时接受新版 12 位 hex 和旧版 32 位 hex）。
+     * 与 backend/ChatMe/APIRouter/static_file.py 的 SESSION_ID_PATTERN 保持一致，
+     * 避免前端用一套正则、后端用另一套导致"前端认为合法、后端 404"的撕裂场景。
+     */
+    isValidSessionId(sid) {
+      if (!sid || typeof sid !== 'string') return false
+      const s = sid.trim()
+      return /^[0-9a-f]{12}$/i.test(s) || /^[0-9a-f]{32}$/i.test(s)
+    },
+    /**
+     * 显示 NotFoundView 浮层 + 启动 10s 自动跳转 timer + 100ms 进度条 tick。
+     * 幂等：已显示时直接 return，避免重复触发多个 setTimeout。
+     */
+    showNotFound() {
+      if (this._notFoundActive) return
+      this._notFoundActive = true
+      this._notFoundRemaining = 10
+
+      // 100ms tick 驱动进度条（不用 1s tick —— 进度条平滑收缩比阶跃好看）
+      this._notFoundTickInterval = setInterval(() => {
+        this._notFoundRemaining = Math.max(0, this._notFoundRemaining - 0.1)
+      }, 100)
+
+      // 10s 后强制跳主页（不依赖 hideNotFound cleanup —— 浮层可能因其他原因被 hide）
+      this._notFoundTimer = setTimeout(() => {
+        this._navigateHome()
+      }, 10000)
+    },
+    /**
+     * 隐藏 NotFoundView 浮层 + 清理所有 timer。
+     * 调用方：用户点击触发 _navigateHome / watcher 主动取消 / beforeUnmount。
+     */
+    hideNotFound() {
+      if (this._notFoundTimer) {
+        clearTimeout(this._notFoundTimer)
+        this._notFoundTimer = null
+      }
+      if (this._notFoundTickInterval) {
+        clearInterval(this._notFoundTickInterval)
+        this._notFoundTickInterval = null
+      }
+      this._notFoundActive = false
+      this._notFoundRemaining = 10
+    },
+    /**
+     * 关闭浮层 + 跳主页（/）。被 showNotFound 10s 后自动调，或用户点击触发。
+     *
+     * 用 location.replace 而不是 $router.push —— 清除 Electron/Vite 残留的 /<sid>
+     * 路径，避免下次 reload 又触发 fallback 显示动画（用户明明已经「回主页」了
+     * 再 reload 应该看到主页，不应该再看到动画）。整个 SPA 状态全部重置，代价
+     * 是页面会闪一下；考虑到 NotFound 浮层期间用户没法做任何交互，这点代价可接受。
+     *
+     * 协议分流：
+     * - dev (http://localhost:18211/<sid>) → 直接跳 /，Vite SPA fallback 会 serve index.html
+     * - prod (file:///path/to/dist/<sid>) → 必须保留 dirname，把 basename 替换为
+     *   index.html（file:/// 直接跳是文件系统根，浏览器/渲染进程找不到 app）
+     */
+    _navigateHome() {
+      this.hideNotFound()
+      if (window.location.pathname !== '/') {
+        if (window.location.protocol === 'file:') {
+          const newPath = window.location.pathname.replace(/[^/]+$/, 'index.html')
+          window.location.replace(window.location.origin + newPath)
+        } else {
+          // http/https：直接跳根，URL bar 干干净净显示 <origin>/
+          window.location.replace('/')
+        }
+      } else if (this.$route.path !== '/') {
+        this.$router.push('/')
+      }
+    },
+    /**
      * 中断态专属：回溯到最近一段已完成 checkpoint + 重新发送触发该轮的用户消息。
      *
      * 与 MessageItem 上「重新生成」按钮的语义完全一致：复用 handleRestream 的标准流程
@@ -3093,7 +3297,11 @@ export default {
               }, sessionId)
             }
           } else if (response.status === 404) {
-            // 会话不存在（可能是新会话通过 URL 进入），当作新会话处理
+            // 会话不存在（用户主动导航到一个已删除 / 不存在的会话）
+            // 触发 NotFoundView 浮层 —— 10s 后自动跳主页（或用户点击立即跳）。
+            // 注意：refreshConversation 走另一条路径，404 时仅 console.error，
+            //       不会进这条分支 → 「正常对话中临时 404」不会被误踢回主页。
+            this.showNotFound()
             this.messages = []
           }
         } catch (error) {
@@ -4217,6 +4425,10 @@ export default {
     window.removeEventListener('resize', this.handleResize)
     for (const controller of this._previewLoadControllers.values()) controller.abort()
     this._previewLoadControllers.clear()
+    // NotFoundView timer 清理：避免组件卸载后 setTimeout / setInterval 仍在跑
+    // （Electron 单窗口架构下基本不会触发，但规范做法）
+    if (this._notFoundTimer) clearTimeout(this._notFoundTimer)
+    if (this._notFoundTickInterval) clearInterval(this._notFoundTickInterval)
   },
   watch: {
     isLoading(newVal) {

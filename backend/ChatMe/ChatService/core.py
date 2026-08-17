@@ -1523,7 +1523,9 @@ class ChatService:
                         thread_id=session_id,
                         target_cid=checkpoint_id,
                     )
-                except ValueError as e:
+                except (ValueError, RuntimeError) as e:
+                    # ValueError: target_cid 在 LangGraph storage 不存在（连续回溯到更早 cid，或 target_cid 已被人为清理）
+                    # RuntimeError: state_saver 未绑定（保护 HASH → storage 耦合不破坏）
                     self.logger.error(
                         f"retarget_to 失败(session_id={session_id}, target={checkpoint_id}): {e}"
                     )
@@ -1819,12 +1821,12 @@ class ChatService:
         """
         重新进行中断了的对话，断点续接
 
-        Metrics：开头扫一次 state 取前段基线，之后每个 SSE 事件本地累加（on_chat_model_end
-        拿 usage_metadata，elapsed 用 _elapsed_ms_since(start_mono)），不再每次都调 helper。
-        注意：续接时 imp_ipt 已被 _delete_last_round_checkpoint 同步从 messages 中清掉，
-        所以续接流的本地起点是 0，数字反映"续接这一刻起的 tokens / elapsed"——
-        与权限 resume 不同（permission resume 复用 imp_ipt 时间戳，起点继承前段 elapsed）。
-        这是设计选择：中断续接是用户显式操作，metrics 重新计时合理。
+        Metrics 起点策略（与 resume_permission_stream 同源）：
+        - **token_usage 续接**：从 `round_metrics:{sid}` 读上一轮中断时的累计 baseline，
+          本轮 on_chat_model_end 累加到 baseline 上 → 总数反映「中断前 + 续接后」真实 API 花费
+          （跟权限 resume 同语义，token 不能因 round 边界抹掉）
+        - **elapsed_ms 重新计时**：start_mono = now，因为续接是「显式新 round」（imp_ipt 已被清），
+          跟权限 resume（继承 imp_ipt 时间戳）不同
         """
         self.logger.info(f"续接会话: {session_id}")
         try:
@@ -1836,8 +1838,16 @@ class ChatService:
                 key_value = await self._get_interrupted_info(session_id)
                 reinvoke_message = [SystemMessage(content=f"中断原因:{key_value['reason']}\n用户进行中断续接,要求为: {message}")]
 
+            # token baseline 续接：从 round_metrics:{sid} 读上一轮中断时的累计
+            # （_clear_round_metrics 已延后到 init 之后；这里先读再 init 覆盖）
+            persisted = await self._load_round_metrics(session_id)
+            token_usage = (
+                (persisted or {}).get("token_usage")
+                or self._new_workflow_token_usage()
+            )
+
+            # elapsed 重新计时（新 round 语义）
             start_mono = time.monotonic()
-            token_usage = self._new_workflow_token_usage()
             await self._initialize_round_metrics(
                 session_id,
                 token_usage,
@@ -1871,8 +1881,9 @@ class ChatService:
             # 清除中断时留下的状态
             await self.redis_client.delete(key)
             await self._delete_last_round_checkpoint(session_id)
-            # 中断续接是新 round（imp_ipt 已被清），临时 metrics 也清掉，从零开始
-            await self._clear_round_metrics(session_id)
+            # ⚠️ 不要在这里 _clear_round_metrics：上面 init 时已经把 baseline token + 新 elapsed
+            # 写入 round_metrics:{sid}，再删会把 baseline 抹掉，导致续接 SSE 流 on_chat_model_end
+            # 累加时失去前段 token。
 
             # 极端 race：上一轮弹 permission → 用户中断 → 续接流进来时 hash 还活着，
             # 不清掉 astream 跑完可能撞到旧 permission_request 弹窗。

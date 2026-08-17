@@ -176,7 +176,7 @@ import { marked } from 'marked'
 
 export default {
   name: 'MessageInput',
-  expose: ['clearInput', 'getSessionId', 'setSessionId', 'checkAndUploadPendingFiles'],
+  expose: ['clearInput', 'getSessionId', 'setSessionId', 'checkAndUploadPendingFiles', 'setInputText'],
   props: {
     isLoading: {
       type: Boolean,
@@ -870,6 +870,24 @@ export default {
       this.clearFiles()
       // 清理引用状态
       this.$emit('update:quote', null)
+    },
+
+    // 撤回按钮调用：把原用户消息文本回填到输入框
+    // files / processedOutputs 暂不恢复（v1 边界，用户需重传附件）
+    setInputText(text) {
+      const value = typeof text === 'string' ? text : ''
+      this.inputText = value
+      this.clearFiles()
+      this.$emit('update:quote', null)
+      this.$nextTick(() => {
+        this.autoResize()
+        // 把光标放到末尾，方便用户继续编辑
+        const ta = this.$refs.textarea
+        if (ta) {
+          ta.focus()
+          ta.setSelectionRange(value.length, value.length)
+        }
+      })
     },
 
     // 关闭引用块（用户点击 × 按钮）

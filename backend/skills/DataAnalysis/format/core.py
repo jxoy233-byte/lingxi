@@ -177,10 +177,14 @@ class ChatDataAnalysisFormat:
 
         seaborn / pandas 都走 matplotlib backend，`rcParams['font.sans-serif']` 对三者都生效。
 
-        同时尝试两个路径（沙盒 + 本地 venv 降级，二选一即可）：
-          - `/cached/.fonts`（沙盒挂载点）
-          - `<cwd>/cached/.fonts`（本地 venv，cwd=backend/）
-        把字体文件放到 host `backend/cached/.fonts/`，两种模式都自动注册。
+        同时尝试 4 个路径（按顺序，去重；目录不存在 no-op 不报错）：
+          1. `/skills/DataAnalysis/fonts`（沙盒 mount 主路径，**推荐**）
+          2. `<cwd>/skills/DataAnalysis/fonts`（本地 venv，cwd=backend/）
+          3. `/cached/.fonts`（legacy 沙盒挂载点）
+          4. `<cwd>/cached/.fonts`（legacy 本地 venv）
+        把字体文件放到 `backend/skills/DataAnalysis/fonts/`（推荐）—— 随 skill 自动进
+        git、自动 mount 到容器内 `/skills/DataAnalysis/fonts/`，无需任何额外配置。
+        legacy `cached/.fonts/` 保留作为老部署兼容。
 
         推荐单文件 `NotoSansSC-Regular.otf`（~5-7MB，SIL OFL，无授权商用）：
           https://github.com/notofonts/noto-cjk/tree/main/Sans/SubsetOTF/SC
@@ -195,7 +199,12 @@ class ChatDataAnalysisFormat:
             "import matplotlib.pyplot as plt\n"
             "try:\n"
             "    import matplotlib.font_manager as fm\n"
-            "    _font_dirs = ['/cached/.fonts', os.path.join(os.getcwd(), 'cached', '.fonts')]\n"
+            "    _font_dirs = [\n"
+            "        '/skills/DataAnalysis/fonts',\n"
+            "        os.path.join(os.getcwd(), 'skills', 'DataAnalysis', 'fonts'),\n"
+            "        '/cached/.fonts',\n"
+            "        os.path.join(os.getcwd(), 'cached', '.fonts'),\n"
+            "    ]\n"
             "    for _font_dir in dict.fromkeys(_font_dirs):\n"
             "        if not os.path.isdir(_font_dir):\n"
             "            continue\n"

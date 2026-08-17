@@ -1,10 +1,11 @@
 <template>
   <div :class="['message', message.role === 'user' ? 'user-message' : 'ai-message', (message.role === 'user' && message.additional_kwargs?.is_file && message.files?.length) ? 'files-only-message' : '']">
     <div :class="['message-wrapper', message.role === 'user' ? 'user-wrapper' : 'ai-wrapper', (message.role === 'user' && message.additional_kwargs?.is_file && message.files?.length) ? 'user-file-wrapper' : '']">
-      <!-- 用户消息的复制按钮 — 气泡左侧 -->
-      <div v-if="message.role === 'user' && message.content && !(message.additional_kwargs?.is_file && parsedFiles.length > 0)" class="user-message-copy">
+      <!-- 用户消息的复制 + 撤回按钮组 — 气泡左侧 -->
+      <div v-if="message.role === 'user' && (message.content || (message.additional_kwargs?.is_file && parsedFiles.length > 0))" class="user-message-actions">
         <button
-          class="user-copy-button"
+          v-if="message.content && !(message.additional_kwargs?.is_file && parsedFiles.length > 0)"
+          class="user-action-button"
           :class="{ 'copy-success': userCopied }"
           @click="copyUserMessage"
           :title="userCopied ? '已复制' : '复制'"
@@ -15,6 +16,17 @@
           </svg>
           <svg v-else xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <polyline points="20 6 9 17 4 12"/>
+          </svg>
+        </button>
+        <button
+          v-if="canWithdraw"
+          class="user-action-button user-withdraw-button"
+          @click="withdrawUserMessage"
+          title="撤回：中断当前工作流并回溯到上一轮，把这条消息的文本放回输入框"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 7v6h6"/>
+            <path d="M21 17a9 9 0 0 0-15-6.7L3 13"/>
           </svg>
         </button>
       </div>
@@ -550,9 +562,15 @@ export default {
     submittingToolDecision: {
       type: Boolean,
       default: false
+    },
+    canWithdraw: {
+      // 撤回按钮是否可点：父级（App.vue）根据「是否有上一轮 AI 消息 + 该 AI 是否有 checkpointId」判断。
+      // 首条用户消息无前一轮可回溯，禁用。
+      type: Boolean,
+      default: false
     }
   },
-  emits: ['restore', 'restream', 'open-link', 'preview-file', 'interrupt', 'resume', 'restart-session', 'quote', 'tool-decide'],
+  emits: ['restore', 'restream', 'open-link', 'preview-file', 'interrupt', 'resume', 'restart-session', 'quote', 'tool-decide', 'withdraw'],
   components: {
     FilePreviewModal
   },
@@ -2012,6 +2030,13 @@ export default {
       }
     },
 
+    // 撤回按钮：把整条消息交给父级（App.vue → handleWithdraw），
+    // 父级负责「中断 + backtrack + reload conv + 填回输入框」。
+    // MessageItem 这里只负责 emit（不直接调 API），跟「重新生成」emit restream 一致。
+    withdrawUserMessage() {
+      this.$emit('withdraw', this.message)
+    },
+
     handleLinkClick(e) {
       const anchor = e.target.closest('a')
       if (!anchor) return
@@ -2976,10 +3001,11 @@ export default {
   color: #059669;
 }
 
-/* 用户消息复制按钮 — 气泡左侧 */
-.user-message-copy {
+/* 用户消息操作按钮组（复制 + 撤回）— 气泡左侧 */
+.user-message-actions {
   display: flex;
   align-items: flex-end;
+  gap: 4px;
   padding-right: 6px;
   opacity: 0;
   transition: opacity 0.15s ease;
@@ -3068,16 +3094,16 @@ export default {
 }
 
 
-.user-message-copy > * {
+.user-message-actions > * {
   pointer-events: auto;
 }
 
-.user-message:hover .user-message-copy,
-.user-message-copy:hover {
+.user-message:hover .user-message-actions,
+.user-message-actions:hover {
   opacity: 1;
 }
 
-.user-copy-button {
+.user-action-button {
   width: 26px;
   height: 26px;
   border: none;
@@ -3091,15 +3117,21 @@ export default {
   transition: all 0.15s;
 }
 
-.user-copy-button:hover {
+.user-action-button:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
 }
 
-.user-copy-button.copy-success,
-.user-copy-button.copy-success:hover {
+.user-action-button.copy-success,
+.user-action-button.copy-success:hover {
   background: transparent;
   color: var(--text-secondary);
+}
+
+/* 撤回按钮：hover 时变红，提示「破坏性操作」 */
+.user-withdraw-button:hover {
+  background: #fef2f2;
+  color: #ef4444;
 }
 
 /* 用户文件消息显示区域 */

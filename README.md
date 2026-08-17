@@ -190,7 +190,7 @@ OPENAI_PRESENCE_PENALTY=0.0
 {
   "app": {
     "name": "ChatMe",
-    "version": "v0.1.5",
+    "version": "v0.1.6",
     "host": "127.0.0.1",
     "port": 8211
   },
@@ -256,7 +256,8 @@ ChatMe/
 │   │   ├── DataAnalysis/                  # 数据分析 skill（mount: rw）
 │   │   │   ├── SKILL.md                  # 主规范（生成图表 / 报告 / CSV 等）
 │   │   │   ├── format/                   # ChatDataAnalysisFormat（拆分为 base / artifacts / manifest / database）
-│   │   │   └── database/                 # 数据库分析（MySQL/SQLite/PostgreSQL/MongoDB 只读查询 + 跨会话配置；lazy skill）
+│   │   │   ├── database/                 # 数据库分析（MySQL/SQLite/PostgreSQL/MongoDB 只读查询 + 跨会话配置；lazy skill）
+│   │   │   └── fonts/                    # matplotlib 中文字体（v0.1.6 起随 skill 进 git，自动 mount 到容器 /skills/DataAnalysis/fonts/）
 │   │   ├── Scheduler/                    # 定时任务 skill（APScheduler + RedisJobStore；models/handlers/registry/core 四层）
 │   │   ├── Memory/                       # 跨会话记忆 skill（v0.1.5 新增；remember/recall）
 │   │   ├── SkillForge/                   # 动态创建 skill skill（v0.1.5 新增；create_skill/list_skills/read_skill）
@@ -416,13 +417,13 @@ MCP 服务器（`mcps/server.py`，FastMCP 3.x，stdio transport）暴露以下�
 ```bash
 cd backend
 uv build --wheel
-# 输出: dist/ChatMe-0.1.5-py3-none-any.whl
+# 输出: dist/ChatMe-0.1.6-py3-none-any.whl
 ```
 
 ### 安装 wheel
 
 ```bash
-uv pip install dist/ChatMe-0.1.5-py3-none-any.whl
+uv pip install dist/ChatMe-0.1.6-py3-none-any.whl
 # 安装后 chatme_main 和 chatme_mcp 命令全局可用
 ```
 
@@ -455,13 +456,13 @@ npm run electron:build:win      # Windows NSIS（x64）
 npm run electron:build:linux    # Linux AppImage（x64）
 ```
 
-桌面端通过 `electron-builder` 打包，应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.1.5）在 `frontend/electron/electron.config.js` 中配置。
+桌面端通过 `electron-builder` 打包，应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.1.6）在 `frontend/electron/electron.config.js` 中配置。
 
 **输出位置**：`../release/electron-builder/`（项目根，与 Vite 的 `dist/` / `frontend/` 区分开）：
 
 - `mac-arm64/灵析.app` — 直接打开
 - `mac/` — x64 .app
-- `灵析-0.1.5-arm64-mac.zip` / `灵析-0.1.5-mac.zip` — 分发包
+- `灵析-0.1.6-arm64-mac.zip` / `灵析-0.1.6-mac.zip` — 分发包
 - `linux-unpacked/` — Linux 解压目录
 - `win-unpacked.exe` — Windows 安装器
 

@@ -213,7 +213,14 @@
                 <div v-if="tool.result !== null && expandedTools[i]" class="tool-result">{{ tool.result }}</div>
 
                 <!-- 内嵌审批 UI：仅当此 tool 是当前 pending 审批目标时渲染 -->
-                <div v-if="isToolAwaitingApproval(i)" class="tool-inline-approval" :class="`tool-inline-approval--${getToolExecutionEnv(tool.name, tool.args) || 'sandbox'}`">
+                <div
+                  v-if="isToolAwaitingApproval(i)"
+                  class="tool-inline-approval"
+                  :class="`tool-inline-approval--${getToolExecutionEnv(tool.name, tool.args) || 'sandbox'}`"
+                  tabindex="-1"
+                  ref="approvalBox"
+                  @keydown="handleApprovalKeydown($event, i)"
+                >
                   <div class="tool-inline-approval-header">
                     <!-- local 时换成警告符号 ⚠️ 提醒用户走的是本机执行（不是沙盒隔离） -->
                     <svg v-if="getToolExecutionEnv(tool.name, tool.args) !== 'local'" class="tool-inline-approval-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -229,21 +236,25 @@
                   <div v-if="!feedbackExpanded[i]" class="tool-inline-approval-actions">
                     <button
                       class="tool-btn-deny"
+                      :class="{ 'kb-active': approvalSelectedIndex === 0 }"
                       :disabled="submittingToolDecision"
                       @click.stop="emitToolDecision('deny')"
                     >取消</button>
                     <button
                       class="tool-btn-once"
+                      :class="{ 'kb-active': approvalSelectedIndex === 1 }"
                       :disabled="submittingToolDecision"
                       @click.stop="emitToolDecision('this-time-only')"
                     >仅本次</button>
                     <button
                       class="tool-btn-feedback"
+                      :class="{ 'kb-active': approvalSelectedIndex === 2 }"
                       :disabled="submittingToolDecision"
                       @click.stop="toggleFeedback(i)"
                     >告诉 AI 怎么做</button>
                     <button
                       class="tool-btn-approve"
+                      :class="{ 'kb-active': approvalSelectedIndex === 3 }"
                       :disabled="submittingToolDecision"
                       @click.stop="emitToolDecision('approve')"
                     >批准</button>
@@ -257,6 +268,7 @@
                       :disabled="submittingToolDecision"
                       rows="3"
                       @click.stop
+                      @keydown="handleFeedbackKeydown($event, i)"
                     ></textarea>
                     <div class="tool-inline-feedback-actions">
                       <button
@@ -596,7 +608,10 @@ export default {
       exporting: false,
       // 内嵌审批的「告诉 AI 怎么做」反馈模式：按 tool index 独立记录展开态 + 文本
       feedbackExpanded: {},
-      feedbackText: {}
+      feedbackText: {},
+      // 工具审批 4 按钮键盘高亮（deny=0 / once=1 / feedback=2 / approve=3）。
+      // 每当此 tool 进入审批态时重置为 0（deny 默认），Enter 触发当前选项的 click。
+      approvalSelectedIndex: 0
     }
   },
   mounted() {
@@ -688,6 +703,8 @@ export default {
           let html = marked(this.preprocessContent(content))
           // 再渲染 LaTeX 数学公式
           html = this.renderLatex(html)
+          // Slash 命令 pill 化（Codex 风格）/ 必须在 sanitizeHtml 之前，pill 才会被 DOMPurify 保留
+          html = this.renderSlashPillsInHtml(html)
           // v-html 注入前过 DOMPurify（挡 <script>、内联事件；iframe 强制 sandbox）
           return sanitizeHtml(html)
         } catch (error) {
@@ -713,6 +730,8 @@ export default {
       try {
         let html = marked(this.preprocessContent(quote))
         html = this.renderLatex(html)
+        // Slash 命令 pill 化（用户引用历史消息里也可能有 `/[xxx]` 提及）
+        html = this.renderSlashPillsInHtml(html)
         // v-html 注入前过 DOMPurify（挡 <script>、内联事件）
         return sanitizeHtml(html)
       } catch (error) {
@@ -724,8 +743,9 @@ export default {
     renderedUserText() {
       const { text } = this.parsedUserContent
       if (!text) return ''
-      // 保留原文以支持换行、空白；转义 HTML 防止注入
-      return this.escapeHtml(text)
+      // 用 renderSlashPills 走占位符路径：先替占位符 → escapeHtml → 替回 pill HTML，
+      // 这样 XSS 安全 + pill 能在 v-html 里渲染出来
+      return this.renderSlashPills(text)
     },
     hasThinking() {
       return (this.message.reasoning && this.message.reasoning.length > 0) ||
@@ -816,6 +836,21 @@ export default {
           this.processMarkdownFiles()
           this.processMermaidFiles()
         })
+      },
+      immediate: true
+    },
+    // 此消息的某个 tool 进入审批态时：重置高亮到 deny(0) + 把焦点抢到审批容器，
+    // 用户不用先 Tab，直接 ←→ + Enter 就能选完提交。
+    pendingToolApproval: {
+      handler(newVal, oldVal) {
+        if (!newVal) return
+        const isThisMessage = newVal.messageIndex === this.messageIndex
+        const wasThisMessage = oldVal && oldVal.messageIndex === this.messageIndex
+        if (isThisMessage && !wasThisMessage) {
+          this.approvalSelectedIndex = 0
+          // 等 v-if 把审批区 DOM 挂上后再 focus（nextTick 不够，因为 v-if 是同步下次 render）
+          this.$nextTick(() => this.focusApproval(newVal.toolIndex))
+        }
       },
       immediate: true
     },
@@ -1242,6 +1277,40 @@ export default {
       const div = document.createElement('div')
       div.textContent = text
       return div.innerHTML
+    },
+
+    /**
+     * 把文本里的 `/[<skill-name>]` 渲染成 Codex 风的 pill chip。
+     * 用占位符 + escapeHtml 的模式：先把 `/[xxx]` 替成不含 HTML 字符的占位符，
+     * escapeHtml（占位符没特殊字符，原样存活），再把占位符换成真正的 pill HTML，
+     * 这样既避免 XSS（pill 之外的字符都被 escapeHtml 转义过）又能在 v-html 里渲染。
+     */
+    renderSlashPills(text) {
+      if (!text) return ''
+      const PLACEHOLDER_RE = /__SLASH_PILL_([\w-]+)__/g
+      const withPlaceholder = text.replace(
+        /\/\[([\w-]+)\]/g,
+        (_, name) => `__SLASH_PILL_${name}__`
+      )
+      const escaped = this.escapeHtml(withPlaceholder)
+      return escaped.replace(
+        PLACEHOLDER_RE,
+        (_, name) => `<span class="slash-pill" data-skill="${name}" title="/[${name}]">${name}</span>`
+      )
+    },
+
+    /**
+     * 在已渲染的 HTML 字符串上做 pill 替换。marked 输出后的 HTML
+     * 中 `/`, `[`, `]` 不是 HTML 特殊字符，所以可以直接 regex replace。
+     * 应用场景：marked() 之后的 HTML（含 AI 回复、quote 块、用户正文），
+     * 在 sanitizeHtml 之前调用。
+     */
+    renderSlashPillsInHtml(html) {
+      if (!html) return ''
+      return html.replace(
+        /\/\[([\w-]+)\]/g,
+        (_, name) => `<span class="slash-pill" data-skill="${name}" title="/[${name}]">${name}</span>`
+      )
     },
 
     // 文件下载处理（供 window.handleFileDownload 调用）
@@ -2178,6 +2247,79 @@ export default {
       this.$emit('tool-decide', decision)
     },
     /**
+     * 工具审批 4 按钮键盘导航：
+     *   - Left / Right (或 ↑ / ↓): 切换高亮选项（deny=0 / once=1 / feedback=2 / approve=3）
+     *   - 1 / 2 / 3 / 4: 直接跳到对应选项
+     *   - Enter: 确认当前高亮选项（行为等价于点击该按钮）
+     *   - Esc: 走 deny（兜底 —— 没选时也能取消，不会被卡住）
+     *
+     * 监听挂在 .tool-inline-approval 容器 div 上（带 tabindex=-1），用户焦点进入
+     * approval 区后所有键盘事件在这里处理。submittingToolDecision 期间禁用避免
+     * 双发。autoFocusOnApproval() 在审批出现时把焦点抢过来（无需用户先 Tab）。
+     */
+    handleApprovalKeydown(e, toolIndex) {
+      if (this.submittingToolDecision) return
+      // 焦点在 textarea 时让原生 keydown 透传（feedback 模式有自己的 Enter 处理）
+      const t = e.target
+      if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable)) {
+        return
+      }
+      const opts = ['deny', 'this-time-only', 'feedback', 'approve']
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+        e.preventDefault()
+        this.approvalSelectedIndex = (this.approvalSelectedIndex + opts.length - 1) % opts.length
+      } else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+        e.preventDefault()
+        this.approvalSelectedIndex = (this.approvalSelectedIndex + 1) % opts.length
+      } else if (e.key === 'Escape') {
+        e.preventDefault()
+        this.emitToolDecision('deny')
+      } else if (e.key === 'Enter' && !e.isComposing) {
+        e.preventDefault()
+        this.emitToolDecision(opts[this.approvalSelectedIndex])
+      } else if (/^[1-4]$/.test(e.key)) {
+        e.preventDefault()
+        this.approvalSelectedIndex = Number(e.key) - 1
+        // 数字键直接触发，不必再按 Enter（Codex 风「一键到位」）
+        this.emitToolDecision(opts[this.approvalSelectedIndex])
+      }
+    },
+    /**
+     * 反馈 textarea 的 keydown：
+     *   - Enter（无 Shift）: 提交（如果有内容）
+     *   - Shift+Enter: 换行（原生行为，不 preventDefault 让 textarea 处理）
+     *   - Esc: 取消反馈回到 4 选项默认视图
+     */
+    handleFeedbackKeydown(e, toolIndex) {
+      if (this.submittingToolDecision) return
+      if (e.isComposing) return
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        this.cancelFeedback(toolIndex)
+      } else if (e.key === 'Enter' && !e.shiftKey) {
+        // 没内容时不响应（与按钮 disabled 一致）
+        const text = (this.feedbackText[toolIndex] || '').trim()
+        if (!text) return
+        e.preventDefault()
+        this.submitFeedback(toolIndex)
+      }
+      // Shift+Enter: 不拦，让 textarea 走原生换行
+    },
+    /**
+     * 把焦点抢到当前审批容器（仅审批刚出现时调用一次）。
+     * 用 $nextTick 等 v-if 把 DOM 挂上后再 focus。
+     */
+    focusApproval(toolIndex) {
+      // 找审批容器：审批区在某个 tool row 内部，靠 toolIndex 定位
+      this.$nextTick(() => {
+        const boxes = this.$refs.approvalBox
+        if (!boxes) return
+        const arr = Array.isArray(boxes) ? boxes : [boxes]
+        const target = arr[toolIndex]
+        if (target && target.focus) target.focus()
+      })
+    },
+    /**
      * 「告诉 AI 怎么做」按钮：展开反馈 textarea
      */
     toggleFeedback(toolIndex) {
@@ -3093,6 +3235,41 @@ export default {
   font-style: italic;
 }
 
+/* Slash 命令 pill（Codex 风格）—— 在主文本 / quote / AI 回复里都生效。
+   data-skill 属性供未来扩展（hover tooltip / click 跳转等）使用。 */
+.message-text :deep(.slash-pill),
+.user-quote-block .quote-block-text :deep(.slash-pill) {
+  display: inline-block;
+  padding: 1px 8px;
+  margin: 0 1px;
+  background: rgba(59, 130, 246, 0.14);
+  color: rgb(59, 130, 246);
+  border: 1px solid rgba(59, 130, 246, 0.28);
+  border-radius: 10px;
+  font-size: 0.9em;
+  font-weight: 500;
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  vertical-align: baseline;
+  white-space: nowrap;
+  line-height: 1.5;
+  user-select: all;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.message-text :deep(.slash-pill:hover),
+.user-quote-block .quote-block-text :deep(.slash-pill:hover) {
+  background: rgba(59, 130, 246, 0.22);
+  border-color: rgba(59, 130, 246, 0.42);
+}
+/* 深色主题适配 */
+@media (prefers-color-scheme: dark) {
+  .message-text :deep(.slash-pill),
+  .user-quote-block .quote-block-text :deep(.slash-pill) {
+    background: rgba(59, 130, 246, 0.18);
+    color: rgb(59, 130, 246);
+    border-color: rgba(59, 130, 246, 0.35);
+  }
+}
+
 
 .user-message-actions > * {
   pointer-events: auto;
@@ -3608,6 +3785,29 @@ export default {
 /* local 审核变体：淡红背景叠加（v0.1.3 区分 sandbox vs local） */
 .tool-inline-approval--local {
   background: rgba(239, 68, 68, 0.06);  /* 淡红底，叠加在黄色边框上 */
+}
+
+/* 键盘高亮选项：双线 box-shadow 模拟 outline（不占布局空间） + 微缩放提示。
+   各按钮保留自己的配色，仅在外层加 keyboard 提示。 */
+.tool-btn-deny.kb-active,
+.tool-btn-once.kb-active,
+.tool-btn-feedback.kb-active,
+.tool-btn-approve.kb-active {
+  outline: 2px solid var(--button-bg);
+  outline-offset: 1px;
+  box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.18);
+  transform: translateY(-1px);
+}
+
+/* 审批容器获得焦点时给个微弱 outline，让用户知道键盘焦点在这里。
+   不是 kb-active（选中态）而是 :focus 容器态（焦点容器态）。 */
+.tool-inline-approval:focus {
+  outline: none;
+}
+.tool-inline-approval:focus-visible {
+  outline: 2px dashed rgba(99, 102, 241, 0.45);
+  outline-offset: 2px;
+  border-radius: 8px;
 }
 
 /* local 警告符号 ⚠️ — 比盾牌更直观地传达「本机执行」风险 */

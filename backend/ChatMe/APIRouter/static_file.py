@@ -15,12 +15,15 @@ from fastapi import APIRouter, HTTPException, Query, Body, Request
 from fastapi.responses import FileResponse
 
 from ChatMe.LoggingManager.logging_config import get_logger
+from ChatMe.paths import BACKEND_ROOT, CACHED_DIR
 
 logger = get_logger("static_file")
 
-# 获取 backend 根目录（使用 __file__ 相对路径，避免依赖启动目录）
-BACKEND_DIR = Path.cwd()
-CACHED_DIR = BACKEND_DIR / "cached"
+# 之前这里写 `BACKEND_DIR = Path.cwd(); CACHED_DIR = BACKEND_DIR / "cached"`，
+# cwd-依赖的写法在「从非 backend 目录启动进程」时会飘。统一从 ChatMe.paths
+# 拿现成常量（已用 __file__ 锚定到 backend/）。
+# 这里仍需要 BACKEND_ROOT 用来把 rglob 出的绝对路径回算成 "cached/..." 相对路径
+# —— 跟 /static/cached/ 路由前缀对齐。
 
 # session_id = uuid.uuid4().hex[:12] (12-char lowercase hex)；旧版曾用 32-char hex，
 # 仍兼容遗留 sid —— PATH 中带 32-char 旧 sid 时不要 404。
@@ -52,8 +55,8 @@ def list_data_analysis_files(data_analysis_dir: Path, base_rel: str) -> List[dic
     for f in data_analysis_dir.rglob("*"):
         if not f.is_file() or f.name.startswith("."):
             continue
-        # 相对 BACKEND_DIR 取，保证 path 含 "cached/" 前缀，与 /static/cached/ 路由一致
-        rel = f.relative_to(BACKEND_DIR).as_posix()
+        # 相对 BACKEND_ROOT 取，保证 path 含 "cached/" 前缀，与 /static/cached/ 路由一致
+        rel = f.relative_to(BACKEND_ROOT).as_posix()
         stat = f.stat()
         files.append({
             "path": rel,
@@ -83,8 +86,8 @@ def list_session_files(session_dir: Path) -> List[dict]:
         # 跳过隐藏文件 + 跳目录（虽然 rglob 也走文件，但 is_file 二次过滤）
         if not f.is_file() or f.name.startswith("."):
             continue
-        # 相对 BACKEND_DIR 取，保证 path 含 "cached/" 前缀，与 /static/cached/ 路由一致
-        rel = f.relative_to(BACKEND_DIR).as_posix()
+        # 相对 BACKEND_ROOT 取，保证 path 含 "cached/" 前缀，与 /static/cached/ 路由一致
+        rel = f.relative_to(BACKEND_ROOT).as_posix()
         stat = f.stat()
         files.append({
             "path": rel,

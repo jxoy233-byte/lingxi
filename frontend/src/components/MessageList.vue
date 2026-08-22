@@ -4,6 +4,11 @@
       <div v-if="messages.length === 0" class="welcome-message">
         <h2>你好！我是灵析——数据分析智能助手</h2>
         <p>有什么我可以帮助你的吗？</p>
+        <p class="welcome-hint">
+          初次使用？试试在对话框输入
+          <button type="button" class="welcome-chip" @click="$emit('insert-suggestion', '/help')">/help</button>
+          快速了解所有功能
+        </p>
       </div>
 
       <MessageItem
@@ -106,7 +111,7 @@ export default {
     },
   },
   emits: [
-    'restore', 'restream', 'open-link', 'preview-file', 'interrupt', 'resume', 'restart-session', 'quote', 'tool-decide', 'withdraw',
+    'restore', 'restream', 'open-link', 'preview-file', 'interrupt', 'resume', 'restart-session', 'quote', 'tool-decide', 'withdraw', 'insert-suggestion',
   ],
   data() {
     return {
@@ -628,6 +633,49 @@ export default {
   margin-bottom: 12px;
   color: var(--text-primary);
   font-weight: 600;
+}
+
+.welcome-hint {
+  margin-top: 18px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.welcome-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  margin: 0 2px;
+  background: rgba(59, 130, 246, 0.14);
+  color: rgb(59, 130, 246);
+  border: 1px solid rgba(59, 130, 246, 0.28);
+  border-radius: 7px;
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, transform 0.08s;
+  vertical-align: baseline;
+  user-select: none;
+}
+
+.welcome-chip:hover {
+  background: rgba(59, 130, 246, 0.22);
+  border-color: rgba(59, 130, 246, 0.42);
+}
+
+.welcome-chip:active {
+  transform: scale(0.97);
+}
+
+.dark-theme .welcome-chip {
+  background: rgba(59, 130, 246, 0.18);
+  color: rgb(59, 130, 246);
+  border-color: rgba(59, 130, 246, 0.32);
+}
+.dark-theme .welcome-chip:hover {
+  background: rgba(59, 130, 246, 0.28);
+  border-color: rgba(59, 130, 246, 0.5);
 }
 
 .loading-message {

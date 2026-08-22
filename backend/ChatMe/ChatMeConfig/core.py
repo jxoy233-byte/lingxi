@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from typing import Any, Optional
 
+from ChatMe.paths import get_chatme_dir
+
 
 class ChatMeConfig:
     """全局配置单例类"""
@@ -24,19 +26,29 @@ class ChatMeConfig:
         return cls._instance
 
     def _get_global_config_dir(self) -> Path:
-        """获取全局配置目录"""
+        """获取全局配置目录（始终是 ~/.chatme，与 local-first 探测逻辑解耦）。
+
+        不要改成 get_chatme_dir()：那个函数在 local 存在时返回 local，与本函数
+        「始终是 global」的语义冲突。ChatMeConfig 内部的 local/global 二段
+        探测逻辑保留显式写法以便阅读。
+        """
         return Path.home() / ".chatme"
 
     def _find_config_file(self) -> Path:
         """查找配置文件路径
         优先级：局部 .chatme/config.json > 全局 CHATME_CONFIG_DIR 或 ~/.chatme/config.json
+
+        注：local/global 的判定统一走 ChatMe.paths.get_chatme_dir()（cwd 下
+        存在 .chatme 就用 local，否则用 ~/.chatme）。这里和 get_chatme_dir()
+        唯一的区别是：get_chatme_dir() 在「两个都不存在」时返回 ~/.chatme，
+        而这里需要分别探测两侧，所以仍是分两步走。
         """
         # 局部配置路径
         local_path = Path.cwd() / ".chatme" / "config.json"
         if local_path.exists():
             return local_path
 
-        # 全局配置路径
+        # 全局配置路径（与 get_chatme_dir() 在「local 不存在」分支的语义一致）
         global_path = self._get_global_config_dir() / "config.json"
         if global_path.exists():
             return global_path
@@ -116,7 +128,7 @@ class ChatMeConfig:
         default_config = {
             "app": {
                 "name": "ChatMe",
-                "version": "v0.1.6",
+                "version": "v0.1.7",
                 "description": "ChatMe LangGraph Workflow",
                 "host": "127.0.0.1",
                 "port": 8211,
@@ -823,16 +835,20 @@ def self_check_llm(timeout: int = 10) -> dict:
 
 
 def ensure_global_config() -> None:
-    """确保全局配置目录和文件存在，优先使用局部配置"""
-    # 1. 如果局部配置存在，直接返回
-    local_path = Path.cwd() / ".chatme" / "config.json"
-    if local_path.exists():
+    """确保 .chatme/config.json 存在，local 优先；都不存在则在 global 生成。
+
+    路径判定走 ChatMe.paths.get_chatme_dir()：cwd 下存在 .chatme/ 即视为
+    local，否则视为 global（~/.chatme）。generate 目标 = 判定后的根目录。
+    """
+    # 1. 如果局部配置存在，直接返回（local 优先，不会落到 generate 分支）
+    if (Path.cwd() / ".chatme" / "config.json").exists():
         return
 
-    # 2. 如果全局配置存在，也直接返回
-    global_path = Path.home() / ".chatme" / "config.json"
-    if global_path.exists():
+    # 2. 拿判定后的 .chatme 根目录，target 即其下的 config.json
+    target = get_chatme_dir() / "config.json"
+    if target.exists():
         return
 
-    # 3. 都不存在，在全局目录生成
-    config._generate_default_config(global_path)
+    # 3. 都不存在 → generate 到 target（get_chatme_dir 兜底为 ~/.chatme，
+    #    所以这里等价于原代码的 global_path 生成行为）
+    config._generate_default_config(target)

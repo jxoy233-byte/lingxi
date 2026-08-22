@@ -11,7 +11,7 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
-SKILLS_ROOT = Path(__file__).resolve().parent.parent  # backend/skills/
+from ChatMe.paths import SKILLS_ROOT
 
 # 保留名：不能被新 skill 占用
 _RESERVED_NAMES = {"SkillForge", "__pycache__"}

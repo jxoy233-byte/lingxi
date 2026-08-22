@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import time
 import traceback
 import uuid
@@ -25,6 +26,70 @@ from ChatMe.LoggingManager.logging_config import (
     get_logger,
     flush_pending_thinking_for_session,
 )
+
+
+# === 标题派生 helpers ===
+# 自动从最新 HumanMessage 内容派生会话标题时，需要剥掉两样 UI 噪声：
+#   1. `<quote>...</quote>` 引用块（用户从历史消息引用过来的内容，不属于本轮标题意图）
+#   2. `/[skill-name]` slash pill（用户在输入框里点 slash 面板产生的提及，Codex 风格）
+# 剥完后再 collapse 空白 + 截断到 12 字符。
+
+# 标题最大字符数（与前端旧逻辑保持一致，超出加 `...`）
+_TITLE_MAX_LEN = 12
+
+# `<quote>...</quote>` 整块剥掉，DOTALL 让 `.` 跨行匹配
+_QUOTE_BLOCK_RE = re.compile(r"<quote>.*?</quote>", re.DOTALL)
+
+# `/[xxx]` slash pill 整段剥掉（xxx 仅允许字母/数字/下划线/连字符，与前端 regex 一致）
+_SLASH_PILL_RE = re.compile(r"/\[[\w-]+]")
+
+# 任意连续空白（含换行）合并成单空格，再 strip 收尾
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _clean_message_for_title(content: str) -> str:
+    """剥掉 `<quote>` 块 + `/[xxx]` pill + 空白归一"""
+    if not content:
+        return ""
+    cleaned = _QUOTE_BLOCK_RE.sub("", content)
+    cleaned = _SLASH_PILL_RE.sub("", cleaned)
+    cleaned = _WHITESPACE_RE.sub(" ", cleaned).strip()
+    return cleaned
+
+
+def _truncate_title(text: str, max_len: int = _TITLE_MAX_LEN) -> str:
+    """按字符数截断 + 末尾加 `...`。按 Python `len()` 计字符，1 个中文 = 1 个字符。"""
+    if not text:
+        return ""
+    if len(text) <= max_len:
+        return text
+    return text[:max_len] + "..."
+
+
+def _derive_title_from_latest_human(messages: List[Any]) -> str:
+    """从 messages 列表里倒序找最近的 HumanMessage，剥掉引用/pill 后截断为标题。
+
+    - HumanMessage.content 可能是 str 或 list（多模态时是 `[{"type": "text", "text": ...}]`）
+    - list 形态只取首个 text 段（与前端 `humanMessageText` 取首段文本一致）
+    """
+    for m in reversed(messages):
+        if not isinstance(m, HumanMessage):
+            continue
+        content = m.content
+        if isinstance(content, list):
+            # 多模态 HumanMessage：只取首段 text
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    content = part.get("text", "")
+                    break
+            else:
+                continue
+        if not isinstance(content, str):
+            continue
+        cleaned = _clean_message_for_title(content)
+        if cleaned:
+            return _truncate_title(cleaned)
+    return ""
 
 
 class ChatService:
@@ -281,6 +346,7 @@ class ChatService:
         metrics: Optional[Dict[str, Any]] = None,
         *,
         status: str = "completed",
+        skip_memory: bool = False,
     ) -> Optional[str]:
         """
         保存每轮检查点。
@@ -288,7 +354,7 @@ class ChatService:
         职责：
         - 写 checkpoint 元数据（checkpoint_id / elapsed_ms / token_usage / status）到 RedisStateSaver
           （app 层 Redis hash），**不再**通过 `graph.aupdate_state` 写回 LangGraph runtime state。
-        - 调度本轮 memory 后台更新任务。
+        - 调度本轮 memory 后台更新任务（除非 `skip_memory=True`）。
 
         为什么去掉 aupdate_state：
         每次 `aupdate_state` 都会在 LangGraph runtime 里生成一个新 checkpoint，把 runtime 指针往前推一格。
@@ -302,6 +368,12 @@ class ChatService:
 
         status: 本轮收尾状态。"completed" = 正常完成；"interrupted" = 用户中断。
         默认 "completed"，中断分支调用时显式传 "interrupted"。
+
+        skip_memory: True = 不调度本轮 memory 后台更新（不阻塞）。
+        用于中断保存：被中断的 round 要么被撤回（不需要 memory 写入，backtrack_memory 会清掉），
+        要么被续接并最终以 status="completed" 保存（那次保存会带完整 state 触发正常 memory 写入）。
+        跳过中断轮的 memory 调度，可以让 backtrack_state 不再因为等待 in-flight memory task
+        而静默阻塞几秒。
 
         :return 保存成功返回对应checkpoint_id
         """
@@ -350,14 +422,18 @@ class ChatService:
                 asyncio.create_task(_safe_prune())
 
             # 更新每轮记忆文件 — 后台静默执行，不阻塞返回
-            try:
-                self._schedule_memory_update(
-                    session_id=session_id,
-                    checkpoint_id=checkpoint_id,
-                    state=state,
-                )
-            except Exception as e:
-                self.logger.error(f"更新记忆文件失败(thread_id={session_id}): {str(e)}")
+            # skip_memory=True 时跳过本轮调度（典型场景：status="interrupted" 的保存）。
+            # 中断轮的 memory 产物注定会被 backtrack_memory 清掉（撤回路径）或被续接后的
+            # completed 保存覆盖（续接路径），没有理由阻塞用户响应。
+            if not skip_memory:
+                try:
+                    self._schedule_memory_update(
+                        session_id=session_id,
+                        checkpoint_id=checkpoint_id,
+                        state=state,
+                    )
+                except Exception as e:
+                    self.logger.error(f"更新记忆文件失败(thread_id={session_id}): {str(e)}")
 
             return checkpoint_id
 
@@ -1057,6 +1133,7 @@ class ChatService:
                 session_id,
                 metrics={"elapsed_ms": elapsed_ms, "token_usage": token_usage},
                 status="interrupted",
+                skip_memory=True,  # 中断轮的 memory 调度跳过：撤回不需要，续接在 completed 保存时覆盖写
             )
 
             # 补充checkpoint_id字段进去
@@ -1342,40 +1419,57 @@ class ChatService:
             self.logger.error(error_detail)
             return False
 
-    async def update_conversation_title(self, session_id: str, new_title: str) -> bool:
-        """ 修改会话标题，存入会话元数据"""
+    async def update_conversation_title(self, session_id: str, new_title: Optional[str] = None) -> Optional[str]:
+        """ 修改会话标题，存入会话元数据
+
+        - `new_title` 非空 → 直接存（前端手动改名场景）
+        - `new_title` 为空 / None → 自动从 state 最新一轮 HumanMessage 派生：
+          剥离 `<quote>...</quote>` 引用块 + `/[xxx]` slash pill，
+          剩余正文取前 12 字符（超过截断加 ...）。
+
+        返回实际写入的标题；无 HumanMessage 可派生 / 异常时返回 None。
+        """
         try:
             config = {"configurable": {"thread_id": session_id}}
             state = await self.graph.aget_state(config=config)
 
+            messages = state.values.get("messages") or []
+            if not messages or not (msg := messages[-1]):
+                self.logger.error(f"会话不存在或无消息(session_id:{session_id})")
+                return None
+
+            # 自动派生：从最新 HumanMessage 提纯 → 截断
+            if not new_title or not new_title.strip():
+                derived = _derive_title_from_latest_human(messages)
+                if not derived:
+                    self.logger.info(f"会话无可派生标题的 HumanMessage(session_id:{session_id})")
+                    return None
+                new_title = derived
+
             # 面对langgraph对更新state的限制所制作的*神秘代码*
-            if msg := state.values["messages"][-1]:
-                msg.additional_kwargs["title"] = new_title.strip()
-                # 只有 AIMessage 才能直接重建，其他类型（如 ToolMessage）直接替换
-                if isinstance(msg, AIMessage):
-                    new_msg = AIMessage(
-                        content=msg.content,
-                        additional_kwargs=msg.additional_kwargs,
-                        response_metadata=msg.response_metadata,
-                        id=msg.id,
-                        usage_metadata = getattr(msg, "usage_metadata", None)
-                    )
-                    state.values["messages"][-1] = new_msg
-                # 其他类型消息已经修改了 additional_kwargs，无需重建
-                # 调用aupdate_state：只传config和values
-                await self.graph.aupdate_state(
-                    config=config,
-                    values=state.values,  # 把修改后的完整state值更新回去
+            msg.additional_kwargs["title"] = new_title.strip()
+            # 只有 AIMessage 才能直接重建，其他类型（如 ToolMessage）直接替换
+            if isinstance(msg, AIMessage):
+                new_msg = AIMessage(
+                    content=msg.content,
+                    additional_kwargs=msg.additional_kwargs,
+                    response_metadata=msg.response_metadata,
+                    id=msg.id,
+                    usage_metadata = getattr(msg, "usage_metadata", None)
                 )
-                # todo 回溯后无法自动更新对话标题
-                self.logger.info(f"会话标题修改成功(session_id:{session_id})：{new_title}")
-                return True
-            else:
-                self.logger.error(f"会话不存在(session_id:{session_id})")
-                return False
+                state.values["messages"][-1] = new_msg
+            # 其他类型消息已经修改了 additional_kwargs，无需重建
+            # 调用aupdate_state：只传config和values
+            await self.graph.aupdate_state(
+                config=config,
+                values=state.values,  # 把修改后的完整state值更新回去
+            )
+            # todo 回溯后无法自动更新对话标题
+            self.logger.info(f"会话标题修改成功(session_id:{session_id})：{new_title}")
+            return new_title.strip()
         except HTTPException as e:
             self.logger.error(f"修改标题失败(session_id:{session_id}): {str(e)}")
-            return False
+            return None
 
     async def _delete_specific_checkpoint(self, session_id: str, checkpoint_id: str,
                                          checkpoint_ns: str = "__empty__") -> bool:
@@ -1745,6 +1839,7 @@ class ChatService:
                 session_id,
                 metrics={"elapsed_ms": elapsed_ms, "token_usage": token_usage},
                 status="interrupted",
+                skip_memory=True,  # 中断轮的 memory 调度跳过：撤回不需要，续接在 completed 保存时覆盖写
             )
 
             # 补充 checkpoint_id 到 interrupt hash（前端 loadConversation 拉取时看到）
@@ -2006,6 +2101,7 @@ class ChatService:
                 session_id,
                 metrics={"elapsed_ms": elapsed_ms, "token_usage": token_usage},
                 status="interrupted",
+                skip_memory=True,  # 中断轮的 memory 调度跳过：撤回不需要，续接在 completed 保存时覆盖写
             )
 
             # 补充checkpoint_id字段进去

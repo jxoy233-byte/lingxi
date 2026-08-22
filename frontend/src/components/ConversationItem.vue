@@ -266,8 +266,22 @@ export default {
       }
     },
     onKeydown(e) {
-      if (e.key === 'Escape' && this.isConfirmingDelete) {
+      // 标题编辑中：Enter 由 input 原生提交（saveTitle），Esc 取消编辑。
+      // 这里不处理，让 input 自己管。
+      if (this.isEditing) return
+      if (!this.isConfirmingDelete) return
+      // 用户在 input / textarea / contentEditable 里按 Enter 是输入行为（如 MessageInput 发送），
+      // 不能 hijack。confirming 态虽然 active，但焦点不在本组件 → 不响应。
+      const t = e.target
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) {
+        return
+      }
+      if (e.key === 'Escape') {
         this.isConfirmingDelete = false
+      } else if (e.key === 'Enter' && !e.isComposing) {
+        // 二次确认态下 Enter 直接执行删除，复用点击路径（先重置再 emit）
+        e.preventDefault()
+        this.handleDeleteClick()
       }
     }
   }

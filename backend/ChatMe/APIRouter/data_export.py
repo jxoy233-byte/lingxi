@@ -29,8 +29,9 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Path, Query
 from fastapi.responses import HTMLResponse, Response
 
-from ChatMe.APIRouter.static_file import CACHED_DIR, list_data_analysis_files
+from ChatMe.APIRouter.static_file import list_data_analysis_files
 from ChatMe.LoggingManager.logging_config import get_logger
+from ChatMe.paths import CACHED_DIR
 
 logger = get_logger("data_export")
 

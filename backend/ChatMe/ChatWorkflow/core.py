@@ -36,6 +36,7 @@ from ..LoggingManager.logging_config import (
 )
 from .decorators import node_guard
 from .CheckpointJanitor import CheckpointJanitor
+from ..paths import CACHED_DIR
 
 
 async def _inject_session_header(request, handler):
@@ -192,7 +193,7 @@ class ChatWorkflow:
         初始化mcp，初始化redis-stack，初始化llm和配置工作流：
         """
         import asyncio
-        self.files_cached_dir = str(Path.cwd()) + "/cached"
+        self.files_cached_dir = str(CACHED_DIR)
 
         await self.init_mcps()
 

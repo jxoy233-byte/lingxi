@@ -25,6 +25,7 @@ from ChatMe.ChatService.FilesLoaders.config import FILE_ALLOWED_TYPES, TEXT_TRUN
 from ChatMe.ChatService.FilesLoaders.SofficeConverter import get_converter, LibreOfficeNotFoundError
 from ChatMe.LoggingManager.logging_config import get_logger
 from ChatMe.ChatMeConfig.core import get_oss_config
+from ChatMe.paths import CACHED_DIR
 
 
 def _upload_local_image_to_oss(local_path: str, original_filename: str = None) -> Optional[str]:
@@ -156,7 +157,7 @@ class FilesLoaders:
         self.session_id = session_id
         self.logger = get_logger("FilesLoader")
         self.processing_files = processing_files
-        self.processing_dir = Path.cwd() / "cached" / session_id
+        self.processing_dir = CACHED_DIR / session_id
 
         os.makedirs(self.processing_dir, exist_ok=True)
 

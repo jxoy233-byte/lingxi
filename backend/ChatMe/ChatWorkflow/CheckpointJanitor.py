@@ -22,9 +22,19 @@ agent / tool / final）就 ``aput()`` 一次，每 ``aput_writes()`` 又落 N �
 
 其余 checkpoint + 关联的 ``checkpoint_write:*`` + ``write_keys_zset:*`` 全删。
 
+LATEST_POINTER 分两类处理
+==========================
+- **主图 ``__empty__`` LATEST_POINTER**：保留，LangGraph 主图恢复用
+- **fork LATEST_POINTER**（如 ``input_parse_node:<uuid>``）：撤回 / 清理后 fork 不再重跑，
+  留着只占空间。除非指向的 cid 恰好在 user_saved（极少见），否则 key 自身 + 指向的 cid 都清
+
+orphan write_keys_zset（对应 ``checkpoint:*`` doc 已不存在的 ``write_keys_zset:*``）
+=====================================================================================
+LangGraph ``aput_writes`` 在 ``aput`` 失败 / 异常中断时可能留下半截 zset，
+没有 checkpoint doc 对应的 zset 不影响主图恢复，直接清。
+
 不动
 ====
-- ``checkpoint_latest`` 指针（LangGraph 自管）
 - ChatMe 自己的 ``permission:{sid}`` / ``interrupt:{sid}`` / ``memory:*`` 等其他 key 命名空间
 - RedisStateSaver hash 本身（只读不写）
 """
@@ -109,6 +119,10 @@ class CheckpointJanitor:
 
         # 1. SCAN 拿该 thread 全部 checkpoint 文档（cid / ns / parent_cid）
         all_checkpoints = await self._scan_checkpoints(thread_id)
+
+        # 2. 即使无 checkpoint doc，也跑一次 orphan write_keys_zset 扫描
+        #    （如果 thread 之前清过所有 checkpoint，但 orphan zset 还残留）
+        #    早期 return 路径会跳过这步 —— 但既然没 checkpoint doc 了，orphan zset 也没意义
         if not all_checkpoints:
             return {
                 "thread_id": thread_id,
@@ -116,28 +130,82 @@ class CheckpointJanitor:
                 "kept": 0,
                 "deleted": 0,
                 "deleted_cids": [],
+                "fork_latest_to_clear": 0,
+                "orphan_zsets": 0,
                 "keys_deleted": 0,
                 "user_saved_count": 0,
             }
 
-        # 2. 每个 namespace 解析 latest 指针
-        latest_per_ns: Dict[str, str] = {}
+        # 3. 拿 RedisStateSaver 里"用户存的"checkpoint_id（每轮对话完成态）
+        user_saved: Set[str] = await self._load_user_saved_cids(thread_id)
+
+        # 4. 每个 namespace 解析 latest 指针
+        #    区分主图（__empty__）和 fork（如 input_parse_node:<uuid>）：
+        #    - 主图 LATEST_POINTER：LangGraph 主图恢复用，必须保留（指向 keep 集合里的 cid）
+        #    - fork LATEST_POINTER：Send fanout 产物，撤回后 fork 不再重跑，主图恢复也用不到，
+        #      只在指向 user_saved cid 时保留，其他全部清掉（key 自身 + 指向的 cid 都清）
+        #
+        #    **关键**：fork LATEST_POINTER 必须独立 scan，不能依赖 _scan_checkpoints 拿到的
+        #    namespaces 集合 —— 因为 fork LATEST_POINTER 指向的 checkpoint doc 可能已经在
+        #    storage 里被清掉（典型 orphan 场景），那时 _scan_checkpoints 拿不到对应 namespace，
+        #    LATEST_POINTER 永远扫不到。
+        latest_per_ns: Dict[str, str] = {}      # 主图 __empty__ → cid（必保留）
+        fork_pointers_to_clear: List[str] = []  # 要删的 fork LATEST_POINTER key
+
+        # 4.1 主图 LATEST_POINTER（依赖 _scan_checkpoints 拿到的 namespaces，因为主图 doc 一定存在）
         namespaces: Set[str] = {c["ns"] for c in all_checkpoints}
         for ns in namespaces:
-            lk = f"{LATEST_POINTER_PREFIX}:{thread_id}:{self._ns_safe(ns)}"
+            ns_safe_val = self._ns_safe(ns)
+            lk = f"{LATEST_POINTER_PREFIX}:{thread_id}:{ns_safe_val}"
             latest_key = await self._redis.get(lk)
             if not latest_key:
                 continue
             latest_key_str = latest_key.decode() if isinstance(latest_key, bytes) else latest_key
-            # latest_key 格式: checkpoint:{tid}:{ns_safe}:{cid_safe}
             parts = latest_key_str.split(":")
-            if len(parts) >= 4:
-                latest_per_ns[ns] = parts[-1]
+            if len(parts) < 4:
+                continue
+            cid = parts[-1]
 
-        # 3. 拿 RedisStateSaver 里"用户存的"checkpoint_id（每轮对话完成态）
-        user_saved: Set[str] = await self._load_user_saved_cids(thread_id)
+            if ns == "__empty__":
+                # 主图 LATEST_POINTER —— 保留进 keep
+                latest_per_ns[ns] = cid
+            else:
+                # fork LATEST_POINTER（在 namespaces 集合里 = 对应 checkpoint doc 还在）
+                # 指向 user_saved 的保留，其他清
+                if cid in user_saved:
+                    latest_per_ns[ns] = cid
+                else:
+                    fork_pointers_to_clear.append(lk)
 
-        # 4. 保留集合（只 2 路）：user_saved (redissaver 里每轮的 cid) + latest 指针
+        # 4.2 独立扫描 fork LATEST_POINTER —— 捕获 namespaces 集合里没有的孤儿 LATEST_POINTER
+        #     （指向的 checkpoint doc 已被清掉的 fork LATEST_POINTER）
+        async for lk_bytes in self._redis.scan_iter(
+            match=f"{LATEST_POINTER_PREFIX}:{thread_id}:*", count=200
+        ):
+            lk = lk_bytes.decode() if isinstance(lk_bytes, bytes) else lk_bytes
+            # 格式: checkpoint_latest:{tid}:{ns_safe} —— ns_safe 可能含 :
+            lparts = lk.split(":")
+            if len(lparts) < 3:
+                continue
+            ns_safe_val = ":".join(lparts[2:])
+            if ns_safe_val == "__empty__":
+                continue  # 主图已在 4.1 处理
+            if lk in fork_pointers_to_clear:
+                continue  # 已在 4.1 处理
+            # 拿指向的 cid
+            current_val = await self._redis.get(lk)
+            if not current_val:
+                continue
+            cv = current_val.decode() if isinstance(current_val, bytes) else current_val
+            cv_parts = cv.split(":")
+            if len(cv_parts) < 4:
+                continue
+            pointed_cid = cv_parts[-1]
+            if pointed_cid in user_saved:
+                continue  # 指向 user_saved 保留
+            fork_pointers_to_clear.append(lk)
+
+        # 5. 保留集合（只 2 路）：user_saved (redissaver 里每轮的 cid) + 主图 latest 指针
         #    不要 parent chain walk —— 中间 workflow cid 可以删，UI 回溯到 user_saved
         #    时 aget_tuple(cid) 只读该 cid 自己的 JSON，不依赖 parent 是否存在；
         #    parent_checkpoint_id 字段是悬空引用但不影响消息显示。
@@ -147,10 +215,30 @@ class CheckpointJanitor:
             | user_saved
         )
 
-        # 7. 候选删除集合
+        # 候选删除集合
         to_delete = [c for c in all_checkpoints if c["cid"] not in keep]
 
-        # 8. dry_run 直接返回统计
+        # 6. 扫 orphan write_keys_zset（CheckpointJanitor._scan_checkpoints 只扫 checkpoint:*，
+        #    看不到 write_keys_zset:*，所以这里要单独扫一轮）
+        #    orphan 判定：对应的 checkpoint:{tid}:{ns}:{cid} 不存在
+        #    （LangGraph aput_writes 可能在 aput 失败 / 异常中断后留下半截 zset，
+        #     没有 checkpoint doc 对应的 zset 不会影响主图恢复）
+        orphan_zsets: List[str] = []
+        async for zk in self._redis.scan_iter(
+            match=f"{WRITE_KEYS_ZSET_PREFIX}:{thread_id}:*", count=200
+        ):
+            zks = zk.decode() if isinstance(zk, bytes) else zk
+            # 格式: write_keys_zset:{tid}:{ns_safe}:{cid}
+            zparts = zks.split(":")
+            if len(zparts) < 4:
+                continue
+            # ns 在中间，cid 在最后
+            ck = f"{CHECKPOINT_PREFIX}:{thread_id}:{':'.join(zparts[2:-1])}:{zparts[-1]}"
+            exists = await self._redis.exists(ck)
+            if not exists:
+                orphan_zsets.append(zks)
+
+        # 7. dry_run 直接返回统计
         if dry_run:
             return {
                 "thread_id": thread_id,
@@ -158,11 +246,13 @@ class CheckpointJanitor:
                 "kept": len(keep),
                 "deleted": len(to_delete),
                 "deleted_cids": [c["cid"] for c in to_delete],
+                "fork_latest_to_clear": len(fork_pointers_to_clear),
+                "orphan_zsets": len(orphan_zsets),
                 "keys_deleted": 0,
                 "user_saved_count": len(user_saved),
             }
 
-        # 9. 实际删除：主文档 + write_keys_zset + 所有 checkpoint_write 子文档
+        # 8. 实际删除：主文档 + write_keys_zset + 所有 checkpoint_write 子文档
         keys_to_delete: List[str] = []
         ns_safe_cache: Dict[str, str] = {}
 
@@ -190,17 +280,25 @@ class CheckpointJanitor:
                 ks = k.decode() if isinstance(k, bytes) else k
                 keys_to_delete.append(ks)
 
-        # 10. 批量删（pipeline 分批 500 避免一次性阻塞 Redis）
+        # 9. 删 fork LATEST_POINTER（不再被 LangGraph 读到，留着只占 Redis 空间）
+        keys_to_delete.extend(fork_pointers_to_clear)
+
+        # 10. 删 orphan write_keys_zset（对应 checkpoint doc 已不存在）
+        keys_to_delete.extend(orphan_zsets)
+
+        # 11. 批量删（pipeline 分批 500 避免一次性阻塞 Redis）
         keys_deleted = 0
         if keys_to_delete:
             for i in range(0, len(keys_to_delete), 500):
                 batch = keys_to_delete[i:i + 500]
                 keys_deleted += await self._redis.delete(*batch)
 
-        if to_delete:
+        if to_delete or fork_pointers_to_clear or orphan_zsets:
             logger.info(
                 f"[CheckpointJanitor] thread={thread_id[:12]}... 扫描={len(all_checkpoints)} "
-                f"用户存的={len(user_saved)} 保留={len(keep)} 删除={len(to_delete)} keys={keys_deleted}"
+                f"用户存的={len(user_saved)} 保留={len(keep)} 删checkpoint={len(to_delete)} "
+                f"删fork_pointer={len(fork_pointers_to_clear)} "
+                f"删orphan_zset={len(orphan_zsets)} keys={keys_deleted}"
             )
 
         return {
@@ -209,6 +307,8 @@ class CheckpointJanitor:
             "kept": len(keep),
             "deleted": len(to_delete),
             "deleted_cids": [c["cid"] for c in to_delete],
+            "fork_latest_cleared": len(fork_pointers_to_clear),
+            "orphan_zsets_cleared": len(orphan_zsets),
             "keys_deleted": keys_deleted,
             "user_saved_count": len(user_saved),
         }
@@ -303,7 +403,10 @@ class CheckpointJanitor:
         user_saved: Set[str] = await self._load_user_saved_cids(thread_id)
 
         # 5. 保留集合：target + user_saved（HASH 里全部 cid）
-        keep: Set[str] = {target_cid} | user_saved
+        keep: Set[str] = (
+            {target_cid}
+            | user_saved
+        )
 
         # 6. 覆写 LATEST_POINTER（值格式与 LangGraph aio.py 的 latest pointer 一致：
         #    ``checkpoint:{tid}:{ns_safe}:{cid}``）
@@ -339,11 +442,56 @@ class CheckpointJanitor:
                 batch = keys_to_delete[i:i + 500]
                 keys_deleted += await self._redis.delete(*batch)
 
+        # 9. 清 fork LATEST_POINTER（namespace != "__empty__" 的所有 LATEST_POINTER）
+        #    回溯后 fork 不再重跑，主图恢复也用不到，留着只占空间
+        #    保留逻辑：必须保留 __empty__ 的 LATEST_POINTER（已在 step 6 覆写到 target_cid）
+        fork_pointers_to_clear: List[str] = []
+        async for fk in self._redis.scan_iter(
+            match=f"{LATEST_POINTER_PREFIX}:{thread_id}:*", count=200
+        ):
+            fks = fk.decode() if isinstance(fk, bytes) else fk
+            fparts = fks.split(":")
+            if len(fparts) >= 3 and fparts[2] != "__empty__":
+                # 进一步检查：fork LATEST_POINTER 指向的 cid 是否在 user_saved
+                # 极少见：用户回溯到的 cid 恰好也是某个 fork 的 LATEST_POINTER 目标
+                # 这种情况下 pointer 仍指向有效 cid，保留无害
+                current_val = await self._redis.get(fks)
+                if current_val:
+                    cv = current_val.decode() if isinstance(current_val, bytes) else current_val
+                    cv_parts = cv.split(":")
+                    if len(cv_parts) >= 4:
+                        pointed_cid = cv_parts[-1]
+                        if pointed_cid in user_saved:
+                            continue  # 跳过，不清
+                fork_pointers_to_clear.append(fks)
+
+        # 10. 扫 orphan write_keys_zset（对应 checkpoint doc 已不存在）
+        #    与 prune_thread 同源：LangGraph aput_writes 异常时可能留下 zset 但 checkpoint doc 被清
+        orphan_zsets: List[str] = []
+        async for zk in self._redis.scan_iter(
+            match=f"{WRITE_KEYS_ZSET_PREFIX}:{thread_id}:*", count=200
+        ):
+            zks = zk.decode() if isinstance(zk, bytes) else zk
+            zparts = zks.split(":")
+            if len(zparts) < 4:
+                continue
+            ck = f"{CHECKPOINT_PREFIX}:{thread_id}:{':'.join(zparts[2:-1])}:{zparts[-1]}"
+            if not await self._redis.exists(ck):
+                orphan_zsets.append(zks)
+
+        # 11. 把这两类也并入批量删
+        extra_keys = fork_pointers_to_clear + orphan_zsets
+        if extra_keys:
+            for i in range(0, len(extra_keys), 500):
+                batch = extra_keys[i:i + 500]
+                keys_deleted += await self._redis.delete(*batch)
+
         logger.info(
             f"[CheckpointJanitor] retarget_to thread={thread_id[:12]}... "
             f"target={target_cid} 扫描={len(all_checkpoints)} "
             f"保留={len(keep)}(target+user_saved={len(user_saved)}) "
-            f"删除={len(to_delete)} keys={keys_deleted}"
+            f"删除={len(to_delete)} 删fork_pointer={len(fork_pointers_to_clear)} "
+            f"删orphan_zset={len(orphan_zsets)} keys={keys_deleted}"
         )
 
         return {
@@ -352,6 +500,8 @@ class CheckpointJanitor:
             "scanned": len(all_checkpoints),
             "deleted": len(to_delete),
             "kept_cids": sorted(keep),
+            "fork_latest_cleared": len(fork_pointers_to_clear),
+            "orphan_zsets_cleared": len(orphan_zsets),
             "keys_deleted": keys_deleted,
         }
 

@@ -81,6 +81,7 @@
           @restart-session="restartConversation"
           @quote="handleQuote"
           @withdraw="handleWithdraw"
+          @insert-suggestion="handleInsertSuggestion"
         />
 
         <MessageInput
@@ -90,6 +91,7 @@
           :permission-resume-in-flight="permissionResumeInFlight"
           :queue="queueForCurrentSession"
           @send="sendMessage"
+          @front-action="runFrontAction"
           @remove-queue-item="onRemoveQueueItem"
           @clear-queue="onClearQueue"
           @files-selected-need-session="handleFilesSelectedNeedSession"
@@ -215,6 +217,21 @@
       @close="settingsVisible = false"
       @theme-change="setTheme"
     />
+
+    <!-- 帮助弹窗（由 /help 命令触发） -->
+    <HelpDialog
+      :visible="helpVisible"
+      :commands="slashCommands"
+      @close="helpVisible = false"
+    />
+
+    <!-- 通用简洁提示弹窗（slash 命令前置条件不满足时用） -->
+    <ToastDialog
+      :visible="toast.visible"
+      :title="toast.title"
+      :message="toast.message"
+      @close="closeToast"
+    />
   </div>
 
   <!--
@@ -261,6 +278,8 @@ import WebPreviewPanel from './components/WebPreviewPanel.vue'
 import FilePreviewPanel from './components/FilePreviewPanel.vue'
 import DataAnalysisTree from './components/DataAnalysisTree.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
+import HelpDialog from './components/HelpDialog.vue'
+import ToastDialog from './components/ToastDialog.vue'
 import NotFoundView from './components/NotFoundView.vue'
 import mermaid from 'mermaid'
 import {
@@ -288,6 +307,8 @@ export default {
     FilePreviewPanel,
     DataAnalysisTree,
     SettingsDialog,
+    HelpDialog,
+    ToastDialog,
     NotFoundView
   },
   data() {
@@ -335,6 +356,8 @@ export default {
       isInterruptedSessionId: null,  // 最近一次中断的会话ID
       hasReceivedInit: false,  // 流式响应是否已收到 init 消息
       _pendingInterruptSessionId: null,  // 临时存储流式响应中的 session_id
+      // handleWithdraw 等待 SSE interrupt 事件到达的 resolver（仅单 in-flight withdraw）
+      _withdrawInterruptResolver: null,
       isMobile: false,
       sidebarMobileOpen: false,
       interruptReason: '',  // 中断原因
@@ -342,6 +365,21 @@ export default {
       resumeInputText: '',  // 续接输入文本
       currentQuote: null,  // 当前引用内容：{ content: string }
       settingsVisible: false,  // 设置弹窗可见性
+      helpVisible: false,  // /help 弹窗可见性
+      // 简洁提示弹窗（slash 命令前置条件不满足时用，例如「/backtrack 当前没有会话」）
+      toast: { visible: false, title: '', message: '' },
+      // 静态 action 命令清单（永远在前，不依赖后端）：
+      // 纯前端动作（打开弹窗 / 刷新页面），name 不会发往后端，无命名约束。
+      staticActionCommands: [
+        { name: 'backtrack', kind: 'action', description: '打开历史版本面板' },
+        { name: 'settings',  kind: 'action', description: '打开设置弹窗' },
+        { name: 'reload',    kind: 'action', description: '刷新当前会话' },
+        { name: 'worktree',  kind: 'action', description: '打开当前会话工作树' },
+        { name: 'help',      kind: 'action', description: '显示本项目功能速览' }
+      ],
+      // 动态 skill 列表（从 /chat/skills 拉的），每个含 {name, description, lazy}。
+      // 由 computed `slashCommands` 与 staticActionCommands 拼接暴露给 HelpDialog。
+      dynamicSkills: [],
       // 工具调用级别的内嵌审批：标记具体 AI 消息 + tool call，让 MessageItem 高亮该 tool 并渲染内嵌按钮
       pendingToolApproval: null,  // { messageIndex, toolIndex, command, action, sessionId }
       submittingToolDecision: false,
@@ -369,6 +407,19 @@ export default {
       // - stream 结束时若用户不在该 sid 上，drain 推迟到 currentSessionId 切回时
       // - 用 Set 包装：Vue 2 必须整 Set 替换才能触发响应式（add/delete 静默）
       _queueDrainDeferred: new Set(),
+      // 已经乐观 slice 但 DELETE Redis 还没发出的 sid 集合（per-session，最多 1 个 head）。
+      // 作用：_loadQueueForSession 拿到 Redis 返回时跳过这些 head，
+      // 避免「乐观 slice 把 head 从本地移除 → 并发 _enqueueMessage / _removeQueueItem 触发
+      // reload → Redis 镜像带回 head → 下一次 drain 递归又把 head 重新 send 一次」
+      // （实测会触发同一条 queue 消息发两次的 bug）。
+      // drain 进入时 add，DELETE Redis 发出时 delete；与 _drainInFlight 同生命周期但语义不同：
+      // _drainInFlight 是「drain 函数本身还在跑」（防并发 drain），
+      // _drainedNotDeleted 是「Redis 还有 head 但本地不应该显示」（防 reload 镜像回来）。
+      _drainedNotDeleted: new Set(),
+      // 同 sid 并发 sendMessage 防护锁：session_id -> bool
+      // sendMessage 入口 set true（防 race），finally 块 set false。
+      // 防止用户在 fetch 还没返回时再次点发送 → 两个 SSE 并发跑。
+      _sendingLock: new Map(),
       // —— 后端健康监测 —— null = 还没拉过；true = 健康；false = 失联 → 显示 banner
       backendHealth: null,
       restartingBackend: false,  // 用户点「重新连接」期间 disable 按钮，避免重复触发
@@ -399,6 +450,9 @@ export default {
     // 检测移动端
     this.isMobile = window.innerWidth <= 600
     window.addEventListener('resize', this.handleResize)
+    // 弹层 Esc/Enter 全局快捷键：image-preview / resume-input 弹层打开时
+    // 监听 document（div 无 tabindex 时 @keydown.esc 收不到事件）
+    window.addEventListener('keydown', this.handleOverlayKeydown)
 
     if (window.electronAPI?.getServicesReady) {
       // ===== Electron 路径 =====
@@ -465,8 +519,20 @@ export default {
         this.backendHealth = backend
       })
     }
+
+    // 启动后后台拉一次动态 skill 列表（registry 内部 _maybe_rescan 自动 mtime 检测）。
+    // /help 弹窗打开时还会再 refetch 一次（watch.helpVisible），覆盖 SkillForge
+    // 中途新增的场景。失败兜底维持空数组，至少 action 命令仍可用。
+    this.fetchSkills()
   },
   watch: {
+    // /help 弹窗「关闭 → 打开」时仅在缓存为空时才 refetch（与 MessageInput 的
+    // slashPalette 转换同语义）。缓存命中时直接复用 dynamicSkills 数据，
+    // 不浪费一次 HTTP。缓存由 sessionId 变化（切会话）+ refreshConversation
+    // 入口清空（MessageInput.clearDynamicSkills 暴露给 App.vue）。
+    helpVisible(visible) {
+      if (visible && this.dynamicSkills.length === 0) this.fetchSkills()
+    },
     '$route.params.sessionId'(newSessionId) {
       // 监听 URL 变化
       // 格式不合法（非 12/32 位 hex，如 #/garbage、#/abc、#/12345）
@@ -501,10 +567,12 @@ export default {
     // 不用在 15+ done 处理器里各自手写 drain 的原因：watcher 是统一触发点，加新 SSE 入口不必改这里。
     '_activeStreamingSessions': {
       handler(newSet, oldSet) {
-        if (!oldSet) return
+        if (!oldSet || oldSet === undefined) return
         for (const sid of oldSet) {
           if (newSet.has(sid)) continue
           // sid 刚离开流式 → 检查是否有排队消息需要 drain
+          // 兜底：watcher 可能不触发（Vue 2 + Set 反应式），所以 done/error/interrupt handler
+          // 也显式调 _tryDrainQueue；watcher 是 belt-and-suspenders，双保险。
           this._tryDrainQueue(sid)
         }
       }
@@ -539,11 +607,53 @@ export default {
       if (!this.currentSessionId) return []
       return this._pendingQueue.get(this.currentSessionId) || []
     },
+    /**
+     * 全量 slash 命令 = 静态 action + 动态 skill，供 HelpDialog 渲染。
+     * - action 永远在前（高频且稳定）
+     * - skill 顺序由 /chat/skills 返回值决定（按 name 字母序）
+     * - runSlashCommandFromHelp 用 find() 取第一个，action 优先语义自然生效
+     */
+    slashCommands() {
+      return [
+        ...this.staticActionCommands,
+        ...this.dynamicSkills.map(s => ({
+          name: s.name,
+          kind: 'skill',
+          description: s.description || `${s.name} skill`
+        }))
+      ]
+    },
   },
   methods: {
     setTheme(isDark) {
       this.isDarkTheme = !!isDark
       localStorage.setItem('chatme-theme', this.isDarkTheme ? 'dark' : 'light')
+    },
+    /**
+     * 后台拉取动态 skill 列表。registry 内部 `_maybe_rescan()` 自动检测
+     * SKILL.md mtime —— SkillForge 写新 skill 后无需重启后端，下次 GET
+     * 即拿到新列表。
+     *
+     * 调用时机（**只在缓存为空时才发请求**）：
+     *  - mounted 首次拉取（冷启动兜底）
+     *  - /help 弹窗打开且缓存为空时拉一次（同会话内反复打开 /help 不重复请求；
+     *    切/刷会话清空缓存后下次开 /help 才重新拉）
+     *
+     * 失败兜底：dynamicSkills 维持上次状态，HelpDialog 至少渲染 action 命令。
+     */
+    async fetchSkills() {
+      try {
+        const response = await fetch('/chat/skills')
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`)
+        }
+        const data = await response.json()
+        const raw = Array.isArray(data?.skills) ? data.skills : []
+        // 后端已过滤 lazy=true，这里再守一层防止 schema 变动
+        this.dynamicSkills = raw.filter(s => s && typeof s.name === 'string' && s.name && !s.lazy)
+      } catch (error) {
+        console.warn('[App] fetchSkills 失败，维持当前动态列表:', error?.message || error)
+      }
     },
     /**
      * 用户在 SetUpView 上点「进入应用」：
@@ -1174,11 +1284,15 @@ export default {
       } finally {
         this.isLoading = false
         this.stopResponseTimer()
+        // 续接完成（正常 / 中断 / 异常 都涵盖在 finally）→ 焦点还给输入框
+        this.focusInput()
       }
     },
     cancelResume() {
       this.showResumeInput = false
       this.resumeInputText = ''
+      // 取消续接 → 焦点还给输入框（用户回到正常输入态）
+      this.focusInput()
     },
     confirmResume() {
       const message = this.resumeInputText.trim()
@@ -1186,6 +1300,39 @@ export default {
       this.resumeInputText = ''
       // 直接调用 handleResume 并传入消息
       this.handleResume(message)
+      // handleResume 末尾会再 focusInput（异步流程）；这里再调一次保险
+      this.focusInput()
+    },
+    /**
+     * App.vue 持有的 overlay 弹层（image-preview / resume-input）开 Esc/Enter 全局快捷键。
+     * 监听 document 而不是 overlay div 上的 @keydown.esc —— 后者 div 无 tabindex 时
+     * 收不到 keyboard 事件。
+     *
+     * - image-preview：Esc 关闭
+     * - resume-input：Esc 取消；Enter 仅在焦点不在 textarea（用户没在输入续接内容）时
+     *   才确认。textarea 里的 Enter 仍走原生换行，不 hijack。
+     */
+    handleOverlayKeydown(e) {
+      if (this.showImagePreview) {
+        if (e.key === 'Escape') {
+          e.preventDefault()
+          this.showImagePreview = false
+        }
+        return
+      }
+      if (this.showResumeInput) {
+        if (e.key === 'Escape') {
+          e.preventDefault()
+          this.cancelResume()
+        } else if (e.key === 'Enter' && !e.isComposing) {
+          const t = e.target
+          const inTextarea = t && (t.tagName === 'TEXTAREA' || t.isContentEditable)
+          if (!inTextarea) {
+            e.preventDefault()
+            this.confirmResume()
+          }
+        }
+      }
     },
     openWebPreview(url) {
       this.webPreviewUrl = url
@@ -1199,21 +1346,135 @@ export default {
     },
 
     /**
+     * 欢迎区「试一试」chip 点击事件。MessageList 把候选文本（目前只有 `/help`）emit 上来，
+     * App.vue 同时做两件事：
+     *   1. 把文本写到 MessageInput 输入框 + focus + 光标置末尾 —— 让用户看到「已敲入」
+     *   2. 直接调对应 front-action，弹 HelpDialog
+     * 第 2 步是关键：用户点 chip 的目的是「快速了解功能」而不是手动敲命令 + 回车，
+     * 一步到位更顺手。
+     */
+    handleInsertSuggestion(text) {
+      if (!text) return
+      this.$refs.messageInput?.setInputText(text)
+      // 模拟一次回车：fillText 后直接派发对应 front-action
+      const cmd = this.slashCommands.find(c => c.name === text.replace(/^\//, ''))
+      if (cmd) {
+        this.runFrontAction(cmd)
+      }
+    },
+
+    /**
+     * 前端动作命令分发器。MessageInput 在用户输入「命令 + 空白（或仅命令）」按回车时
+     * emit `front-action` 上来，App.vue 根据 name 派发到对应的前端操作。
+     *
+     * 关键不变量：
+     * 1. 不走 /chat SSE 流 —— 这些是纯前端动作（无 AI 处理）
+     * 2. MessageInput 端已校验：用户只敲了 `/cmd ` + 空白（或就 `/cmd`），任何额外文本
+     *    都会走 send（自动回退到普通消息路径）
+     * 3. 前置条件不满足时弹 ToastDialog 提示（如「/backtree 当前没有可用会话」）
+     *
+     * 与 ChatHeader 按钮完全等价：
+     *   /backtrack ↔ ChatHeader ⏱ 按钮（toggleCheckpoints → CheckpointPanel）
+     *   /settings   ↔ ChatHeader ⚙ 按钮（settingsVisible = true）
+     *   /worktree   ↔ DataAnalysisTree 触发按钮（openPanel()）
+     *   /reload     刷新当前会话（refreshConversation，重拉 messages）
+     *   /help       独立弹窗（HelpDialog）
+     */
+    async runFrontAction(cmd) {
+      if (!cmd || !cmd.name) return
+      const sid = this.currentSessionId
+
+      switch (cmd.name) {
+        case 'backtrack': {
+          // 打开历史版本面板（与 ChatHeader ⏱ 按钮同路径），用户从面板里点具体版本恢复
+          if (!sid) {
+            this.showToast('当前没有可用会话', '请先新建或选择一个会话，再查看历史版本。')
+            return
+          }
+          this.showCheckpoints = true
+          return
+        }
+        case 'settings':
+          this.settingsVisible = true
+          return
+        case 'reload':
+          if (!sid) {
+            this.showToast('当前没有可用会话', '请先新建或选择一个会话，再刷新会话内容。')
+            return
+          }
+          await this.refreshConversation(sid)
+          return
+        case 'worktree':
+          if (!sid) {
+            this.showToast('当前没有可用会话', '工作树与具体会话绑定，请先新建或选择一个会话。')
+            return
+          }
+          this.$refs.dataAnalysisTree?.openPanel?.()
+          return
+        case 'help':
+          this.helpVisible = true
+          return
+        default:
+          console.warn('[runFrontAction] 未知的前端动作命令:', cmd.name)
+      }
+    },
+
+    /**
+     * 简洁提示弹窗：用于 slash 命令前置条件不满足（如无 sid）等轻量提示场景。
+     * 与 ConfirmDialog 不同 —— 单按钮「知道了」直接关闭，不阻塞业务流程。
+     */
+    showToast(title, message = '') {
+      this.toast = { visible: true, title, message }
+    },
+    closeToast() {
+      this.toast.visible = false
+      // 简洁提示弹窗关闭 → 把焦点还给输入框（用户看完提示应当能继续打字）
+      this.focusInput()
+    },
+    /**
+     * 全局「归还焦点到输入框」入口。dialog / panel / refresh / tool approval
+     * / resume 等事件回调里调一下，光标自动回到 MessageInput 的 textarea。
+     * 走 $nextTick 等 DOM 更新完再 focus，避免和 v-if 过渡 / input 状态变更撞车。
+     * `?.` 链式调用防御 $refs.messageInput 不可用的情况（冷启动未挂载等）。
+     */
+    focusInput() {
+      this.$nextTick(() => {
+        const mi = this.$refs.messageInput
+        if (mi && typeof mi.focusTextarea === 'function') mi.focusTextarea()
+      })
+    },
+    /**
+     * 弹窗 / 面板关闭 → 把焦点还给输入框。复用同一段逻辑避免每个组件 @close
+     * 都包一层调用（escape / overlay click / ×按钮三条路径都要覆盖）。
+     *
+     * 注意：是「close 后焦点归还」而不是「open 时抢占」—— 因为 MessageInput 的
+     * 初始 focus 已经在用户开始输入时自然发生，弹窗 open 反而是借焦点出去。
+     *
+     * 例外：showRestoreConfirm（恢复历史版本）→ 用户做完决定后**不应**抢焦点，
+     *   因为会立即触发新一轮流程；cancelRestore / confirmRestore 自己显式处理。
+     *   这里不监听 showRestoreConfirm。
+     */
+    onPanelClosed() {
+      this.focusInput()
+    },
+
+    /**
      * 撤回用户消息：
      * 1. 找「此用户消息之前最近的 AI 消息」的 checkpointId 作为回溯目标
      * 2. POST /interrupt → 让后台 workflow 立即停（astream 中段会 1-2s 内感知）
-     * 3. POST /backtrack → langgraph 指针回溯（CheckpointJanitor.retarget_to）
-     * 4. 拉 get_conversation → messages 数组刷新（这条用户消息和后面的 AI 都消失）
-     * 5. 把原 message.content 写到 MessageInput 输入框（files v1 不恢复）
+     * 3. 等 SSE interrupt 事件到达（timeout 3s 兜底）→ astream 真的 raise GraphInterrupt
+     * 4. POST /backtrack → langgraph 指针回溯（CheckpointJanitor.retarget_to）
+     * 5. 拉 get_conversation → messages 数组刷新（这条用户消息和后面的 AI 都消失）
+     * 6. 把原 message.content 写到 MessageInput 输入框（files v1 不恢复）
+     *
+     * /backtrack slash 命令复用同一个底层（runBacktrack），区别只是「找最近 AI 消息」
+     * 而不是「找 userMessage 之前的 AI 消息」。
      */
     async handleWithdraw(userMessage) {
       if (!userMessage || !this.currentSessionId) return
-
-      const sid = this.currentSessionId
       const msgIndex = this.messages.findIndex(m => m === userMessage)
       if (msgIndex === -1) return
 
-      // 1. 找前一轮 AI 的 checkpointId
       let backtrackCid = null
       for (let i = msgIndex - 1; i >= 0; i--) {
         const prev = this.messages[i]
@@ -1227,18 +1488,66 @@ export default {
         return
       }
 
+      await this.runBacktrack({
+        sid: this.currentSessionId,
+        backtrackCid,
+        withdrawText: userMessage.content || '',
+        withdrawSid: this.currentSessionId
+      })
+    },
+
+    /**
+     * 通用回溯执行器。handleWithdraw（用户点 ↶ 按钮）和 /backtrack slash 命令都走这里。
+     * withdrawText 为 null 表示不回填输入框（slash 命令路径，撤回整轮对话但保留输入框当前内容）。
+     */
+    async runBacktrack({ sid, backtrackCid, withdrawText, withdrawSid }) {
       try {
-        // 2. 先中断（让后台 workflow 不要再执行到底；astream 中段会感知）
-        await fetch(`/chat/${sid}/interrupt`, {
+        // 2. 设置 SSE interrupt resolver（必须先于 POST /interrupt 注册：避免 race —
+        //    后端 astream 一旦感知到 Redis hash 就会立刻 yield interrupt 事件，
+        //    若 resolver 还没挂上、SSE handler 检查 this._withdrawInterruptResolver 为 null 就直接吞掉事件，
+        //    然后 handleWithdraw 在这干等 5s 超时 —— 撤回失败）。
+        let _interruptArrived
+        const _interruptPromise = new Promise((resolve, reject) => {
+          let done = false
+          const finish = (err) => {
+            if (done) return
+            done = true
+            clearTimeout(timer)
+            this._withdrawInterruptResolver = null
+            if (err) reject(err)
+            else resolve()
+          }
+          // timeout 5s 兜底：astream 卡在 tool_execution_node 太久（tool 执行慢）时强制继续 backtrack
+          const timer = setTimeout(() => finish(new Error('等 SSE interrupt 事件超时（5s）')), 5000)
+          // SSE interrupt handler 调用 resolver 时触发 resolve
+          this._withdrawInterruptResolver = () => finish()
+        })
+        _interruptArrived = _interruptPromise
+
+        // 3. POST /interrupt — fire-and-forget（不 await：触发 backtrack 的唯一信号是 SSE interrupt 事件，
+        //    不是这个 API 是否返回 200；写 Redis hash 是后端 astream 感知中断的前置条件，
+        //    但「hash 写完」≠「astream 已 raise GraphInterrupt」，
+        //    真正的状态权威在 SSE 事件上）。
+        fetch(`/chat/${sid}/interrupt`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ interrupt_reason: 'user_withdraw_message' })
+        }).catch(err => {
+          console.warn('[handleWithdraw] POST /interrupt 发送失败（不影响撤回，后端 SSE 也会兜底）:', err)
         })
 
-        // 给中断留 ~500ms 让 astream 真正进入 GraphInterrupt 抛点（fast guard 8/16 chunks 即触发）
-        await new Promise(r => setTimeout(r, 500))
+        // 4. 等 SSE interrupt 事件真的到达 —— 这是触发 backtrack 的唯一信号
+        // 必须等 astream 真的 raise GraphInterrupt 否则:
+        //   - backtrack 清掉 interrupt:{sid} hash + retarget_to 覆写 LATEST_POINTER
+        //   - astream 继续跑完 → _save_round_checkpoint 写新 cid → LangGraph 自动覆盖 LATEST_POINTER
+        //   - 撤回失败：刷新看到完整本轮对话
+        try {
+          await _interruptArrived
+        } catch (e) {
+          console.warn('[handleWithdraw] SSE interrupt 未在 5s 内到达，强制 backtrack（astream 可能卡在 tool 执行）:', e.message)
+        }
 
-        // 3. 回溯
+        // 5. 回溯
         const btResp = await fetch(`/chat/${sid}/backtrack`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1246,7 +1555,7 @@ export default {
         })
         if (!btResp.ok) throw new Error('回溯失败')
 
-        // 4. 拉新 conversation（这条 user message 和后续 AI/工具消息都消失）
+        // 5. 拉新 conversation（这条 user message 和后续 AI/工具消息都消失）
         const convResp = await fetch(`/chat/${sid}/conversation`)
         if (!convResp.ok) throw new Error('获取回溯后状态失败')
         const conv = await convResp.json()
@@ -1256,29 +1565,58 @@ export default {
         // 同步文件树 + 侧栏
         this.$refs.dataAnalysisTree?.reload()
 
-        // 5. 把原消息文本回填到输入框
-        this.$refs.messageInput?.setInputText(userMessage.content || '')
+        // 6. 把原消息文本回填到输入框 + 持久化到 localStorage（跨 F5 存活）
+        //    loadConversation 时会检测 entry 自动 setInputText；用户发送 / 主动清空时清掉
+        //    withdrawText === null 走 /backtrack 路径，不回填（输入框当前内容视为"还想保留"）
+        const storageKey = withdrawSid || sid
+        if (withdrawText !== null && withdrawText !== undefined) {
+          this.$refs.messageInput?.setInputText(withdrawText)
+        }
+        const withdrawnText = withdrawText || ''
+        if (withdrawnText) {
+          localStorage.setItem(`chatme-withdraw-pending:${storageKey}`, withdrawnText)
+        } else {
+          localStorage.removeItem(`chatme-withdraw-pending:${storageKey}`)
+        }
+
+        // 5.5 【按后端响应同步中断状态】—— 与 handleRestream 模式一致
+        //     防御 SSE 第二个 interrupt 事件在 handleWithdraw 重置后再次置 true：
+        //     backtrack 已清掉 redis hash，后端 interrupted_info 反映权威状态
+        if (conv.interrupted_info?.reason) {
+          this.isInterrupted = true
+          this.isInterruptedSessionId = sid
+          this.interruptReason = conv.interrupted_info.reason
+          const lastAiMsg = this.messages.filter(m => m.role === 'ai').pop()
+          if (lastAiMsg) lastAiMsg.interruptReason = conv.interrupted_info.reason
+        } else {
+          this.isInterrupted = false
+          this.isInterruptedSessionId = null
+          this.interruptReason = ''
+        }
 
         // 清掉流式相关状态（消息已变）
         this.isLoading = false
-        this._pendingQueue = []
+        // _pendingQueue 是 Map<sid, QueueEntry[]>（见 data() 声明），
+        // 切 session 时由 loadConversation 的 _loadQueueForSession 负责重拉；这里不能赋 [] 破坏类型
         this._activeStreamingSessions.delete(sid)
         this._streamingMessages.delete(sid)
         this._streamingMeta.delete(sid)
         this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-        this.isInterrupted = false
-        this.isInterruptedSessionId = null
-        this.interruptReason = ''
         this.cleanupLoadingState()
 
-        // 侧栏 refresh（标题可能不变，但对话状态变了）
-        await this.refreshSession(sid)
+        // 侧栏 sync（直接复用 step 5 的 conv，不再发一次 GET /conversation；
+        //     backtrack 已经带了 refresh 会话的效果，再刷一次纯属浪费）
+        const sidebarConv = this.conversations.find(c => c.session_id === sid)
+        if (sidebarConv && conv.title) {
+          sidebarConv.title = conv.title
+          sidebarConv.updated_at = conv.updated_at
+        }
 
         this.$nextTick(() => {
           this.$refs.messageList?.scrollToBottom()
         })
       } catch (err) {
-        console.error('[handleWithdraw] 撤回失败:', err)
+        console.error('[runBacktrack] 回溯失败:', err)
       }
     },
     async previewFile(file) {
@@ -1877,6 +2215,10 @@ export default {
         this.pendingToolApproval = null
         // 黄点立即清除：用户做了决定 = 审批状态解除（不依赖后续 resume done 兜底）
         this.markSessionApprovalResolved(sessionId)
+        // 焦点还给输入框（用户做了决策 = 已不再需要与审批 UI 交互）。
+        // resume 流仍在后台跑，但 permissionResumeInFlight 守门，发送按钮禁用，
+        // 用户可以先在输入框打字准备后续消息，等 resume 完成自动接上。
+        this.focusInput()
         // 走 SSE 流：复用 handleResume 的 SSE 处理逻辑（content / reasoning / tool_call / done）
         await this.handlePermissionResumeStream(resumeResp)
       } catch (error) {
@@ -1884,6 +2226,8 @@ export default {
         this.pendingToolApproval = null
         // 出错也清黄点（用户已经提交了决定 = 状态解除）
         this.markSessionApprovalResolved(sessionId)
+        // 出错路径也要归还焦点（用户已经把决策交了 = 该回主输入流）
+        this.focusInput()
       } finally {
         this.submittingToolDecision = false
         // resume 流无论成功 / 异常都已结束，清掉 in-flight 标志恢复发送按钮
@@ -2963,8 +3307,17 @@ export default {
         const r = await fetch(`/chat/${sid}/queue`)
         if (r.ok) {
           const data = await r.json()
+          let items = data.items || []
+          // —— 关键：过滤掉乐观 slice 出去的 in-flight head ——
+          // 乐观 slice 后本地已经没有 head，但 Redis 暂时还有（DELETE 没发出）；
+          // 此时 _enqueueMessage / _removeQueueItem 触发 reload，如果不过滤，
+          // 会把 head 镜像回本地 → 下次 drain 递归把同一条 head 再 send 一次。
+          // per-session 最多 1 个 in-flight head（_drainInFlight 串行化），slice(1) 即可。
+          if (this._drainedNotDeleted?.has(sid) && items.length > 0) {
+            items = items.slice(1)
+          }
           const m = new Map(this._pendingQueue)
-          m.set(sid, data.items || [])
+          m.set(sid, items)
           this._pendingQueue = m
           this._queueLoaded.add(sid)
         }
@@ -3040,32 +3393,135 @@ export default {
     /**
      * 弹队列头并送出去。
      * 行为：
-     *   1. 从本地 _pendingQueue[sid] 拿 head，slice(1) 留下尾（立即更新 UI，不等后端）
-     *   2. DELETE /chat/{sid}/queue?idx=0（不 await；失败不影响本轮，drain 仍走 sendMessage）
-     *   3. 调 sendMessage 走正常流（push 用户消息 + 起 SSE + _activeStreamingSessions add）
-     *      关键是 sendMessage 顶部那个守卫会再次检查 _activeStreamingSessions.has(sid)：
-     *      此刻 sid 刚从 stream-end 中移除 → has(sid) === false → 走正常路径不重复入队。
-     * 之所以不 await 后端 DELETE：sendMessage 是 fire-and-forget 用户感知操作，
-     *   让 Redis 删除与前端起流同时进行；如果 DELETE 失败，下一次 _loadQueueForSession
-     *   会重新拉到 head，导致重复发送（可接受：drain 的语义是"按 FIFO 发"，掉一条不致命）。
+     *   1. **乐观 slice**：先从 _pendingQueue[sid] slice(1) 出去 → MessageInput 立刻
+     *      看到 queue.length -= 1（UI 在「发送的那一刻」就响应减少，不等 SSE 流跑完）
+     *   2. await sendMessage(head.message) → 拿到 fetch 是否 200
+     *   3. 成功 → DELETE /chat/{sid}/queue?idx=0（不 await；与 SSE 同时进行）；本地不再重复 slice
+     *   4. 失败 → reload 从 Redis 拉回 head（DELETE 还没发出去，Redis 还有 head）
+     *
+     * 为什么要乐观 slice（v0.1.7+ 改）：
+     *   旧实现在 await sendMessage 之后才 slice，N 条排队时要等 N 轮完整流式才逐条减少，
+     *   UI 反馈延迟到「第二个发完」才响应，与用户期望不符。改为入口立即 slice，
+     *   失败靠 catch 块 reload 兜底。
+     *
+     * 为什么要 await sendMessage：
+     *   sendMessage + DELETE 都 fire-and-forget 的旧实现，fetch 失败时（网络断 / 后端 500），
+     *   消息已经从 UI 卡上消失、Redis 里也被 DELETE，真丢了。
+     *   现在改为先 await 验证 sendMessage 启动成功再 DELETE；失败 catch 块从 Redis 拉回 head 兜底。
      */
-    _drainQueueAndSend(sid) {
+    /**
+     * SSE 流结束（done / error / interrupt）后清理 per-session 流式状态。
+     * 集中在一个 helper 里，避免散在 4 个 SSE 分支各写一遍漏一处。
+     * 必须保证：
+     *   - _activeStreamingSessions.delete + new Set 触发侧栏状态点 watcher / drain watcher
+     *   - _sendingLock.delete + new Map（关键！SSE 循环期间 sendMessage 不 return，finally 永不跑，锁要主动释放）
+     *   - snapshot 引用清理（_streamingMessages / _streamingMeta）让下一次切回走 get_conversation
+     */
+    _finishStreamingSession(sid) {
+      if (!sid) return
+      // _activeStreamingSessions 清理（触发 watcher）
+      this._activeStreamingSessions.delete(sid)
+      this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+      // _sendingLock 释放（sendMessage 在 SSE 循环期间永不 return，finally 不可靠）
+      if (this._sendingLock.has(sid)) {
+        const m = new Map(this._sendingLock)
+        m.delete(sid)
+        this._sendingLock = m
+      }
+      // 流式 timer + snapshot 清理
+      this.stopStreamTimer(sid)
+      this._streamingMessages.delete(sid)
+      this._streamingMeta.delete(sid)
+    },
+
+    async _drainQueueAndSend(sid) {
       const queue = this._pendingQueue.get(sid) || []
       if (queue.length === 0) return
       const head = queue[0]
-      // 立即从本地移除（slice 出新数组触发响应式）
-      const m = new Map(this._pendingQueue)
-      m.set(sid, queue.slice(1))
-      this._pendingQueue = m
-      // 后端删 idx=0（不 await）
-      fetch(`/chat/${sid}/queue?idx=0`, { method: 'DELETE' })
-        .catch(e => console.warn('[queue] drain delete failed:', e))
-      // 调 sendMessage 走正常路径（不走 enqueue 守卫，因为 sid 已不在 _activeStreamingSessions）
-      this.sendMessage({
-        message: head.message,
-        files: [],
-        processedOutputs: [],
-      })
+      // 同 sid 防并发：drain / done handler / currentSessionId watcher 各自都可能触发
+      // _tryDrainQueue(sid)，导致同一 head 在 M1 正在 fetch 时，M2 也进入本函数。
+      // 用 _drainInFlight set 守住：M1 进入时 set(sid)，M2 看见 set 里有自己就 early return；
+      // M1 finally 块清理掉，允许下一轮 head 由 SSE done handler 的 _tryDrainQueue 再次触发。
+      // 这层是 _sendingLock 的补充（_sendingLock 在 sendMessage 内部 acquire/finally release，
+      // 不知道 drain 还没完成；这里在 drain 粒度上再加一道）。
+      if (!this._drainInFlight) this._drainInFlight = new Set()
+      if (this._drainInFlight.has(sid)) {
+        console.log(`[queue] drain already in flight for ${sid}, skip`)
+        return
+      }
+      try {
+        const s = new Set(this._drainInFlight)
+        s.add(sid)
+        this._drainInFlight = s
+
+        // —— 乐观 slice：UI 在发送那一刻就减少（用户期望 head 立刻从排队卡消失）——
+        // sendMessage 还没发出去就先 slice 本地队列 → Vue 响应式立刻让 MessageInput
+        // 看到 queue.length -= 1（v-if="queue.length > 0" 自动隐藏 / 徽章 -1）。
+        // 此时 Redis 暂时还有 head（要等 sendMessage 成功后才 DELETE），
+        // 必须把 sid 记到 _drainedNotDeleted，让后续 _loadQueueForSession 跳过这个 head，
+        // 否则并发 _enqueueMessage / _removeQueueItem 触发 reload 会把 head 镜像回本地，
+        // 下次 drain 递归把同一条 head 重新 send —— 实测会发两次。
+        if (!this._drainedNotDeleted) this._drainedNotDeleted = new Set()
+        if (!this._drainedNotDeleted.has(sid)) {
+          const ds = new Set(this._drainedNotDeleted)
+          ds.add(sid)
+          this._drainedNotDeleted = ds
+        }
+        const m = new Map(this._pendingQueue)
+        const cur = this._pendingQueue.get(sid) || []
+        // slice(1) 时如果别的 enqueue 在中间又加了新消息（比如用户同时点了 ✕ 又敲了新文本入队），
+        // 也只丢已 send 的 head，新入队仍在 cur[1:]
+        m.set(sid, cur.slice(1))
+        this._pendingQueue = m
+
+        await this.sendMessage({
+          message: head.message,
+          files: [],
+          processedOutputs: [],
+        })
+        // sendMessage 成功（其内部 finally 已释放 _sendingLock，本函数不再碰） →
+        // 删 Redis idx=0（与本地 slice 一致；fire-and-forget DELETE，失败仅 warn）
+        fetch(`/chat/${sid}/queue?idx=0`, { method: 'DELETE' })
+          .catch(e => console.warn('[queue] drain delete failed:', e))
+        // DELETE 已发出 → Redis 即将少 head，_loadQueueForSession 不再需要过滤这个 head。
+        // 立即从 in-flight 集合移除（不等 DELETE 网络返回，因为 load 看到 head 仍可能短暂存在；
+        // 万一 DELETE 真失败，下次 drain 仍会从 Redis 取到 head 重发——这是 server-side 一致性兜底）。
+        if (this._drainedNotDeleted?.has(sid)) {
+          const ds = new Set(this._drainedNotDeleted)
+          ds.delete(sid)
+          this._drainedNotDeleted = ds
+        }
+        // head 已在入口处乐观 slice 掉，这里不再重复 slice。
+        // 队列还有 → 触发下一轮 drain。
+        // 不在本函数递归（会让 stack 太深 + SSE done handler 已经会调 _tryDrainQueue，双 trigger 容易失控），
+        // 走 $nextTick 异步调度，让 Vue 微任务队列清完再发起下一轮。
+        if ((this._pendingQueue.get(sid) || []).length > 0 && !this._activeStreamingSessions.has(sid)) {
+          this.$nextTick(() => this._tryDrainQueue(sid))
+        }
+      } catch (e) {
+        // sendMessage 失败（网络断 / 后端 500 / 用户主动中断后端拒绝）→
+        // 本地已经乐观 slice 出去，但 Redis 还有 head（DELETE 没发出去）→
+        // reload 从 Redis 拉回 head 回 UI（_loadQueueForSession 是 server-authoritative 同步点；
+        // 此处 sid 仍在 _drainedNotDeleted → 过滤掉 head → reload 看不到 head，似乎矛盾？
+        // 不矛盾：catch 在 DELETE 之前 fail，DELETE 没发出，Redis 还有 head。
+        // 我们希望 catch reload 把 head 还回 UI，所以 catch 里要先清理 _drainedNotDeleted 再 reload，
+        // 才能让 head 重新进 local（否则会被 slice 掉再次过滤）。
+        console.warn(`[queue] drain failed for ${sid}, restoring head from Redis:`, e)
+        if (this._drainedNotDeleted?.has(sid)) {
+          const ds = new Set(this._drainedNotDeleted)
+          ds.delete(sid)
+          this._drainedNotDeleted = ds
+        }
+        this.showToast('排队发送失败', '该消息仍在排队中，下次流式结束后会自动重试。')
+        await this._loadQueueForSession(sid)
+      } finally {
+        // 无论成功失败，离开 drain 临界区 — 下一条 head（若存在）由 SSE done handler 触发 _tryDrainQueue。
+        if (this._drainInFlight?.has(sid)) {
+          const s = new Set(this._drainInFlight)
+          s.delete(sid)
+          this._drainInFlight = s
+        }
+      }
     },
 
     /**
@@ -3313,6 +3769,19 @@ export default {
       this.fetchScheduledTasks(sessionId)
       // 拉取当前会话的排队消息（不阻塞；UI 卡片基于 _pendingQueue 渲染）
       this._loadQueueForSession(sessionId)
+
+      // —— 恢复撤回后保留的输入文本（跨 F5 持久化）——
+      //    用户撤回时把文本写进 localStorage[chatme-withdraw-pending:{sid}]；
+      //    加载会话时检测 entry 自动回填，让用户接着编辑 / 发送
+      const pendingWithdraw = localStorage.getItem(`chatme-withdraw-pending:${sessionId}`)
+      if (pendingWithdraw) {
+        this.$nextTick(() => {
+          this.$refs.messageInput?.setInputText(pendingWithdraw)
+        })
+      }
+
+      // 切换/刷新会话后 → 焦点还给输入框（用户预期：看完历史直接接着输入）
+      this.focusInput()
     },
 
     // 静默刷新消息内容，不触发自动滚动（用于对话结束后同步 checkpointId）
@@ -3356,6 +3825,11 @@ export default {
     },
     // 右键刷新指定会话
     async refreshConversation(sessionId) {
+      // 刷新会话（sid 不变，但消息被重拉）→ 清空 MessageInput 的动态 skill 缓存，
+      // 下次用户敲 `/` 时面板会自动 refetch，让 SkillForge 中途新增的 skill 可见。
+      // 切会话走 sessionId watcher（MessageInput.vue），不需要这里重复处理。
+      this.$refs.messageInput?.clearDynamicSkills()
+
       // 流式中的会话跳过 messages 重拉，避免覆盖 in-progress 状态（只刷侧栏）
       if (this._activeStreamingSessions.has(sessionId)) {
         console.log(`[流式保护] 跳过流式中会话的 messages 刷新: ${sessionId}`)
@@ -3399,6 +3873,9 @@ export default {
             conv.title = conversation.title
             conv.updated_at = conversation.updated_at
           }
+          // 刷新完（无论是当前会话还是其他会话的侧栏刷新）→ 焦点还给输入框，
+          // 用户接着打字。流式中的会话已在前面 early return，不走到这里。
+          this.focusInput()
         }
       } catch (error) {
         console.error('刷新会话失败:', error)
@@ -3447,6 +3924,9 @@ export default {
         this._approvalPendingSessions = new Set(this._approvalPendingSessions)
         this._errorSessions.delete(sessionId)
         this._errorSessions = new Set(this._errorSessions)
+        // 释放 sendMessage 并发锁（避免删除会话后锁卡住）
+        this._sendingLock.delete(sessionId)
+        this._sendingLock = new Map(this._sendingLock)
       }
     },
     async updateConversationTitle({ sessionId, title }) {
@@ -3475,18 +3955,53 @@ export default {
       const processedOutputs = typeof data === 'object' ? data.processedOutputs : []
 
       // —— 消息队列守卫 ——
-      // 如果目标 session 正在流式响应（且不是当前 sendMessage 触发的——本函数下面会 set isLoading 之前），
-      // 把消息入队持久化到 Redis（db1，queue:{sid}），UI 显示卡片；
+      // 如果目标 session 正在流式响应（_activeStreamingSessions）或 AI 正在等用户审批
+      // （_approvalPendingSessions；interrupt 已清理 streaming 但 approval 还没解决），
+      // 把消息入队持久化到 Redis（db1，queue:{sid}），UI 显示卡片。
+      // 注意：**不要**把 _drainInFlight 加到 isBusy 里 —— drain 自己调 sendMessage 时，
+      // sid 已经在 _drainInFlight（drain 在 await sendMessage 前先 add），如果 guard 命中，
+      // drain 这次 sendMessage 走 _enqueueMessage → POST + GET 一下、又返回 success，
+      // drain 继续 DELETE idx=0 + slice + 递归 $nextTick → 递归的 sendMessage 又命中 guard
+      // → 再 enqueue 一条 → POST + GET + DELETE + 递归 → **死循环**（POST / GET / DELETE
+      // 一直打 /queue）。所以 _drainInFlight 只用于 _drainQueueAndSend 顶端的 dedup 检查，
+      // 不能泄露到 sendMessage 内部。
       // 输入框已由 MessageInput.handleSend 在 emit 前清空，currentQuote 也已由 update:quote 清空，
       // 所以入队路径只需 POST + re-fetch。
       // 为什么不在 isLoading 上做判断：isLoading 可能因 race / 时序 false（切走前的 stream 已被别的代码清过），
-      // 用 _activeStreamingSessions.has(sid) 更稳——只要 SSE 还在跑就算忙。
-      if (this.currentSessionId && this._activeStreamingSessions.has(this.currentSessionId)) {
-        await this._enqueueMessage(this.currentSessionId, {
+      // 用 _activeStreamingSessions / _approvalPendingSessions 检查更稳——只要 SSE 还在跑或 AI 在等审批就算忙。
+      // （drain 自己调 sendMessage 不走这层判断，busy 由 _drainInFlight 顶端 dedup 保证不会和别的 drain 并发）
+      const sid = this.currentSessionId
+      const isBusy =
+        sid &&
+        (this._activeStreamingSessions.has(sid) || this._approvalPendingSessions.has(sid))
+      if (isBusy) {
+        await this._enqueueMessage(sid, {
           message: message,
           quote: this.currentQuote?.content || null,
         })
         return
+      }
+
+      // —— 同 sid 并发 sendMessage 防护 ——
+      // 极端 case：用户在前一次 sendMessage 的 fetch 还没返回时再次点击发送，
+      // 此时 _activeStreamingSessions 尚未 add(sid)（add 在 fetch 200 之后才发生），
+      // 第二次 sendMessage 会绕过上面的 busy 检查走两次正常路径，导致两个 SSE 并发跑。
+      // 用 _sendingLock Map 兜底：第一次进入 sendMessage 时 set true，函数结尾 finally 块清理；
+      // 第二次进入 fallback 到 _enqueueMessage 入队（不静默 return 丢消息）——
+      // 用户的二次点击变成排队卡，等上一轮 SSE done 后 drain 自动发送。
+      // 这样既避免了两个 SSE 并发跑（_sendingLock 仍挡住了），又保证用户消息不丢。
+      if (sid && this._sendingLock.has(sid)) {
+        console.warn(`[sendMessage] 拒绝并发 sendMessage: sid=${sid}, fallback enqueue`)
+        await this._enqueueMessage(sid, {
+          message: message,
+          quote: this.currentQuote?.content || null,
+        })
+        return
+      }
+      if (sid) {
+        const m = new Map(this._sendingLock)
+        m.set(sid, true)
+        this._sendingLock = m
       }
 
       // 构建文件消息（只包含 files 信息）
@@ -3546,6 +4061,10 @@ export default {
         }
         this.messages.push(textMessage)
       }
+
+      // 撤回文本不再 pending —— 用户已发送，清掉 localStorage
+      // （下次切回该会话不该自动恢复这条已发出的消息）
+      localStorage.removeItem(`chatme-withdraw-pending:${this.currentSessionId}`)
 
       this.isLoading = true
 
@@ -3751,6 +4270,7 @@ export default {
                     if (requestSessionId) {
                       await this.updateTitleOnly(requestSessionId, message)
                     }
+                    this._tryDrainQueue(requestSessionId)
                   } else if (data.type === 'error') {
                     console.error('AI响应错误（原会话）:', data.error)
                     this._sessionHadError.add(requestSessionId)
@@ -3773,6 +4293,7 @@ export default {
                     if (requestSessionId) {
                       await this.updateTitleOnly(requestSessionId, meta.lastUserMessage || message)
                     }
+                    this._tryDrainQueue(requestSessionId)
                   } else if (data.type === 'interrupt') {
                     this.stopResponseTimer()
                     const reason = data.reason || '用户主动中断'
@@ -3787,6 +4308,13 @@ export default {
                     this._streamingMessages.delete(requestSessionId)
                     this._streamingMeta.delete(requestSessionId)
                     this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                    this._tryDrainQueue(requestSessionId)
+                    // 通知 handleWithdraw：SSE interrupt 事件已到达，可以发 backtrack 了
+                    if (this._withdrawInterruptResolver) {
+                      const r = this._withdrawInterruptResolver
+                      this._withdrawInterruptResolver = null
+                      r()
+                    }
                     // 会话已切换：只 PUT 标题 + 同步侧栏，不调 get_conversation
                     if (requestSessionId) {
                       await this.updateTitleOnly(requestSessionId, message)
@@ -3886,6 +4414,12 @@ export default {
                   console.log('更新请求归属的会话标题:', requestSessionId)
                   await this.updateTitleOnly(requestSessionId, message)
                 }
+                // drain 必须在 refresh 之后：
+                // refresh 会 `this.messages = processConversationMessages(...)`，覆盖整数组。
+                // 如果 drain 提前推了占位 AI message，refresh 一覆盖，drain 后续 SSE 的
+                // `this.messages[aiMessageIndex].reasoning` 就炸 `Cannot read of undefined`。
+                // 在所有 refresh / update 完成后触发 → 占位消息被 refresh 的下一轮 fetch 自然吸收。
+                this._tryDrainQueue(requestSessionId)
               } else if (data.type === 'error') {
                 console.error('AI响应错误:', data.error)
                 this._sessionHadError.add(requestSessionId)
@@ -3912,6 +4446,7 @@ export default {
                 if (requestSessionId) {
                   await this.updateTitleOnly(requestSessionId, message)
                 }
+                this._tryDrainQueue(requestSessionId)
               } else if (data.type === 'interrupt') {
                 this.stopResponseTimer()
                 const reason = data.reason || '用户主动中断'
@@ -3930,6 +4465,13 @@ export default {
                 this._streamingMessages.delete(requestSessionId)
                 this._streamingMeta.delete(requestSessionId)
                 this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+                this._tryDrainQueue(requestSessionId)
+                // 通知 handleWithdraw：SSE interrupt 事件已到达，可以发 backtrack 了
+                if (this._withdrawInterruptResolver) {
+                  const r = this._withdrawInterruptResolver
+                  this._withdrawInterruptResolver = null
+                  r()
+                }
               } else if (data.type === 'permission_request') {
                 this.handlePermissionRequest(data, requestSessionId)
               }
@@ -4082,6 +4624,9 @@ export default {
                 this._activeStreamingSessions = new Set(this._activeStreamingSessions)
                 // 绿点：buffer-tail in-session done（已计算 wasError）
                 if (!wasError) this.markSessionCompleted(requestSessionId)
+                // 与 main-loop in-session done 同样的 race 防护：
+                // drain 必须在 refresh 之后，避免 placeholder 被 messages 整体重写。
+                this._tryDrainQueue(requestSessionId)
               } else if (data.type === 'permission_request') {
                 this.handlePermissionRequest(data, requestSessionId)
               }
@@ -4091,6 +4636,13 @@ export default {
           }
         }
       } finally {
+        // —— 释放同 sid 并发 sendMessage 防护锁 ——
+        // 必须走 new Map() 整体替换以触发响应式（虽然本字段没绑定到视图，但保持一致风格避免隐患）。
+        if (sid && this._sendingLock.has(sid)) {
+          const m = new Map(this._sendingLock)
+          m.delete(sid)
+          this._sendingLock = m
+        }
         this.isLoading = false
         this.stopResponseTimer()
       }
@@ -4098,14 +4650,22 @@ export default {
     async updateTitleOnly(sessionId, userMessage) {
       // 只更新会话标题（含侧边栏同步），不重拉 messages。
       // 出错后调用，避免覆盖前端的错误气泡。
+      // 标题派生下沉到后端：传空 title 由后端从最新 HumanMessage 自动筛掉 <quote> + /[xxx] 后截断到 12 字符。
       if (!sessionId || !userMessage) return
-      const title = userMessage.substring(0, 12) + (userMessage.length > 12 ? '...' : '')
+      let title = userMessage.substring(0, 12) + (userMessage.length > 12 ? '...' : '')
       try {
-        await fetch(`/chat/${sessionId}/title`, {
+        const resp = await fetch(`/chat/${sessionId}/title`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title })
+          body: JSON.stringify({})  // 空 → 后端自动派生（剥 quote / pill + 截断）
         })
+        if (resp.ok) {
+          const data = await resp.json().catch(() => ({}))
+          // 后端派生的标题优先（剥了 quote / pill 的干净版本）；失败 fallback 到前端兜底
+          if (data && typeof data.new_title === 'string' && data.new_title) {
+            title = data.new_title
+          }
+        }
       } catch (error) {
         console.error('更新标题失败:', error)
       }
@@ -4123,14 +4683,20 @@ export default {
       }
     },
     async updateTitleAndRefresh(sessionId, userMessage) {
-      // 1. 用用户消息更新标题
-      const title = userMessage.substring(0, 12) + (userMessage.length > 12 ? '...' : '')
+      // 1. 用用户消息更新标题（后端自动剥 <quote> + /[xxx] + 截断到 12 字符）
+      let title = userMessage.substring(0, 12) + (userMessage.length > 12 ? '...' : '')
       try {
-        await fetch(`/chat/${sessionId}/title`, {
+        const resp = await fetch(`/chat/${sessionId}/title`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title })
+          body: JSON.stringify({})  // 空 → 后端自动派生
         })
+        if (resp.ok) {
+          const data = await resp.json().catch(() => ({}))
+          if (data && typeof data.new_title === 'string' && data.new_title) {
+            title = data.new_title
+          }
+        }
       } catch (error) {
         console.error('更新标题失败:', error)
       }
@@ -4423,6 +4989,7 @@ export default {
   },
   beforeUnmount() {
     window.removeEventListener('resize', this.handleResize)
+    window.removeEventListener('keydown', this.handleOverlayKeydown)
     for (const controller of this._previewLoadControllers.values()) controller.abort()
     this._previewLoadControllers.clear()
     // NotFoundView timer 清理：避免组件卸载后 setTimeout / setInterval 仍在跑
@@ -4436,7 +5003,21 @@ export default {
       if (!newVal) {
         this.currentAiMessageIndex = null
       }
-    }
+    },
+    // —— 弹窗 / 面板关闭 → 焦点还给输入框（统一处理）——
+    // slash 命令 /backtrack /settings /help /worktree 等开的弹层关掉后，
+    // 用户应当能直接继续打字。Esc / × / overlay click 三条关闭路径都覆盖。
+    // showRestoreConfirm（恢复历史版本）故意不监听：那是 destructive 操作，
+    // 用户做了决定后焦点归还反而干扰（会立即开始一轮新流程）。
+    showCheckpoints(newVal, oldVal) { if (oldVal && !newVal) this.onPanelClosed() },
+    showWebPreview(newVal, oldVal)  { if (oldVal && !newVal) this.onPanelClosed() },
+    showImagePreview(newVal, oldVal){ if (oldVal && !newVal) this.onPanelClosed() },
+    showFilePreview(newVal, oldVal) { if (oldVal && !newVal) this.onPanelClosed() },
+    settingsVisible(newVal, oldVal) { if (oldVal && !newVal) this.onPanelClosed() },
+    helpVisible(newVal, oldVal)     { if (oldVal && !newVal) this.onPanelClosed() }
+    // ToastDialog 走 closeToast() 方法自己处理（不监听 toast.visible，
+    // 因为 toast 内的「知道了」按钮和自动消失是两套时机，混在一起易抖）。
+    // Resume 弹窗走 cancelResume / confirmResume 自己处理（用户正在做决策）。
   }
 }
 </script>

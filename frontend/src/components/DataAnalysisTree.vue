@@ -1,10 +1,10 @@
 <template>
-  <div v-if="exists" class="da-tree-wrapper">
+  <div class="da-tree-wrapper">
     <button
       class="da-trigger"
       :class="{ active: showTree }"
       @click.stop="togglePanel"
-      :title="`数据分析产物 (${fileCount} 个文件)`"
+      :title="fileCount > 0 ? `数据分析产物 (${fileCount} 个文件)` : '数据分析产物（暂无文件）'"
     >
       <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M3 3h18v4H3z"/>
@@ -60,6 +60,19 @@
                 <circle cx="12" cy="12" r="3"/>
               </svg>
             </button>
+            <button
+              class="da-icon-btn"
+              @click="confirmClearTrash"
+              title="清空当前会话的 .trash/ 回收站（物理删除）"
+              aria-label="清空回收站"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="3 6 5 6 21 6"/>
+                <path d="M19 6l-1.5 14a2 2 0 0 1-2 1.83H8.5a2 2 0 0 1-2-1.83L5 6"/>
+                <path d="M10 11v6M14 11v6"/>
+                <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+              </svg>
+            </button>
             <button class="da-icon-btn" @click="reload" title="刷新">
               <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="23 4 23 10 17 10"/>
@@ -112,21 +125,33 @@
                 :node="child"
                 :depth="0"
                 @file-click="onFileClick"
+                @file-delete="onFileDelete"
               />
             </div>
           </div>
         </div>
       </div>
     </transition>
+
+    <ConfirmDialog
+      :visible="showClearTrashDialog"
+      title="清空回收站？"
+      :message="`手动删除 .trash/${clearTrashSidShort}/ 下的软删除文件，无法恢复。`"
+      confirm-text="清空"
+      cancel-text="取消"
+      @confirm="doClearTrash"
+      @cancel="showClearTrashDialog = false"
+    />
   </div>
 </template>
 
 <script>
 import DataTreeNode from './DataTreeNode.vue'
+import ConfirmDialog from './ConfirmDialog.vue'
 
 export default {
   name: 'DataAnalysisTree',
-  components: { DataTreeNode },
+  components: { DataTreeNode, ConfirmDialog },
   props: {
     sessionId: { type: String, default: '' }
   },
@@ -142,7 +167,9 @@ export default {
       tipsHovered: false,
       tipsPinned: false,
       _tipsHoverEndTimer: null,
-      exporting: false
+      exporting: false,
+      showClearTrashDialog: false,
+      clearingTrash: false
     }
   },
   computed: {
@@ -163,6 +190,10 @@ export default {
         if (a.type !== b.type) return a.type === 'directory' ? -1 : 1
         return a.name.localeCompare(b.name)
       })
+    },
+    clearTrashSidShort() {
+      // 弹窗文案里展示短 sid 让用户能识别是哪条会话
+      return this.sessionId ? this.sessionId.slice(0, 8) : 'session'
     }
   },
   watch: {
@@ -184,6 +215,13 @@ export default {
     togglePanel() {
       this.showTree = !this.showTree
       if (!this.showTree) this.tipsPinned = false
+    },
+    // 由 App.vue 通过 ref 调起（如 `/worktree` slash 命令），用于把工作树浮窗打开。
+    // 复用现有 showTree 状态，与用户手动点 trigger 按钮效果一致。
+    openPanel() {
+      if (!this.showTree) {
+        this.showTree = true
+      }
     },
     closePanel() {
       this.showTree = false
@@ -277,9 +315,12 @@ export default {
               modified_at: file.modified_at
             })
           } else {
+            // 目录节点也存 path（指向该目录的完整路径），让行内 × 删除能取到
+            // 之前只有文件 leaf 带 path，目录节点删除按钮没法工作
+            const dirPath = basePrefix + parts.slice(0, i + 1).join('/')
             let dir = current.children.find(c => c.name === part && c.type === 'directory')
             if (!dir) {
-              dir = { name: part, type: 'directory', children: [] }
+              dir = { name: part, type: 'directory', path: dirPath, children: [] }
               current.children.push(dir)
             }
             current = dir
@@ -353,6 +394,64 @@ export default {
       // 点文件后不折叠树：保留树状态让用户继续浏览其他文件，
       // 树面板的关闭交给 click-outside 处理
       this.$emit('file-click', node)
+    },
+    async onFileDelete(node) {
+      // DataTreeNode 已经做完行内二次确认，这里直接发 DELETE。
+      // 后端走软删除：文件移到 .trash/{sid}/{ts}_{rel_path}，11:30 定时清。
+      if (!this.sessionId || !node || !node.path) return
+      // node.path 是绝对路径（含 cached/{sid}/ 前缀），提取相对路径给后端
+      const relPath = this._extractRelativePath(node.path)
+      if (!relPath) {
+        alert('删除失败：路径解析异常')
+        return
+      }
+      try {
+        const url = `/chat/${encodeURIComponent(this.sessionId)}/file?file_path=${encodeURIComponent(relPath)}`
+        const resp = await fetch(url, { method: 'DELETE' })
+        if (!resp.ok) {
+          const detail = await resp.json().catch(() => ({}))
+          alert(`删除失败：${resp.status} ${detail.detail || resp.statusText}`)
+          return
+        }
+        // 删除成功后刷新树（不开新面板）
+        this.check()
+      } catch (e) {
+        console.error('[DataAnalysisTree] file delete failed:', e)
+        alert(`删除失败：${e.message || e}`)
+      }
+    },
+    _extractRelativePath(absolutePath) {
+      // 去掉 rootPath 前缀，留 cached/{sid}/xxx 的 xxx 段
+      const basePrefix = this.rootPath.endsWith('/') ? this.rootPath : this.rootPath + '/'
+      if (absolutePath.startsWith(basePrefix)) {
+        return absolutePath.slice(basePrefix.length)
+      }
+      // 兜底：直接走 basename 应急（理论上不应触发）
+      return absolutePath.split('/').pop()
+    },
+    confirmClearTrash() {
+      if (!this.sessionId || this.clearingTrash) return
+      this.showClearTrashDialog = true
+    },
+    async doClearTrash() {
+      this.showClearTrashDialog = false
+      if (!this.sessionId || this.clearingTrash) return
+      this.clearingTrash = true
+      try {
+        const resp = await fetch(`/chat/${encodeURIComponent(this.sessionId)}/trash`, { method: 'DELETE' })
+        const data = await resp.json().catch(() => ({}))
+        if (!resp.ok) {
+          alert(`清空失败：${resp.status} ${data.detail || resp.statusText}`)
+          return
+        }
+        // 静默成功即可，定时任务每天也会兜底清
+        console.log('[DataAnalysisTree] trash cleared:', data)
+      } catch (e) {
+        console.error('[DataAnalysisTree] clear trash failed:', e)
+        alert(`清空失败：${e.message || e}`)
+      } finally {
+        this.clearingTrash = false
+      }
     },
     onOutsideClick(e) {
       // 树没开就不处理

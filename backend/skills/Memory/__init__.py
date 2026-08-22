@@ -30,8 +30,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+from ChatMe.paths import get_chatme_dir
 
-_THREAD_MEMORY_DIR = Path.cwd() / ".chatme" / "memory"
+
+_THREAD_MEMORY_DIR = get_chatme_dir() / "memory"
 _GLOBAL_MEMORY_DIR = _THREAD_MEMORY_DIR / "global"
 
 

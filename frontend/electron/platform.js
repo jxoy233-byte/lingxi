@@ -73,12 +73,18 @@ export function getShellCmd(cmd) {
  * （`/etc/paths.d/*` 只在 login interactive shell 启动时被 `/etc/zprofile` 调用）。
  * 结果用户在终端能跑的 python3，Electron 子进程 ENOENT。
  *
- * 解法：`$SHELL -ilc '<cmd>'`
- *   -i  interactive：让 `eval "$(pyenv init -)"` 这类 interactive-only 初始化也走
- *   -l  login：让 /etc/zprofile → path_helper → /etc/paths.d/* 被注入
- *   -c  跑命令
+ * 解法（按平台分流）：
+ *   - macOS/Linux: `$SHELL -ilc '<cmd>'`
+ *     -i  interactive：让 `eval "$(pyenv init -)"` 这类 interactive-only 初始化也走
+ *     -l  login：让 /etc/zprofile → path_helper → /etc/paths.d/* 被注入
+ *     -c  跑命令
+ *   - Windows: `cmd.exe /d /s /c '<cmd>'`
+ *     -ilc 是 bash/zsh 标志，cmd.exe 不认（会把它当文件名找）。所以 Windows 走 cmd.exe 自己的标志：
+ *     /d 跳过 AutoRun 注册表项；/s 调整引号处理（docker compose 命令里常有
+ *         `--format "{{.State.Status}}"` 这种含引号参数，没有 /s 时外层 /c 的字符串边界识别会断）；
+ *     /c 执行命令后退出。
  *
- * ⚠️ 性能成本：每次 ~200ms（pyenv rehash + zsh 启动）。
+ * ⚠️ 性能成本：每次 ~200ms（pyenv rehash + zsh 启动；cmd 启动也 ~50ms）。
  *   不适合做高频调用；这里只在 probe / 启动后端时用。
  *
  * 这是 best-effort：极少数用户的 .zshrc 用 `[[ $- != *i* ]] && return` 早期 return，
@@ -87,14 +93,21 @@ export function getShellCmd(cmd) {
 export async function execInUserShell(command, opts = {}) {
   const shell = getUserShell()
   // spawn 直跑避免 /bin/sh 二次包裹；不走 exec() 默认行为
-  // HISTFILE=/dev/null 屏蔽 zsh "Restored session" 噪音（不影响 PATH 解析）
+  // HISTFILE=/dev/null 屏蔽 zsh "Restored session" 噪音（不影响 PATH 解析，cmd.exe 忽略此变量）
   return new Promise((resolve, reject) => {
-    const child = spawn(shell, ['-ilc', command], {
-      timeout: opts.timeout ?? 10_000,
-      cwd: opts.cwd,
-      windowsHide: true,
-      env: { ...process.env, HISTFILE: '/dev/null' },
-    })
+    const child = IS_WIN
+      ? spawn(shell, ['/d', '/s', '/c', command], {
+          timeout: opts.timeout ?? 10_000,
+          cwd: opts.cwd,
+          windowsHide: true,
+          env: { ...process.env, HISTFILE: '/dev/null' },
+        })
+      : spawn(shell, ['-ilc', command], {
+          timeout: opts.timeout ?? 10_000,
+          cwd: opts.cwd,
+          windowsHide: true,
+          env: { ...process.env, HISTFILE: '/dev/null' },
+        })
     let stdout = '', stderr = ''
     child.stdout?.on('data', d => stdout += d.toString())
     child.stderr?.on('data', d => stderr += d.toString())
@@ -129,10 +142,17 @@ const CANDIDATE_NAMES = ['lingxi', 'chatme']
 
 /** BFS 扫描时跳过的目录（体积大 / 不可能放项目） */
 const SKIP_DIRS = new Set([
+  // 通用（构建 / 依赖产物）
   'Library', 'Applications', 'System', 'Music', 'Movies', 'Pictures',
   'node_modules', '.git', '.venv', 'venv', '__pycache__', 'dist',
   'Trash', '.Trash', 'AppData', 'Windows', 'Program Files',
   'Downloads', 'downloads', 'Desktop', 'desktop',
+  // Linux 大目录（避免 maxVisits=4000 被吃掉扫不到项目）
+  // .cargo / .rustup 是 registry cache / git refs，几乎不可能放项目源码
+  '.cache', '.config', '.local', '.cargo', '.rustup',
+  '.npm', '.nvm', '.yarn', '.next', '.claude',
+  // 包管理器数据
+  'snap', '.snap', 'flatpak', '.var',
 ])
 
 /**

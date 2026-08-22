@@ -1,6 +1,6 @@
 {
   "name": "lingxi-frontend",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": true,
   "type": "module",
   "main": "electron/main.js",
@@ -70,12 +70,35 @@
     },
     "linux": {
       "icon": "build/icon.png",
-      "category": "Office",
+      "category": "Development",
+      "synopsis": "AI 数据分析智能助手",
+      "description": "基于 LangGraph 的多智能体数据分析对话系统，支持文件解析、SQL 查询、Python 代码沙盒、定时任务等",
+      "desktop": {
+        "Comment": "AI 数据分析智能助手，支持文件解析、SQL 查询、Python 沙盒、定时任务",
+        "Keywords": "AI;data;analysis;sql;python;langgraph;",
+        "StartupNotify": "true",
+        "Terminal": "false"
+      },
       "target": [
         {
           "target": "AppImage",
           "arch": [
-            "x64"
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "rpm",
+          "arch": [
+            "x64",
+            "arm64"
           ]
         }
       ]

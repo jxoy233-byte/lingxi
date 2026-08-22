@@ -49,6 +49,11 @@
 - **SkillForge 动态创建 skill（v0.1.5 新增）**：`SkillForge` skill 让 agent / 用户写一段 Python wrapper 落到 `/skills/<name>/`，立即被 `find_skill` 发现（registry 按 mtime 自动重扫，无需重启）。
 - **Settings 4 tab + 热加载（v0.1.5 新增）**：`vl.local` 开关决定是否加载本地 VL 模型 + fallback 主用 LLM；`/admin/config` GET / PUT（白名单 llm_providers / skills / permissions）；**按段决定 `restart_required`** —— permissions / skills 改动立即生效，llm_providers 需重启；`/admin/restart` + `/admin/health` 支持前端轮询等待重启恢复。**前端 `buildPayload()` diff-only**（`_deepDiff` + `_stripEmptyObjects`），避免「在 Permissions 改一字段把 llm_providers 全部带上」的误判。
 - **Checkpoint 清理端点（v0.1.5 新增）**：LangGraph `AsyncRedisSaver` 每节点 aput 会攒几十～几百个 checkpoint，dump.rdb 膨胀且启动慢；`POST /admin/checkpoints/prune` 手动清理（dry_run 预览 / 真删两种），前端 Settings「立即清理」按钮调用；后台已自动 hook 进 `_save_round_checkpoint` 每轮 round 收尾时异步 prune。
+- **Slash 命令面板（v0.1.7 新增）**：行首输入 `/` 弹出 Codex 风格面板，分「命令 / 技能」两组；静态 action（`/backtrack` `/settings` `/reload` `/worktree` `/help`）+ 动态 skill（后端 `/chat/skills` 实时拉取，按目录名 PascalCase 显示）。选中后以 `/[SkillName]` chip 形态浮在输入框左侧，`handleSend` 时还原成 `/[xxx] ` 前缀发给后端。prompt 注入对应 hint：前缀一字不改、args 可优化；非 slash 输入不要凭空加 `/[SkillName]`。
+- **文件树行内删除 + 软删除 .trash/（v0.1.7 新增）**：文件 / 文件夹行内 × 红叉二次确认调 `DELETE /chat/{sid}/file`，文件移到 `backend/.trash/{sid}/{timestamp}_{rel_path}`；每天 11:30 APScheduler 定时清空，前端 DataAnalysisTree 头部 🗑 「清空回收站」按钮手动触发 `DELETE /chat/{sid}/trash`。误删可找回。
+- **标题自动派生（v0.1.7 新增）**：`PUT /chat/{sid}/title` title 为空时后端从 state 最新 HumanMessage 派生（剥 `<quote>` 引用块 + `/[xxx]` slash pill + 截断 12 字符），返回实际写入的 `new_title`，前端不再依赖客户端 substring 兜底。
+- **后端路径中心化（v0.1.7 新增）**：`backend/ChatMe/paths.py` 集中导出 `BACKEND_ROOT` / `CACHED_DIR` / `SKILLS_ROOT` / `TRASH_DIR` / `get_chatme_dir()`，替代所有模块里散落的 `Path.cwd()` / `parents[N]` 调用；从任意 cwd 启动后端都不会漂移。
+- **Linux 多格式打包（v0.1.7 新增）**：`electron-builder` 同时产出 AppImage / `.deb` / `.rpm`，x64 + arm64 双架构；`README` 增「Linux 安装与故障排查」段覆盖 FUSE 缺失、AppImage 直接解压等场景。
 
 ## 界面预览
 
@@ -190,7 +195,7 @@ OPENAI_PRESENCE_PENALTY=0.0
 {
   "app": {
     "name": "ChatMe",
-    "version": "v0.1.6",
+    "version": "v0.1.7",
     "host": "127.0.0.1",
     "port": 8211
   },
@@ -417,13 +422,13 @@ MCP 服务器（`mcps/server.py`，FastMCP 3.x，stdio transport）暴露以下�
 ```bash
 cd backend
 uv build --wheel
-# 输出: dist/ChatMe-0.1.6-py3-none-any.whl
+# 输出: dist/ChatMe-0.1.7-py3-none-any.whl
 ```
 
 ### 安装 wheel
 
 ```bash
-uv pip install dist/ChatMe-0.1.6-py3-none-any.whl
+uv pip install dist/ChatMe-0.1.7-py3-none-any.whl
 # 安装后 chatme_main 和 chatme_mcp 命令全局可用
 ```
 
@@ -453,18 +458,53 @@ npm run electron:build
 # 明确指定平台
 npm run electron:build:mac      # macOS arm64 + x64（DMG + ZIP）
 npm run electron:build:win      # Windows NSIS（x64）
-npm run electron:build:linux    # Linux AppImage（x64）
+npm run electron:build:linux    # Linux AppImage + .deb + .rpm（x64 + arm64）
 ```
 
-桌面端通过 `electron-builder` 打包，应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.1.6）在 `frontend/electron/electron.config.js` 中配置。
+桌面端通过 `electron-builder` 打包，应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.1.7）在 `frontend/electron/electron.config.js` 中配置。
 
 **输出位置**：`../release/electron-builder/`（项目根，与 Vite 的 `dist/` / `frontend/` 区分开）：
 
 - `mac-arm64/灵析.app` — 直接打开
 - `mac/` — x64 .app
-- `灵析-0.1.6-arm64-mac.zip` / `灵析-0.1.6-mac.zip` — 分发包
+- `灵析-0.1.7-arm64-mac.zip` / `灵析-0.1.7-mac.zip` — 分发包
 - `linux-unpacked/` — Linux 解压目录
+- `灵析-0.1.7.AppImage` — Linux 便携版（需 FUSE，见下文）
+- `灵析-0.1.7.deb` — Debian / Ubuntu 安装包
+- `灵析-0.1.7.rpm` — Fedora / RHEL 安装包
 - `win-unpacked.exe` — Windows 安装器
+
+### Linux 安装与故障排查
+
+**优先选 .deb / .rpm**（系统包管理器管理依赖、自动建快捷方式、`.desktop` 文件进 `/usr/share/applications/`）：
+
+```bash
+# Debian / Ubuntu
+sudo dpkg -i 灵析-0.1.7.deb
+sudo apt install -f   # 自动补依赖
+
+# Fedora / RHEL / openSUSE
+sudo rpm -ivh 灵析-0.1.7.rpm
+# 或
+sudo dnf install ./灵析-0.1.7.rpm
+```
+
+**AppImage 需要 FUSE**（默认走 squashfs 挂载路径）。如果遇到以下报错：
+
+```
+dlopen(): libfuse.so.2 ... cannot open shared object file
+fuse: device not found, try 'modprobe fuse' first
+```
+
+三种修复方式，按推荐顺序：
+
+1. **装 FUSE**（最稳）：`sudo apt install fuse libfuse2`（Debian/Ubuntu）/ `sudo dnf install fuse`（Fedora）
+2. **绕过 FUSE 直接解压跑**（无 FUSE 环境 / WSL2 默认）：`./灵析-0.1.7.AppImage --appimage-extract-and-run`，内置解包 + 跑（每次启动慢 ~1s）
+3. **手动解包**：`./灵析-0.1.7.AppImage --appimage-extract` → `squashfs-root/AppRun` 直接跑（适合调试）
+
+**下载后无法执行**通常是浏览器没设可执行位：`chmod +x 灵析-0.1.7.AppImage`
+
+**arm64 用户**（Apple Silicon Linux / RPi 4-5 / AWS Graviton）：现在构建同时产出 `*-arm64.AppImage` / `*-arm64.deb` / `*-arm64.rpm`，不用改源码。
 
 **Electron 核心机制**（详见 [`frontend/README.md`](frontend/README.md)）：
 

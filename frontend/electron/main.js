@@ -751,6 +751,17 @@ async function fixUv(onLog) {
     )
     const cargoBin = path.join(os.homedir(), '.cargo', 'bin')
     process.env.PATH = `${cargoBin}${path.delimiter}${process.env.PATH}`
+    // 持久化到用户环境：只改 process.env.PATH 不够——后续 spawn 的 cmd.exe
+    // 子进程不继承父进程瞬时改动（且 cmd.exe 启动也不重读 PATH），所以 setx
+    // 把 cargoBin 追加到用户 PATH，bootstrap 后续步骤（probeUv / uv sync）才能找到 uv。
+    // 用 `setx PATH "%PATH%;..."` 而不是 setx 单变量是为了复用当前 session 的 PATH。
+    // 失败不抛——改 process.env.PATH 已经是兜底，本进程内再 exec 能找到。
+    await execStream(
+      `setx PATH "%PATH%;${cargoBin}"`,
+      { onLog, shell: true }
+    ).catch(err => {
+      onLog?.(`[uv] ⚠️ setx PATH 失败（当前进程仍可用）：${err.message}\n`)
+    })
   } else {
     // mac/linux 装到 ~/.local/bin
     await execStream(
@@ -784,7 +795,7 @@ async function fixRedis(onLog) {
   // 不主动 `docker rm`：避免误删用户手动配置的容器或旧版残留（数据可能还在数据卷里）
   try {
     const inspectOut = await execInUserShell(
-      `docker inspect chatme-redis --format "{{.State.Status}}" 2>/dev/null`
+      `docker inspect chatme-redis --format "{{.State.Status}}" ${IS_WIN ? '2>nul' : '2>/dev/null'}`
     ).catch(() => '')
     if (inspectOut === 'running') {
       onLog?.('[redis] 容器已在运行，跳过\n')
@@ -818,7 +829,7 @@ async function waitForRedisReady(root, onLog) {
   while (Date.now() < deadline) {
     try {
       const out = await execInUserShell(
-        `docker exec chatme-redis redis-cli -a 123456 --no-auth-warning ping 2>/dev/null`
+        `docker exec chatme-redis redis-cli -a 123456 --no-auth-warning ping ${IS_WIN ? '2>nul' : '2>/dev/null'}`
       )
       if (out === 'PONG') {
         onLog?.('[redis] ✅ PONG\n')

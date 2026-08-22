@@ -5,6 +5,8 @@ from pathlib import Path
 from datetime import datetime
 from logging.handlers import RotatingFileHandler, QueueHandler, QueueListener
 
+from ChatMe.paths import get_chatme_dir
+
 
 _log_listeners: dict[str, QueueListener] = {}
 
@@ -75,7 +77,7 @@ def set_logger(
     log_level: int = logging.DEBUG,
     max_bytes: int = 10 * 1024 * 1024,
     backup_count: int = 5,
-    log_dir=Path.cwd() / ".chatme" / "logs"
+    log_dir=get_chatme_dir() / "logs"
 ):
     """
     配置主日志处理器（写主日志文件 `YYYY-MM-DD.log`）
@@ -105,7 +107,7 @@ def set_thinking_chain_logger(
     log_level: int = logging.INFO,
     max_bytes: int = 10 * 1024 * 1024,
     backup_count: int = 5,
-    log_dir=Path.cwd() / ".chatme" / "logs"
+    log_dir=get_chatme_dir() / "logs"
 ):
     """
     配置 AI 思维链专用日志处理器（写独立文件 `thinking_chain-YYYY-MM-DD.log`）。
@@ -160,7 +162,7 @@ _THINKING_PENDING_DIR_NAME = "thinking_chain-pending"
 
 def get_pending_thinking_dir() -> Path:
     """返回 thinking_chain-pending 临时目录路径，自动创建。"""
-    pending_dir = Path.cwd() / ".chatme" / "logs" / _THINKING_PENDING_DIR_NAME
+    pending_dir = get_chatme_dir() / "logs" / _THINKING_PENDING_DIR_NAME
     pending_dir.mkdir(parents=True, exist_ok=True)
     return pending_dir
 
@@ -187,7 +189,7 @@ def flush_pending_thinking_for_session(sid: str) -> bool:
         if content:
             # 按临时文件 mtime 决定 merge 目标日期文件（主文件按天切分）
             date_str = datetime.fromtimestamp(pending_file.stat().st_mtime).strftime("%Y-%m-%d")
-            main_file = Path.cwd() / ".chatme" / "logs" / f"thinking_chain-{date_str}.log"
+            main_file = get_chatme_dir() / "logs" / f"thinking_chain-{date_str}.log"
             with main_file.open("a", encoding="utf-8") as f:
                 f.write(content)
 

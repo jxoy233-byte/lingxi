@@ -9,6 +9,7 @@ from typing import Optional, Set, Dict, Deque
 
 from ChatMe.ChatWorkflow.skills.registry import SkillRegistry
 from ChatMe.LoggingManager.logging_config import get_logger
+from ChatMe.paths import BACKEND_ROOT, CACHED_DIR, SKILLS_ROOT, get_chatme_dir
 
 
 class SandboxPoolTimeoutError(RuntimeError):
@@ -62,19 +63,21 @@ class SandboxPool:
     ):
         self.image = image
 
-        # __file__ = backend/ChatMe/ChatWorkflow/mcps/sandbox/pool.py
-        # 移入 sandbox/ 子包后路径深度 +1：原 CodeSandboxPool.py 在 parents[3] 拿到 backend/，
-        # 现在 pool.py 要 parents[4] 才能拿到 backend/，parents[5] 是项目根。
-        backend_root = Path(__file__).resolve().parents[4]
-        top_root = Path(__file__).resolve().parents[5]
-        self.skills_path = os.path.abspath(skills_path or backend_root / "skills")
-        self.cached_path = os.path.abspath(cached_path or backend_root / "cached")
-        self.config_path = os.path.abspath(config_path or backend_root / ".chatme" / "config.json")
-        self.logs_path = os.path.abspath(config_path or backend_root / ".chatme" / "logs")
+        # 路径全部走 ChatMe.paths（anchored to backend/，不依赖 cwd / __file__ 深度）：
+        # - skills / cached / .chatme 三个根从中心模块拿，不再硬写 parents[N]
+        # - project_root（parents[1] from backend/）用于找 sandbox-only config 所在目录
+        #   （sandbox/ 目录与 backend/ 平级，所以 project_root = backend/ 的 parent）
+        chatme_dir = get_chatme_dir()
+        # project_root = backend/ 的父目录（sandbox/ 在 backend/ 同级）
+        project_root = BACKEND_ROOT.parent
+        self.skills_path = os.path.abspath(skills_path or str(SKILLS_ROOT))
+        self.cached_path = os.path.abspath(cached_path or str(CACHED_DIR))
+        self.config_path = os.path.abspath(config_path or str(chatme_dir / "config.json"))
+        self.logs_path = os.path.abspath(str(chatme_dir / "logs"))
         # 记忆目录（ro 挂到 /memory）—— 沙盒可读不可写，写仍走 host 的 remember
-        self.memory_path = os.path.abspath(backend_root / ".chatme" / "memory")
+        self.memory_path = os.path.abspath(str(chatme_dir / "memory"))
         # 自动生成的 sandbox-only config（只含 skills 段，权限 600，不入 git）
-        self.sandbox_config_path = os.path.abspath(top_root / "sandbox" / ".sandbox-config.json")
+        self.sandbox_config_path = os.path.abspath(str(project_root / "sandbox" / ".sandbox-config.json"))
 
         # 从 host config.json 抽取 skills 段，生成 sandbox-only 配置
         self._generate_sandbox_config()

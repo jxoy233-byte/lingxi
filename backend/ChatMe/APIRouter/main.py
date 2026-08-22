@@ -1,7 +1,11 @@
 from contextlib import asynccontextmanager
+from datetime import datetime
+import hashlib
+import pathlib
+import shutil
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, FastAPI, Path, Body, File, Form, UploadFile
+from fastapi import APIRouter, HTTPException, FastAPI, Path, Body, File, Form, Query, UploadFile
 from pydantic import BaseModel
 from fastapi.responses import StreamingResponse
 
@@ -11,6 +15,7 @@ from ChatMe.ChatService.config.models import ChatRequest, ConversationSimple
 from ChatMe.ChatService import ChatService, FILE_MAX_LENGTH
 from ChatMe.ChatWorkflow import ChatWorkflow
 from ChatMe.LoggingManager.logging_config import get_logger
+from ChatMe.paths import BACKEND_ROOT, CACHED_DIR, TRASH_DIR
 
 ChatMe_app = APIRouter(prefix="/chat")
 
@@ -137,16 +142,16 @@ async def delete_conversation(
     return {"code": 200, "msg": "会话删除成功", "session_id": session_id}
 
 
-@ChatMe_app.put("/{session_id}/title", summary="修改会话标题")
+@ChatMe_app.put("/{session_id}/title", summary="修改会话标题（自动从最新 HumanMessage 派生）")
 async def update_conversation_title(
     session_id: str = Path(..., description="会话唯一ID"),
-    title: str = Body(..., embed=True, min_length=1, max_length=50, description="会话标题")
+    title: Optional[str] = Body(None, embed=True, max_length=50, description="会话标题；为空则自动从最新 HumanMessage 派生（剥 <quote> 块 + /[xxx] pill）")
 ):
-    """修改会话标题：解决默认标题新对话的问题，前端点击修改标题调用"""
-    success = await chat_service.update_conversation_title(session_id, title)
-    if not success:
-        raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在，修改失败")
-    return {"code": 200, "msg": "标题修改成功", "session_id": session_id, "new_title": title}
+    """修改会话标题：title 为空时由后端从 state 最新 HumanMessage 自动派生（剥掉引用块和 slash pill）。"""
+    new_title = await chat_service.update_conversation_title(session_id, title)
+    if not new_title:
+        raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在或无可派生标题的 HumanMessage")
+    return {"code": 200, "msg": "标题修改成功", "session_id": session_id, "new_title": new_title}
 
 @ChatMe_app.get("/{session_id}/title", summary="获取单个会话的标题")
 async def get_conversation_title(
@@ -180,6 +185,66 @@ async def get_file_config():
     return await chat_service.get_file_config()
 
 
+@ChatMe_app.get("/skills", summary="获取动态 skill 列表（前端 slash 弹窗 + /help 用）")
+async def get_skills():
+    """列出当前后端可见的所有顶层 skill，供前端 `/` 弹窗和 `/help` 弹窗渲染。
+
+    设计要点：
+    - 走 `get_skill_registry().names()`，registry 内部 `_maybe_rescan()` 自动
+      检测 SKILL.md mtime 变化 —— SkillForge 写新 skill 后无需重启后端，
+      下次 GET 即拿到新列表。
+    - 顶层 skill 限定：`manifest.path.parent == registry.skills_root`。嵌套
+      子 skill（如 DataAnalysis/database）通过主 skill 的 SKILL.md 引导
+      `cmd("cat /skills/<...>")` 加载，不进 slash 命令面板。
+    - `lazy: true` 过滤：lazy skill 不进 find_skill 索引（按偏好 30 约定），
+      同样不进 slash 面板；用户直接敲 `/[LazyName]` 仍可走（typing 兜底认 name）。
+    - **name 字段 = 目录名 PascalCase**（如 `DataAnalysis`），不是 registry
+      里的 frontmatter name（snake_case 如 `data_analysis`，仅供 Python
+      import 用）。slash chip 显示 + 发往后端的 `/[<name>]` 都用目录名，
+      agent 收到后 `cat /skills/DataAnalysis/SKILL.md` 才能在 case-sensitive
+      的 Linux 容器里命中路径。
+    - description 优先 SKILL.md frontmatter 的 description，回退到 summary，
+      最后兜底 `<name> skill`。
+    """
+    from ChatMe.ChatWorkflow.skills.registry import get_skill_registry
+
+    try:
+        registry = get_skill_registry()
+    except Exception as exc:
+        logger.warning(f"SkillRegistry 不可用，返回空列表: {exc}")
+        return {"skills": []}
+
+    skills = []
+    skills_root = registry.skills_root
+    for name in registry.names():
+        manifest = registry.get(name)
+        if manifest is None:
+            continue
+        # 只保留顶层 skill
+        if manifest.path.parent != skills_root:
+            continue
+        # lazy skill 不进 slash 面板
+        if manifest.lazy:
+            continue
+        # 用目录名（PascalCase）作为 slash 命令的 name —— 见 docstring 的关键约束。
+        # manifest.name 是 frontmatter 里的 snake_case（如 `data_analysis`），
+        # 那是 Python module import 用的，不能拿去 cat 路径。
+        slash_name = manifest.path.name
+        description = str(manifest.frontmatter.get("description", "")).strip()
+        if not description:
+            description = (manifest.summary or "").strip() or f"{slash_name} skill"
+        skills.append({
+            "name": slash_name,
+            "description": description,
+            "lazy": False,
+            "module": manifest.module_path,
+        })
+
+    # 按 name 稳定排序（前后端过滤 / 搜索行为一致）
+    skills.sort(key=lambda s: s["name"].lower())
+    return {"skills": skills}
+
+
 @ChatMe_app.get("/{session_id}/data-analysis/tree", summary="检测会话的 data_analysis 目录结构")
 async def get_data_analysis_tree(
     session_id: str = Path(..., description="会话ID")
@@ -193,7 +258,7 @@ async def get_data_analysis_tree(
         root_path: str - 根路径（相对 cached/）
         files: list[dict] - 扁平文件列表，每项含 path / size / modified_at
     """
-    from ChatMe.APIRouter.static_file import CACHED_DIR, list_data_analysis_files
+    from ChatMe.APIRouter.static_file import list_data_analysis_files
 
     data_analysis_dir = CACHED_DIR / session_id / "data_analysis"
     base_rel = f"cached/{session_id}/data_analysis"
@@ -229,7 +294,7 @@ async def get_session_tree(
         root_path: str - 根路径（相对 cached/），形如 "cached/{session_id}"
         files: list[dict] - 扁平文件列表，每项含 path / size / modified_at
     """
-    from ChatMe.APIRouter.static_file import CACHED_DIR, list_session_files
+    from ChatMe.APIRouter.static_file import list_session_files
 
     session_dir = CACHED_DIR / session_id
     base_rel = f"cached/{session_id}"
@@ -246,6 +311,106 @@ async def get_session_tree(
         "exists": len(files) > 0,
         "root_path": base_rel,
         "files": files,
+    }
+
+
+@ChatMe_app.delete("/{session_id}/file", summary="软删除会话文件（移到 .trash/，每天 11:30 定时清理）")
+async def delete_session_file(
+    session_id: str = Path(..., description="会话ID"),
+    file_path: str = Query(..., description="相对 cached/{session_id}/ 的路径，如 data_analysis/gen_001/charts/sales.png"),
+):
+    """会话文件树右键/行内删除文件 / 目录 —— 软删除实现。
+
+    1. 拒绝绝对路径 / 路径越界（必须落在 cached/{session_id}/ 下）
+    2. 文件 / 目录都支持：shutil.move 对目录自动 rmtree 整树移到 .trash/
+    3. 移目标到 .trash/{session_id}/{timestamp}_{rel_path}（保留路径结构便于排查）
+    4. 已存在同名 → 追加 hash 后缀避免覆盖
+
+    Returns:
+        {"code": 200, "msg": "...", "trash_path": "..."}
+        {"code": 400/404, "msg": "..."} on error
+    """
+    if not file_path or file_path.startswith("/"):
+        raise HTTPException(status_code=400, detail="file_path 必须为相对路径")
+
+    # 拒绝空 / 文件名越界 / 路径穿越
+    if ".." in pathlib.Path(file_path).parts:
+        raise HTTPException(status_code=400, detail="file_path 含非法 '..' 段")
+
+    target = (CACHED_DIR / session_id / file_path).resolve()
+    session_root = (CACHED_DIR / session_id).resolve()
+    try:
+        target.relative_to(session_root)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="file_path 越界，不得跨出会话目录")
+
+    if not target.exists():
+        raise HTTPException(status_code=404, detail=f"文件不存在: {file_path}")
+
+    # 目标：.trash/{session_id}/{timestamp}_{filename}，保留相对路径避免重名
+    # 目录整体走 shutil.move 时自动 rmtree 树移到 .trash/（保留树结构便于排查）
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    trash_target = TRASH_DIR / session_id / f"{timestamp}_{file_path.replace('/', '_')}"
+    trash_target.parent.mkdir(parents=True, exist_ok=True)
+
+    # 同名碰撞兜底：极小概率（同一秒删两次同文件）
+    if trash_target.exists():
+        suffix = hashlib.sha1(str(target).encode()).hexdigest()[:6]
+        trash_target = trash_target.with_name(f"{trash_target.stem}_{suffix}{trash_target.suffix}")
+
+    shutil.move(str(target), str(trash_target))
+    logger.info(f"[delete_session_file] {session_id}/{file_path} → {trash_target}")
+    return {
+        "code": 200,
+        "msg": "已移至 .trash/（每天 11:30 定时清理）",
+        "trash_path": str(trash_target.relative_to(BACKEND_ROOT)),
+        "session_id": session_id,
+    }
+
+
+@ChatMe_app.delete("/{session_id}/trash", summary="手工清空当前会话的 .trash/ 目录")
+async def clear_session_trash(
+    session_id: str = Path(..., description="会话ID"),
+):
+    """物理清理 .trash/{session_id}/ 下所有文件（前端文件树「清空回收站」按钮走这里）。
+
+    与定时清理的关系：
+    - 每天 11:30 APScheduler 会自动跑 `clean_trash()` 清空整个 .trash/
+    - 本接口允许用户从前端随时清空当前会话的 trash（不阻塞其他 session）
+    - 都基于 `TRASH_DIR` 同款路径，无歧义
+
+    Returns:
+        {"code": 200, "removed": N, "freed_bytes": B, "session_id": "..."}
+    """
+    trash_session_dir = TRASH_DIR / session_id
+    if not trash_session_dir.exists():
+        return {
+            "code": 200,
+            "msg": "回收站为空",
+            "removed": 0,
+            "freed_bytes": 0,
+            "session_id": session_id,
+        }
+
+    # 先扫一遍统计：rglob("*") 包含子目录，但只统计文件大小 / 数量
+    # （rmtree 不返回统计；用 onerror 也能做，但预扫更直观）
+    removed = 0
+    freed_bytes = 0
+    for entry in trash_session_dir.rglob("*"):
+        if entry.is_file():
+            freed_bytes += entry.stat().st_size
+            removed += 1
+    # shutil.rmtree 整树删：删除的目录里可能有软删过来的整棵子树
+    # （如 .trash/{sid}/{ts}_data_analysis_gen_001/charts/...），单 unlink + rmdir 删不干净
+    shutil.rmtree(trash_session_dir)
+
+    logger.info(f"[clear_session_trash] {session_id} 清理 {removed} 个文件，释放 {freed_bytes} bytes")
+    return {
+        "code": 200,
+        "msg": f"已清理 {removed} 个文件",
+        "removed": removed,
+        "freed_bytes": freed_bytes,
+        "session_id": session_id,
     }
 
 

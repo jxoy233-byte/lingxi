@@ -198,6 +198,19 @@ export default {
              file.type === 'text/xml')
     },
 
+    /**
+     * 弹窗可见时响应 Esc → 关闭。监听 document 而不是 overlay div 的
+     * @keydown.esc（div 无 tabindex 时收不到键盘事件；预览中有时焦点在 iframe
+     * / 文档内，document 监听最稳）。
+     */
+    handleKeydown(e) {
+      if (!this.visible) return
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        this.close()
+      }
+    },
+
     getFileTypeLabel(file) {
       if (!file) return '未知类型'
 
@@ -314,6 +327,12 @@ export default {
         return ''
       }
     }
+  },
+  mounted() {
+    document.addEventListener('keydown', this.handleKeydown)
+  },
+  beforeDestroy() {
+    document.removeEventListener('keydown', this.handleKeydown)
   },
   computed: {
     // 是否显示下载按钮：覆盖所有有 preview_url 的文件类型（含图片）

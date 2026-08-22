@@ -4,6 +4,7 @@ import pytest
 
 from ChatMe.ChatWorkflow.skills.manifest import parse_frontmatter
 from ChatMe.ChatWorkflow.skills.prompt import available_skills_block, find_skill_block
+from ChatMe.paths import SKILLS_ROOT
 from ChatMe.ChatWorkflow.skills.registry import SkillRegistry, get_skill_registry, reset_skill_registry
 
 
@@ -35,7 +36,7 @@ def test_parse_frontmatter_rejects_malformed_yaml():
 
 
 def test_registry_scans_current_skills():
-    skills_root = Path(__file__).resolve().parents[2] / "skills"
+    skills_root = SKILLS_ROOT
     registry = SkillRegistry(skills_root)
 
     names = registry.names()
@@ -63,7 +64,7 @@ def test_registry_mount_args_include_top_level_rw_and_per_skill_rw(monkeypatch):
     """
     from ChatMe.ChatWorkflow.mcps.sandbox.pool import SandboxPool
 
-    skills_root = Path(__file__).resolve().parents[2] / "skills"
+    skills_root = SKILLS_ROOT
     pool = SandboxPool.__new__(SandboxPool)
     pool.skills_path = str(skills_root.resolve())
 

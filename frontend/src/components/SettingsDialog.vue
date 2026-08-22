@@ -14,13 +14,21 @@
         </div>
 
         <div class="settings-body">
-          <!-- 左侧导航：纯文字标签 -->
-          <nav class="settings-nav">
+          <!-- 左侧导航：纯文字标签。
+               ↑ / ↓（或 ← / →）切 tab，Enter 直接应用（与点击等价）。
+               焦点挂在 nav 上，keydown 监听在 nav，不抢全局其他 keydown。 -->
+          <nav
+            class="settings-nav"
+            tabindex="-1"
+            ref="nav"
+            @keydown="handleTabKeydown"
+          >
             <button
               v-for="tab in tabs"
               :key="tab.key"
+              :ref="'tab_' + tab.key"
               :class="['nav-item', { active: activeTab === tab.key }]"
-              @click="activeTab = tab.key"
+              @click="selectTab(tab.key)"
             >
               {{ tab.label }}
             </button>
@@ -349,6 +357,11 @@ export default {
         this.activeTab = 'appearance'
         this.theme = this.isDarkTheme ? 'dark' : 'light'
         this.loadConfig()
+        // 把焦点抢到 nav 上，↑/↓ 立刻能切 tab
+        this.$nextTick(() => {
+          const nav = this.$refs.nav
+          if (nav && nav.focus) nav.focus()
+        })
       } else {
         this.cleanupTimer()
       }
@@ -357,10 +370,72 @@ export default {
       this.$emit('theme-change', newVal === 'dark')
     }
   },
+  mounted() {
+    document.addEventListener('keydown', this.handleKeydown)
+  },
+  beforeDestroy() {
+    document.removeEventListener('keydown', this.handleKeydown)
+  },
   methods: {
     close() {
       this.cleanupTimer()
       this.$emit('close')
+    },
+    /**
+     * 左侧 nav 键盘导航：
+     *   - ↑ / ↓ (或 ← / →): 切 tab（夹紧边界）
+     *   - Enter / Space: 显式应用当前 active tab（与点击等价 —— 通常 active 已是高亮，
+     *                   但 Enter 让焦点明确表达"就是这个"）
+     * 监听挂在 nav 容器上，open 时 .focus() 把键盘焦点拉过来。
+     * Save 按钮 Enter 走原浏览器行为不被劫持（监听只在 nav 内部冒泡到这里时触发）。
+     */
+    handleTabKeydown(e) {
+      const list = this.tabs
+      if (!list || list.length === 0) return
+      let idx = list.findIndex(t => t.key === this.activeTab)
+      if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
+        e.preventDefault()
+        idx = Math.min(idx + 1, list.length - 1)
+        this.selectTab(list[idx].key)
+      } else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
+        e.preventDefault()
+        idx = Math.max(idx - 1, 0)
+        this.selectTab(list[idx].key)
+      } else if (e.key === 'Home') {
+        e.preventDefault()
+        this.selectTab(list[0].key)
+      } else if (e.key === 'End') {
+        e.preventDefault()
+        this.selectTab(list[list.length - 1].key)
+      }
+    },
+    selectTab(key) {
+      this.activeTab = key
+      // 滚动 nav 让当前 tab 可见（nav 通常可滚动时才有意义）
+      this.$nextTick(() => {
+        const nav = this.$refs.nav
+        const el = this.$refs['tab_' + key]
+        if (!nav || !el || !el[0]) return
+        const itemTop = el[0].offsetTop
+        const itemBottom = itemTop + el[0].offsetHeight
+        const viewTop = nav.scrollTop
+        const viewBottom = viewTop + nav.clientHeight
+        if (itemTop < viewTop) nav.scrollTop = itemTop - 4
+        else if (itemBottom > viewBottom) nav.scrollTop = itemBottom - nav.clientHeight + 4
+      })
+    },
+    /**
+     * 弹窗可见时响应 Esc → 关闭。Save 按钮 Enter 提交让浏览器原生处理
+     * （input focus 时 Enter 触发表单 submit / button click，不需要劫持）。
+     * 这里只补 Esc，避免和 Save 按钮的原生 Enter 行为冲突。
+     */
+    handleKeydown(e) {
+      if (!this.visible) return
+      if (this.restarting || this.saving) return
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        this.close()
+      }
     },
     providerLabel(name) {
       const map = { model1: 'Primary model', model2: 'Backup model', vl: 'Vision model' }
@@ -690,6 +765,8 @@ export default {
   flex-direction: column;
   gap: 2px;
   overflow-y: auto;
+  /* nav 自动 focus 接收 ↑↓/←→ 等键盘事件，不该显示浏览器默认黑 focus ring */
+  outline: none;
 }
 
 .nav-item {

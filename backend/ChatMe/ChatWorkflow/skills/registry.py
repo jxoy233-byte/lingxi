@@ -5,6 +5,7 @@ from typing import Optional
 
 from ChatMe.ChatWorkflow.skills.manifest import SkillManifest, parse_frontmatter
 from ChatMe.LoggingManager.logging_config import get_logger
+from ChatMe.paths import SKILLS_ROOT
 
 logger = get_logger("skill_registry")
 
@@ -254,7 +255,7 @@ class SkillRegistry:
         )
 
 
-_DEFAULT_SKILLS_ROOT = Path(__file__).resolve().parents[3] / "skills"
+_DEFAULT_SKILLS_ROOT = SKILLS_ROOT  # alias：保留旧名字避免外部代码引用 _DEFAULT_SKILLS_ROOT 时破坏
 _registry: Optional[SkillRegistry]
 try:
     _registry = SkillRegistry(_DEFAULT_SKILLS_ROOT)

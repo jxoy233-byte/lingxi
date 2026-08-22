@@ -137,8 +137,18 @@ export default {
       }
     },
     onKeydown(e) {
-      if (e.key === 'Escape' && this.confirmingDelete) {
+      if (!this.confirmingDelete) return
+      // 用户在 input / textarea / contentEditable 里按 Enter 是输入行为（如 MessageInput 发送），
+      // 不能 hijack。confirming 态虽 active 但焦点不在本组件 → 不响应。
+      const t = e.target
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) {
+        return
+      }
+      if (e.key === 'Escape') {
         this.confirmingDelete = false
+      } else if (e.key === 'Enter' && !e.isComposing) {
+        e.preventDefault()
+        this.onDelete()
       }
     },
   },

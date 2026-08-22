@@ -31,6 +31,7 @@ from langgraph.errors import GraphBubbleUp
 from langchain_core.messages import ToolMessage
 
 from ChatMe.LoggingManager.logging_config import get_logger
+from ChatMe.paths import get_chatme_dir
 from ..tools.code_fingerprint import code_fingerprint
 
 logger = get_logger("permissions")
@@ -416,10 +417,8 @@ def init_permissions(config_path: Optional[Path] = None) -> Permissions:
     global _permissions
     if _permissions is None:
         if config_path is None:
-            # 默认 backend/.chatme/config.json（仿 ChatMeConfig._find_config_file 的局部优先）
-            config_path = Path.cwd() / ".chatme" / "config.json"
-            if not config_path.exists():
-                config_path = Path.home() / ".chatme" / "config.json"
+            # 默认 .chatme/config.json（local-first，仿 ChatMeConfig._find_config_file）
+            config_path = get_chatme_dir() / "config.json"
         _permissions = Permissions(config_path)
     return _permissions
 

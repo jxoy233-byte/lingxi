@@ -26,9 +26,62 @@
       </button>
     </div>
 
-    <!-- 排队机制保留在 App.vue 后端（流式中点击发送 → 入 Redis → 上轮结束自动 drain），
-         此处不渲染任何排队卡 / "排队中(N)" 头 / 进度提示 —— 走 ChatGPT/Codex 风格：
-         用户点完「发送」消息透明吸收，看起来就像即时发送，下轮响应自然接上。 -->
+    <!-- 排队卡片列表（流式响应中用户继续发的消息会进入 Redis 队列等待上轮结束自动 drain）。
+         每条显示排队顺序号 + 消息预览（>120 字截断）+ 引文标记 + ✕ 删除单条。
+         队列非空时，输入框顶部还显示「排队中 (N)」徽章 + 🗑 清空全部按钮。 -->
+    <div v-if="queue.length > 0" class="queue-list-container">
+      <div class="queue-list-header">
+        <div class="queue-list-badge">
+          <span class="queue-list-badge-dot"></span>
+          <span>排队中 ({{ queue.length }})</span>
+        </div>
+        <button
+          type="button"
+          class="queue-list-clear"
+          @click="onQueueClear"
+          title="清空排队"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="3 6 5 6 21 6"/>
+            <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+            <path d="M10 11v6"/>
+            <path d="M14 11v6"/>
+            <path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/>
+          </svg>
+          <span>清空</span>
+        </button>
+      </div>
+      <div class="queue-list-scroll">
+        <div
+          v-for="(item, idx) in queue"
+          :key="`${item.queued_at || idx}-${idx}`"
+          class="queue-item"
+        >
+          <div class="queue-item-index">#{{ idx + 1 }}</div>
+          <div class="queue-item-body">
+            <div v-if="item.quote" class="queue-item-quote" :title="item.quote">
+              <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 21c3 0 7-1 7-8V5c0-1.25-.756-2.017-2-2H4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2 1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V20c0 1 0 1 1 1z"/>
+                <path d="M15 21c3 0 7-1 7-8V5c0-1.25-.757-2.017-2-2h-4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2h.75c0 2.25.25 4-2.75 4v3c0 1 0 1 1 1z"/>
+              </svg>
+              <span>引用</span>
+            </div>
+            <div class="queue-item-text">{{ truncateForCard(item.message) }}</div>
+          </div>
+          <button
+            type="button"
+            class="queue-item-remove"
+            @click="onQueueItemRemove(idx)"
+            :title="`删除 #${idx + 1}`"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"/>
+              <line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </div>
 
     <!-- 文件列表显示区域 - 横向紧凑布局 -->
     <div v-if="selectedFiles.length > 0" class="file-list-container">
@@ -111,15 +164,47 @@
         style="display: none"
       />
 
-      <textarea
-        v-model="inputText"
-        @keydown.enter="handleEnterKey"
-        @input="autoResize"
-        @paste="handlePaste"
-        placeholder="输入消息..."
-        rows="1"
-        ref="textarea"
-      ></textarea>
+      <!-- 输入列：chip 与 textarea 同排（chip 在最左侧占视觉锚点），
+           后跟的文本内容在 textarea 里继续输入。chip 用绝对定位浮在 textarea 第一行
+           文本起始位置之上（textarea padding 同步预留 chip 宽度），textarea 永远不出现
+           `/[xxx]` 原文，handleSend 时再还原成前缀。 -->
+      <div ref="composer" class="composer">
+        <transition name="slash-chip-pop">
+          <span
+            v-if="activeSlashCommand"
+            ref="slashChip"
+            class="slash-chip"
+            :title="activeSlashCommand.description"
+          >
+            <span class="slash-chip-slash">/</span>
+            <span class="slash-chip-name">{{ activeSlashCommand.name }}</span>
+            <button
+              type="button"
+              class="slash-chip-remove"
+              @click="clearSlashCommand"
+              title="移除命令（或把光标移到开头按 Backspace）"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="18" y1="6" x2="6" y2="18"/>
+                <line x1="6" y1="6" x2="18" y2="18"/>
+              </svg>
+            </button>
+          </span>
+        </transition>
+
+        <textarea
+          v-model="inputText"
+          @keydown="handleKeydown"
+          @input="onInputChange"
+          @compositionstart="onCompositionStart"
+          @compositionend="onCompositionEnd"
+          @paste="handlePaste"
+          :class="{ 'composer-textarea--with-chip': activeSlashCommand }"
+          :placeholder="activeSlashCommand ? `告诉 AI 怎么用 ${activeSlashCommand.name}` : '输入消息...'"
+          rows="1"
+          ref="textarea"
+        ></textarea>
+      </div>
 
       <!-- 优化按钮 -->
       <button
@@ -168,15 +253,27 @@
         <p>释放文件以上传</p>
       </div>
     </div>
+
+    <!-- Slash 命令面板：行首输入 `/` 时弹出，Codex 风格 -->
+    <SlashPalette
+      :visible="slashPalette.visible"
+      :query="slashPalette.query"
+      :commands="filteredSlashCommands"
+      :selected-index.sync="slashPalette.selectedIndex"
+      @select="onSlashCommandSelect"
+      @close="closeSlashPalette"
+    />
   </div>
 </template>
 
 <script>
 import { marked } from 'marked'
+import SlashPalette from './SlashPalette.vue'
 
 export default {
   name: 'MessageInput',
-  expose: ['clearInput', 'getSessionId', 'setSessionId', 'checkAndUploadPendingFiles', 'setInputText'],
+  components: { SlashPalette },
+  expose: ['clearInput', 'getSessionId', 'setSessionId', 'checkAndUploadPendingFiles', 'setInputText', 'focusTextarea', 'clearDynamicSkills'],
   props: {
     isLoading: {
       type: Boolean,
@@ -203,7 +300,7 @@ export default {
       default: () => []
     }
   },
-  emits: ['send', 'files-selected-need-session', 'update:quote', 'remove-queue-item', 'clear-queue'],
+  emits: ['send', 'files-selected-need-session', 'update:quote', 'remove-queue-item', 'clear-queue', 'front-action'],
   data() {
     return {
       inputText: '',
@@ -217,10 +314,78 @@ export default {
       uploadQueue: [],      // 待处理的文件队列
       isUploadQueueProcessing: false,  // 队列是否正在处理中
       // 会话 ID（优先使用 prop，其次使用 localStorage）
-      currentSessionId: null
+      currentSessionId: null,
+      // Slash 命令面板状态：
+      // - visible: 当前是否应该显示面板
+      // - query: `/` 后面用户已输入的过滤文本（不含 `/` 也不含 `[`）
+      // - triggerStart: 输入框中触发字符 `/` 的位置（用于选中时替换）
+      // - selectedIndex: 当前高亮的候选项下标
+      slashPalette: {
+        visible: false,
+        query: '',
+        triggerStart: -1,
+        selectedIndex: 0
+      },
+      // IME 输入法合成中标记。中文/日文/韩文等输入法敲 `/` + 选候选时，
+      // 每次候选变更都会触发 input 事件 —— 此时不应跑 slash 检测 / chip 提取，
+      // 等 compositionend 落地后再统一检测一次。
+      isComposing: false,
+      // 当前挂在输入框上的 slash 命令（整个 cmd 对象，含 description 供 tooltip 用）。
+      // 命令选中后不留在 inputText 里 —— 由这个字段 + chip UI 承载，
+      // handleSend 时才还原成 `/[name] ` 前缀发给后端。单条消息只允许一个。
+      activeSlashCommand: null,
+      // chip 视觉宽度（含 padding / border），用于 textarea 的左 padding 偏移。
+      // 命令切换时重新测量，让 chip 与首字符无缝拼接。
+      chipMinWidth: '0px',
+      // 静态 action 命令清单（永远在前，不依赖后端返回）：
+      // 这些是纯前端动作（打开弹窗 / 刷新页面），name 不会发往后端，无命名约束。
+      // kind: 'action' → emit front-action 给 App.vue，不发后端。
+      staticActionCommands: [
+        { name: 'backtrack', kind: 'action', description: '打开历史版本面板' },
+        { name: 'settings',  kind: 'action', description: '打开设置弹窗' },
+        { name: 'reload',    kind: 'action', description: '刷新当前会话' },
+        { name: 'worktree',  kind: 'action', description: '打开当前会话工作树' },
+        { name: 'help',      kind: 'action', description: '显示本项目功能速览' }
+      ],
+      // 动态 skill 列表（从 /chat/skills 拉的），每个含 {name, description, lazy}。
+      // name 严格对应 backend/skills/ 下的**文件夹名**（PascalCase，如
+      // `DataAnalysis` / `Exa`），发送时 chip 还原成 `/[DataAnalysis] args`，
+      // agent 收到后直接 `cat /skills/DataAnalysis/SKILL.md` 加载契约。
+      // kind 由 computed 自动标记为 'skill'（chip → /chat 流）。
+      // 失败兜底：fetch 异常时维持空数组，至少 action 命令仍可用。
+      dynamicSkills: [],
+      // refetch 节流：slash 面板「关闭 → 打开」时触发后台 refetch；面板已
+      // 打开期间的连续打字不重复请求。
+      _slashPaletteWasVisible: false
     }
   },
   computed: {
+    // 全量 slash 命令 = 静态 action + 动态 skill。
+    // - action 永远在前（高频且稳定，弹窗打第一眼就能看到）
+    // - skill 跟随 /chat/skills 返回的顺序（按 name 字母序），所以新装 skill
+    //   字母靠后就排后面，靠前就自动顶到 action 之后
+    // - 不做 dedup：action name（backtrack / settings / reload / worktree / help）
+    //   故意不和任何 skill 文件夹撞名，万一撞了走「action 优先」语义
+    slashCommands() {
+      return [
+        ...this.staticActionCommands,
+        ...this.dynamicSkills.map(s => ({
+          name: s.name,
+          kind: 'skill',
+          description: s.description || `${s.name} skill`
+        }))
+      ]
+    },
+    // Slash 命令面板：按 query 过滤的候选列表
+    filteredSlashCommands() {
+      const q = (this.slashPalette.query || '').toLowerCase().trim()
+      if (!q) return this.slashCommands
+      return this.slashCommands.filter(cmd => {
+        const name = (cmd.name || '').toLowerCase()
+        const desc = (cmd.description || '').toLowerCase()
+        return name.includes(q) || desc.includes(q)
+      })
+    },
     maxFileSize() {
       return this.fileConfig?.maxFileSize || 25 * 1024 * 1024
     },
@@ -269,9 +434,23 @@ export default {
     }
   },
   watch: {
+    // chip 命令变化时重新测宽度。**不能用 immediate: true** —— immediate 触发
+    // 时组件还在 created 生命周期，`this.$el` 还没就绪，`$el.querySelector` 直接
+    // 抛 TypeError 把整个组件挂载砸掉。改成在 mounted + $nextTick 跑首次测量，
+    // 后续变化也走 nextTick 等 DOM 更新完。
+    activeSlashCommand() {
+      this.$nextTick(this.measureChipMinWidth)
+    },
     sessionId: {
-      handler(newVal) {
+      handler(newVal, oldVal) {
         this.currentSessionId = newVal
+        // 切换会话时清空动态 skill 缓存，下一次 `/` 进面板时若缓存为空
+        // 会触发 refetch —— 让 SkillForge 中途新增的 skill 在切/刷会话后能看到。
+        // 跳过 immediate 首次调用（oldVal === undefined），避免冷启动清掉
+        // mounted 时刚拉到的数据。
+        if (oldVal !== undefined && newVal !== oldVal) {
+          this.dynamicSkills = []
+        }
         // 如果有 sessionId 且有待上传文件，自动触发上传
         if (newVal) {
           this.$nextTick(() => {
@@ -284,6 +463,10 @@ export default {
   },
   mounted() {
     this.fetchFileConfig()
+    // 后台拉取动态 skill 列表（mounted 首次 + 后续 slash 面板关闭→打开时再触发）
+    this.fetchSkills()
+    // 首次测量 chip 宽度（watch 不能 immediate，created 阶段 $el 未就绪 → 见 watch 注释）
+    this.$nextTick(this.measureChipMinWidth)
     // 监听全局拖拽事件
     window.addEventListener('dragenter', this.handleDragEnter)
     window.addEventListener('dragover', this.handleDragOver)
@@ -392,6 +575,34 @@ export default {
       }
     },
 
+    /**
+     * 后台拉取动态 skill 列表。registry 内部 `_maybe_rescan()` 自动检测
+     * SKILL.md mtime —— SkillForge 写新 skill 后无需重启后端，下次 GET
+     * 即拿到新列表。
+     *
+     * 调用时机（**只在缓存为空时才发请求**）：
+     *  - mounted 首次拉取（冷启动兜底）
+     *  - slash 面板打开且缓存为空时拉一次（同会话内反复打开面板不重复请求；
+     *    切/刷会话清空缓存后下个 `/` 才重新拉）
+     *
+     * 失败兜底：dynamicSkills 维持上次状态（或首次的空数组），至少
+     * staticActionCommands 仍可用，输入框不会卡住。
+     */
+    async fetchSkills() {
+      try {
+        const response = await fetch('/chat/skills')
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`)
+        }
+        const data = await response.json()
+        const raw = Array.isArray(data?.skills) ? data.skills : []
+        // 后端已过滤 lazy=true，这里再守一层防止 schema 变动
+        this.dynamicSkills = raw.filter(s => s && typeof s.name === 'string' && s.name && !s.lazy)
+      } catch (error) {
+        console.warn('[MessageInput] fetchSkills 失败，维持当前动态列表:', error?.message || error)
+      }
+    },
+
     handlePaste(e) {
       const items = e.clipboardData?.items
       if (!items) return
@@ -438,6 +649,251 @@ export default {
       }
     },
 
+    /**
+     * 统一键盘入口：先处理 Slash 命令面板的导航键，再走原有的 Enter/Ctrl+Enter 逻辑。
+     * 之所以拆出来而不是用 @keydown.enter，是因为面板要拦截 Enter / Tab / Esc / Arrow。
+     */
+    handleKeydown(e) {
+      // Slash 面板打开时，截走 ↑↓ / Tab / Enter / Esc
+      if (this.slashPalette.visible) {
+        const items = this.filteredSlashCommands
+
+        if (e.key === 'ArrowDown' || e.key === 'Tab') {
+          // Tab = ↓：选中下移（Codex 风格）。无 Shift 走下移；Shift+Tab 走上移（对齐 ↑↓ 对称）。
+          e.preventDefault()
+          if (items.length > 0) {
+            const step = e.key === 'Tab' && e.shiftKey ? -1 : 1
+            const next = this.slashPalette.selectedIndex + step
+            this.slashPalette.selectedIndex = Math.max(0, Math.min(next, items.length - 1))
+          }
+          return
+        }
+        if (e.key === 'ArrowUp') {
+          e.preventDefault()
+          if (items.length > 0) {
+            this.slashPalette.selectedIndex = Math.max(0, this.slashPalette.selectedIndex - 1)
+          }
+          return
+        }
+        if (e.key === 'Enter') {
+          // 仅当面板有匹配项时拦截 Enter（空列表让 Enter 走正常发送）
+          if (items.length > 0) {
+            e.preventDefault()
+            e.stopPropagation()
+            this.onSlashCommandSelect(items[this.slashPalette.selectedIndex])
+          }
+          return
+        }
+        if (e.key === 'Escape') {
+          e.preventDefault()
+          this.closeSlashPalette()
+          return
+        }
+      }
+
+      // Backspace 停在最开头且无选区时，先吃掉 slash chip（Codex 行为：
+      // 光标退到命令位置时，退格删的是命令本身而不是前一个字符）
+      if (
+        e.key === 'Backspace' &&
+        this.activeSlashCommand &&
+        e.target.selectionStart === 0 &&
+        e.target.selectionEnd === 0
+      ) {
+        e.preventDefault()
+        this.clearSlashCommand()
+        return
+      }
+
+      // 其他情况：走原有的 Enter/Ctrl+Enter 逻辑
+      if (e.key === 'Enter') {
+        this.handleEnterKey(e)
+      }
+    },
+
+    /**
+     * 输入变化时同步 slash 面板状态：
+     * - 行首 `/` 触发显示
+     * - 行首 `/xxx`（xxx 是 query）触发过滤
+     * - 一旦离开「行首 / 可选 [ + 字母/数字/-/_」的形式就关闭面板
+     */
+    onInputChange() {
+      this.autoResize()
+      // IME 合成中跳过 slash 检测 —— 中文输入法敲 `/` 候选时会疯狂触发 input 事件，
+      // 此时拿到的 inputText 是带候选框临时内容的伪结果，检测会误判。等
+      // compositionend 才走真正的「用户已确认输入」路径。
+      if (this.isComposing) return
+      this.extractTypedSlashCommand()
+      this.updateSlashPalette()
+    },
+
+    /**
+     * IME 合成结束。中文 / 日文 / 韩文等输入法敲完选词后才触发，此时 inputText
+     * 已经是用户确认的最终文本，slash 检测可以放心跑。
+     */
+    onCompositionEnd() {
+      this.isComposing = false
+      this.autoResize()
+      this.extractTypedSlashCommand()
+      this.updateSlashPalette()
+    },
+
+    /**
+     * IME 合成开始。中文输入法敲 `/` 后打开候选框时关闭已存在的 slash 面板，
+     * 避免「候选框临时 input 触发 slash 面板弹出 → 选完词后面板残留」的闪烁。
+     */
+    onCompositionStart() {
+      this.isComposing = true
+      this.closeSlashPalette()
+    },
+
+    /**
+     * 用户手敲 / 粘贴出完整的 `/[xxx] ` 或 `/xxx ` 前缀时也收编成 chip，
+     * 保证输入框里永远不出现 `/[xxx]` 原文。
+     * 只收编 slashCommands 里的已知技能名，避免把 "/usr/bin 下的文件" 这类正常文本吃掉。
+     */
+    extractTypedSlashCommand() {
+      if (this.activeSlashCommand) return
+      const m = this.inputText.match(/^\/(?:\[([\w-]+)\]|([\w-]+))[ \t]/)
+      if (!m) return
+      const known = this.slashCommands.find(c => c.name === (m[1] || m[2]))
+      if (!known) return
+
+      const ta = this.$refs.textarea
+      const caret = ta ? ta.selectionStart : 0
+      this.inputText = this.inputText.slice(m[0].length)
+      this.activeSlashCommand = known
+
+      this.$nextTick(() => {
+        if (ta) {
+          const newCaret = Math.max(0, caret - m[0].length)
+          ta.setSelectionRange(newCaret, newCaret)
+        }
+        this.autoResize()
+      })
+    },
+
+    updateSlashPalette() {
+      const ta = this.$refs.textarea
+      if (!ta) {
+        this.closeSlashPalette()
+        return
+      }
+      const caret = ta.selectionStart
+      const before = this.inputText.slice(0, caret)
+      const lineStart = before.lastIndexOf('\n') + 1
+      const linePrefix = before.slice(lineStart)
+
+      // Codex 风格检测规则：
+      //   - 仅行首 `/` 或 `/xxx`（仅命令名字符，**不含**空格/换行）时才进 slash 模式
+      //   - 用户敲了空格就退出检测回到纯文本模式（`/xxx args` 中的 args 不再触发匹配）
+      //   - 命令名查 slashCommands 后还有 ≥1 个匹配 → 显示面板（即便过滤后 0 条也仍显示「无匹配」空状态）
+      //   - 0 个匹配 → 关闭面板，纯文本
+      const openMatch = linePrefix.match(/^\/(?:\[([\w-]*)\]?|([\w-]+))?$/)
+      if (openMatch) {
+        const query = (openMatch[1] || openMatch[2] || '').toLowerCase().trim()
+        // 关闭 → 打开 转换时仅在缓存为空时才 refetch：缓存命中直接复用，
+        // 不浪费一次 HTTP。缓存会在 session 切换 / 刷新时被清空（见
+        // sessionId watcher + App.vue refreshConversation），所以同会话内
+        // 反复打开面板不会重新请求。
+        if (!this.slashPalette.visible && this.dynamicSkills.length === 0) {
+          this.fetchSkills()
+        }
+        // 命令面板始终保持可见（含 0 匹配时的「无匹配」空状态），让用户清楚当前不是纯文本模式
+        this.slashPalette.visible = true
+        this.slashPalette.query = query
+        this.slashPalette.triggerStart = lineStart
+        if (this.slashPalette.selectedIndex >= this.filteredSlashCommands.length) {
+          this.slashPalette.selectedIndex = 0
+        }
+        return
+      }
+      this.closeSlashPalette()
+    },
+
+    closeSlashPalette() {
+      this.slashPalette.visible = false
+      this.slashPalette.query = ''
+      this.slashPalette.triggerStart = -1
+      this.slashPalette.selectedIndex = 0
+    },
+
+    /**
+     * 选中 slash 命令后，把输入框中 `/` 起头的那一段**摘掉**（不留 `/[xxx]` 原文），
+     * 命令改由 activeSlashCommand chip 承载，光标停在原位继续输入任务内容。
+     * `kind === 'action'` 的命令（/backtrack /settings /reload /worktree /help）
+     * 跳过 chip 直接 emit front-action —— 这些是纯前端动作，不发往后端。
+     */
+    onSlashCommandSelect(cmd) {
+      if (!cmd) return
+      const ta = this.$refs.textarea
+      if (!ta) return
+      const caret = ta.selectionStart
+      const triggerStart = this.slashPalette.triggerStart
+      const before = this.inputText.slice(0, triggerStart)
+      const after = this.inputText.slice(caret)
+
+      // 1. 先擦掉输入框里那一段 `/` 起头的内容（既不留原文也不挂 chip）
+      this.inputText = before + after
+      this.closeSlashPalette()
+
+      // 2. action 命令 → 立刻触发前端动作，清空输入框
+      if (cmd.kind === 'action') {
+        this.$emit('front-action', cmd)
+        this.$nextTick(() => {
+          this.clearInput()
+        })
+        return
+      }
+
+      // 3. skill 命令 → 挂 chip，光标回到原位继续输入
+      this.activeSlashCommand = cmd
+      this.$nextTick(() => {
+        ta.focus()
+        ta.setSelectionRange(before.length, before.length)
+        this.autoResize()
+      })
+    },
+
+    clearSlashCommand() {
+      this.activeSlashCommand = null
+      this.$nextTick(() => {
+        const ta = this.$refs.textarea
+        if (ta) ta.focus()
+        this.autoResize()
+      })
+    },
+
+    /**
+     * 把 chip 的「视觉宽度」量出来写到 composer 的 --chip-min-width CSS 变量上，
+     * textarea 用这个变量做 padding-left，保证 chip 与正文在 textarea 第一行
+     * 恰好无缝拼接（chip 右沿 ↔ 文本左沿贴齐，不重叠）。
+     *
+     * 关键：chip 自身绝对定位 `left: 16px`（与 textarea 原 padding-left 对齐，
+     * 给视觉留 16px 呼吸距离），所以 textarea padding-left 必须包含：
+     *   chipLeftOffset(16) + chipWidth + gap(2)
+     * 否则 chip 的右半段会盖到文本起始位置（视觉上 chip 和首字符重叠）。
+     */
+    measureChipMinWidth() {
+      const composerEl = this.$refs.composer || this.$el.querySelector('.composer')
+      if (!composerEl) {
+        this.chipMinWidth = '0px'
+        return
+      }
+      if (!this.activeSlashCommand) {
+        composerEl.style.setProperty('--chip-min-width', '0px')
+        this.chipMinWidth = '0px'
+        return
+      }
+      const chipEl = this.$refs.slashChip
+      if (chipEl) {
+        const chipLeftOffset = 16   // 与 .slash-chip CSS left 同步
+        const gap = 2                // chip 右沿 ↔ 首字符的视觉气口
+        const w = chipLeftOffset + chipEl.offsetWidth + gap
+        composerEl.style.setProperty('--chip-min-width', w + 'px')
+        this.chipMinWidth = w + 'px'
+      }
+    },
+
     autoResize() {
       const textarea = this.$refs.textarea
       if (!textarea) return
@@ -463,8 +919,43 @@ export default {
         return
       }
 
+      // 前端动作命令（kind === 'action'）拦截：用户敲了 `/backtrack` `/reload`
+      // `/help` 等「只命令 + 无后续内容」时，不发往后端，直接走 front-action。
+      // 若用户敲了 `/backtrack 解释一下` 之类的「命令 + 文本」，按普通消息处理。
+      const rawText = this.inputText.trim()
+      const onlyCmdMatch = rawText.match(/^\/([\w-]+)\s*$/)
+      if (onlyCmdMatch) {
+        const cmd = this.slashCommands.find(c => c.name === onlyCmdMatch[1] && c.kind === 'action')
+        if (cmd) {
+          this.$emit('front-action', cmd)
+          // 用 clearInput 走完整清理路径（输入框 + chip + 文件 + 引用）
+          this.clearInput()
+          return
+        }
+      }
+
       // 如果有引用，把引用内容拼到 message 前面（<quote>...</quote> 标记）
       let finalMessage = this.inputText.trim()
+
+      // Slash 命令包装：chip（activeSlashCommand）或行首 `/xxx` → `/[xxx]`
+      // 方括号是"结构化指令"边界，与自然文本里的 `/xxx` 引用
+      // （如"我看 /data-analysis 的文档"）做语义区分。后端通过
+      // `/[<command-name>]` 字面量识别这是真命令。
+      // 包装在 quote 拼接之前（不依赖输入顺序）—— quote 块始终拼在最前，
+      // 最终顺序：<quote>...</quote>\n\n/[xxx] args。
+      // 单条消息只识别一个 slash 命令，args 中再出现的 `/[xxx]` 视为字面量。
+      if (this.activeSlashCommand) {
+        // chip 里的命令没进正文，发送时还原成前缀
+        finalMessage = `/[${this.activeSlashCommand.name}] ${finalMessage}`
+      } else {
+        // 没收编成 chip 的字面量（未知技能名 / 换行后手敲）仍按原规则归一化
+        const slashMatch = finalMessage.match(/^\/(?:\[([\w-]+)\]|([\w-]+))\s+/)
+        if (slashMatch) {
+          const cmdName = slashMatch[1] || slashMatch[2]
+          finalMessage = `/[${cmdName}] ${finalMessage.slice(slashMatch[0].length)}`
+        }
+      }
+
       if (this.quote && this.quote.content) {
         finalMessage = `<quote>\n${this.quote.content}\n</quote>\n\n${finalMessage}`
       }
@@ -478,6 +969,7 @@ export default {
       console.log('发送消息，processedOutputs 数量:', this.processedOutputs.length)
 
       this.inputText = ''
+      this.activeSlashCommand = null
       this.clearFiles()
       // 发送后清空引用
       this.$emit('update:quote', null)
@@ -488,6 +980,36 @@ export default {
           textarea.style.height = '52px'
         }
       })
+    },
+
+    /**
+     * 排队卡片截断：去掉开头的 <quote>...</quote> 块再按字符截断到 120 字。
+     * 后端的 title 派生逻辑也有类似的 _clean_message_for_title，但这里是 UI 渲染，
+     * 复刻同样的剥 quote 行为保持视觉一致。
+     */
+    truncateForCard(text) {
+      if (!text) return ''
+      // 剥掉 <quote>...</quote> 块（DOTALL）
+      const noQuote = String(text).replace(/<quote>[\s\S]*?<\/quote>/g, '').trim()
+      if (noQuote.length <= 120) return noQuote
+      return noQuote.slice(0, 120) + '…'
+    },
+
+    /**
+     * 单条排队 ✕ 按钮：emit 到 App.vue 调 DELETE /chat/{sid}/queue?idx=N。
+     * App.vue 收到后会调 _removeQueueItem → DELETE 后端 → _loadQueueForSession 同步本地。
+     */
+    onQueueItemRemove(idx) {
+      if (idx === undefined || idx === null) return
+      this.$emit('remove-queue-item', idx)
+    },
+
+    /**
+     * 队列头 🗑 清空按钮：emit 到 App.vue 调 DELETE /chat/{sid}/queue（无 idx）。
+     * 与单条 ✕ 同样走后端权威删除，App.vue onClearQueue 接收。
+     */
+    onQueueClear() {
+      this.$emit('clear-queue')
     },
 
     async optimizeInput() {
@@ -864,12 +1386,32 @@ export default {
       this.uploadQueue = []
     },
 
+    /**
+     * 清空动态 skill 缓存。App.vue 在切/刷会话时调（`$refs.messageInput.clearDynamicSkills()`），
+     * sessionId 变化由本组件的 watcher 内部处理。这里仅暴露给外部 sid 不变的
+     * 场景（典型：`refreshConversation(sid)` —— sid 不变但消息被重拉）。
+     *
+     * 下次打开 slash 面板时由于 `dynamicSkills.length === 0`，会触发
+     * `fetchSkills()` 重新拉一次，覆盖 SkillForge 中途新增的 skill。
+     *
+     * 暴露在 `expose` 数组里供父组件调用。
+     */
+    clearDynamicSkills() {
+      this.dynamicSkills = []
+    },
+
     // 清理输入框内容（切换/删除对话时调用）
     clearInput() {
       this.inputText = ''
+      this.activeSlashCommand = null
+      this.closeSlashPalette()
       this.clearFiles()
       // 清理引用状态
       this.$emit('update:quote', null)
+      // 撤回文本的 localStorage 同步清掉（与 sendMessage 路径一致，
+      // 避免下次切回同会话误恢复已被用户主动清空的文本）
+      const sid = this.sessionId
+      if (sid) localStorage.removeItem(`chatme-withdraw-pending:${sid}`)
     },
 
     // 撤回按钮调用：把原用户消息文本回填到输入框
@@ -887,6 +1429,25 @@ export default {
           ta.focus()
           ta.setSelectionRange(value.length, value.length)
         }
+      })
+    },
+    /**
+     * 暴露给 App.vue 的「归还焦点」入口。任何弹窗 / 面板 / 审批 / 刷新
+     * 完成事件回调里调一下，光标自动回到输入框，光标位置放末尾让用户
+     * 接着打字。用 $nextTick 等 DOM 更新完再 focus，避免和 v-if 等过渡冲突。
+     *
+     * 暴露在 `expose` 数组里（首行）供父组件 this.$refs.messageInput.focusTextarea() 调用。
+     */
+    focusTextarea() {
+      this.$nextTick(() => {
+        const ta = this.$refs.textarea
+        if (!ta || typeof ta.focus !== 'function') return
+        ta.focus()
+        try {
+          // 光标放末尾（用户在「先做完别的事再回来输入」的场景下，期望从尾继续）
+          const len = (this.inputText || '').length
+          ta.setSelectionRange(len, len)
+        } catch (_) { /* read-only 场景（如表单 readonly）静默吞 */ }
       })
     },
 
@@ -1426,58 +1987,166 @@ export default {
 }
 
 .input-wrapper textarea {
+  /* textarea 已搬到 .composer 里，下面的样式在 .composer textarea 块中重新定义 */
+}
+
+/* Slash chip —— 输入框里"挂"在 textarea 上方的命令胶囊。
+   Codex CLI 风格：紫底浅色 + monospace 名称 + 右侧 × 移除。
+   chip 只承载"已选命令"的事实，textarea 永远不出现 `/[xxx]` 原文。 */
+.composer {
   flex: 1;
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background-color: var(--bg-secondary);
+  transition: border-color 0.2s;
+  overflow: hidden;
+  /* chip 宽度（measureChipMinWidth 写入），textarea padding-left 读这个变量对齐首字符 */
+  --chip-min-width: 0px;
+}
+
+.composer:focus-within {
+  border-color: var(--button-bg);
+}
+
+.composer textarea {
+  width: 100%;
   min-height: 52px;
   max-height: 200px;
   height: 52px;
   padding: 14px 16px;
-  border: 1px solid var(--border-color);
-  border-radius: 12px;
-  background-color: var(--bg-secondary);
+  border: none;
+  border-radius: 0;
+  background: transparent;
   color: var(--text-primary);
   font-size: 15px;
   font-family: inherit;
   resize: none;
   outline: none;
-  transition: border-color 0.2s;
-  overflow-y: hidden;
   line-height: 1.5;
   scrollbar-width: thin;
   scrollbar-color: rgba(0, 0, 0, 0.1) transparent;
+  overflow-y: hidden;
+  text-indent: 0;
 }
 
-.input-wrapper textarea::-webkit-scrollbar {
+/* chip 在场时 textarea 左侧 padding 留出 chip 空间，文本仍从左到右自然书写 */
+.composer textarea.composer-textarea--with-chip {
+  padding-left: var(--chip-min-width, 0px);
+}
+
+.composer textarea::-webkit-scrollbar {
   width: 6px;
 }
 
-.input-wrapper textarea::-webkit-scrollbar-track {
+.composer textarea::-webkit-scrollbar-track {
   background: transparent;
 }
 
-.input-wrapper textarea::-webkit-scrollbar-thumb {
+.composer textarea::-webkit-scrollbar-thumb {
   background: rgba(0, 0, 0, 0.1);
   border-radius: 3px;
 }
 
-.input-wrapper textarea::-webkit-scrollbar-thumb:hover {
+.composer textarea::-webkit-scrollbar-thumb:hover {
   background: rgba(0, 0, 0, 0.15);
 }
 
-/* 暗色主题下的滚动条 */
-.dark-theme .input-wrapper textarea {
-  scrollbar-color: rgba(255, 255, 255, 0.1) transparent;
-}
-
-.dark-theme .input-wrapper textarea::-webkit-scrollbar-thumb {
+.dark-theme .composer textarea::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.1);
 }
 
-.dark-theme .input-wrapper textarea::-webkit-scrollbar-thumb:hover {
+.dark-theme .composer textarea::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.15);
 }
 
-.input-wrapper textarea:focus {
-  border-color: var(--button-bg);
+.composer textarea::placeholder {
+  color: var(--text-secondary);
+  opacity: 0.6;
+}
+
+/* slash chip —— 绝对定位浮在 textarea 第一行起始位置之上。
+   textarea padding-top = 14px（首行顶部），line-height: 1.5 × font-size 15px ≈ 22.5px。
+   chip 自身高度 ≈ 22px（border + padding + content），把 top 设到首行顶部位置
+   再用 translateY 微调到 baseline 视觉对齐。 */
+.slash-chip {
+  position: absolute;
+  top: 14px;
+  left: 16px;
+  transform: translateY(-1px);
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px 4px 3px 9px;
+  background: rgba(59, 130, 246, 0.14);
+  color: rgb(59, 130, 246);
+  border: 1px solid rgba(59, 130, 246, 0.28);
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1;
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  letter-spacing: 0.01em;
+  /* chip 整体不接收鼠标事件 —— 让 click 穿透到底层 textarea，
+     用户点 chip 范围（除 ×按钮外）能正常定位光标到首字符位置。
+     只有 ×按钮显式恢复 pointer-events: auto。 */
+  pointer-events: none;
+  z-index: 1;
+  white-space: nowrap;
+  max-width: calc(100% - 32px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dark-theme .slash-chip {
+  background: rgba(59, 130, 246, 0.18);
+  color: rgb(59, 130, 246);
+  border-color: rgba(59, 130, 246, 0.32);
+}
+
+.slash-chip-slash {
+  opacity: 0.6;
+  font-weight: 400;
+}
+
+.slash-chip-name {
+  font-weight: 600;
+}
+
+.slash-chip-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-left: 3px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0.55;
+  transition: opacity 0.12s, background 0.12s;
+  /* ×按钮恢复交互（覆盖父级 pointer-events: none） */
+  pointer-events: auto;
+}
+
+.slash-chip-remove:hover {
+  opacity: 1;
+  background: rgba(59, 130, 246, 0.18);
+}
+
+.slash-chip-pop-enter-active,
+.slash-chip-pop-leave-active {
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+.slash-chip-pop-enter-from,
+.slash-chip-pop-leave-to {
+  opacity: 0;
+  transform: translateY(-4px) scale(0.96);
 }
 
 .send-btn {
@@ -1540,5 +2209,171 @@ export default {
   50% {
     transform: translateY(-10px);
   }
+}
+
+/* ===== 排队卡（流式中继续发送时进入 Redis 队列的待发消息） ===== */
+/* 走 lingxi 中性冷淡风格：全部 var(--*) 主题 token，无 brand 强调色；
+   与引用块 / 文件列表视觉对齐，仅靠极简的左侧细条 + 灰底 + 数字标来区分。 */
+.queue-list-container {
+  margin-bottom: 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-secondary);
+  overflow: hidden;
+}
+
+.queue-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-color);
+  background: transparent;
+}
+
+.queue-list-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.queue-list-badge-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+  opacity: 0.55;
+  animation: queue-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes queue-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 0.9; }
+}
+
+.queue-list-clear {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.queue-list-clear:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-color);
+  color: var(--text-primary);
+}
+
+.queue-list-scroll {
+  max-height: 110px;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.queue-list-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.queue-list-scroll::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 3px;
+}
+
+.queue-list-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+}
+
+.queue-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--bg-primary);
+  border: 1px solid transparent;
+  margin-bottom: 4px;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.queue-item:last-child {
+  margin-bottom: 0;
+}
+
+.queue-item:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-color);
+}
+
+.queue-item-index {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  padding: 2px 6px;
+  background: var(--bg-secondary);
+  border-radius: 10px;
+  min-width: 26px;
+  text-align: center;
+}
+
+.queue-item-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.queue-item-quote {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+
+.queue-item-text {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.queue-item-remove {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  opacity: 0;
+}
+
+.queue-item:hover .queue-item-remove {
+  opacity: 1;
+}
+
+.queue-item-remove:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-color);
+  color: var(--text-primary);
 }
 </style>

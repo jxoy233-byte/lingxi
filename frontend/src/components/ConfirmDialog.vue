@@ -53,12 +53,33 @@ export default {
     }
   },
   emits: ['confirm', 'cancel'],
+  mounted() {
+    document.addEventListener('keydown', this.handleKeydown)
+  },
+  beforeDestroy() {
+    document.removeEventListener('keydown', this.handleKeydown)
+  },
   methods: {
     handleConfirm() {
       this.$emit('confirm')
     },
     handleCancel() {
       this.$emit('cancel')
+    },
+    /**
+     * 弹窗打开时（visible=true）响应 Esc → 取消、Enter → 确认。
+     * 直接监听 document 而不是把 tabindex 写到 overlay div 上，避免破坏遮罩层
+     * 的事件冒泡（@click.self 仍需冒泡检测）。
+     */
+    handleKeydown(e) {
+      if (!this.visible) return
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        this.handleCancel()
+      } else if (e.key === 'Enter' && !e.isComposing) {
+        e.preventDefault()
+        this.handleConfirm()
+      }
     }
   }
 }

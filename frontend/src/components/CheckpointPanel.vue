@@ -1,6 +1,6 @@
 <template>
   <transition name="slide">
-    <aside v-if="visible" class="checkpoint-panel">
+    <aside v-if="visible" class="checkpoint-panel" tabindex="-1" ref="panel" @keydown="handleKeydown">
       <div class="panel-header">
         <h3>历史记录</h3>
         <button @click="$emit('close')" class="close-btn">
@@ -25,6 +25,8 @@
             v-for="(checkpoint, index) in checkpoints"
             :key="checkpoint.checkpoint_id"
             class="checkpoint-item"
+            :class="{ 'kb-active': selectedIndex === index }"
+            @click="selectIndex(index)"
           >
             <div class="checkpoint-icon">
               <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -36,7 +38,7 @@
               <div class="checkpoint-title">对话 {{ checkpoints.length - index }}</div>
               <div class="checkpoint-preview">{{ checkpoint.content_preview }}...</div>
             </div>
-            <button class="restore-btn" title="恢复到此版本" @click.stop="handleRestore(checkpoint)">
+            <button class="restore-btn" title="恢复到此版本（Enter 也可触发）" @click.stop="handleRestore(checkpoint)">
               <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="1 4 1 10 7 10"/>
                 <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
@@ -63,6 +65,28 @@ export default {
     }
   },
   emits: ['close', 'restore'],
+  data() {
+    return {
+      // 键盘高亮的 checkpoint 下标（最新一条默认高亮）
+      selectedIndex: 0
+    }
+  },
+  watch: {
+    visible(val) {
+      if (val) {
+        // 重新打开时复位到第一条（最新）
+        this.selectedIndex = 0
+        this.$nextTick(() => {
+          const p = this.$refs.panel
+          if (p && p.focus) p.focus()
+          this.scrollActiveIntoView()
+        })
+      }
+    },
+    selectedIndex() {
+      this.$nextTick(this.scrollActiveIntoView)
+    }
+  },
   computed: {
     checkpoints() {
       // 从消息列表中提取所有带 checkpointId 的 AI 消息
@@ -84,6 +108,63 @@ export default {
   methods: {
     handleRestore(checkpoint) {
       this.$emit('restore', checkpoint.checkpoint_id)
+    },
+    /**
+     * checkpoint 列表键盘导航：
+     *   - ↑ / ↓: 切换高亮条目（夹紧到 [0, len-1]）
+     *   - Enter: 恢复当前高亮条目
+     *   - Esc: 关闭面板
+     * 监听挂在 panel aside 上（tabindex=-1 + open 时自动 focus），保证键盘
+     * 焦点在面板内就能生效。click 也更新 selectedIndex，让鼠标/键盘双轨同步。
+     */
+    handleKeydown(e) {
+      const list = this.checkpoints
+      if (list.length === 0) {
+        if (e.key === 'Escape') {
+          e.preventDefault()
+          this.$emit('close')
+        }
+        return
+      }
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        this.selectedIndex = Math.min(this.selectedIndex + 1, list.length - 1)
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        this.selectedIndex = Math.max(this.selectedIndex - 1, 0)
+      } else if (e.key === 'Enter' && !e.isComposing) {
+        e.preventDefault()
+        const cp = list[this.selectedIndex]
+        if (cp) this.handleRestore(cp)
+      } else if (e.key === 'Escape') {
+        e.preventDefault()
+        this.$emit('close')
+      }
+    },
+    selectIndex(i) {
+      this.selectedIndex = i
+    },
+    /**
+     * 高亮条目滚到视区内。只滚 .panel-content 自身，不连带外层页面跳动。
+     * 参考 SlashPalette 的 scrollActiveIntoView 写法。
+     */
+    scrollActiveIntoView() {
+      const panel = this.$refs.panel
+      if (!panel) return
+      const list = panel.querySelector('.checkpoint-list')
+      if (!list) return
+      const items = list.querySelectorAll('.checkpoint-item')
+      const el = items[this.selectedIndex]
+      if (!el) return
+      const itemTop = el.offsetTop
+      const itemBottom = itemTop + el.offsetHeight
+      const viewTop = list.scrollTop
+      const viewBottom = viewTop + list.clientHeight
+      if (itemTop < viewTop) {
+        list.scrollTop = itemTop - 4
+      } else if (itemBottom > viewBottom) {
+        list.scrollTop = itemBottom - list.clientHeight + 4
+      }
     }
   }
 }
@@ -189,6 +270,25 @@ export default {
   background: var(--bg-hover);
   border-color: var(--button-bg);
   transform: translateX(-2px);
+}
+
+/* 键盘高亮条目：紫色 outline + 浅紫底。优先 hover（鼠标），
+   没 hover 时键盘选中也能明显区分。 */
+.checkpoint-item.kb-active {
+  background: rgba(99, 102, 241, 0.08);
+  border-color: rgba(99, 102, 241, 0.5);
+  outline: 2px solid var(--button-bg);
+  outline-offset: -2px;
+}
+
+/* 容器 focus 时给个微弱的 dashed outline 让键盘焦点可见。
+   配合 aside 上 tabindex=-1 + open 时 .focus()。 */
+.checkpoint-panel:focus {
+  outline: none;
+}
+.checkpoint-panel:focus-visible {
+  outline: 2px dashed rgba(99, 102, 241, 0.45);
+  outline-offset: -2px;
 }
 
 .checkpoint-icon {

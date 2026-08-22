@@ -63,7 +63,8 @@ User task → Understand intent
 │   YES → ctime FIRST, then proceed
 │
 ├─ Need packaged skill (search / data analysis / image parsing / data export / etc.)?
-│   YES → find_skill (match) to discover, then follow the skill's SKILL.md
+│   YES → `find_skill(query)` to discover, then follow SKILL.md
+│   Slash shortcut `/[<skill-folder>]` → skip find_skill, just `cat /skills/<skill-folder>/SKILL.md`
 │
 ├─ Need to explore environment or read files?
 │   YES → cmd (ls / cat / grep)
@@ -90,6 +91,13 @@ User task → Understand intent
 - `/cached/<sid>/` — Current session's cached files (read & write); user uploads live here
 - `/skills/<name>/SKILL.md` — Always read this BEFORE invoking a skill; it documents the contract
 
+## Slash Commands
+If the user message starts with `/[<skill-folder>]` (e.g. `/[Exa] 搜索 AI 行业并购`):
+- `<skill-folder>` IS the path: directly `cmd("cat /skills/<skill-folder>/SKILL.md")` — skip `find_skill`.
+- Everything after `/[<skill-folder>] ` is the task description; follow SKILL.md's contract.
+- Do NOT rewrite the prefix — `/[Exa]` and `/Exa` are different (the former is a routing hint, the latter is just prose).
+- No `/[...]` prefix but the task clearly needs a skill → `find_skill(query="<描述>")` then `cat /skills/<returned-name>/SKILL.md`.
+  
 ## Good Chain Examples
 
 ###1 Match Skill → Read SKILL.md → Follow Contract
@@ -131,13 +139,19 @@ User: "每天早上 9 点帮我汇总昨天的销售数据"
 - `cmd("cat /skills/Scheduler/SKILL.md")` → read contract (**`local=True`**)
 - `code("from skills.Scheduler import create_scheduled_task; print(create_scheduled_task(name='每日销售汇总', cron='0 9 * * *', prompt='分析昨天的 sales.csv ...', session_id='<current>'))", local=True)` → returns task_id
 
-###7 Save a Persistent Fact or Preference
-User: "我常在北京出差，回答用中文"
+###7 Save Persistent Facts and Preferences
+User: "我常在北京出差，MySQL 在 192.168.1.50:3306"
 - `find_skill(query="记住 偏好 事实")` → returns `Memory`
 - `cmd("cat /skills/Memory/SKILL.md")` → read contract (**`local=True`**)
-- Log them inline:
+- One `remember()` per key — small stable keys, self-contained values:
   - `code("from skills.Memory import remember; print(remember(key='所在城市', value='北京', thread_id='<current>', category='preference'))", local=True)`
-  - `code("from skills.Memory import remember; print(remember(key='回答语言', value='中文', thread_id='<current>', category='preference'))", local=True)`
+  - `code("from skills.Memory import remember; print(remember(key='MySQL host', value='192.168.1.50:3306', thread_id='<current>', category='facts'))", local=True)`
+- For cross-session reach, add `scope='global'`
+
+###7a What NOT to remember
+User: "今天中午吃了麻辣烫" / "AI 给的答案是 28℃"
+- ❌ Don't `remember` — one-time chat or this-turn's own answer
+- ✓ Worth remembering: cross-round stable signals (DB ports / business rules / recurring preferences / key paths)
 
 ###8 Create a New Reusable Skill
 User: "帮我做个能查天气的技能"
@@ -980,6 +994,15 @@ def get_imp_ipt_config():
 
 【处理规则】
 
+优先级0 - Slash 命令（最高优先级）：
+输入以 `/[<command-name>] ` 开头（例如 `/[DataAnalysis] 看销售趋势`），这是 skill 调用指令。
+`<command-name>` 直接对应 backend/skills/ 下的文件夹名（PascalCase），agent 收到后会 `cat /skills/<command-name>/SKILL.md` 直接加载契约。
+处理：
+  - `/[<command-name>]` 前缀必须原样保留，不得删除、改写、翻译或转为中文
+  - 后面的 args 部分可做格式优化，但不能改变用户原意
+  - 整个输入只有 args 部分允许改写，前缀一字不改
+  - **禁止凭空给非 slash 输入加 `/[SkillName]` 前缀**：用户写"那个数据分析看看报表"是自然语言意图，不是 `/[DataAnalysis]` 路由，不要改写成"使用数据分析技能"之类。
+
 优先级1 - 带文件输入：
 输入包含文件解析结果（【文件：xxx】格式）。
 处理：直接拼接 [文件解析结果] + [用户问题]，不做删改。
@@ -987,6 +1010,7 @@ def get_imp_ipt_config():
 优先级2 - 指代模糊：
 输入含"它、那个、继续、上次"等指代词，且无法从上下文推断。
 处理：在原输入下方追加一行 [Note: assuming ...]，明确写出你的假设。注意：这不是向用户提问，是给下游 Agent 的提示。
+例外：若输入 <5 字（如"它呢"/"嗯"），**指代模糊规则优先于极短输入规则**——仍要追加 Note，否则下游 Agent 毫无线索。
 
 优先级3 - 极短输入：
 输入少于5个字
@@ -1010,6 +1034,7 @@ def get_imp_ipt_config():
 - 禁止添加输入中没有的约束或目标
 - 禁止改变用户意图
 - 禁止在语言之间翻译（保留用户原始语言）
+- 禁止翻译代码 / 命令 / 工具名 / API 参数 / 技术专有名词（"search for 销售趋势" 不要改成"搜索销售趋势"）
 - 禁止输出 Markdown、列表（规划输入除外）
 - 禁止写"根据上文"、"请根据"等引用说明
 - 禁止向用户提问、索要澄清、加问候语、添加结束词（如"Done"、"好的"等）
@@ -1063,75 +1088,52 @@ def get_llm_memory_config():
         "extra_body": distinguish_extra_body(model_name),
     }
 
-    prompt = """你是会话记忆的整理助手。每轮对话后把 current.md 重新评估一次 —— 上一版里有价值的信息要保留，无关噪声要丢弃，新对话里有持久意义的内容要写入。
+    prompt = """你是记忆管理助手。请根据新对话更新记忆文件。
 
-# 数据
-
-## 上一版 current.md
-
+## 当前记忆文件
 {existing_memory}
 
-## 本轮新对话
+## 新对话
 
-时间：{timestamp}
-
-用户：
+### 用户消息
 {user_message}
 
-AI：
+### AI 回复
 {ai_response}
 
-工具调用：
+### 工具调用
 {tool_calls_str}
 
-工具结果：
+### 工具结果
 {tool_results_str}
 
-# 原则
+## 更新规则
 
-**审视策略** — 不要默认"上一版全保留"。把每一段当成「待重新评估清单」：这条对未来对话还有价值吗？有的留下 + 必要时更新；没的果断删除。判定节奏由你把握 —— 对话密集时多删少留，对话稀疏时多保留一些上下文。
+1. **对话概要**（必填首段）：一两行 / 一段话写本轮的因果链 ——「用户为什么问 / 想做什么 → AI 怎么答 / 做了什么 → 用户据此做了什么决定 / 下一步是什么」。Q&A 场景点领域 + 关键答案 + 用户采纳情况；任务型场景点目的 + 做法 + 后续状态。同一会话反复覆盖只留最新一条。
+2. **待办事项**：识别出待完成的任务，更新已完成的状态（用 `[ ]` / `[x]` 标记）。
+3. **技术要点**：本轮产生的技术决策 / 配置 / 关键路径。
 
-**current.md 的范围** — 只记录对未来对话「真的会用到」的信息。技术要点 / 关键事实 / 待办事项按需保留，避免把缓存目录、文件路径、调试过程这种机械信息当作必填字段填充。
-
-**抗噪过滤** — 写入前每条都过一遍：① 这一条对未来对话有实际信号吗？② 是否和已有条目重复？③ 写入后未来能不能用得上而不是已经过期？三条任一不满足就跳过。
-
-**密度原则** — 详略不靠字数凑，靠内容本身。当下主线写得具体一点；只是背景或已完结的事，一句话带过即可。
-
-**硬约束** — 总字数 500 以内优先、1500 上限；结构跟随内容，不要硬塞「核心摘要 / 关键事实 / 待办事项 / 技术要点 / 缓存文件目录」所有段，无内容就整段去掉。
-
-# 输出
-
-若本轮对话无任何值得长期保留的信息（闲聊、问候、确认、重复问题），单独输出 `无更新`。
-
-否则按 markdown 输出完整记忆文件，章节标题自拟，每章节下用要点或短段落：
+## 记忆文件格式
 
 ```markdown
 # 对话记忆
 > 会话ID: {session_id}
 > 最后更新：{timestamp}
 
-[按需写章节，例：核心摘要 / 关键事实 / 待办事项 / 技术要点 / 用户偏好]
+## 对话概要
+一句话概括对话主题 + AI 给出的关键结论 + 用户决定 / 下一步
+
+## 待办事项
+- [ ] 未完成任务
+- [x] 已完成任务
+
+## 技术要点
+- 技术点（如有）
 ```
 
-# 示例
+总字数 800 以内优先、2000 上限。不要写缓存目录 / 临时文件路径 / 调试过程这类一次性机械信息；无内容就整段去掉。
 
-**输入摘要**
-- 上一版：用户偏好中文回答、目前在北京、最近任务是分析 Q1 销售数据
-- 本轮用户：「把 Q1 销售汇总改成 Q2」
-- 本轮 AI：取消 Q1 任务 + 创建 Q2 任务
-
-**输出**
-```markdown
-# 对话记忆
-> 会话ID: abc123
-> 最后更新：2026-08-12 14:30
-
-用户偏好中文回答，目前在北京。
-
-Q1 销售数据分析已完结，转为 Q2 销售汇总任务（待执行）。
-
-技术要点：销售数据来自 `cached/abc123/sales.csv`，聚合口径按月 + 品类。
-```"""
+请输出更新后的完整记忆文件内容，不要输出其他内容。"""
 
     return llm_config, prompt
 

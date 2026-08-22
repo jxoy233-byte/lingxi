@@ -13,10 +13,14 @@
     click-anywhere  用户点击浮层任意位置（包括卡片本身 + 卡片外部 backdrop）
                    App.vue 收到后跳转主页
 
-  ====== 像素鹿设计（14x14 viewBox，鹿朝右）======
-  鹿角在右上（4 行：顶尖 + 双叉分枝 + 收束基座），耳在角下，
-  头在右端（5 列宽：眼靠前嘴在最右），颈从左肩斜下接身体，
-  身体水平延展（6 列宽），白色尾尖在最左端，两双细腿前后分布。
+  ====== 像素鹿设计（16x18 viewBox，鹿朝右）======
+  垂直比例（高辨识度鹿的关键）：
+  - 鹿角 5 行（顶尖 2 + 中分枝 + 主体收束），占整高 28%
+  - 头 + 耳 4 行（耳 3 像素宽 → 辨识「耳在角下」）
+  - 颈 2 行（窄 → 显得身体纤细）
+  - 身体 3 行（水平延展 9 列，奶油腹 7 像素宽）
+  - 腿 4 行（腿高 = 身体的 1.33x，是真鹿的标志）
+  - 白色尾尖 2 像素（垂直贴在身体最左端）
 -->
 <template>
   <div class="not-found-overlay" @click="$emit('click-anywhere')">
@@ -26,83 +30,136 @@
         <div class="pixel-deer-shadow"></div>
         <div class="pixel-deer-wrap">
           <!--
-            14x14 viewBox；每个 viewBox 单位 = 9 CSS px（126x126）。
-            side-view 鹿朝右；鹿角 / 奶油腹 / 白色尾尖 / 深色蹄子。
-            shape-rendering: crispEdges + image-rendering: pixelated 保持像素锐利。
+            16x18 viewBox；每个 viewBox 单位 = 8 CSS px（128x144 鹿 + 16px 跳跃空间 = 128x160 舞台）。
+            shape-rendering: crispEdges + image-rendering: pixelated 保证像素锐利。
           -->
-          <svg class="pixel-deer" viewBox="0 0 14 14" xmlns="http://www.w3.org/2000/svg">
-            <!-- ===== Antlers (cream top, darker stems for shading) ===== -->
-            <rect x="7" y="0" width="1" height="1" fill="#f5e6c8"/>
-            <rect x="10" y="0" width="1" height="1" fill="#f5e6c8"/>
-            <rect x="6" y="1" width="1" height="1" fill="#f5e6c8"/>
-            <rect x="7" y="1" width="1" height="1" fill="#c9a875"/>
-            <rect x="8" y="1" width="1" height="1" fill="#f5e6c8"/>
-            <rect x="9" y="1" width="1" height="1" fill="#f5e6c8"/>
+          <svg class="pixel-deer" viewBox="0 0 16 18" xmlns="http://www.w3.org/2000/svg">
+            <!-- ===== Antlers: 5 行，V 形分叉 + 收束基座 ===== -->
+            <!-- 顶尖 (cream) -->
+            <rect x="8" y="0" width="1" height="1" fill="#f5e6c8"/>
+            <rect x="11" y="0" width="1" height="1" fill="#f5e6c8"/>
+            <!-- 第 1 层分枝：左右外尖 + 中间 4 个深色（鹿角主梁投影） -->
+            <rect x="7" y="1" width="1" height="1" fill="#f5e6c8"/>
+            <rect x="8" y="1" width="1" height="1" fill="#c9a875"/>
+            <rect x="9" y="1" width="1" height="1" fill="#c9a875"/>
             <rect x="10" y="1" width="1" height="1" fill="#c9a875"/>
-            <rect x="11" y="1" width="1" height="1" fill="#f5e6c8"/>
-            <rect x="7" y="2" width="1" height="1" fill="#c9a875"/>
+            <rect x="11" y="1" width="1" height="1" fill="#c9a875"/>
+            <rect x="12" y="1" width="1" height="1" fill="#f5e6c8"/>
+            <!-- 第 2 层分枝：左右更外的尖（鹿角最宽点） -->
+            <rect x="6" y="2" width="1" height="1" fill="#c9a875"/>
             <rect x="8" y="2" width="1" height="1" fill="#c9a875"/>
             <rect x="9" y="2" width="1" height="1" fill="#c9a875"/>
             <rect x="10" y="2" width="1" height="1" fill="#c9a875"/>
-            <!-- ===== Ear (dark brown, just below antler base) ===== -->
-            <rect x="7" y="3" width="1" height="1" fill="#7a4f2c"/>
-            <rect x="8" y="3" width="1" height="1" fill="#7a4f2c"/>
-            <!-- ===== Head top (5 wide, cols 7-11) ===== -->
-            <rect x="7" y="4" width="1" height="1" fill="#a87147"/>
-            <rect x="8" y="4" width="1" height="1" fill="#a87147"/>
-            <rect x="9" y="4" width="1" height="1" fill="#a87147"/>
-            <rect x="10" y="4" width="1" height="1" fill="#a87147"/>
-            <rect x="11" y="4" width="1" height="1" fill="#a87147"/>
-            <!-- ===== Face: cream cheek + eye near nose + dark nose tip ===== -->
-            <rect x="7" y="5" width="1" height="1" fill="#a87147"/>
-            <rect x="8" y="5" width="1" height="1" fill="#a87147"/>
-            <rect x="9" y="5" width="1" height="1" fill="#f4d8a8"/>
-            <rect x="10" y="5" width="1" height="1" fill="#1a1a1a"/>
-            <rect x="11" y="5" width="1" height="1" fill="#3a2418"/>
-            <!-- ===== Neck (narrow, cream underline for belly hint) ===== -->
+            <rect x="11" y="2" width="1" height="1" fill="#c9a875"/>
+            <rect x="13" y="2" width="1" height="1" fill="#c9a875"/>
+            <!-- 鹿角主梁收束 -->
+            <rect x="7" y="3" width="1" height="1" fill="#c9a875"/>
+            <rect x="8" y="3" width="1" height="1" fill="#c9a875"/>
+            <rect x="9" y="3" width="1" height="1" fill="#c9a875"/>
+            <rect x="10" y="3" width="1" height="1" fill="#c9a875"/>
+            <rect x="11" y="3" width="1" height="1" fill="#c9a875"/>
+            <rect x="12" y="3" width="1" height="1" fill="#c9a875"/>
+            <!-- 主梁最窄（接近头部） -->
+            <rect x="8" y="4" width="1" height="1" fill="#c9a875"/>
+            <rect x="9" y="4" width="1" height="1" fill="#c9a875"/>
+            <rect x="10" y="4" width="1" height="1" fill="#c9a875"/>
+            <rect x="11" y="4" width="1" height="1" fill="#c9a875"/>
+
+            <!-- ===== Ear (3 像素宽，深棕) ===== -->
+            <rect x="8" y="5" width="1" height="1" fill="#7a4f2c"/>
+            <rect x="9" y="5" width="1" height="1" fill="#7a4f2c"/>
+            <rect x="10" y="5" width="1" height="1" fill="#7a4f2c"/>
+
+            <!-- ===== Head top (6 wide) ===== -->
             <rect x="7" y="6" width="1" height="1" fill="#a87147"/>
-            <rect x="8" y="6" width="1" height="1" fill="#f4d8a8"/>
-            <!-- ===== Shoulder widens to support body ===== -->
-            <rect x="6" y="7" width="1" height="1" fill="#a87147"/>
+            <rect x="8" y="6" width="1" height="1" fill="#a87147"/>
+            <rect x="9" y="6" width="1" height="1" fill="#a87147"/>
+            <rect x="10" y="6" width="1" height="1" fill="#a87147"/>
+            <rect x="11" y="6" width="1" height="1" fill="#a87147"/>
+            <rect x="12" y="6" width="1" height="1" fill="#a87147"/>
+
+            <!-- ===== Face: cheek cream + eye + dark nose tip ===== -->
             <rect x="7" y="7" width="1" height="1" fill="#a87147"/>
             <rect x="8" y="7" width="1" height="1" fill="#a87147"/>
-            <!-- ===== Body top + white tail tip at far left ===== -->
-            <rect x="1" y="8" width="1" height="1" fill="#fff5e1"/>
-            <rect x="2" y="8" width="1" height="1" fill="#a87147"/>
-            <rect x="3" y="8" width="1" height="1" fill="#a87147"/>
-            <rect x="4" y="8" width="1" height="1" fill="#a87147"/>
-            <rect x="5" y="8" width="1" height="1" fill="#a87147"/>
-            <rect x="6" y="8" width="1" height="1" fill="#a87147"/>
+            <rect x="9" y="7" width="1" height="1" fill="#f4d8a8"/>
+            <rect x="10" y="7" width="1" height="1" fill="#1a1a1a"/>
+            <rect x="11" y="7" width="1" height="1" fill="#1a1a1a"/>
+            <rect x="12" y="7" width="1" height="1" fill="#3a2418"/>
+
+            <!-- ===== Snout/jaw: 奶油下巴 + 鼻尖延伸 ===== -->
             <rect x="7" y="8" width="1" height="1" fill="#a87147"/>
-            <!-- ===== Body w/ cream belly ===== -->
-            <rect x="2" y="9" width="1" height="1" fill="#a87147"/>
-            <rect x="3" y="9" width="1" height="1" fill="#f4d8a8"/>
-            <rect x="4" y="9" width="1" height="1" fill="#f4d8a8"/>
-            <rect x="5" y="9" width="1" height="1" fill="#f4d8a8"/>
-            <rect x="6" y="9" width="1" height="1" fill="#f4d8a8"/>
-            <rect x="7" y="9" width="1" height="1" fill="#a87147"/>
-            <!-- ===== Body bottom ===== -->
-            <rect x="2" y="10" width="1" height="1" fill="#a87147"/>
-            <rect x="3" y="10" width="1" height="1" fill="#a87147"/>
-            <rect x="4" y="10" width="1" height="1" fill="#a87147"/>
-            <rect x="5" y="10" width="1" height="1" fill="#a87147"/>
-            <rect x="6" y="10" width="1" height="1" fill="#a87147"/>
-            <rect x="7" y="10" width="1" height="1" fill="#a87147"/>
-            <!-- ===== Legs top (dark brown shading at joint) ===== -->
-            <rect x="2" y="11" width="1" height="1" fill="#7a4f2c"/>
-            <rect x="3" y="11" width="1" height="1" fill="#7a4f2c"/>
-            <rect x="6" y="11" width="1" height="1" fill="#7a4f2c"/>
-            <rect x="7" y="11" width="1" height="1" fill="#7a4f2c"/>
-            <!-- ===== Legs ===== -->
+            <rect x="8" y="8" width="1" height="1" fill="#f4d8a8"/>
+            <rect x="9" y="8" width="1" height="1" fill="#f4d8a8"/>
+            <rect x="10" y="8" width="1" height="1" fill="#f4d8a8"/>
+            <rect x="11" y="8" width="1" height="1" fill="#f4d8a8"/>
+            <rect x="12" y="8" width="1" height="1" fill="#3a2418"/>
+
+            <!-- ===== Neck (narrow, cream underline) ===== -->
+            <rect x="8" y="9" width="1" height="1" fill="#a87147"/>
+            <rect x="9" y="9" width="1" height="1" fill="#f4d8a8"/>
+            <rect x="10" y="9" width="1" height="1" fill="#a87147"/>
+
+            <!-- ===== Shoulder widens to support body ===== -->
+            <rect x="8" y="10" width="1" height="1" fill="#a87147"/>
+            <rect x="9" y="10" width="1" height="1" fill="#a87147"/>
+            <rect x="10" y="10" width="1" height="1" fill="#a87147"/>
+            <!-- 白尾尖：垂直 2 像素，紧贴身体最左端 -->
+            <rect x="1" y="10" width="1" height="1" fill="#fff5e1"/>
+
+            <!-- ===== Body top + tail ===== -->
+            <rect x="1" y="11" width="1" height="1" fill="#fff5e1"/>
+            <rect x="2" y="11" width="1" height="1" fill="#a87147"/>
+            <rect x="3" y="11" width="1" height="1" fill="#a87147"/>
+            <rect x="4" y="11" width="1" height="1" fill="#a87147"/>
+            <rect x="5" y="11" width="1" height="1" fill="#a87147"/>
+            <rect x="6" y="11" width="1" height="1" fill="#a87147"/>
+            <rect x="7" y="11" width="1" height="1" fill="#a87147"/>
+            <rect x="8" y="11" width="1" height="1" fill="#a87147"/>
+            <rect x="9" y="11" width="1" height="1" fill="#a87147"/>
+            <rect x="10" y="11" width="1" height="1" fill="#a87147"/>
+
+            <!-- ===== Body w/ cream belly (7 wide) ===== -->
             <rect x="2" y="12" width="1" height="1" fill="#a87147"/>
-            <rect x="3" y="12" width="1" height="1" fill="#a87147"/>
-            <rect x="6" y="12" width="1" height="1" fill="#a87147"/>
-            <rect x="7" y="12" width="1" height="1" fill="#a87147"/>
-            <!-- ===== Hooves (dark brown) ===== -->
-            <rect x="2" y="13" width="1" height="1" fill="#3a2418"/>
-            <rect x="3" y="13" width="1" height="1" fill="#3a2418"/>
-            <rect x="6" y="13" width="1" height="1" fill="#3a2418"/>
-            <rect x="7" y="13" width="1" height="1" fill="#3a2418"/>
+            <rect x="3" y="12" width="1" height="1" fill="#f4d8a8"/>
+            <rect x="4" y="12" width="1" height="1" fill="#f4d8a8"/>
+            <rect x="5" y="12" width="1" height="1" fill="#f4d8a8"/>
+            <rect x="6" y="12" width="1" height="1" fill="#f4d8a8"/>
+            <rect x="7" y="12" width="1" height="1" fill="#f4d8a8"/>
+            <rect x="8" y="12" width="1" height="1" fill="#f4d8a8"/>
+            <rect x="9" y="12" width="1" height="1" fill="#f4d8a8"/>
+            <rect x="10" y="12" width="1" height="1" fill="#a87147"/>
+
+            <!-- ===== Body bottom ===== -->
+            <rect x="2" y="13" width="1" height="1" fill="#a87147"/>
+            <rect x="3" y="13" width="1" height="1" fill="#a87147"/>
+            <rect x="4" y="13" width="1" height="1" fill="#a87147"/>
+            <rect x="5" y="13" width="1" height="1" fill="#a87147"/>
+            <rect x="6" y="13" width="1" height="1" fill="#a87147"/>
+            <rect x="7" y="13" width="1" height="1" fill="#a87147"/>
+            <rect x="8" y="13" width="1" height="1" fill="#a87147"/>
+            <rect x="9" y="13" width="1" height="1" fill="#a87147"/>
+            <rect x="10" y="13" width="1" height="1" fill="#a87147"/>
+
+            <!-- ===== Legs (4 行，腿:身体 = 4:3 ≈ 1.33:1 — 真鹿标志) ===== -->
+            <!-- 后腿 (cols 2-3, 在臀下) -->
+            <rect x="2" y="14" width="1" height="1" fill="#7a4f2c"/>
+            <rect x="3" y="14" width="1" height="1" fill="#7a4f2c"/>
+            <rect x="2" y="15" width="1" height="1" fill="#a87147"/>
+            <rect x="3" y="15" width="1" height="1" fill="#a87147"/>
+            <rect x="2" y="16" width="1" height="1" fill="#a87147"/>
+            <rect x="3" y="16" width="1" height="1" fill="#a87147"/>
+            <rect x="2" y="17" width="1" height="1" fill="#3a2418"/>
+            <rect x="3" y="17" width="1" height="1" fill="#3a2418"/>
+
+            <!-- 前腿 (cols 9-10, 在肩下) -->
+            <rect x="9" y="14" width="1" height="1" fill="#7a4f2c"/>
+            <rect x="10" y="14" width="1" height="1" fill="#7a4f2c"/>
+            <rect x="9" y="15" width="1" height="1" fill="#a87147"/>
+            <rect x="10" y="15" width="1" height="1" fill="#a87147"/>
+            <rect x="9" y="16" width="1" height="1" fill="#a87147"/>
+            <rect x="10" y="16" width="1" height="1" fill="#a87147"/>
+            <rect x="9" y="17" width="1" height="1" fill="#3a2418"/>
+            <rect x="10" y="17" width="1" height="1" fill="#3a2418"/>
           </svg>
         </div>
         <!-- 浮动像素尘埃：3 个错开延迟的小方块升起，渲染像素风"扬尘" -->
@@ -173,10 +230,10 @@ export default {
 
 /* ===== 像素鹿舞台 ===== */
 .pixel-deer-stage {
-  /* 14x14 viewBox × 9 CSS px = 126x126 方形舞台；与下方文字留 8px 间距 */
+  /* 16x18 viewBox × 8 CSS px = 128x144 鹿 + 16px 跳跃空间 = 128x160 舞台 */
   position: relative;
-  width: 126px;
-  height: 126px;
+  width: 128px;
+  height: 160px;
   margin: 4px auto 8px;
 }
 
@@ -190,7 +247,7 @@ export default {
 }
 
 .pixel-deer {
-  /* SVG 撑满 wrap —— 126x126 → 每个 viewBox 单位 = 9 CSS px，pixelated 锐利 */
+  /* SVG 撑满 wrap —— 128x144 → 每个 viewBox 单位 = 8 CSS px，pixelated 锐利 */
   width: 100%;
   height: 100%;
   image-rendering: pixelated;
@@ -208,7 +265,8 @@ export default {
   position: absolute;
   bottom: 2px;
   left: 50%;
-  width: 64px;
+  /* 腿跨 col 2-3 与 9-10，跨距 8 列 ≈ 64px；阴影略宽让视觉更稳 */
+  width: 72px;
   height: 8px;
   background: rgba(0, 0, 0, 0.22);
   border-radius: 50%;
@@ -228,14 +286,14 @@ export default {
   pointer-events: none;
 }
 .pixel-particle--1 {
-  left: 16px;
+  left: 14px;
   bottom: 18px;
   animation: pixel-float 2.6s ease-in-out infinite;
   animation-delay: 0s;
 }
 .pixel-particle--2 {
-  left: 96px;
-  bottom: 30px;
+  left: 100px;
+  bottom: 32px;
   animation: pixel-float 3.2s ease-in-out infinite;
   animation-delay: 0.8s;
 }
@@ -249,15 +307,15 @@ export default {
 /* ===== 鹿跳跃：translateY + squash/stretch 5 段关键帧 ===== */
 @keyframes deer-hop {
   /* 落地：垂直压扁 + 水平外扩（脚着地冲击） */
-  0%   { transform: translateY(0)     scaleY(0.92) scaleX(1.05); }
+  0%   { transform: translateY(0)     scaleY(0.9)  scaleX(1.06); }
   /* 起跳离地：拉回正方形 */
-  18%  { transform: translateY(-3px)  scaleY(1)    scaleX(1); }
+  18%  { transform: translateY(-4px)  scaleY(1)    scaleX(1); }
   /* 顶点：垂直拉伸 + 水平收紧（空中姿态） */
-  50%  { transform: translateY(-16px) scaleY(1.06) scaleX(0.96); }
+  50%  { transform: translateY(-18px) scaleY(1.07) scaleX(0.95); }
   /* 下落回到拉伸回正 */
-  82%  { transform: translateY(-3px)  scaleY(1)    scaleX(1); }
+  82%  { transform: translateY(-4px)  scaleY(1)    scaleX(1); }
   /* 再次落地：压扁 */
-  100% { transform: translateY(0)     scaleY(0.92) scaleX(1.05); }
+  100% { transform: translateY(0)     scaleY(0.9)  scaleX(1.06); }
 }
 
 /* ===== 阴影同步：鹿最高时阴影最小最淡 ===== */
@@ -336,7 +394,7 @@ export default {
     padding: 22px 22px 20px;
   }
   .pixel-deer-stage {
-    transform: scale(0.82);
+    transform: scale(0.78);
     transform-origin: center top;
   }
 }

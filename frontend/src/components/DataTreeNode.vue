@@ -13,6 +13,14 @@
       <span v-if="node.children && node.children.length > 0" class="dtn-count">
         {{ node.children.length }}
       </span>
+      <!-- 行内删除按钮：删除整棵子树到 .trash/{sid}/ -->
+      <button
+        class="dtn-del"
+        :class="{ confirming: confirmingDelete }"
+        :title="confirmingDelete ? '再次点击确认删除整个文件夹（含子树）' : '删除文件夹'"
+        :aria-label="confirmingDelete ? '再次点击确认删除整个文件夹（含子树）' : '删除文件夹'"
+        @click.stop="onDeleteClick"
+      >{{ confirmingDelete ? '×' : '×' }}</button>
     </div>
 
     <!-- 文件节点 -->
@@ -26,6 +34,14 @@
       <span class="dtn-icon">{{ icon }}</span>
       <span class="dtn-name">{{ node.name }}</span>
       <span v-if="node.size != null" class="dtn-size">{{ formatSize(node.size) }}</span>
+      <!-- 行内删除按钮：参考偏好 21/22 模式（小红叉二次确认） -->
+      <button
+        class="dtn-del"
+        :class="{ confirming: confirmingDelete }"
+        :title="confirmingDelete ? '再次点击确认删除' : '删除'"
+        :aria-label="confirmingDelete ? '再次点击确认删除' : '删除'"
+        @click.stop="onDeleteClick"
+      >{{ confirmingDelete ? '×' : '×' }}</button>
     </div>
 
     <!-- 递归子节点 -->
@@ -36,6 +52,7 @@
         :node="child"
         :depth="depth + 1"
         @file-click="$emit('file-click', $event)"
+        @file-delete="$emit('file-delete', $event)"
       />
     </div>
   </div>
@@ -48,10 +65,11 @@ export default {
     node: { type: Object, required: true },
     depth: { type: Number, default: 0 }
   },
-  emits: ['file-click'],
+  emits: ['file-click', 'file-delete'],
   data() {
     return {
-      expanded: this.depth < 1 // 默认展开前 1 层（gen_xxx 一级）
+      expanded: this.depth < 1, // 默认展开前 1 层（gen_xxx 一级）
+      confirmingDelete: false
     }
   },
   computed: {
@@ -83,12 +101,43 @@ export default {
     onClick() {
       this.$emit('file-click', this.node)
     },
+    onDeleteClick() {
+      if (this.confirmingDelete) {
+        // 第二次点 → 真删（先重置防止冒泡）
+        this.confirmingDelete = false
+        this.$emit('file-delete', this.node)
+      } else {
+        // 第一次点 → 进确认态
+        this.confirmingDelete = true
+      }
+    },
+    cancelDeleteConfirm() {
+      this.confirmingDelete = false
+    },
+    onKeydown(e) {
+      if (e.key === 'Escape' && this.confirmingDelete) {
+        this.confirmingDelete = false
+      }
+    },
+    onOutsideClick(e) {
+      // 点中本节点的删除按钮 → 不重置（让按钮自己处理）
+      if (this.$el && this.$el.contains(e.target)) return
+      if (this.confirmingDelete) this.confirmingDelete = false
+    },
     formatSize(bytes) {
       if (bytes == null) return ''
       if (bytes < 1024) return bytes + 'B'
       if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + 'K'
       return (bytes / 1024 / 1024).toFixed(1) + 'M'
     }
+  },
+  mounted() {
+    document.addEventListener('click', this.onOutsideClick)
+    document.addEventListener('keydown', this.onKeydown)
+  },
+  beforeDestroy() {
+    document.removeEventListener('click', this.onOutsideClick)
+    document.removeEventListener('keydown', this.onKeydown)
   }
 }
 </script>
@@ -135,5 +184,42 @@ export default {
   font-size: 11px;
   color: var(--text-secondary, #9ca3af);
   flex-shrink: 0;
+}
+
+/* —— 行内删除按钮 —— 参考偏好 21/22 模式 —— */
+.dtn-del {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-secondary, #9ca3af);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s, color 0.15s;
+}
+.dtn-row:hover .dtn-del {
+  opacity: 1;
+}
+.dtn-del:hover {
+  background: var(--bg-hover, #e5e7eb);
+  color: var(--text-primary, #111);
+}
+.dtn-del.confirming {
+  /* 二次确认态：变红常显，不依赖 hover */
+  opacity: 1 !important;
+  background: rgba(239, 68, 68, 0.12);
+  color: #ef4444;
+  font-weight: 600;
+}
+.dtn-del.confirming:hover {
+  background: rgba(239, 68, 68, 0.22);
 }
 </style>

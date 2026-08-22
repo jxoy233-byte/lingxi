@@ -2,6 +2,7 @@
 定时清理任务
 - 缓存文件：清理 30 天未访问的文件
 - 日志文件：清理 3 天前的日志
+- 回收站：每天 11:30 物理删除 .trash/ 下所有文件（软删除兜底）
 
 使用方式：
     from contextlib import asynccontextmanager
@@ -27,6 +28,7 @@ from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI
 
 from ..LoggingManager.logging_config import get_logger
+from ..paths import CACHED_DIR, TRASH_DIR, get_chatme_dir
 
 # 调度器单例
 _scheduler: Optional[AsyncIOScheduler] = None
@@ -41,18 +43,18 @@ PRESERVED_TOP_DIRS: frozenset[str] = frozenset({".fonts"})
 # ============================================================
 
 def get_cache_dir() -> Path:
-    """获取缓存目录"""
-    return Path.cwd() / "cached"
+    """获取缓存目录。统一走 ChatMe.paths.CACHED_DIR（anchored to backend/）。"""
+    return CACHED_DIR
 
 
 def get_log_dir() -> Path:
-    """获取日志目录"""
-    return Path.cwd() / ".chatme" / "logs"
+    """获取日志目录。统一走 ChatMe.paths.get_chatme_dir()（local .chatme 优先）。"""
+    return get_chatme_dir() / "logs"
 
 
 def get_memory_dir() -> Path:
-    """获取记忆文件目录"""
-    return Path.cwd() / ".chatme" / "memory"
+    """获取记忆文件目录。统一走 ChatMe.paths.get_chatme_dir()。"""
+    return get_chatme_dir() / "memory"
 
 
 def touch_file(path: Path):
@@ -244,6 +246,46 @@ async def clean_orphaned_sessions() -> tuple[int, list[str]]:
     return len(removed_names), removed_names
 
 
+def clean_trash() -> tuple[int, float]:
+    """物理清理 .trash/ 目录下所有文件（软删除兜底）。
+
+    DELETE /chat/{sid}/file 把文件移到 .trash/{sid}/{ts}_{rel_path} 后，
+    本函数负责物理删除。每天 11:30 定时跑（与硬删除 23:30 错开）。
+
+    为什么全量清不按 mtime 过滤：
+    - 用户期望「每天 11:30 准时清干净」，简单直接
+    - 误删恢复窗口靠 .trash/ 目录本身（同会话历史删过的好找），
+      不靠延长 .trash/ 生命周期
+    - 想保留更久 → 改 cron 频率为每周或每月，不再用每天
+    """
+    import shutil
+
+    trash_dir = TRASH_DIR
+    if not trash_dir.exists():
+        return 0, 0.0
+
+    removed = 0
+    freed_size = 0.0
+    for sid_dir in trash_dir.iterdir():
+        # 预扫统计文件大小 / 数量（rmtree 本身不返回统计）
+        if sid_dir.is_dir():
+            for file in sid_dir.rglob("*"):
+                if file.is_file():
+                    freed_size += file.stat().st_size
+                    removed += 1
+            # shutil.rmtree 整树删：子目录嵌套也得带走
+            # （如 .trash/{sid}/{ts}_data_analysis_gen_001/charts/...），
+            # 单 unlink + rmdir 删不干净
+            shutil.rmtree(sid_dir)
+        elif sid_dir.is_file():
+            # 顶层散落文件：直接删
+            freed_size += sid_dir.stat().st_size
+            sid_dir.unlink()
+            removed += 1
+
+    return removed, freed_size
+
+
 # ============================================================
 # 调度器管理
 # ============================================================
@@ -296,6 +338,19 @@ async def _cleanup_task():
         logger.debug("无文件需要清理")
 
 
+async def _trash_cleanup_task():
+    """每天 11:30 物理清理 .trash/（与 23:30 的硬删除错开）。"""
+    logger = get_logger("CleanupScheduler")
+    removed, freed = clean_trash()
+    if removed > 0:
+        logger.info(
+            f".trash/ 清理完成: 删除 {removed} 个文件，"
+            f"释放 {freed / 1024 / 1024:.2f} MB"
+        )
+    else:
+        logger.debug(".trash/ 暂无文件需要清理")
+
+
 def _start_scheduler():
     """启动调度器"""
     global _scheduler
@@ -308,6 +363,15 @@ def _start_scheduler():
         trigger=CronTrigger(hour=23, minute=30, timezone='Asia/Shanghai'),
         id="daily_cleanup",
         name="每日缓存和日志清理",
+        replace_existing=True,
+    )
+    # 软删除兜底：每天 11:30 物理清空 .trash/
+    # 与 23:30 的硬删除任务错开运行，避免同一时间点做太多 IO
+    _scheduler.add_job(
+        _trash_cleanup_task,
+        trigger=CronTrigger(hour=11, minute=30, timezone='Asia/Shanghai'),
+        id="daily_trash_cleanup",
+        name="每日 .trash/ 物理清理",
         replace_existing=True,
     )
     _scheduler.start()

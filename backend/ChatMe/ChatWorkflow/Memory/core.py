@@ -12,6 +12,7 @@ from langchain_openai import ChatOpenAI
 
 from ChatMe.LoggingManager.logging_config import get_logger
 from ChatMe.ChatWorkflow.config.models import MemoryUpdateFormat
+from ChatMe.paths import get_chatme_dir
 
 async def _filter_thinking_content(ai_response: AIMessage) -> AIMessage:
     """
@@ -91,11 +92,9 @@ class MemoryManager:
 
         # 记忆文件存储目录
         if memory_dir is None:
-            memory_dir = os.path.join(
-                Path.cwd(),
-                ".chatme",
-                "memory"
-            )
+            # 统一走 ChatMe.paths.get_chatme_dir()（local .chatme 优先），
+            # 不再直接拼接 Path.cwd() + ".chatme" + "memory"。
+            memory_dir = str(get_chatme_dir() / "memory")
         self._memory_dir = memory_dir
         self._thread_locks: Dict[str, asyncio.Lock] = {}
 

@@ -3,7 +3,7 @@
     <aside v-show="visible && tabs.length" class="file-preview-panel" :style="{ width: panelWidth + 'px' }">
       <div class="resize-handle" @mousedown="startResize"></div>
 
-      <div class="preview-tabs" ref="tabStrip">
+      <div class="preview-tabs" ref="tabStrip" tabindex="-1" @keydown="handleTabKeydown">
         <button
           v-for="tab in tabs"
           :key="tab.id"
@@ -11,7 +11,7 @@
           class="preview-tab"
           :class="{ active: tab.id === activeTabId }"
           :title="tab.name"
-          @click="$emit('activate-tab', tab.id)"
+          @click="selectTab(tab.id)"
         >
           <span v-if="tab.loading" class="tab-loading"></span>
           <span class="tab-name">{{ tab.name }}</span>
@@ -107,8 +107,16 @@ export default {
       }
     },
     visible(value) {
-      if (value) this.scrollActiveTabIntoView()
-      else this.showFileTree = false
+      if (value) {
+        this.scrollActiveTabIntoView()
+        // 把焦点抢到 tab 条上，← / → 立刻能切 tab
+        this.$nextTick(() => {
+          const strip = this.$refs.tabStrip
+          if (strip && strip.focus) strip.focus()
+        })
+      } else {
+        this.showFileTree = false
+      }
     }
   },
   methods: {
@@ -117,6 +125,44 @@ export default {
         const activeTab = this.$refs.tabStrip?.querySelector('.preview-tab.active')
         activeTab?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
       })
+    },
+    /**
+     * 顶部 tab 键盘导航：
+     *   - ← / →: 切 tab（水平 tab 条，左右键符合视觉方向）
+     *   - Enter / Space: 显式 apply 当前高亮 tab（与点击等价）
+     *   - Home / End: 跳到第一个 / 最后一个 tab
+     *   - Ctrl+W: 关闭当前 tab（与 IDE 一致；不挡用户的 Ctrl+W 系统快捷键，
+     *             但在 tabStrip 内被认为是关闭意图）
+     * 监听挂在 .preview-tabs 上（tabindex=-1），open 时 .focus() 把键盘焦点拉过来。
+     */
+    handleTabKeydown(e) {
+      const list = this.tabs
+      if (!list || list.length === 0) return
+      let idx = list.findIndex(t => t.id === this.activeTabId)
+      if (idx < 0) idx = 0
+      if (e.key === 'ArrowRight') {
+        e.preventDefault()
+        idx = Math.min(idx + 1, list.length - 1)
+        this.selectTab(list[idx].id)
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault()
+        idx = Math.max(idx - 1, 0)
+        this.selectTab(list[idx].id)
+      } else if (e.key === 'Home') {
+        e.preventDefault()
+        this.selectTab(list[0].id)
+      } else if (e.key === 'End') {
+        e.preventDefault()
+        this.selectTab(list[list.length - 1].id)
+      } else if ((e.key === 'w' || e.key === 'W') && (e.ctrlKey || e.metaKey)) {
+        // Ctrl/Cmd+W: 关闭当前 tab
+        e.preventDefault()
+        if (list[idx]) this.$emit('close-tab', list[idx].id)
+      }
+    },
+    selectTab(id) {
+      this.$emit('activate-tab', id)
+      this.$nextTick(this.scrollActiveTabIntoView)
     },
     async toggleFileTree() {
       this.showFileTree = !this.showFileTree
@@ -266,6 +312,9 @@ export default {
   border-bottom: 1px solid var(--border-color);
   flex-shrink: 0;
   scrollbar-width: thin;
+  /* tab 条自动 focus 接收 ←/→/Home/End 等键盘事件，
+     不该显示浏览器默认黑 focus ring（active tab 已有高亮）。 */
+  outline: none;
 }
 .preview-tabs::-webkit-scrollbar { height: 4px; }
 .preview-tabs::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 2px; }

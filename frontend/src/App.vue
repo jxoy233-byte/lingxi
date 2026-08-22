@@ -700,11 +700,14 @@ export default {
         // 意识不到自己访问的是坏 URL。
         // 这里主动检测：pathname 不是根也不是 index.html（即 Vite SPA fallback 留下的
         // 单 segment），就视为坏 URL → 直接触发动画。
-        // 排除 /index.html 是因为 _navigateHome() 会跳到 /index.html 清理 pathname，
-        // 那个是「正常 reload 后的入口」，不该再触发动画。
+        // 用 endsWith('/index.html') 而不是 === '/index.html'：Electron 打包后
+        // win.loadFile(dist/index.html) 不会把 pathname 规范化成 /index.html，
+        // 而是完整绝对路径（macOS 如 /Applications/灵析.app/Contents/Resources/
+        // app.asar/dist/index.html），prod 启动每次都会撞这条误触发动画。
+        // / 单独保留：dev 模式 loadURL('http://localhost:18211/') 的 pathname 就是 /。
         const path = window.location.pathname
-        const isRootPath = path === '/' || path === '/index.html'
-        if (!isRootPath && !initialSessionId) {
+        const isIndexHtmlEntry = path === '/' || path.endsWith('/index.html')
+        if (!isIndexHtmlEntry && !initialSessionId) {
           this.showNotFound()
           return
         }

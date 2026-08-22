@@ -894,7 +894,6 @@ async function startBackend(onLog) {
   await getShellAugmentedPath()
 
   console.log('[backend] starting:', pythonExe, 'main.py')
-  onLog?.(`[backend] starting: ${pythonExe} main.py\n`)
 
   const proc = spawn(pythonExe, ['main.py'], {
     cwd: backendDir,
@@ -1106,7 +1105,6 @@ function registerStartupIpc() {
       onLog('venv', '✅ Python 依赖就绪\n')
 
       // 5. backend
-      onLog('backend', '正在启动后端服务（首次加载 docling/QwenVL 可能较慢）...\n')
       await startBackend((m) => onLog('backend', m))
       onLog('backend', '✅ 后端就绪\n')
 

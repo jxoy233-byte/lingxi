@@ -27,3 +27,5 @@
 - 优化electron的windows端，electron还有linux端的吗，这个有必要的吗
 
 - /goal技能 + 规划计划技能
+
+- 创建快捷键可以选定输入消息框

@@ -67,6 +67,9 @@ cached/
 cache/
 *.cache
 
+# Soft-delete trash (per-session .trash/{sid}/{YYYYMMDD_HHMMSS}_{rel}.sha1[:6]/)
+backend/.trash/
+
 # VL model local directory (avoid uploading 4GB model binaries to git)
 .model/
 

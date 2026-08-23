@@ -21,6 +21,7 @@
           <section class="help-section">
             <h3>快捷键</h3>
             <ul>
+              <li><kbd>//</kbd>（双击 <kbd>/</kbd>）：从任意位置聚焦输入框；输入框内按 <kbd>/</kbd> 正常输入不拦截</li>
               <li><kbd>↑</kbd> <kbd>↓</kbd> / <kbd>Enter</kbd> / <kbd>Esc</kbd>：slash 面板、审批、列表通用导航</li>
               <li><kbd>1</kbd>–<kbd>4</kbd>：审批 4 档快速选（取消 / 仅本次 / 反馈 / 批准）</li>
               <li><kbd>Shift+Enter</kbd>：输入框换行</li>

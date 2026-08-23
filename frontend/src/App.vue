@@ -436,6 +436,10 @@ export default {
       _notFoundTimer: null,          // 10s 自动跳转 setTimeout handle
       _notFoundTickInterval: null,   // 100ms tick interval 驱动进度条
       _notFoundRemaining: 10,        // 倒计时剩余秒数（驱动模板 + 进度条）
+      // —— 双击 `/` 快捷键 —— 上一次 `/` 按下的时间戳。
+      // 双击窗口 500ms 内（macOS 双击阈值）且用户当前不在输入框 → 聚焦输入框；
+      // 在输入框里则不拦截，让 `//` 正常输入（用户主动输入字面量 //）。
+      _lastSlashTime: 0,
     }
   },
   mounted() {
@@ -453,6 +457,9 @@ export default {
     // 弹层 Esc/Enter 全局快捷键：image-preview / resume-input 弹层打开时
     // 监听 document（div 无 tabindex 时 @keydown.esc 收不到事件）
     window.addEventListener('keydown', this.handleOverlayKeydown)
+    // 全局快捷键 双击 `/` → 聚焦输入框。监听独立挂载，不并入 handleOverlayKeydown，
+    // 因为「双击 /」是「全局跳转」语义，弹层打开时也需要短路。
+    window.addEventListener('keydown', this.handleDoubleSlashFocus)
 
     if (window.electronAPI?.getServicesReady) {
       // ===== Electron 路径 =====
@@ -1335,6 +1342,68 @@ export default {
             this.confirmResume()
           }
         }
+      }
+    },
+    /**
+     * 全局快捷键 双击 `/` → 聚焦消息输入框。
+     *
+     * 行为矩阵：
+     * - 用户已在输入框（textarea / input / contenteditable）：
+     *   单 `/` 正常输入；双 `//` 也正常输入（用户可能故意输入注释符号、URL、Python 注释等）。
+     *   不拦截、不抢焦点。
+     * - 用户不在输入框（侧栏 / 消息列表 / 任意非输入态）：
+     *   单 `/` `preventDefault` 阻止 Firefox quick-find 等浏览器自带行为；
+     *   双 `//`（500ms 内连按两次）→ `preventDefault` + 聚焦输入框。
+     *
+     * 设计要点：
+     * - 双击而不是单字符：避免和「用户在输入框打 / 调 slash 命令」撞键，
+     *   也避免误触（输入框里 `//` 是合法字面量，不应被吞）。
+     * - 500ms 阈值：参考 macOS 双击默认（~500ms），够快不累赘、又不至于和正常输入节奏混淆。
+     * - 第一次 `/` 也 `preventDefault`：用户不在输入框时按的 `/` 没有「应该出现的」目标，
+     *   让浏览器做任何反应（quick-find / dev console / iframe focus）都是意外的。
+     * - 弹窗（Settings/Help/Confirm 等）打开时短路：弹窗有自己的 keydown 处理器，
+     *   强抢焦点会把焦点偷到被遮的 textarea 上，破坏弹窗自身的快捷键回路。
+     *   用户先 Esc 关闭弹窗再双击 `/`。
+     * - 不和 shift/alt/meta/ctrl 同按：避免和未来扩展（如 Shift+/ = ?）撞键；
+     *   中文 IME 组合输入期 `e.isComposing` 跳过，组合完成后才判断。
+     */
+    handleDoubleSlashFocus(e) {
+      if (e.key !== '/') return
+      if (e.isComposing) return
+      if (e.shiftKey || e.altKey || e.metaKey || e.ctrlKey) return
+
+      const active = document.activeElement
+      const isInInput = active && (
+        active.tagName === 'TEXTAREA' ||
+        active.tagName === 'INPUT' ||
+        active.isContentEditable === true
+      )
+
+      if (isInInput) {
+        // 在输入框内 —— 不拦截，让 / 和 // 都正常输入；
+        // 同时清掉双击窗口，防止「按 / 切走再切回输入框」误触双击。
+        this._lastSlashTime = 0
+        return
+      }
+
+      // 弹窗（Settings / Help / Confirm 等）打开时短路：弹窗有自己的 keydown 处理器，
+      // 强抢焦点会把焦点偷到被遮的 textarea 上，破坏弹窗自身的快捷键回路。
+      // 用户先 Esc 关闭弹窗再双击 `/`。
+      if (this.settingsVisible || this.helpVisible || this.showRestoreConfirm
+          || this.showImagePreview || this.showWebPreview || this.showFilePreview
+          || this.showCheckpoints || this.showResumeInput) {
+        return
+      }
+
+      // 不在输入框也不在弹窗 —— 拦截 /，检测双击
+      e.preventDefault()
+      const now = Date.now()
+      const DOUBLE_TAP_WINDOW = 500
+      if (this._lastSlashTime && (now - this._lastSlashTime) < DOUBLE_TAP_WINDOW) {
+        this._lastSlashTime = 0
+        this.focusInput()
+      } else {
+        this._lastSlashTime = now
       }
     },
     openWebPreview(url) {
@@ -4999,6 +5068,7 @@ export default {
     // （Electron 单窗口架构下基本不会触发，但规范做法）
     if (this._notFoundTimer) clearTimeout(this._notFoundTimer)
     if (this._notFoundTickInterval) clearInterval(this._notFoundTickInterval)
+    window.removeEventListener('keydown', this.handleDoubleSlashFocus)
   },
   watch: {
     isLoading(newVal) {

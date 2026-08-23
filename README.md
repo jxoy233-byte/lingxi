@@ -458,7 +458,6 @@ npm run electron:build
 # 明确指定平台
 npm run electron:build:mac      # macOS arm64 + x64（DMG + ZIP）
 npm run electron:build:win      # Windows NSIS（x64）
-npm run electron:build:linux    # Linux AppImage + .deb + .rpm（x64 + arm64）
 ```
 
 桌面端通过 `electron-builder` 打包，应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.1.7）在 `frontend/electron/electron.config.js` 中配置。
@@ -473,45 +472,6 @@ npm run electron:build:linux    # Linux AppImage + .deb + .rpm（x64 + arm64）
 - `灵析-0.1.7.deb` — Debian / Ubuntu 安装包
 - `灵析-0.1.7.rpm` — Fedora / RHEL 安装包
 - `win-unpacked.exe` — Windows 安装器
-
-### Linux 安装与故障排查
-
-**优先选 .deb / .rpm**（系统包管理器管理依赖、自动建快捷方式、`.desktop` 文件进 `/usr/share/applications/`）：
-
-```bash
-# Debian / Ubuntu
-sudo dpkg -i 灵析-0.1.7.deb
-sudo apt install -f   # 自动补依赖
-
-# Fedora / RHEL / openSUSE
-sudo rpm -ivh 灵析-0.1.7.rpm
-# 或
-sudo dnf install ./灵析-0.1.7.rpm
-```
-
-**AppImage 需要 FUSE**（默认走 squashfs 挂载路径）。如果遇到以下报错：
-
-```
-dlopen(): libfuse.so.2 ... cannot open shared object file
-fuse: device not found, try 'modprobe fuse' first
-```
-
-三种修复方式，按推荐顺序：
-
-1. **装 FUSE**（最稳）：`sudo apt install fuse libfuse2`（Debian/Ubuntu）/ `sudo dnf install fuse`（Fedora）
-2. **绕过 FUSE 直接解压跑**（无 FUSE 环境 / WSL2 默认）：`./灵析-0.1.7.AppImage --appimage-extract-and-run`，内置解包 + 跑（每次启动慢 ~1s）
-3. **手动解包**：`./灵析-0.1.7.AppImage --appimage-extract` → `squashfs-root/AppRun` 直接跑（适合调试）
-
-**下载后无法执行**通常是浏览器没设可执行位：`chmod +x 灵析-0.1.7.AppImage`
-
-**arm64 用户**（Apple Silicon Linux / RPi 4-5 / AWS Graviton）：现在构建同时产出 `*-arm64.AppImage` / `*-arm64.deb` / `*-arm64.rpm`，不用改源码。
-
-**Electron 核心机制**（详见 [`frontend/README.md`](frontend/README.md)）：
-
-- `protocol.handle('file', ...)` 在 `app.whenReady()` 内注册，把 `/chat/*` 和 `/static/*` 转发到后端（等价 Vite dev proxy）；其他 `file://` 走白名单校验后从 asar 内 `dist/` 读盘
-- API 转发必须显式带 `method/headers/body + duplex: 'half'`（POST `/chat/` 的 body 否则被丢），SSE 流必须显式 `new Response(upstream.body, ...)` 透传避免被 buffer
-- 多环境由 `NODE_ENV` 严格控制：`development` / `test` / `production` 分别走 Vite dev / Vite dev / 本地 dist；`app.isPackaged` 仅用于决定图标路径来源
-- **单窗口架构 + 启动引导**：始终一个 BrowserWindow，主界面始终在 DOM 里（冷启动未就绪时灰显禁用 + SetUpView 浮窗叠加）。`main.js` 维护模块级 `servicesReady` 状态，bootstrap 完成后 `webContents.send('startup:services-ready-changed', { ready, autoEnterFrontend })` 广播给 `App.vue`；`App.vue` 翻 `appReady` 控制主界面启用 + 调 `initConversationState()`。详见 CLAUDE.md 偏好章节「单窗口架构 + autoEnter 三态按钮」。
 
 ## 开发注意事项
 

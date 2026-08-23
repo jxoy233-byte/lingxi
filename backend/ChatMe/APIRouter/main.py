@@ -1,11 +1,7 @@
 from contextlib import asynccontextmanager
-from datetime import datetime
-import hashlib
-import pathlib
-import shutil
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, FastAPI, Path, Body, File, Form, Query, UploadFile
+from fastapi import APIRouter, HTTPException, FastAPI, Path, Body, File, Form, UploadFile
 from pydantic import BaseModel
 from fastapi.responses import StreamingResponse
 
@@ -15,7 +11,7 @@ from ChatMe.ChatService.config.models import ChatRequest, ConversationSimple
 from ChatMe.ChatService import ChatService, FILE_MAX_LENGTH
 from ChatMe.ChatWorkflow import ChatWorkflow
 from ChatMe.LoggingManager.logging_config import get_logger
-from ChatMe.paths import BACKEND_ROOT, CACHED_DIR, TRASH_DIR
+from ChatMe.paths import CACHED_DIR
 
 ChatMe_app = APIRouter(prefix="/chat")
 
@@ -314,104 +310,9 @@ async def get_session_tree(
     }
 
 
-@ChatMe_app.delete("/{session_id}/file", summary="软删除会话文件（移到 .trash/，每天 11:30 定时清理）")
-async def delete_session_file(
-    session_id: str = Path(..., description="会话ID"),
-    file_path: str = Query(..., description="相对 cached/{session_id}/ 的路径，如 data_analysis/gen_001/charts/sales.png"),
-):
-    """会话文件树右键/行内删除文件 / 目录 —— 软删除实现。
-
-    1. 拒绝绝对路径 / 路径越界（必须落在 cached/{session_id}/ 下）
-    2. 文件 / 目录都支持：shutil.move 对目录自动 rmtree 整树移到 .trash/
-    3. 移目标到 .trash/{session_id}/{timestamp}_{rel_path}（保留路径结构便于排查）
-    4. 已存在同名 → 追加 hash 后缀避免覆盖
-
-    Returns:
-        {"code": 200, "msg": "...", "trash_path": "..."}
-        {"code": 400/404, "msg": "..."} on error
-    """
-    if not file_path or file_path.startswith("/"):
-        raise HTTPException(status_code=400, detail="file_path 必须为相对路径")
-
-    # 拒绝空 / 文件名越界 / 路径穿越
-    if ".." in pathlib.Path(file_path).parts:
-        raise HTTPException(status_code=400, detail="file_path 含非法 '..' 段")
-
-    target = (CACHED_DIR / session_id / file_path).resolve()
-    session_root = (CACHED_DIR / session_id).resolve()
-    try:
-        target.relative_to(session_root)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="file_path 越界，不得跨出会话目录")
-
-    if not target.exists():
-        raise HTTPException(status_code=404, detail=f"文件不存在: {file_path}")
-
-    # 目标：.trash/{session_id}/{timestamp}_{filename}，保留相对路径避免重名
-    # 目录整体走 shutil.move 时自动 rmtree 树移到 .trash/（保留树结构便于排查）
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    trash_target = TRASH_DIR / session_id / f"{timestamp}_{file_path.replace('/', '_')}"
-    trash_target.parent.mkdir(parents=True, exist_ok=True)
-
-    # 同名碰撞兜底：极小概率（同一秒删两次同文件）
-    if trash_target.exists():
-        suffix = hashlib.sha1(str(target).encode()).hexdigest()[:6]
-        trash_target = trash_target.with_name(f"{trash_target.stem}_{suffix}{trash_target.suffix}")
-
-    shutil.move(str(target), str(trash_target))
-    logger.info(f"[delete_session_file] {session_id}/{file_path} → {trash_target}")
-    return {
-        "code": 200,
-        "msg": "已移至 .trash/（每天 11:30 定时清理）",
-        "trash_path": str(trash_target.relative_to(BACKEND_ROOT)),
-        "session_id": session_id,
-    }
-
-
-@ChatMe_app.delete("/{session_id}/trash", summary="手工清空当前会话的 .trash/ 目录")
-async def clear_session_trash(
-    session_id: str = Path(..., description="会话ID"),
-):
-    """物理清理 .trash/{session_id}/ 下所有文件（前端文件树「清空回收站」按钮走这里）。
-
-    与定时清理的关系：
-    - 每天 11:30 APScheduler 会自动跑 `clean_trash()` 清空整个 .trash/
-    - 本接口允许用户从前端随时清空当前会话的 trash（不阻塞其他 session）
-    - 都基于 `TRASH_DIR` 同款路径，无歧义
-
-    Returns:
-        {"code": 200, "removed": N, "freed_bytes": B, "session_id": "..."}
-    """
-    trash_session_dir = TRASH_DIR / session_id
-    if not trash_session_dir.exists():
-        return {
-            "code": 200,
-            "msg": "回收站为空",
-            "removed": 0,
-            "freed_bytes": 0,
-            "session_id": session_id,
-        }
-
-    # 先扫一遍统计：rglob("*") 包含子目录，但只统计文件大小 / 数量
-    # （rmtree 不返回统计；用 onerror 也能做，但预扫更直观）
-    removed = 0
-    freed_bytes = 0
-    for entry in trash_session_dir.rglob("*"):
-        if entry.is_file():
-            freed_bytes += entry.stat().st_size
-            removed += 1
-    # shutil.rmtree 整树删：删除的目录里可能有软删过来的整棵子树
-    # （如 .trash/{sid}/{ts}_data_analysis_gen_001/charts/...），单 unlink + rmdir 删不干净
-    shutil.rmtree(trash_session_dir)
-
-    logger.info(f"[clear_session_trash] {session_id} 清理 {removed} 个文件，释放 {freed_bytes} bytes")
-    return {
-        "code": 200,
-        "msg": f"已清理 {removed} 个文件",
-        "removed": removed,
-        "freed_bytes": freed_bytes,
-        "session_id": session_id,
-    }
+# ─── trash 相关端点（软删 / 列 / 整树清空 / 单条硬删 / 恢复）已移至 ChatMe/APIRouter/trash.py ───
+# 单一职责：trash 增删改查 / sidecar 维护 / 路径安全 都集中到 trash.py，
+# main.py 只保留对话 / 文件树主路由。
 
 
 @ChatMe_app.post("/{session_id}/backtrack", summary="会话回溯")

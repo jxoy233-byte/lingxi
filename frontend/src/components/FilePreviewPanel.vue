@@ -195,6 +195,7 @@ export default {
     buildTreeNode() {
       const root = { name: 'data_analysis', type: 'directory', children: [] }
       const basePrefix = this.treeRootPath.endsWith('/') ? this.treeRootPath : this.treeRootPath + '/'
+      // 优先用后端返回的 type 字段（兼容空目录）；老版本后端没 type 时 fallback 到「末段=file」
       for (const file of this.treeFiles) {
         const rel = file.path.startsWith(basePrefix)
           ? file.path.slice(basePrefix.length)
@@ -202,10 +203,12 @@ export default {
         const parts = rel.split('/').filter(Boolean)
         if (parts.length === 0) continue
         let current = root
+        const backendType = file.type  // 'file' | 'directory' | undefined
         for (let i = 0; i < parts.length; i++) {
           const part = parts[i]
-          const isFile = i === parts.length - 1
-          if (isFile) {
+          const isLast = i === parts.length - 1
+          const nodeType = isLast ? (backendType || 'file') : 'directory'
+          if (nodeType === 'file') {
             current.children.push({
               name: part,
               type: 'file',
@@ -214,9 +217,10 @@ export default {
               modified_at: file.modified_at
             })
           } else {
+            const dirPath = basePrefix + parts.slice(0, i + 1).join('/')
             let dir = current.children.find(c => c.name === part && c.type === 'directory')
             if (!dir) {
-              dir = { name: part, type: 'directory', children: [] }
+              dir = { name: part, type: 'directory', path: dirPath, children: [] }
               current.children.push(dir)
             }
             current = dir

@@ -40,62 +40,75 @@ static_file_router = APIRouter(prefix="/static", tags=["静态文件"])
 
 def list_data_analysis_files(data_analysis_dir: Path, base_rel: str) -> List[dict]:
     """
-    列出 data_analysis 目录下所有文件（扁平列表），供前端自行构树。
+    列出 data_analysis 目录下所有文件 + **目录**（扁平列表），供前端自行构树。
 
     Args:
         data_analysis_dir: data_analysis 绝对路径
         base_rel: 路径前缀，如 "cached/{session_id}/data_analysis"
 
     Returns:
-        [{"path": "cached/.../xxx.png", "size": int, "modified_at": str}, ...]
+        [{"path": "cached/.../xxx.png", "type": "file"|"directory", "size": int, "modified_at": str}, ...]
+
+    同 `list_session_files`：保留目录节点（含空目录）+ 显式 type 字段。
     """
-    files = []
+    entries = []
     if not data_analysis_dir.exists() or not data_analysis_dir.is_dir():
-        return files
+        return entries
     for f in data_analysis_dir.rglob("*"):
-        if not f.is_file() or f.name.startswith("."):
+        if f.name.startswith("."):
             continue
-        # 相对 BACKEND_ROOT 取，保证 path 含 "cached/" 前缀，与 /static/cached/ 路由一致
         rel = f.relative_to(BACKEND_ROOT).as_posix()
         stat = f.stat()
-        files.append({
+        entry_type = "directory" if f.is_dir() else "file"
+        entry = {
             "path": rel,
-            "size": stat.st_size,
+            "type": entry_type,
+            "size": stat.st_size if entry_type == "file" else 0,
             "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
-        })
-    files.sort(key=lambda x: x["path"])
-    return files
+        }
+        entries.append(entry)
+    entries.sort(key=lambda x: x["path"])
+    return entries
 
 
 def list_session_files(session_dir: Path) -> List[dict]:
     """
-    列出整个 session 目录下所有文件（扁平列表），范围比 list_data_analysis_files 广：
-    包含 data_analysis/ 子目录 + 用户上传文件 + AI 中间产物等任何位置的文件。
+    列出整个 session 目录下所有文件 + **目录**（扁平列表），范围比 list_data_analysis_files 广：
+    包含 data_analysis/ 子目录 + 用户上传文件 + AI 中间产物等任何位置的文件 + **空目录**。
     供前端 "工作树" 面板构树展示当前会话的全部产物。
 
     Args:
         session_dir: session 绝对路径 (cached/{session_id})
 
     Returns:
-        [{"path": "cached/.../xxx", "size": int, "modified_at": str}, ...]
+        [{"path": "cached/.../xxx", "type": "file"|"directory", "size": int, "modified_at": str}, ...]
+
+    注意：空目录**必须**出现在结果里（带 type="directory"），否则前端 `_buildFileTree`
+    永远建不出空目录节点（用户右键创建的文件夹就是空的）。同时给目录/文件都加 type 字段，
+    前端不再依赖「path 末段 = file / 中间段 = directory」这种隐式约定，根除歧义。
     """
-    files = []
+    entries = []
     if not session_dir.exists() or not session_dir.is_dir():
-        return files
+        return entries
     for f in session_dir.rglob("*"):
-        # 跳过隐藏文件 + 跳目录（虽然 rglob 也走文件，但 is_file 二次过滤）
-        if not f.is_file() or f.name.startswith("."):
+        # 跳过隐藏文件 / 隐藏目录（如 .trash/.cache）
+        if f.name.startswith("."):
             continue
         # 相对 BACKEND_ROOT 取，保证 path 含 "cached/" 前缀，与 /static/cached/ 路由一致
         rel = f.relative_to(BACKEND_ROOT).as_posix()
         stat = f.stat()
-        files.append({
+        # 关键：rglob("*") 也会产出目录节点；保留它们（包括空目录），
+        # 并显式标注 type，让前端 `_buildFileTree` 能区分 file vs directory。
+        entry_type = "directory" if f.is_dir() else "file"
+        entry = {
             "path": rel,
-            "size": stat.st_size,
+            "type": entry_type,
+            "size": stat.st_size if entry_type == "file" else 0,
             "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
-        })
-    files.sort(key=lambda x: x["path"])
-    return files
+        }
+        entries.append(entry)
+    entries.sort(key=lambda x: x["path"])
+    return entries
 
 
 @static_file_router.put("/{file_path:path}", summary="写入文件内容")

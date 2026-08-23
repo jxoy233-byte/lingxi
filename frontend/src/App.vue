@@ -14,10 +14,12 @@
   >
     <div class="main-layout">
       <Sidebar
+        ref="sidebar"
         :collapsed="sidebarCollapsed"
         :conversations="conversations"
         :active-session-id="currentSessionId"
         :mobile-open="sidebarMobileOpen"
+        :active-view="sidebarView"
         :active-streaming-sessions="_activeStreamingSessions"
         :completed-sessions="_completedSessions"
         :approval-pending-sessions="_approvalPendingSessions"
@@ -34,6 +36,9 @@
         @scheduled-task-toggle="onScheduledTaskToggle"
         @scheduled-task-run="onScheduledTaskRun"
         @scheduled-task-delete="onScheduledTaskDelete"
+        @update:activeView="sidebarView = $event"
+        @file-click="onDataAnalysisFileClick"
+        @reload-files="onSidebarReloadFiles"
       />
 
       <!-- 移动端侧边栏遮罩 -->
@@ -50,15 +55,7 @@
           @toggle-checkpoints="toggleCheckpoints"
           @toggle-sidebar="toggleMobileSidebar"
           @refresh="refreshPage"
-        >
-          <template v-if="currentSessionId" #extra-actions>
-            <DataAnalysisTree
-              ref="dataAnalysisTree"
-              :session-id="currentSessionId"
-              @file-click="onDataAnalysisFileClick"
-            />
-          </template>
-        </ChatHeader>
+        />
 
         <MessageList
           ref="messageList"
@@ -276,7 +273,6 @@ import SetUpView from './components/SetUpView.vue'
 import CheckpointPanel from './components/CheckpointPanel.vue'
 import WebPreviewPanel from './components/WebPreviewPanel.vue'
 import FilePreviewPanel from './components/FilePreviewPanel.vue'
-import DataAnalysisTree from './components/DataAnalysisTree.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import HelpDialog from './components/HelpDialog.vue'
 import ToastDialog from './components/ToastDialog.vue'
@@ -305,7 +301,6 @@ export default {
     CheckpointPanel,
     WebPreviewPanel,
     FilePreviewPanel,
-    DataAnalysisTree,
     SettingsDialog,
     HelpDialog,
     ToastDialog,
@@ -315,6 +310,13 @@ export default {
     return {
       isDarkTheme: false,
       sidebarCollapsed: false,
+      // 侧栏视图：'sessions' | 'files'，持久化到 localStorage（用户偏好）
+      sidebarView: (() => {
+        try {
+          const v = localStorage.getItem('lingxi.sidebarView')
+          return v === 'files' ? 'files' : 'sessions'
+        } catch { return 'sessions' }
+      })(),
       conversations: [],
       // 加载会话失败时的错误消息（用户可见），空字符串 = 成功或尚未加载
       conversationsLoadError: '',
@@ -539,6 +541,10 @@ export default {
     // 入口清空（MessageInput.clearDynamicSkills 暴露给 App.vue）。
     helpVisible(visible) {
       if (visible && this.dynamicSkills.length === 0) this.fetchSkills()
+    },
+    // 侧栏视图切换持久化（跨 F5 恢复）
+    sidebarView(newVal) {
+      try { localStorage.setItem('lingxi.sidebarView', newVal) } catch { /* 静默 */ }
     },
     '$route.params.sessionId'(newSessionId) {
       // 监听 URL 变化
@@ -1401,7 +1407,8 @@ export default {
       const DOUBLE_TAP_WINDOW = 500
       if (this._lastSlashTime && (now - this._lastSlashTime) < DOUBLE_TAP_WINDOW) {
         this._lastSlashTime = 0
-        this.focusInput()
+        // force=true：双击 / 是用户明确要把焦点切到输入框，绕过 files 视图的短路
+        this.focusInput(true)
       } else {
         this._lastSlashTime = now
       }
@@ -1481,7 +1488,7 @@ export default {
             this.showToast('当前没有可用会话', '工作树与具体会话绑定，请先新建或选择一个会话。')
             return
           }
-          this.$refs.dataAnalysisTree?.openPanel?.()
+          this.sidebarView = 'files'
           return
         case 'help':
           this.helpVisible = true
@@ -1508,8 +1515,16 @@ export default {
      * / resume 等事件回调里调一下，光标自动回到 MessageInput 的 textarea。
      * 走 $nextTick 等 DOM 更新完再 focus，避免和 v-if 过渡 / input 状态变更撞车。
      * `?.` 链式调用防御 $refs.messageInput 不可用的情况（冷启动未挂载等）。
+     *
+     * 文件视图（sidebarView === 'files'）下短路：不抢焦点 —— 文件树快捷键（Cmd+C/V/D/X 等）
+     * 要求焦点留在文件树上，否则 `_shortcutGuard` 检测到 textarea 会拒绝响应，
+     * 让用户的复制 / 粘贴 / 删除等操作全部失效。
+     *
+     * 例外：`force=true` 强制抢焦点 —— 用于「双击 /」快捷键（用户明确要把焦点切到输入框），
+     * 此时即便在 files 视图也要抢。
      */
-    focusInput() {
+    focusInput(force = false) {
+      if (!force && this.sidebarView === 'files') return
       this.$nextTick(() => {
         const mi = this.$refs.messageInput
         if (mi && typeof mi.focusTextarea === 'function') mi.focusTextarea()
@@ -1635,7 +1650,7 @@ export default {
         this.messages = this.processConversationMessages(conv.messages)
 
         // 同步文件树 + 侧栏
-        this.$refs.dataAnalysisTree?.reload()
+        this.$refs.sidebar?.reloadFiles?.()
 
         // 6. 把原消息文本回填到输入框 + 持久化到 localStorage（跨 F5 存活）
         //    loadConversation 时会检测 entry 自动 setInputText；用户发送 / 主动清空时清掉
@@ -1750,6 +1765,8 @@ export default {
         : ''
       await this.openFilePreviewTab({ file: fileNode, url, suffix, kind, content })
     },
+    // Sidebar @reload-files 兜底：当前 sidebar 内部已经自管数据，这里主要是占位
+    onSidebarReloadFiles() { /* sidebar 内部已 fetch */ },
     async openFilePreviewTab({ file, url = '', suffix = '', kind = 'text', content = '' }) {
       const sourceKey = buildFilePreviewSourceKey(file, this.currentSessionId || '', url)
       const existing = this.filePreviewTabs.find(tab => tab.sourceKey === sourceKey)
@@ -2865,7 +2882,7 @@ export default {
         this.$refs.messageList?.suppressNextScroll()
         this.messages = this.processConversationMessages(conversation.messages)
         // 同步文件树（AI 回溯后 cached 下的文件可能变化）
-        this.$refs.dataAnalysisTree?.reload()
+        this.$refs.sidebar?.reloadFiles?.()
 
         // 3. 清除中断状态（backtrack 后后端已清除，前端保持同步）
         if (conversation.interrupted_info?.reason) {
@@ -3170,7 +3187,7 @@ export default {
             this.$refs.messageList?.suppressNextScroll()
             this.messages = this.processConversationMessages(conversation.messages)
             // 同步文件树（恢复检查点后 cached 下的文件可能变化）
-            this.$refs.dataAnalysisTree?.reload()
+            this.$refs.sidebar?.reloadFiles?.()
 
             // 清除中断状态（后端已清除，前端保持同步）
             if (conversation.interrupted_info?.reason) {
@@ -3866,7 +3883,7 @@ export default {
           this.$refs.messageList?.suppressNextScroll()
           this.messages = this.processConversationMessages(conversation.messages)
           // 同步文件树
-          this.$refs.dataAnalysisTree?.reload()
+          this.$refs.sidebar?.reloadFiles?.()
           // 同步中断状态
           const reason = conversation.interrupted_info?.reason
           if (reason) {
@@ -3924,7 +3941,7 @@ export default {
             this.$refs.messageList?.suppressNextScroll()
             this.messages = this.processConversationMessages(conversation.messages)
             // 同步文件树
-            this.$refs.dataAnalysisTree?.reload()
+            this.$refs.sidebar?.reloadFiles?.()
             // 同步中断状态
             const reason = conversation.interrupted_info?.reason
             if (reason) {
@@ -4798,7 +4815,7 @@ export default {
           this.$refs.messageList?.suppressNextScroll()
           this.messages = this.processConversationMessages(conversation.messages)
           // 同步工作树（AI 跑完一轮可能新写文件到 cached/{sid}/ 任意位置，包括 data_analysis/ 子目录之外的中间产物）
-          this.$refs.dataAnalysisTree?.reload()
+          this.$refs.sidebar?.reloadFiles?.()
           // 同步侧边栏标题和更新时间
           const conv = this.conversations.find(c => c.session_id === sessionId)
           if (conv) {
@@ -4834,7 +4851,7 @@ export default {
           this.$refs.messageList?.suppressNextScroll()
           this.messages = this.processConversationMessages(conversation.messages)
           // 同步文件树
-          this.$refs.dataAnalysisTree?.reload()
+          this.$refs.sidebar?.reloadFiles?.()
 
           // 更新侧边栏中的对话时间
           const conv = this.conversations.find(c => c.session_id === this.currentSessionId)

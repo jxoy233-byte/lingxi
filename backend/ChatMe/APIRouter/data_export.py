@@ -29,7 +29,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Path, Query
 from fastapi.responses import HTMLResponse, Response
 
-from ChatMe.APIRouter.static_file import list_data_analysis_files
+from ChatMe.APIRouter.static_file import SESSION_ID_PATTERN, list_data_analysis_files
 from ChatMe.LoggingManager.logging_config import get_logger
 from ChatMe.paths import CACHED_DIR
 
@@ -47,8 +47,12 @@ _MAX_FILE_BYTES = 100 * 1024 * 1024  # 100MB
 
 
 def _resolve_data_analysis_dir(session_id: str) -> Optional[Path]:
-    """解析 session 的 data_analysis 目录，不存在或 sid 不合法时返回 None。"""
-    if not re.match(r"^[0-9a-f]{12}$", session_id):
+    """解析 session 的 data_analysis 目录，不存在或 sid 不合法时返回 None。
+
+    sid 兼容 12 位（新版 `uuid.uuid4().hex[:12]`）和 32 位（旧版 `uuid.uuid4().hex`）hex；
+    复用了 `static_file.SESSION_ID_PATTERN`，避免散落多处正则定义。
+    """
+    if not SESSION_ID_PATTERN.match(session_id):
         return None
     base = CACHED_DIR.resolve()
     d = (base / session_id / _DATA_ANALYSIS_DIRNAME).resolve()

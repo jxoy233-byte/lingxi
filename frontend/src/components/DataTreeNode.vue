@@ -4,75 +4,220 @@
     <div
       v-if="node.type === 'directory'"
       class="dtn-row dtn-dir"
-      :style="{ paddingLeft: (depth * 14 + 8) + 'px' }"
-      @click="toggle"
+      :class="{ selected: isSelected, 'dtn-cut': isCutSource, 'dtn-copy': isCopySource }"
+      :style="rowStyle"
+      :data-node-path="node.path || ''"
+      @click="onRowClick"
+      @contextmenu.prevent.stop="onContextMenu"
     >
-      <span class="dtn-caret" :class="{ open: expanded }">▶</span>
-      <span class="dtn-icon">📁</span>
-      <span class="dtn-name">{{ node.name }}</span>
+      <span
+        v-for="i in depth"
+        :key="'indent-' + i"
+        class="dtn-indent"
+      ></span>
+
+      <span class="dtn-caret" :class="{ open: isExpanded }" @click.stop="toggle">
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="9 6 15 12 9 18"/>
+        </svg>
+      </span>
+
+      <span class="dtn-icon">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path v-if="isExpanded" d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/>
+          <path v-else d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"
+                :style="{ fill: 'rgba(59, 130, 246, 0.08)' }"/>
+        </svg>
+      </span>
+
+      <!-- inline 重命名态 -->
+      <input
+        v-if="renaming"
+        ref="renameInput"
+        v-model="renameText"
+        class="dtn-rename-input"
+        @blur="commitRename"
+        @keydown.enter.prevent="commitRename"
+        @keydown.esc.prevent="cancelRename"
+        @click.stop
+        @contextmenu.stop
+      />
+      <span v-else class="dtn-name" v-html="renderHighlighted(node.name)"></span>
+
       <span v-if="node.children && node.children.length > 0" class="dtn-count">
         {{ node.children.length }}
       </span>
-      <!-- 行内删除按钮：删除整棵子树到 .trash/{sid}/ -->
+
       <button
         class="dtn-del"
         :class="{ confirming: confirmingDelete }"
-        :title="confirmingDelete ? '再次点击确认删除整个文件夹（含子树）' : '删除文件夹'"
-        :aria-label="confirmingDelete ? '再次点击确认删除整个文件夹（含子树）' : '删除文件夹'"
+        :title="confirmingDelete ? '再次点击确认删除整个文件夹' : '删除文件夹'"
         @click.stop="onDeleteClick"
-      >{{ confirmingDelete ? '×' : '×' }}</button>
+      >×</button>
     </div>
 
     <!-- 文件节点 -->
     <div
       v-else
       class="dtn-row dtn-file"
-      :style="{ paddingLeft: (depth * 14 + 26) + 'px' }"
+      :class="{ selected: isSelected, 'dtn-cut': isCutSource, 'dtn-copy': isCopySource }"
+      :style="rowStyle"
+      :data-node-path="node.path || ''"
       @click="onClick"
+      @contextmenu.prevent.stop="onContextMenu"
       :title="node.path"
     >
-      <span class="dtn-icon">{{ icon }}</span>
-      <span class="dtn-name">{{ node.name }}</span>
+      <span
+        v-for="i in depth"
+        :key="'indent-' + i"
+        class="dtn-indent"
+      ></span>
+      <span class="dtn-caret dtn-caret--placeholder"></span>
+
+      <span class="dtn-icon dtn-icon--file" :class="'dtn-icon-' + iconKind">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path v-if="iconKind === 'image'" d="M3 5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5z"/>
+          <circle v-if="iconKind === 'image'" cx="9" cy="9" r="1.5" fill="currentColor"/>
+          <path v-if="iconKind === 'image'" d="M21 15l-5-5L5 21"/>
+          <path v-else-if="iconKind === 'data'"
+                d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+          <path v-else-if="iconKind === 'data'" d="M9 13h6M9 17h6M9 9h2"/>
+          <path v-else-if="iconKind === 'code'"
+                d="M16 18l6-6-6-6M8 6l-6 6 6 6"/>
+          <path v-else-if="iconKind === 'markdown'"
+                d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+          <path v-else-if="iconKind === 'markdown'" d="M8 13v4M12 13v4M16 13l-2 4M8 13l4 4M8 17l4-4"/>
+          <path v-else d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+          <polyline v-if="iconKind !== 'image' && iconKind !== 'code' && iconKind !== 'markdown'"
+                    points="14 2 14 8 20 8"/>
+          <line v-if="iconKind === 'code'" x1="2" y1="12" x2="6" y2="12"/>
+        </svg>
+      </span>
+
+      <input
+        v-if="renaming"
+        ref="renameInput"
+        v-model="renameText"
+        class="dtn-rename-input"
+        @blur="commitRename"
+        @keydown.enter.prevent="commitRename"
+        @keydown.esc.prevent="cancelRename"
+        @click.stop
+        @contextmenu.stop
+      />
+      <span v-else class="dtn-name" v-html="renderHighlighted(node.name)"></span>
+
       <span v-if="node.size != null" class="dtn-size">{{ formatSize(node.size) }}</span>
-      <!-- 行内删除按钮：参考偏好 21/22 模式（小红叉二次确认） -->
+
       <button
         class="dtn-del"
         :class="{ confirming: confirmingDelete }"
         :title="confirmingDelete ? '再次点击确认删除' : '删除'"
-        :aria-label="confirmingDelete ? '再次点击确认删除' : '删除'"
         @click.stop="onDeleteClick"
-      >{{ confirmingDelete ? '×' : '×' }}</button>
+      >×</button>
     </div>
 
-    <!-- 递归子节点 -->
-    <div v-if="node.type === 'directory' && expanded && sortedChildren.length > 0">
+    <!-- 递归子节点（带树线） -->
+    <div v-if="node.type === 'directory' && isExpanded && sortedChildren.length > 0" class="dtn-children">
       <DataTreeNode
         v-for="child in sortedChildren"
         :key="child.type + ':' + (child.path || child.name)"
         :node="child"
         :depth="depth + 1"
+        :search="search"
+        :selected-paths="selectedPaths"
+        :last-clicked-path="lastClickedPath"
+        :rename-target-path="renameTargetPath"
+        :cut-path="cutPath"
+        :copy-path="copyPath"
+        :expanded-paths="expandedPaths"
+        @node-select="$emit('node-select', $event)"
+        @node-toggle-expand="$emit('node-toggle-expand', $event)"
         @file-click="$emit('file-click', $event)"
-        @file-delete="$emit('file-delete', $event)"
+        @file-delete="(n) => $emit('file-delete', n)"
+        @node-context="$emit('node-context', $event)"
+        @node-rename="$emit('node-rename', $event)"
+        @node-rename-done="$emit('node-rename-done', $event)"
       />
     </div>
   </div>
 </template>
 
 <script>
+/**
+ * 数据树节点 —— IDEA 风重制 + 文件编辑交互：
+ * - 全 SVG 图标 + 缩进引导线 + 搜索匹配段 mark 高亮
+ * - 单击选中（向上 emit 给 Sidebar 维护 selectedNode）
+ * - 右键弹出菜单（位置信息 emit 给 Sidebar，由 Sidebar 渲染全局 context menu）
+ * - 重命名态：renameTargetPath 命中本节点 → 本节点进入 inline 重命名输入
+ * - 行内 × 红叉二次确认沿用偏好 21/22 模式
+ *
+ * 节点结构（父级 buildFileTree 生成）：
+ * - 目录：{ type: 'directory', name, path, children: [...] }
+ * - 文件：{ type: 'file', name, path, size, modified_at }
+ */
 export default {
   name: 'DataTreeNode',
   props: {
     node: { type: Object, required: true },
-    depth: { type: Number, default: 0 }
+    depth: { type: Number, default: 0 },
+    search: { type: String, default: '' },
+    // 多选集合（来自 Sidebar.selectedPaths）—— 数组形式以触发响应式
+    selectedPaths: { type: Array, default: () => [] },
+    // 最后点击的节点 path（Shift+click 范围选的锚点）
+    lastClickedPath: { type: String, default: '' },
+    // 当前正在重命名的 path（命中本节点 → 进入 inline rename）
+    renameTargetPath: { type: String, default: '' },
+    // 剪贴板里的「cut 源」完整 path（绝对 path 与本节点 path 一致 → 半透灰显）
+    cutPath: { type: String, default: '' },
+    // 剪贴板里的「copy 源」完整 path（命中本节点 → 加底色 + 角标提示）
+    copyPath: { type: String, default: '' },
+    // 共享展开状态（plain object { path: true }，由父级 Sidebar 维护，用于 Shift+click 范围选）
+    expandedPaths: { type: Object, default: () => ({}) }
   },
-  emits: ['file-click', 'file-delete'],
+  emits: [
+    'file-click',          // 兼容旧逻辑：选中 + 触发预览（按 modifier 转发）
+    'node-select',         // 用户主动点击节点 → { node, event: MouseEvent, modifier: { meta, shift, alt, ctrl } }
+    'file-delete',
+    'node-context',        // 右键菜单触发 → { node, event: MouseEvent }
+    'node-rename',         // 提交重命名 → { node, newName }
+    'node-rename-done',    // 重命名完成（成功或取消）→ { node }
+    'node-toggle-expand'   // 展开状态切换 → { node, expanded }
+  ],
   data() {
     return {
-      expanded: this.depth < 1, // 默认展开前 1 层（gen_xxx 一级）
-      confirmingDelete: false
+      confirmingDelete: false,
+      renaming: false,
+      renameText: ''
     }
   },
   computed: {
+    rowStyle() {
+      return { paddingLeft: (this.depth * 18) + 'px' }
+    },
+    isSelected() {
+      // 虚拟根节点（path 为空）不参与选中
+      return this.node.path && this.selectedPaths.includes(this.node.path)
+    },
+    isExpanded() {
+      // 单一权威：shared expandedPaths（plain object { path: true }）
+      // 没有 depth 兜底 —— 否则顶层 dir 被折叠后会立即被 depth < 1 重新展开，
+      // 用户感受是「点了没反应」。_buildFileTree 已经把顶层 dir 默认展开写进 state。
+      const ep = this.expandedPaths
+      if (!ep || typeof ep !== 'object') return this.depth < 1
+      return this.node.path ? !!ep[this.node.path] : false
+    },
+    isCutSource() {
+      // 剪贴板 mode=cut 时的源节点 → 半透灰显示，明确告诉用户「这行即将被移走」
+      return this.node.path && this.cutPath && this.node.path === this.cutPath
+    },
+    isCopySource() {
+      // 剪贴板 mode=copy 时的源节点 → 浅蓝底 + 「复制」语义角标（不破坏原选中色）
+      return this.node.path && this.copyPath && this.node.path === this.copyPath
+    },
     sortedChildren() {
       if (!this.node.children) return []
       return [...this.node.children].sort((a, b) => {
@@ -80,34 +225,76 @@ export default {
         return a.name.localeCompare(b.name)
       })
     },
-    icon() {
+    iconKind() {
       const name = (this.node.name || '').toLowerCase()
-      if (/\.(png|jpe?g|gif|webp|svg)$/.test(name)) return '🖼'
-      if (/\.(csv|tsv)$/.test(name)) return '📊'
-      if (/\.json$/.test(name)) return '📋'
-      if (/\.xlsx?$/.test(name)) return '📈'
-      if (/\.(md|markdown)$/.test(name)) return '📝'
-      if (/\.mmd$/.test(name)) return '🕸'
-      if (/\.py$/.test(name)) return '🐍'
-      if (/\.(html?|css)$/.test(name)) return '🌐'
-      if (/\.(txt|log)$/.test(name)) return '📄'
-      return '📄'
+      if (/\.(png|jpe?g|gif|webp|svg)$/.test(name)) return 'image'
+      if (/\.(csv|tsv|xlsx?)$/.test(name)) return 'data'
+      if (/\.(json)$/.test(name)) return 'data'
+      if (/\.(py|js|ts|jsx|tsx|vue|rs|go|java|c|cpp|h|hpp|rb|sh|bash)$/.test(name)) return 'code'
+      if (/\.(md|markdown)$/.test(name)) return 'markdown'
+      if (/\.mmd$/.test(name)) return 'markdown'
+      return 'text'
+    }
+  },
+  watch: {
+    renameTargetPath(newVal) {
+      if (newVal && newVal === this.node.path) {
+        this.startRename()
+      } else if (this.renaming && newVal !== this.node.path) {
+        // 别的节点进入重命名，本节点退出
+        this.cancelRename()
+      }
     }
   },
   methods: {
     toggle() {
-      this.expanded = !this.expanded
+      const next = !this.isExpanded
+      this.$emit('node-toggle-expand', { node: this.node, expanded: next })
     },
-    onClick() {
-      this.$emit('file-click', this.node)
+    /**
+     * 点击 row —— 区分目录与文件：
+     * - 目录：plain click 同时切换展开 + 选中；meta/cmd click 只切换选中不展开
+     * - 文件：plain click = 选中 + 预览；meta/cmd click = 切换选中不预览
+     */
+    onRowClick(e) {
+      const modifier = this._modifierOf(e)
+      // 目录：plain click / shift 点击都展开；meta/cmd 点击不展开（toggle 只切选中）
+      if (!modifier.meta) {
+        this.toggle()
+      }
+      this._emitSelect(e, /* previewFile */ false)
+    },
+    onClick(e) {
+      // 文件节点：始终触发预览（modifier 区分预览时机）
+      this._emitSelect(e, /* previewFile */ true)
+    },
+    onChildClick(node, event) {
+      // 递归子节点转发
+      this.$emit('node-select', { node, event, modifier: this._modifierOf(event) })
+    },
+    _emitSelect(e, previewFile) {
+      const modifier = this._modifierOf(e)
+      this.$emit('node-select', { node: this.node, event: e, modifier })
+      // 预览文件：plain click 时；meta/shift click 不预览避免误开
+      if (previewFile && !modifier.meta && !modifier.shift) {
+        this.$emit('file-click', this.node)
+      }
+    },
+    _modifierOf(e) {
+      return {
+        meta: !!(e && (e.metaKey || e.ctrlKey)),
+        shift: !!(e && e.shiftKey),
+        alt: !!(e && e.altKey)
+      }
+    },
+    onContextMenu(e) {
+      this.$emit('node-context', { node: this.node, event: e })
     },
     onDeleteClick() {
       if (this.confirmingDelete) {
-        // 第二次点 → 真删（先重置防止冒泡）
         this.confirmingDelete = false
         this.$emit('file-delete', this.node)
       } else {
-        // 第一次点 → 进确认态
         this.confirmingDelete = true
       }
     },
@@ -115,14 +302,61 @@ export default {
       this.confirmingDelete = false
     },
     onKeydown(e) {
-      if (e.key === 'Escape' && this.confirmingDelete) {
-        this.confirmingDelete = false
+      if (e.key === 'Escape') {
+        if (this.confirmingDelete) this.confirmingDelete = false
+        if (this.renaming) this.cancelRename()
       }
     },
     onOutsideClick(e) {
-      // 点中本节点的删除按钮 → 不重置（让按钮自己处理）
       if (this.$el && this.$el.contains(e.target)) return
       if (this.confirmingDelete) this.confirmingDelete = false
+    },
+    startRename() {
+      this.renaming = true
+      this.renameText = this.node.name
+      this.$nextTick(() => {
+        const input = this.$refs.renameInput
+        if (input) {
+          input.focus()
+          input.select()
+        }
+      })
+    },
+    commitRename() {
+      if (!this.renaming) return
+      const newName = (this.renameText || '').trim()
+      const oldName = this.node.name
+      this.renaming = false
+      if (!newName || newName === oldName) {
+        this.$emit('node-rename-done', { node: this.node, success: false })
+        return
+      }
+      this.$emit('node-rename', { node: this.node, newName })
+    },
+    cancelRename() {
+      this.renaming = false
+      this.renameText = ''
+      this.$emit('node-rename-done', { node: this.node, success: false })
+    },
+    renderHighlighted(name) {
+      if (!this.search || !name) return this._escape(name || '')
+      const searchLower = this.search.toLowerCase()
+      const nameLower = name.toLowerCase()
+      const idx = nameLower.indexOf(searchLower)
+      if (idx < 0) return this._escape(name)
+      const before = name.slice(0, idx)
+      const match = name.slice(idx, idx + this.search.length)
+      const after = name.slice(idx + this.search.length)
+      return this._escape(before) +
+        '<mark class="dtn-hl">' + this._escape(match) + '</mark>' +
+        this._escape(after)
+    },
+    _escape(s) {
+      return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
     },
     formatSize(bytes) {
       if (bytes == null) return ''
@@ -145,65 +379,175 @@ export default {
 <style scoped>
 .dtn-wrapper {
   user-select: none;
+  font-size: 12.5px;
 }
 .dtn-row {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 8px 4px 0;
+  gap: 4px;
+  padding: 3px 8px 3px 0;
   cursor: pointer;
-  line-height: 1.5;
+  line-height: 1.4;
   white-space: nowrap;
+  min-height: 24px;
+  position: relative;
+  border-radius: 3px;
+  margin: 0 4px 1px 4px;
 }
 .dtn-row:hover {
   background: var(--bg-hover, #f3f4f6);
 }
-.dtn-caret {
+.dtn-row.selected {
+  background: rgba(59, 130, 246, 0.12);
+}
+.dtn-row.selected:hover {
+  background: rgba(59, 130, 246, 0.16);
+}
+
+/* —— 剪贴板视觉区分 —— */
+/* cut 源：剪下后即将被移走 → 半透灰 + 斜体划线感（避免误以为是 ghost） */
+.dtn-row.dtn-cut {
+  opacity: 0.45;
+  font-style: italic;
+}
+.dtn-row.dtn-cut .dtn-name {
+  text-decoration: line-through;
+  text-decoration-color: rgba(107, 114, 128, 0.5);
+  text-decoration-thickness: 1px;
+}
+.dtn-row.dtn-cut:hover {
+  opacity: 0.7;
+}
+/* copy 源：复制后仍保留原位 → 浅蓝虚线左边框 + 角标 */
+.dtn-row.dtn-copy {
+  position: relative;
+  background: rgba(59, 130, 246, 0.06);
+  box-shadow: inset 2px 0 0 rgba(59, 130, 246, 0.5);
+}
+.dtn-row.dtn-copy:hover {
+  background: rgba(59, 130, 246, 0.1);
+}
+.dtn-row.dtn-copy .dtn-name::after {
+  content: '⎘';
+  margin-left: 5px;
+  font-size: 11px;
+  color: var(--primary-color, #3b82f6);
+  font-weight: 600;
+  vertical-align: middle;
+  opacity: 0.75;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.dtn-indent {
   display: inline-block;
-  width: 12px;
-  font-size: 9px;
-  transition: transform 0.15s;
+  width: 18px;
+  height: 100%;
+  position: relative;
+  flex-shrink: 0;
+}
+.dtn-indent::before {
+  content: '';
+  position: absolute;
+  left: 8px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border-color, #e5e7eb);
+  opacity: 0.7;
+}
+
+.dtn-caret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 10px;
+  height: 14px;
+  flex-shrink: 0;
   color: var(--text-secondary, #9ca3af);
-  text-align: center;
+  transition: transform 0.15s;
+  cursor: pointer;
 }
 .dtn-caret.open {
   transform: rotate(90deg);
 }
-.dtn-icon {
-  font-size: 14px;
-  flex-shrink: 0;
+.dtn-caret--placeholder {
+  visibility: hidden;
 }
+
+.dtn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  color: var(--primary-color, #3b82f6);
+}
+.dtn-icon--file { color: var(--text-secondary, #6b7280); }
+.dtn-icon-image { color: #8b5cf6; }
+.dtn-icon-data { color: #10b981; }
+.dtn-icon-code { color: #f59e0b; }
+.dtn-icon-markdown { color: #6366f1; }
+.dtn-icon-text { color: #6b7280; }
+
 .dtn-name {
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--text-primary, #111);
+  min-width: 0;
 }
-.dtn-count,
-.dtn-size {
-  font-size: 11px;
-  color: var(--text-secondary, #9ca3af);
-  flex-shrink: 0;
+.dtn-name :deep(.dtn-hl) {
+  background: rgba(250, 204, 21, 0.4);
+  color: var(--primary-color, #3b82f6);
+  font-weight: 600;
+  border-radius: 2px;
+  padding: 0 1px;
 }
 
-/* —— 行内删除按钮 —— 参考偏好 21/22 模式 —— */
+/* —— inline 重命名输入 —— */
+.dtn-rename-input {
+  flex: 1;
+  height: 22px;
+  padding: 0 4px;
+  border: 1px solid var(--primary-color, #3b82f6);
+  border-radius: 3px;
+  background: var(--bg-primary, #fff);
+  color: var(--text-primary, #111);
+  font-size: 12.5px;
+  font-family: inherit;
+  outline: none;
+  min-width: 0;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.18);
+}
+
+.dtn-count,
+.dtn-size {
+  font-size: 10.5px;
+  color: var(--text-secondary, #9ca3af);
+  flex-shrink: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 0 2px;
+}
+
 .dtn-del {
   flex-shrink: 0;
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   padding: 0;
   border: none;
   border-radius: 50%;
   background: transparent;
   color: var(--text-secondary, #9ca3af);
   cursor: pointer;
-  font-size: 14px;
+  font-size: 13px;
   line-height: 1;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   opacity: 0;
   transition: opacity 0.15s, background 0.15s, color 0.15s;
+  margin-left: 2px;
 }
 .dtn-row:hover .dtn-del {
   opacity: 1;
@@ -213,7 +557,6 @@ export default {
   color: var(--text-primary, #111);
 }
 .dtn-del.confirming {
-  /* 二次确认态：变红常显，不依赖 hover */
   opacity: 1 !important;
   background: rgba(239, 68, 68, 0.12);
   color: #ef4444;
@@ -221,5 +564,9 @@ export default {
 }
 .dtn-del.confirming:hover {
   background: rgba(239, 68, 68, 0.22);
+}
+
+.dtn-children {
+  position: relative;
 }
 </style>

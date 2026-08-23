@@ -12,7 +12,7 @@
             <line x1="2" y1="12" x2="22" y2="12"/>
             <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
           </svg>
-          <span class="url-text" :title="url">{{ displayUrl }}</span>
+          <span class="url-text" :title="displayUrl">{{ displayUrl }}</span>
         </div>
         <div class="toolbar-actions">
           <button @click="reload" class="tool-btn" title="刷新">
@@ -76,6 +76,8 @@
 </template>
 
 <script>
+import { normalizeUrlForDisplay } from '../utils/urlDisplay.js'
+
 export default {
   name: 'WebPreviewPanel',
   props: {
@@ -98,16 +100,7 @@ export default {
   },
   computed: {
     displayUrl() {
-      try {
-        const u = new URL(this.url)
-        // 本机 / 内网 host 统一显示成「lingxi」，避免泄露 localhost:18211 等端口细节给用户
-        const hostname = (u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '0.0.0.0')
-          ? 'lingxi'
-          : u.hostname
-        return hostname + (u.pathname !== '/' ? u.pathname : '')
-      } catch {
-        return this.url
-      }
+      return normalizeUrlForDisplay(this.url)
     }
   },
   watch: {

@@ -94,10 +94,17 @@ export async function fetchTextPreview(
   url,
   { signal, sizeHint = 0, maxBytes = MAX_TEXT_PREVIEW_BYTES } = {}
 ) {
+  // 已知 0 字节文件（新创建的空文件）不发 Range header —— 否则 FastAPI FileResponse 会回 416
+  // （HTTP 416 = Requested Range Not Satisfiable，因为 0 字节文件没有 bytes=0-3999 这段）
+  const useRange = sizeHint > 0
   const response = await fetch(url, {
     signal,
-    headers: { Range: `bytes=0-${maxBytes - 1}` }
+    headers: useRange ? { Range: `bytes=0-${maxBytes - 1}` } : undefined
   })
+  // 416 兜底：万一 sizeHint 不准（比如缓存陈旧、文件刚被清空），也按「空文件」处理而不是抛错
+  if (response.status === 416) {
+    return { text: '', truncated: false, totalBytes: 0 }
+  }
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`)
   }

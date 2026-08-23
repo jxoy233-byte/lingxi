@@ -32,7 +32,7 @@ import shutil
 from datetime import datetime
 
 from fastapi import APIRouter, Body, HTTPException, Path, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ChatMe.LoggingManager.logging_config import get_logger
 from ChatMe.paths import BACKEND_ROOT, CACHED_DIR, TRASH_DIR
@@ -640,5 +640,131 @@ async def soft_delete_all_files(
         "skipped": skipped,
         "timestamp": timestamp,
         "trash_path": str(trash_root.relative_to(BACKEND_ROOT)) + "/",
+        "session_id": session_id,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 指定路径批量软删除：POST /chat/{sid}/files/soft-delete
+# ─────────────────────────────────────────────────────────────────────────────
+class BatchSoftDeleteRequest(BaseModel):
+    """批量软删除请求体：file_paths 是相对 cached/{sid}/ 的路径数组。
+
+    对应前端多选场景：用户 Cmd/Ctrl+click 选中 N 个节点 → Delete 一次软删。
+    """
+
+    file_paths: list[str] = Field(
+        ...,
+        description="相对 cached/{session_id}/ 的路径数组（可同时含文件和目录）",
+    )
+
+
+@router.post(
+    "/{session_id}/files/soft-delete",
+    summary="批量软删除指定路径列表（移到 .trash/，前端多选 Delete 走这里）",
+)
+async def soft_delete_files(
+    session_id: str = Path(..., description="会话ID"),
+    body: BatchSoftDeleteRequest = Body(...),
+):
+    """批量软删除指定路径列表到 .trash/{session_id}/{timestamp}/。
+
+    与 DELETE /{sid}/files（一键全删）的区别：
+    - 一键全删遍历整棵 cached 树，本端点按 caller 给的精确路径集合删
+    - 共享一个 timestamp（与一键全删一致，trash 树里同一 ts_dir 容纳本次全部产物）
+    - 单次往返删 N 个文件 / 目录
+
+    与 DELETE /{sid}/file（单条软删除）的区别：
+    - 单条每调用一次生成一个新 timestamp；本端点**共享一个 timestamp**
+    - 单次往返删 N 个文件 / 目录
+
+    安全：
+    - 每个 file_path 拒绝绝对路径 / 含 `..` 段 / 越界（必须落在 CACHED_DIR/{sid}/ 下）
+    - 校验失败的路径跳过（记 skipped + reason），不阻断整体操作
+
+    容错：
+    - 单个路径不存在（race condition 或 stale 视图）→ 跳过（skipped++）
+    - 父目录在前面已被删的情况 → 跳过（避免重复删）
+
+    Returns:
+        {
+        "code": 200,
+        "msg": "已软删除 N 个路径",
+        "removed": N,
+        "skipped": M,
+        "failures": [{"path": "...", "reason": "..."}],
+        "timestamp": "20260823_173845",
+        "session_id": "...",
+        }
+    """
+    file_paths = body.file_paths
+    if not file_paths:
+        raise HTTPException(status_code=400, detail="file_paths 不能为空")
+
+    if len(file_paths) > 500:
+        # 防御性上限：避免一次搬 1 万个文件撑爆 FS / 锁
+        raise HTTPException(status_code=400, detail="file_paths 一次最多 500 个")
+
+    session_root = (CACHED_DIR / session_id).resolve()
+    if not session_root.exists():
+        raise HTTPException(status_code=404, detail=f"会话目录不存在: {session_id}")
+
+    # 共享一个 timestamp：trash 树里整次批量软删的产物集中在同一 ts_dir 下，
+    # 视觉上像「一次操作」的产物，与一键全删一致
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    trash_root = TRASH_DIR / session_id / timestamp
+    trash_root.mkdir(parents=True, exist_ok=True)
+
+    removed = 0
+    skipped = 0
+    failures: list[dict] = []
+
+    # 先按「深 → 浅」排序，让父目录排在子目录之后（避免先删父再删子的 dependency 错乱）
+    sorted_paths = sorted(file_paths, key=lambda p: p.count("/"), reverse=True)
+
+    for rel_path in sorted_paths:
+        # 路径安全校验
+        if not rel_path or rel_path.startswith("/"):
+            failures.append({"path": rel_path, "reason": "必须是相对路径"})
+            skipped += 1
+            continue
+        if ".." in pathlib.Path(rel_path).parts:
+            failures.append({"path": rel_path, "reason": "路径含非法 '..' 段"})
+            skipped += 1
+            continue
+        target = (CACHED_DIR / session_id / rel_path).resolve()
+        try:
+            target.relative_to(session_root)
+        except ValueError:
+            failures.append({"path": rel_path, "reason": "路径越界"})
+            skipped += 1
+            continue
+        if not target.exists():
+            failures.append({"path": rel_path, "reason": "不存在"})
+            skipped += 1
+            continue
+        trash_target = trash_root / rel_path
+        trash_target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.move(str(target), str(trash_target))
+            removed += 1
+        except FileNotFoundError:
+            failures.append({"path": rel_path, "reason": "race condition"})
+            skipped += 1
+        except Exception as e:
+            logger.error(f"[soft_delete_files] move 失败 {rel_path}: {e}")
+            failures.append({"path": rel_path, "reason": str(e)})
+            skipped += 1
+
+    logger.info(
+        f"[soft_delete_files] {session_id} 软删除 {removed} 项（跳过 {skipped}） → {trash_root}"
+    )
+    return {
+        "code": 200,
+        "msg": f"已软删除 {removed} 个路径",
+        "removed": removed,
+        "skipped": skipped,
+        "failures": failures,
+        "timestamp": timestamp,
         "session_id": session_id,
     }

@@ -24,6 +24,7 @@ from ChatMe.APIRouter.timed_clean import cleanup_lifespan, cleanup_router
 from ChatMe.APIRouter.scheduled_tasks import router as scheduled_tasks_router
 from ChatMe.APIRouter.message_queue import router as message_queue_router
 from ChatMe.APIRouter.trash import router as trash_router
+from ChatMe.APIRouter.file_ops import router as file_ops_router
 from skills.Scheduler import scheduler_lifespan
 from ChatMe.LoggingManager.logging_config import set_logger
 
@@ -116,6 +117,7 @@ app.include_router(checkpoint_janitor_router)
 app.include_router(scheduled_tasks_router)
 app.include_router(message_queue_router)
 app.include_router(trash_router)
+app.include_router(file_ops_router)
 
 # 仅在 local=true 时加载本地 VL 模型
 # 关键：必须延迟 import —— model_vl.py 顶层会调 Qwen3VLForConditionalGeneration.from_pretrained

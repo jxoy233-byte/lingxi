@@ -39,7 +39,10 @@
 
             <h4>文件树</h4>
             <ul>
-              <li>顶栏 📁 看当前会话所有产物；文件 / 文件夹行 × 软删除到 <code>.trash/</code>，面板头部 🗑 可手工清空</li>
+              <li>📁 看当前会话所有产物；行内 × 软删除到 <code>.trash/{sid}/</code>，面板头部 🗑 手工清空；树底 [+] 一键新建</li>
+              <li><b>焦点</b>：点目录行 → 蓝竖线标记 → <kbd>{{ _modKey }}+V</kbd> 粘到这里；点文件 → 焦点跳到父目录（{{ _fileManager }} 习惯）</li>
+              <li><b>复制 vs 剪切</b>：琥珀 ⎘ 角标 = 复制（原位保留）；半透灰划线 = 剪切（即将移走）；同位置粘贴自动生成 <code>foo(N).py</code></li>
+              <li><b>框选 / 拖拽</b>：空白处长按进入框选；树内拖拽移动，按住 <kbd>Alt</kbd> 复制；从 {{ _fileManager }} 拖文件直接上传</li>
             </ul>
 
             <h4>引用 & 撤回</h4>
@@ -130,7 +133,15 @@ export default {
     },
     skillCommands() {
       return this.commands.filter(c => c.kind !== 'action')
-    }
+    },
+    /** Mac vs Win/Linux：决定帮助文本里的修饰键与文件管理器名 */
+    _isMac() {
+      if (typeof navigator === 'undefined') return false
+      return /Mac|iPhone|iPad/.test(navigator.platform)
+    },
+    _modKey() { return this._isMac ? 'Cmd' : 'Ctrl' },
+    _modKeyKbd() { return this._isMac ? '⌘' : 'Ctrl' },
+    _fileManager() { return this._isMac ? 'Finder' : 'Explorer' }
   }
 }
 </script>

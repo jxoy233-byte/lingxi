@@ -379,6 +379,12 @@ export default {
         { name: 'worktree',  kind: 'action', description: '打开当前会话工作树' },
         { name: 'help',      kind: 'action', description: '显示本项目功能速览' }
       ],
+      // Skill 描述前端覆盖：key = /chat/skills 返回的目录名（PascalCase），缺省 fallback 后端 description
+      skillDescriptionOverrides: {
+        Memory:       '把反复出现的精确事实 / 用户偏好记下来，下次对话自动加载到上下文',
+        ImageParser:  '解析图片中的文字、表格、界面元素与场景（支持截图、照片、URL、base64）',
+        SkillForge:   '动态创建新技能：写一段 Python 包装 + 描述，AI 后续对话会自动识别并使用'
+      },
       // 动态 skill 列表（从 /chat/skills 拉的），每个含 {name, description, lazy}。
       // 由 computed `slashCommands` 与 staticActionCommands 拼接暴露给 HelpDialog。
       dynamicSkills: [],
@@ -632,7 +638,7 @@ export default {
         ...this.dynamicSkills.map(s => ({
           name: s.name,
           kind: 'skill',
-          description: s.description || `${s.name} skill`
+          description: this.skillDescriptionOverrides[s.name] || s.description || `${s.name} skill`
         }))
       ]
     },

@@ -360,7 +360,7 @@ const isTest = process.env.NODE_ENV === 'test'
 | `app.name` | `灵析` | 应用名（菜单栏第一项、`app.getName()`） |
 | `app.title` | `灵析——数据分析智能助手` | 窗口标题 / 关于弹窗 |
 | `app.identifier` | `com.chatme.app` | bundle identifier |
-| `app.version` | `0.1.7` | 同步后端版本号 |
+| `app.version` | `0.1.8` | 同步后端版本号 |
 | `window.width × height` | `1100 × 720` | 主窗口尺寸 |
 | `window.minWidth × minHeight` | `650 × 480` | 最小尺寸 |
 | `devServer.url` | 从 Vite 导入的 `http://localhost:18211` | Electron 开发时加载的 URL |
@@ -494,8 +494,8 @@ DMG 阶段需要 `dmgbuild-bundle-arm64-*.tar.gz` 包，npmmirror 当前缺这�
 release/electron-builder/
 ├── mac-arm64/
 │   └── 灵析.app          ← 直接打开
-├── 灵析-0.1.7-arm64-mac.zip
-└── 灵析-0.1.7-mac.zip
+├── 灵析-0.1.8-arm64-mac.zip
+└── 灵析-0.1.8-mac.zip
 ```
 
 打开方式：
@@ -507,7 +507,7 @@ open ~/coding/projects/ChatMe/release/electron-builder/mac-arm64/灵析.app
 "~/coding/projects/ChatMe/release/electron-builder/mac-arm64/灵析.app/Contents/MacOS/灵析"
 
 # 解压 zip 后再打开
-unzip 灵析-0.1.7-arm64-mac.zip -d ~/Downloads
+unzip 灵析-0.1.8-arm64-mac.zip -d ~/Downloads
 open ~/Downloads/灵析.app
 ```
 

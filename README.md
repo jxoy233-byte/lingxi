@@ -54,6 +54,8 @@
 - **标题自动派生（v0.1.7 新增）**：`PUT /chat/{sid}/title` title 为空时后端从 state 最新 HumanMessage 派生（剥 `<quote>` 引用块 + `/[xxx]` slash pill + 截断 12 字符），返回实际写入的 `new_title`，前端不再依赖客户端 substring 兜底。
 - **后端路径中心化（v0.1.7 新增）**：`backend/ChatMe/paths.py` 集中导出 `BACKEND_ROOT` / `CACHED_DIR` / `SKILLS_ROOT` / `TRASH_DIR` / `get_chatme_dir()`，替代所有模块里散落的 `Path.cwd()` / `parents[N]` 调用；从任意 cwd 启动后端都不会漂移。
 - **Linux 多格式打包（v0.1.7 新增）**：`electron-builder` 同时产出 AppImage / `.deb` / `.rpm`，x64 + arm64 双架构；`README` 增「Linux 安装与故障排查」段覆盖 FUSE 缺失、AppImage 直接解压等场景。
+- **文件树 Finder 化大优化（v0.1.8 新增）**：长按框选 / HTML5 拖拽移动 + 多选整组拖 / 焦点目录 `focusDir`（Cmd/Ctrl+V 粘到蓝竖线）/ copy 改琥珀 ⎘ focus 蓝色实心左边框三态区分 / 空状态 + 树底 `+文件夹 +文件` 操作行 / 系统拖拽 overlay / 拖拽事件穿透重构；详见 `CLAUDE.md` 偏好 33。
+- **后端文件操作体验优化（v0.1.8 新增）**：`_find_unique_name` 计数器剥除（`foo(1).py` 复制 → `foo(2).py` 不再无限累加）+ 无空格紧凑命名 + 自粘贴 no-op 兜底 + 创建同名静默追加 + 空 session 懒加载；详见 `CLAUDE.md` 偏好 33。
 
 ## 界面预览
 
@@ -195,7 +197,7 @@ OPENAI_PRESENCE_PENALTY=0.0
 {
   "app": {
     "name": "ChatMe",
-    "version": "v0.1.7",
+    "version": "v0.1.8",
     "host": "127.0.0.1",
     "port": 8211
   },
@@ -422,13 +424,13 @@ MCP 服务器（`mcps/server.py`，FastMCP 3.x，stdio transport）暴露以下�
 ```bash
 cd backend
 uv build --wheel
-# 输出: dist/ChatMe-0.1.7-py3-none-any.whl
+# 输出: dist/ChatMe-0.1.8-py3-none-any.whl
 ```
 
 ### 安装 wheel
 
 ```bash
-uv pip install dist/ChatMe-0.1.7-py3-none-any.whl
+uv pip install dist/ChatMe-0.1.8-py3-none-any.whl
 # 安装后 chatme_main 和 chatme_mcp 命令全局可用
 ```
 
@@ -460,17 +462,17 @@ npm run electron:build:mac      # macOS arm64 + x64（DMG + ZIP）
 npm run electron:build:win      # Windows NSIS（x64）
 ```
 
-桌面端通过 `electron-builder` 打包，应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.1.7）在 `frontend/electron/electron.config.js` 中配置。
+桌面端通过 `electron-builder` 打包，应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.1.8）在 `frontend/electron/electron.config.js` 中配置。
 
 **输出位置**：`../release/electron-builder/`（项目根，与 Vite 的 `dist/` / `frontend/` 区分开）：
 
 - `mac-arm64/灵析.app` — 直接打开
 - `mac/` — x64 .app
-- `灵析-0.1.7-arm64-mac.zip` / `灵析-0.1.7-mac.zip` — 分发包
+- `灵析-0.1.8-arm64-mac.zip` / `灵析-0.1.8-mac.zip` — 分发包
 - `linux-unpacked/` — Linux 解压目录
-- `灵析-0.1.7.AppImage` — Linux 便携版（需 FUSE，见下文）
-- `灵析-0.1.7.deb` — Debian / Ubuntu 安装包
-- `灵析-0.1.7.rpm` — Fedora / RHEL 安装包
+- `灵析-0.1.8.AppImage` — Linux 便携版（需 FUSE，见下文）
+- `灵析-0.1.8.deb` — Debian / Ubuntu 安装包
+- `灵析-0.1.8.rpm` — Fedora / RHEL 安装包
 - `win-unpacked.exe` — Windows 安装器
 
 ## 开发注意事项

@@ -236,13 +236,14 @@
       </button>
     </div>
 
-    <!-- 拖拽区域遮罩 -->
+    <!-- 拖拽区域遮罩 —— 仅视觉提示，pointer-events: none 让事件穿透到下方元素，
+         真正的 drop 由 window-level handleWindowDrop 接收并按 e.target 区分：
+         - 落在 Sidebar .files-tree → Sidebar 处理（自己 @drop.stop.prevent）
+         - 落在其他地方 → 上传到 MessageInput（attach 到对话发送）
+         修复 v0.1.x：原 @drop.prevent="handleDrop" + overlay 拦截所有 drop 导致 file tree drop 失效。 -->
     <div
       v-if="isDragging"
       class="drag-overlay"
-      @drop.prevent="handleDrop"
-      @dragover.prevent
-      @dragleave="isDragging = false"
     >
       <div class="drag-content">
         <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -354,6 +355,12 @@ export default {
       // kind 由 computed 自动标记为 'skill'（chip → /chat 流）。
       // 失败兜底：fetch 异常时维持空数组，至少 action 命令仍可用。
       dynamicSkills: [],
+      // Skill 描述前端覆盖：key = /chat/skills 返回的目录名（PascalCase），缺省 fallback 后端 description
+      skillDescriptionOverrides: {
+        Memory:       '把反复出现的精确事实 / 用户偏好记下来，下次对话自动加载到上下文',
+        ImageParser:  '解析图片中的文字、表格、界面元素与场景（支持截图、照片、URL、base64）',
+        SkillForge:   '动态创建新技能：写一段 Python 包装 + 描述，AI 后续对话会自动识别并使用'
+      },
       // refetch 节流：slash 面板「关闭 → 打开」时触发后台 refetch；面板已
       // 打开期间的连续打字不重复请求。
       _slashPaletteWasVisible: false
@@ -372,7 +379,7 @@ export default {
         ...this.dynamicSkills.map(s => ({
           name: s.name,
           kind: 'skill',
-          description: s.description || `${s.name} skill`
+          description: this.skillDescriptionOverrides[s.name] || s.description || `${s.name} skill`
         }))
       ]
     },
@@ -471,12 +478,19 @@ export default {
     window.addEventListener('dragenter', this.handleDragEnter)
     window.addEventListener('dragover', this.handleDragOver)
     window.addEventListener('drop', this.handleWindowDrop)
+    // 拖拽状态兜底清理：drag 在浏览器外结束（drop 在外部、Esc 取消、dragend 等）
+    // 不会触发 window drop，需要 dragend / dragleave(relatedTarget=null) 兜底重置 isDragging，
+    // 否则 overlay 一直显示，状态不灵敏。
+    window.addEventListener('dragend', this.handleDragEnd)
+    document.addEventListener('dragleave', this.handleDocumentDragLeave)
   },
   beforeUnmount() {
     // 清理事件监听
     window.removeEventListener('dragenter', this.handleDragEnter)
     window.removeEventListener('dragover', this.handleDragOver)
     window.removeEventListener('drop', this.handleWindowDrop)
+    window.removeEventListener('dragend', this.handleDragEnd)
+    document.removeEventListener('dragleave', this.handleDocumentDragLeave)
 
     // 清理预览 URL
     this.selectedFiles.forEach(file => {
@@ -1060,31 +1074,82 @@ export default {
       event.target.value = ''
     },
 
+    /**
+     * 检测当前 drag 事件的目标是否落在 Sidebar 的 .files-tree 区域。
+     * 在该区域内 → Sidebar 自己 @drop.stop.prevent 处理（不上传到 chat），MessageInput 不接管。
+     * 返回 true 表示「drag 在文件树里」，MessageInput 不应显示自己的 overlay / 处理 drop。
+     */
+    _isDragOverFilesTree(e) {
+      // pointer-events: none 后 e.target 是穿透后的真实元素；用 contains 反查 .files-tree
+      let node = e && e.target
+      while (node && node !== document) {
+        if (node.classList && node.classList.contains('files-tree')) return true
+        node = node.parentNode
+      }
+      return false
+    },
+
     handleDragEnter(e) {
       e.preventDefault()
       if (this.isLoading) return
 
-      // 检查是否包含文件
-      if (e.dataTransfer.types.includes('Files')) {
-        this.isDragging = true
+      // 非文件类型（内部 drag / 文本等）→ 不显示 overlay
+      if (!e.dataTransfer.types.includes('Files')) return
+
+      // 在 .files-tree 区域 → Sidebar 自己处理，不显示 chat overlay（避免双 overlay 抢视觉）
+      if (this._isDragOverFilesTree(e)) {
+        this.isDragging = false
+        return
       }
+
+      this.isDragging = true
     },
 
     handleDragOver(e) {
+      // 非文件 drag → 不 preventDefault（让浏览器走默认行为，比如文本 drag）
+      if (!e.dataTransfer.types || !e.dataTransfer.types.includes('Files')) return
+      // 在 .files-tree 区域 → 不 preventDefault，让 Sidebar 的 @dragover.stop.prevent 处理
+      if (this._isDragOverFilesTree(e)) return
+      // 其他区域 → preventDefault 启用 drop
       e.preventDefault()
     },
 
+    /**
+     * window-level drop：所有 drop 都会冒泡到这里，除非被某个子元素 stopPropagation 拦截。
+     * Sidebar 的 .files-tree 有 @drop.stop.prevent → 文件树 drop 不会到这里（已被 Sidebar 拦截）。
+     * 所以这里的 e.target 一定不在 .files-tree 内（防御兜底再判断一次），放心走 addFiles。
+     */
     handleWindowDrop(e) {
       e.preventDefault()
       this.isDragging = false
+      if (this.isLoading) return
+      if (!e.dataTransfer.types || !e.dataTransfer.types.includes('Files')) return
+      // 防御兜底：万一未来 Sidebar 改了 stopPropagation 策略，这里再检查一次
+      if (this._isDragOverFilesTree(e)) return
+      const droppedFiles = Array.from(e.dataTransfer.files || [])
+      if (droppedFiles.length) this.addFiles(droppedFiles)
+    },
+
+    /**
+     * 拖拽在浏览器外部结束 / Esc 取消时不会触发 window drop，
+     * 用 dragend 兜底重置 isDragging，避免 overlay 卡死。
+     */
+    handleDragEnd() {
+      this.isDragging = false
+    },
+
+    /**
+     * 拖拽离开文档（relatedTarget 为 null）→ 视为放弃拖拽，重置 isDragging。
+     * 注意：dragleave 在文件树 / 对话区 / 子元素间穿梭时会疯狂触发，
+     * 只在真正离开文档（relatedTarget === null）时才动作，避免误判。
+     */
+    handleDocumentDragLeave(e) {
+      if (!e.relatedTarget) this.isDragging = false
     },
 
     handleDrop(e) {
+      // 旧实现保留作 no-op（事件已穿透 overlay，由 handleWindowDrop 接管）
       this.isDragging = false
-      if (this.isLoading) return
-
-      const droppedFiles = Array.from(e.dataTransfer.files)
-      this.addFiles(droppedFiles)
     },
 
     async addFiles(newFiles) {
@@ -2184,6 +2249,9 @@ export default {
   display: flex;
   align-items: center;
   justify-content: center;
+  /* 仅视觉：让 drag/drop 事件穿透到下方的 .files-tree / 对话区等真实元素，
+     真正的 drop 分流由 window-level handleWindowDrop + Sidebar 自己 @drop.stop.prevent 配合完成。 */
+  pointer-events: none;
 }
 
 .drag-content {

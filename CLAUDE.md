@@ -375,6 +375,20 @@ docker-compose up -d redis       # 端口 6024，密码 123456
     - **API 端点**：`PUT /chat/{session_id}/title` 的 `title` 参数从 `str` 改成 `Optional[str] = Body(None)`；响应 `new_title` 是后端实际写入的版本（前端不需要再算一遍）。
     - **前端 `App.vue`**：`updateTitleOnly` / `updateTitleAndRefresh` 改为 `body: JSON.stringify({})` 触发后端派生；用响应 `new_title` 更新侧栏（剥了 quote/pill 的干净版本），仅在请求失败时 fallback 到客户端 substring。
     - **测试**：`ChatMe/test/test_title_derive.py` 30 个 case 覆盖 clean / truncate / derive（含 multimodal、quote-only、pill-only、long-truncate、empty 等边界）。
+33. **v0.1.8 新增约定 —— 文件树 Finder 化大优化**：
+    - **长按框选状态机**（`Sidebar._startBoxSelect` / `_boxPressTimer` / `_boxPressActivated`）：`mousedown` 后等 **250ms** 或 **移动 ≥8px** 才进 box-select，避免「点空白清选区 vs 长按拖框选」误触；`mouseup` 矩宽 `<4px` 且非 additive → 清选区。
+    - **HTML5 拖拽移动**：节点 `:draggable="!renaming"` + `dragstart.stop`；多选整组拖用 `setData('application/x-lingxi-paths', JSON.stringify([...selectedPaths]))` + `effectAllowed='copyMove'`（Alt/Option 切 copy/move）+ 自定义 ghost 拖拽图像；drop 调 `POST /chat/{sid}/files/move?auto_rename=true`；drop target 目录行高亮（蓝色虚线 outline + 浅蓝底）。
+    - **焦点目录 `focusDir`（Cmd/Ctrl+V 目标）**：点目录行 → `focusDir = 该目录相对路径`；点文件行 → `focusDir = 父目录`（Finder 习惯 —— 焦点是用户所在目录）；Shift 范围选 / 多选切换 / 框选 / 拖拽都不动 focus；完成任何文件操作后回根。视觉 `.dtn-dir.focus-target` —— 蓝色实心左边框 + 浅蓝底。
+    - **copy / cut 视觉重做（蓝 → 琥珀）**：copy 改成 amber 500 浅底 + ⎘ 角标（之前蓝色虚线左边框与 focus 冲突）；focus 蓝色实心左边框。冷暖对比 + 角标 + 边框三层信号区分「源 / 目的」；focus + copy 共存时背景偏 amber 但保留蓝色左竖线。
+    - **空状态 + 树底 `+` 操作行**：`.empty-state` 重做（📂 图标 + 标题 + 提示 + [📁 新建文件夹] [📄 新建文件]）；树底 `.tree-new-actions` 始终挂 `+文件夹 / +文件` 两条快捷按钮 + 快捷键 `Cmd+Shift+N` / `Cmd+Shift+Alt+N`；按钮 `@mousedown.stop` 防 box-select 抢焦点。**OS 系统拖拽 overlay** —— 从 Finder/Explorer 拖系统文件时显示「⬇ 释放以上传到当前会话」全屏浮层。
+    - **拖拽事件穿透重构**（`MessageInput.handleWindowDrop` + `_isDragOverFilesTree(e)`）：原 `drag-overlay` 拦截所有 drop 导致 Sidebar drop 失效，改为 overlay 加 `pointer-events: none` + window-level `drop` 监听 + 检测 target 是否在 `.files-tree` 内（在则让 Sidebar 处理）。`dragend` / `dragleave(relatedTarget=null)` 兜底重置 isDragging。
+    - **后端文件操作体验优化**：
+      - **`_find_unique_name` 计数器剥除**（regex `^(.*?)\((\d+)\)$`）：`foo(1).py` 复制 → `foo(2).py`，不再 `foo(1)(1).py` 无限累加；`(\d+)` 限定数字，`(bar)` / `(v1-beta)` 保留。
+      - **无空格紧凑命名**：`foo(1).txt`（按用户偏好紧凑风格）。
+      - **`move_file` / `batch_move_files` 自粘贴兜底**：`src.parent == dst_dir` 直接 no-op（防御兜底，避免 auto_rename 触发无限累加）。
+      - **创建同名静默追加**：`create_folder` / `create_file` 同名直接调 `_find_unique_name` 自动改名落地（Finder 习惯，无 409 冲突提示）。
+      - **空 session 懒加载**：`body.parent == ""` 时先 `parent.mkdir(parents=True, exist_ok=True)`，全新 session 第一个新建按钮不再 400。
+    - **Skill 描述前端覆盖**（`skillDescriptionOverrides`）：App.vue + MessageInput.vue 维护 `{ Memory, ImageParser, SkillForge }` 三条更准确描述，缺省 fallback 后端 `/chat/skills` 的 description。HelpDialog 文件树 h4 段同步展示 + 4 条 bullet（焦点 / 复制 vs 剪切 / 框选 / 拖拽），通过 `_isMac` / `_modKey` / `_fileManager` computed 跨平台切换修饰键文案。
 
 ### 代码 / 提交风格
 

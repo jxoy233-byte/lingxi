@@ -81,18 +81,32 @@ def _relativize(p: pathlib.Path, session_id: str) -> str:
     return str(p.relative_to(CACHED_DIR / session_id))
 
 
-def _find_unique_name(dst_dir: pathlib.Path, original_name: str) -> str:
-    """在 dst_dir 下找一个不冲突的名字，冲突时累加 (1) / (2) / ...
+_TRAILING_COUNTER_RE = re.compile(r"^(.*?)\((\d+)\)$")
 
-    规则（参考 macOS Finder 习惯 —— 用「首个非前导点」切 base/ext）：
-    - foo.txt → foo (1).txt → foo (2).txt ...
-    - foo（无扩展）→ foo (1) → foo (2) ...
-    - foo.tar.gz → foo (1).tar.gz → ...（在第一个 . 前插入 (N)）
-    - .gitignore（隐藏文件）→ .gitignore (1) → ...
-    - .gitignore.backup → .gitignore (1).backup → ...
+
+def _find_unique_name(dst_dir: pathlib.Path, original_name: str) -> str:
+    r"""在 dst_dir 下找一个不冲突的名字，冲突时累加 (1) / (2) / ...
+
+    规则（用「首个非前导点」切 base/ext）：
+    - foo.txt → foo(1).txt → foo(2).txt ...
+    - foo（无扩展）→ foo(1) → foo(2) ...
+    - foo.tar.gz → foo(1).tar.gz → ...（在第一个 . 前插入 (N)）
+    - .gitignore（隐藏文件）→ .gitignore(1) → ...
+    - .gitignore.backup → .gitignore(1).backup → ...
+    - **foo(1).py（已带计数器后缀）→ 剥掉 (1) → base='foo' → foo(2).py**
+      —— 复制「已被自动改名过的副本」时也要基于**原始 stem** 找下一个空位，
+      否则会生成 `foo(1)(1).py` / `foo(1)(2).py` 这种无限累加后缀的怪名字。
+      这条与 macOS Finder / Windows Explorer 的「Duplicate 计数器」行为一致。
 
     为什么用首个非前导点（而不是末点）：Finder 把 `.tar.gz` 当作一个完整复合扩展，
-    重命名时只把前面的 stem 加上 `(N)`；用末点会得到 `foo.tar (1).gz` 跟 Finder 不一致。
+    重命名时只把前面的 stem 加上 `(N)`；用末点会得到 `foo.tar(1).gz` 同样能跑但语义不如前者清晰。
+
+    为什么 base 和 (N) 之间无空格：紧凑命名 `xxx12.py → xxx12(1).py` 视觉密度更友好，
+    跟 Python/JS 常见模式（`x1`, `v2`）一致；带空格的 `foo (1).txt` 偏向 macOS Finder 默认，
+    这里按用户偏好选无空格紧凑风格。
+
+    为什么「末尾 (N) 计数剥除」只剥数字：`(bar)` / `(v1-beta)` 这类非纯数字括号会被保留，
+    不当作计数器（regex `(\d+)` 限定数字）；避免误伤用户主动起的名字。
 
     防御：N 上限 10000，避免文件系统死循环（理论上不会到这里）。
     """
@@ -112,8 +126,13 @@ def _find_unique_name(dst_dir: pathlib.Path, original_name: str) -> str:
     else:
         base = original_name[:first_dot]
         ext = original_name[first_dot:]
+    # 剥掉 base 末尾的 (N) 计数器后缀，让 foo(N) 副本的「再次复制」回到原始 stem 找下一个空位。
+    # 例：复制 foo(1).py 时不再生成 foo(1)(1).py，而是回到 foo → foo(2).py。
+    m = _TRAILING_COUNTER_RE.match(base)
+    if m:
+        base = m.group(1)
     for i in range(1, 10001):
-        candidate = f"{base} ({i}){ext}"
+        candidate = f"{base}({i}){ext}"
         if not (dst_dir / candidate).exists():
             return candidate
     raise HTTPException(
@@ -233,6 +252,23 @@ async def move_file(
             raise HTTPException(status_code=400, detail="不能把目录移动到自身子目录")
         except ValueError:
             pass
+    # 自粘贴 / no-op move：src 和 dst 解析到同一路径
+    # —— 比如「顶层文件夹拖回根 padding」或「文件拖回自己父目录」。
+    # 此时 dst_dir + src.name === src.parent / src.name === src（目标 == 源），
+    # shutil.move 会丢 src 再 rename，导致 auto_rename 触发「foo (1) / (2) / ...」无限累加。
+    # 直接 no-op 返回（前端 _isSelfPaste 应该已拦截，这里是 defense-in-depth 兜底）。
+    if src.parent == dst_dir:
+        logger.info(
+            f"[move_file] {session_id}: no-op move detected, src={body.src} dst_dir={body.dst_dir}"
+        )
+        return {
+            "code": 200,
+            "msg": "已在目标位置，无需移动",
+            "src": body.src,
+            "dst": body.src,
+            "renamed": False,
+            "session_id": session_id,
+        }
     if body.auto_rename:
         dst_name = _find_unique_name(dst_dir, src.name)
     else:
@@ -444,6 +480,12 @@ async def batch_move_files(
                 continue
             except ValueError:
                 pass
+        # 自粘贴 / no-op move：src.parent == dst_dir → 目标 == 源，不做 rename
+        # （防御兜底，参见 move_file 注释）
+        if src.parent == dst_dir:
+            successes.append({"src": src_rel, "dst": src_rel, "renamed": False})
+            removed += 1
+            continue
         if body.auto_rename:
             dst_name = _find_unique_name(dst_dir, src.name)
         else:
@@ -551,24 +593,29 @@ async def create_folder(
             detail="name 必须为非空且不含路径分隔符",
         )
     parent = _resolve_safe(session_id, body.parent)
-    if not parent.exists() or not parent.is_dir():
+    if body.parent == "":
+        # 空 session 还没有 cached/{sid}/ —— 文件树懒加载，第一个文件/文件夹写入时才创建。
+        # 先建根目录再 mkdir 子目录，否则「新建文件夹」按钮在全新 session 里会 400。
+        parent.mkdir(parents=True, exist_ok=True)
+    elif not parent.exists() or not parent.is_dir():
         raise HTTPException(
             status_code=400, detail=f"父目录不存在或不是目录: {body.parent}"
         )
-    dst = parent / body.name
-    if dst.exists():
-        raise HTTPException(
-            status_code=409, detail=f"目标已存在: {_relativize(dst, session_id)}"
-        )
+    # 同名静默追加 (N) —— 跟 Finder/Explorer 一样，文件系统不允许同名所以只是改个名落地，
+    # 对用户而言就是「创建成功了」，不需要任何「冲突 / 改名」字样。
+    original_name = body.name
+    unique_name = _find_unique_name(parent, original_name)
+    dst = parent / unique_name
     dst.mkdir(parents=False, exist_ok=False)
     logger.info(
-        f"[create_folder] {session_id}: {body.parent}/{body.name}"
+        f"[create_folder] {session_id}: {body.parent}/{unique_name}"
+        + (" (auto-renamed)" if unique_name != original_name else "")
     )
     return {
         "code": 200,
         "msg": "目录已创建",
         "parent": body.parent,
-        "name": body.name,
+        "name": unique_name,
         "path": _relativize(dst, session_id),
         "session_id": session_id,
     }
@@ -607,24 +654,27 @@ async def create_file(
             detail="name 必须为非空且不含路径分隔符",
         )
     parent = _resolve_safe(session_id, body.parent)
-    if not parent.exists() or not parent.is_dir():
+    if body.parent == "":
+        # 空 session 还没有 cached/{sid}/ —— 同 create_folder 的懒加载兜底
+        parent.mkdir(parents=True, exist_ok=True)
+    elif not parent.exists() or not parent.is_dir():
         raise HTTPException(
             status_code=400, detail=f"父目录不存在或不是目录: {body.parent}"
         )
-    dst = parent / body.name
-    if dst.exists():
-        raise HTTPException(
-            status_code=409, detail=f"目标已存在: {_relativize(dst, session_id)}"
-        )
+    # 同名静默追加 (N) —— 同 create_folder：foo.py → foo(1).py → foo(2).py ...
+    original_name = body.name
+    unique_name = _find_unique_name(parent, original_name)
+    dst = parent / unique_name
     dst.write_text(body.content, encoding="utf-8")
     logger.info(
-        f"[create_file] {session_id}: {body.parent}/{body.name} ({len(body.content)} bytes)"
+        f"[create_file] {session_id}: {body.parent}/{unique_name} ({len(body.content)} bytes)"
+        + (" (auto-renamed)" if unique_name != original_name else "")
     )
     return {
         "code": 200,
         "msg": "文件已创建",
         "parent": body.parent,
-        "name": body.name,
+        "name": unique_name,
         "path": _relativize(dst, session_id),
         "size": dst.stat().st_size,
         "session_id": session_id,

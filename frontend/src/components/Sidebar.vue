@@ -214,8 +214,12 @@
           :class="{ 'has-overflow': filesHasOverflow }"
           ref="filesTreeRef"
           tabindex="-1"
-          @mousedown="onFilesTreeFocus"
+          @mousedown="onFilesTreeMouseDown"
           @contextmenu.prevent="onTreeEmptyContextMenu"
+          @dragover.prevent="onFilesTreeDragOver"
+          @dragenter.prevent="onFilesTreeDragEnter"
+          @dragleave="onFilesTreeDragLeave"
+          @drop.stop.prevent="onFilesTreeDrop"
         >
           <!-- 文件 tab -->
           <template v-if="filesActiveTab === 'files'">
@@ -223,8 +227,17 @@
               @contextmenu.prevent="onTreeEmptyContextMenu">加载中…</div>
             <div v-else-if="!rootNode || !rootNode.children || rootNode.children.length === 0" class="empty-state"
               @contextmenu.prevent="onTreeEmptyContextMenu">
-              暂无文件
-              <div class="empty-state-hint">右键空白处可新建文件夹 / 文件</div>
+              <div class="empty-state-icon">📂</div>
+              <div class="empty-state-title">暂无文件</div>
+              <div class="empty-state-hint">从你的第一个文件开始</div>
+              <div class="empty-state-actions">
+                <button class="empty-state-btn" @mousedown.stop @click="openNewItemDialog('folder', null)">
+                  <span class="esb-icon">📁</span>新建文件夹
+                </button>
+                <button class="empty-state-btn" @mousedown.stop @click="openNewItemDialog('file', null)">
+                  <span class="esb-icon">📄</span>新建文件
+                </button>
+              </div>
             </div>
             <div v-else-if="filteredRootChildren.length === 0 && filesSearch" class="empty-state"
               @contextmenu.prevent="onTreeEmptyContextMenu">
@@ -232,7 +245,6 @@
             </div>
             <div v-else ref="treeListRef" class="tree-list"
               @contextmenu.prevent="onTreeEmptyContextMenu"
-              @mousedown="onTreeMouseDown"
             >
               <!-- Finder/Explorer 风格 box-select 视觉矩形 -->
               <div
@@ -252,6 +264,9 @@
                 :cut-path="cutClipboardPath"
                 :copy-path="copyClipboardPath"
                 :expanded-paths="expandedPaths"
+                :drop-target-path="dropTargetPath"
+                :focus-dir="focusDir"
+                :focus-dir-prop="focusDirAbsolute"
                 @node-select="onNodeSelect"
                 @node-toggle-expand="onNodeToggleExpand"
                 @file-click="onFileClick"
@@ -260,6 +275,17 @@
                 @node-rename="onFileRename"
                 @node-rename-done="onRenameDone"
               />
+
+              <!-- 根级 + 操作行（Finder 风格 —— 已有文件下方挂两条 quick action）
+                   始终落在 sid/ 根目录创建。@mousedown.stop 防 box-select 状态机误触清掉选区。 -->
+              <div class="tree-new-actions">
+                <button class="tree-new-btn" @mousedown.stop @click="openNewItemDialog('folder', null)" title="新建文件夹（Cmd+Shift+N）">
+                  <span class="tna-icon">+</span>文件夹
+                </button>
+                <button class="tree-new-btn" @mousedown.stop @click="openNewItemDialog('file', null)" title="新建文件（Cmd+Shift+Alt+N）">
+                  <span class="tna-icon">+</span>文件
+                </button>
+              </div>
             </div>
           </template>
 
@@ -371,6 +397,14 @@
         :class="'flash-message--' + flashMessage.type"
       >{{ flashMessage.text }}</div>
     </transition>
+
+    <!-- OS 系统拖拽 overlay（Finder/Explorer 拖文件到文件树时显示） -->
+    <transition name="system-drag-fade">
+      <div v-if="systemDragHover" class="system-drag-overlay">
+        <div class="system-drag-icon">⬇</div>
+        <div class="system-drag-text">释放以上传到当前会话</div>
+      </div>
+    </transition>
   </aside>
 </template>
 
@@ -455,6 +489,12 @@ export default {
       selectedPaths: [],          // 多选 path 数组（响应式：必须数组，Set 加减不触发重渲染）
       lastClickedPath: '',        // 最后点击的节点（Shift+click 范围选锚点）
       lastClickedNode: null,      // 最后点击的节点对象（F2/Delete 等快捷键的目标）
+      // —— 当前焦点目录 ——
+      // 用户「点进」的目录（普通点击目录行 / 右键菜单选 Paste into），决定 Cmd+V 粘贴的目标。
+      // 规则：普通点击 dir 行 → focusDir = 该目录相对路径；点击 file 行 → 保持不变。
+      // 重置时机：会话切换 / 文件树刷新 / 完成任何文件操作（粘贴 / 删除 / 重命名 / 新建 / 拖拽移动）。
+      // 这样用户能复制完点进去再 Cmd+V，复制操作本身 / 多选切换都不会清掉焦点。
+      focusDir: '',                // 相对 cached/{sid}/ 的目录路径，'' = 根目录
       // 展开状态：plain object { [path]: true }（Vue 3 对 plain object 字段追踪最可靠）
       expandedPaths: {},
       clipboard: null,            // { src: 相对路径, mode: 'copy' | 'cut' }
@@ -491,7 +531,14 @@ export default {
         x: 0, y: 0,              // 矩形左上角（取 start/end 的较小值）
         width: 0, height: 0,     // 矩形尺寸
         additive: false          // true = 按住 Shift/Cmd/Ctrl 时累加而非替换选区
-      }
+      },
+      // —— 长按框选状态机：mousedown 后不立即激活，需等 250ms 或移动 ≥8px 才进 box-select ——
+      _boxPressTimer: null,        // setTimeout 句柄
+      _boxPressStart: null,        // { x, y, additive } —— mousedown 起点
+      _boxPressActivated: false,   // true = 已进入 box-select 模式（计时器到点 or 移动超阈值）
+      // —— 拖拽 / 系统粘贴目标状态 ——
+      dropTargetPath: '',          // 当前高亮的 drop 目标绝对路径（'' = 根）
+      systemDragHover: false       // 系统拖拽 overlay 是否显示
     }
   },
   computed: {
@@ -519,6 +566,15 @@ export default {
       if (!this.clipboard || this.clipboard.mode !== 'copy') return ''
       const basePrefix = this.rootPath.endsWith('/') ? this.rootPath : this.rootPath + '/'
       return this.clipboard.src ? basePrefix + this.clipboard.src : ''
+    },
+    /**
+     * 焦点目录的绝对路径（与 node.path 同格式）—— 给 DataTreeNode 用于 node.path === 匹配点亮。
+     * focusDir 本身是相对路径（方便 _batchCopyToDir 直接用），这里拼回绝对路径供视觉匹配。
+     */
+    focusDirAbsolute() {
+      if (!this.focusDir) return ''
+      const basePrefix = this.rootPath.endsWith('/') ? this.rootPath : this.rootPath + '/'
+      return basePrefix + this.focusDir
     },
     /** 拍平当前选中的节点（用于批量操作：copy/cut/delete） */
     selectedNodes() {
@@ -627,29 +683,28 @@ export default {
   methods: {
     // ========== 非阻塞 flash 消息（替换 file ops 里所有 alert()） ==========
     /**
-     * 把焦点放到文件树容器 —— 用户在文件树上点击（任意位置）时调，
-     * 让后续键盘快捷键（Cmd+C/X/V/D/F2/箭头）的 _shortcutGuard 通过（tagName=div）。
-     * 切到 files 视图时也走这条把焦点抢过来（从 MessageInput 抢回）。
+     * 文件树容器 mousedown —— focus + 启动 box-select 状态机
+     * 统一处理 .files-tree 内所有非节点行点击，覆盖：
+     * - .tree-list padding（原有 box-select 触发区）
+     * - .empty-state（加载中 / 暂无文件 / 搜索无结果）
+     * - .files-tree 自身的 padding
      *
-     * 同时处理「点空白处清状态」：
-     * - 点 .dtn-row（节点行）→ 不动，节点自己的 click handler 会处理
-     * - 点 .tree-list 空白 → onTreeMouseDown 已经清了，跳过避免重复
-     * - 点 .files-tree padding / .empty-state（加载中 / 暂无文件 / 搜索无结果）→ 清 lastClickedNode + 选区
-     *   这样后续 Cmd+V / 右键新建文件夹 / F2 等操作默认到 sid/ 根，不会被上次点击的节点带偏。
+     * 节点行点击（`.dtn-row` 内）由 DataTreeNode 自己的 click / dragstart 处理，本方法不接管。
+     *
+     * 注意：onFilesTreeMouseDown 不立即清选区 —— 清选区交给 box-select 状态机的「点击空白」分支
+     * （mouseup 时矩宽 < 4px 且非 additive → 清选区）。这样点空白确实清选区，但长按 250ms 后再拖
+     * 也能正常进入 box-select（不会出现「长按前已被清空」的视觉跳跃）。
      */
-    onFilesTreeFocus(event) {
+    onFilesTreeMouseDown(event) {
+      if (event.button !== 0) return  // 只响应左键
       const el = this.$refs.filesTreeRef
       if (el && typeof el.focus === 'function') {
         el.focus({ preventScroll: true })
       }
-      if (!event || !event.target || !event.target.closest) return
-      const t = event.target
-      if (t.closest('.dtn-row')) return    // 节点行 → 留给节点 click handler
-      if (t.closest('.tree-list')) return  // tree-list 空白 → onTreeMouseDown 已经清过
-      // 现在命中的是 .files-tree padding 或 .empty-state 区域
-      this.selectedPaths = []
-      this.lastClickedPath = ''
-      this.lastClickedNode = null
+      // 节点行点击 → 不启动 box-select（让 node-select / dragstart 处理）
+      if (event.target && event.target.closest && event.target.closest('.dtn-row')) return
+      // 启动长按框选状态机
+      this._startBoxSelect(event)
     },
     _flash(text, type = 'info') {
       this.flashMessage = { text, type, timestamp: Date.now() }
@@ -748,6 +803,7 @@ export default {
       this.selectedPaths = []
       this.lastClickedPath = ''
       this.lastClickedNode = null
+      this.focusDir = ''           // 文件树重置：焦点回到根
       this.expandedPaths = {}
       this.clipboard = null
       this.renameTargetPath = ''
@@ -944,6 +1000,16 @@ export default {
         this.selectedPaths = [node.path]
         this.lastClickedPath = node.path
         this.lastClickedNode = node
+        // 焦点：
+        // - 目录行 plain-click → focusDir = 该目录（用户进入此目录）
+        // - 文件行 plain-click → focusDir = 文件所在目录（文件「同级」），这样复制文件后
+        //   在原位置 Cmd+V 仍会粘到同级目录（Finder 习惯 —— 焦点是「用户当前所在的目录」）
+        // - shift 范围选 / meta 多选切换 / 框选 → 不动 focus（避免误清空上下文）
+        if (node.type === 'directory') {
+          this.focusDir = this._extractRelativePath(node.path)
+        } else {
+          this.focusDir = this._parentRelPathOfNode(node) || this.focusDir
+        }
       }
     },
     /**
@@ -993,41 +1059,104 @@ export default {
      * - 用 data-node-path 属性 + getBoundingClientRect 做命中检测（O(n) 遍历可见节点）
      * - mousemove / mouseup 挂在 window 上 —— 拖出 tree-list 也要能继续画 / 正常结束
      */
-    onTreeMouseDown(event) {
-      if (event.button !== 0) return
-      const tree = this.$refs.treeListRef
-      if (!tree) return
-      // 只在「点的是空白处」时启动 —— 节点行点击 / 拖动不在此处理（节点行的 mousedown 会冒泡但不会到这里，因为它们的祖先也是 .tree-list 本身... 需要排除）
-      // 这里用 closest()：如果 target 在 .dtn-row 内部，不启动 box-select
-      if (event.target && event.target.closest && event.target.closest('.dtn-row')) {
-        return
-      }
-      const rect = tree.getBoundingClientRect()
-      const x = event.clientX - rect.left + tree.scrollLeft
-      const y = event.clientY - rect.top + tree.scrollTop
+    /**
+     * 长按框选状态机启动：
+     * - mousedown 不立即激活 box-select；要么等 250ms 计时器到点，要么期间移动 ≥8px 立即激活
+     * - 两都未达（鼠标没动就松开）：当作「点击空白」→ 清选区
+     * - 监听 mousemove / mouseup 挂在 window（拖出 .files-tree 也不丢事件）
+     */
+    _startBoxSelect(event) {
       const additive = !!(event.shiftKey || event.metaKey || event.ctrlKey)
+      this._boxPressStart = { x: event.clientX, y: event.clientY, additive }
+      this._boxPressActivated = false
+      if (this._boxPressTimer) clearTimeout(this._boxPressTimer)
+      this._boxPressTimer = setTimeout(() => {
+        this._boxPressTimer = null
+        if (!this._boxPressStart) return
+        // 计时器到点 → 立即激活 box-select
+        this._beginBoxSelect(event, additive)
+        this._boxPressActivated = true
+        // 计时器路径也要挂 _onBoxSelectMouseMove，否则后续 mousemove 不更新矩形
+        window.addEventListener('mousemove', this._onBoxSelectMouseMove)
+      }, 250)
+      // 监听 mousemove / mouseup
+      const onMove = (e) => {
+        if (!this._boxPressStart) return
+        if (this._boxPressActivated) return  // 已激活：_onBoxSelectMouseMove 接管
+        const dx = e.clientX - this._boxPressStart.x
+        const dy = e.clientY - this._boxPressStart.y
+        // 移动 ≥8px 立即激活（不等 250ms）
+        if (Math.abs(dx) >= 8 || Math.abs(dy) >= 8) {
+          if (this._boxPressTimer) {
+            clearTimeout(this._boxPressTimer)
+            this._boxPressTimer = null
+          }
+          this._beginBoxSelect(event, additive)
+          this._boxPressActivated = true
+          window.addEventListener('mousemove', this._onBoxSelectMouseMove)
+        }
+      }
+      const onUp = (e) => {
+        if (this._boxPressTimer) {
+          clearTimeout(this._boxPressTimer)
+          this._boxPressTimer = null
+        }
+        window.removeEventListener('mousemove', onMove)
+        window.removeEventListener('mouseup', onUp)
+        if (this._boxPressActivated) {
+          window.removeEventListener('mousemove', this._onBoxSelectMouseMove)
+          this._onBoxSelectMouseUp(e)
+        } else {
+          // 250ms 内 + 移动 <8px + 松手 → 「点空白」清选区
+          this._clearSelection()
+        }
+        this._boxPressStart = null
+        this._boxPressActivated = false
+      }
+      window.addEventListener('mousemove', onMove)
+      window.addEventListener('mouseup', onUp)
+    },
+    /**
+     * 真正进入 box-select 阶段（被长按计时器到点 / 8px 移动阈值触发）：
+     * - 设 active=true（box-select 矩形出现）
+     * - 记录 _prevSelection（additive 模式 = 当前选区快照；非 additive = 空数组）
+     * - 非 additive 立即清空选区（替换语义）
+     */
+    _beginBoxSelect(event, additive) {
+      const container = this._boxContainer()
+      if (!container) return
+      const rect = container.getBoundingClientRect()
+      const x = event.clientX - rect.left + container.scrollLeft
+      const y = event.clientY - rect.top + container.scrollTop
       this.boxSelect = {
         active: true,
         anchorX: x, anchorY: y,
         x, y, width: 0, height: 0,
         additive,
-        // 非 additively 时记录起点选区，结束时基于这个做替换
         _prevSelection: additive ? this.selectedPaths.slice() : []
       }
-      // additively 模式：不清空；纯 box-select：清空选区（替换语义）
       if (!additive) {
         this.selectedPaths = []
         this.lastClickedPath = ''
         this.lastClickedNode = null
       }
-      // 阻止默认文字选中
-      event.preventDefault()
-      window.addEventListener('mousemove', this._onBoxSelectMouseMove)
-      window.addEventListener('mouseup', this._onBoxSelectMouseUp)
+    },
+    /** box-select / 框选定位用的容器：优先 .tree-list（box-select 命中目标都在里面），fallback 到 .files-tree */
+    _boxContainer() {
+      return this.$refs.treeListRef || this.$refs.filesTreeRef
+    },
+    /** 清空当前选区 + 取消 lastClicked 锚点 —— 「点空白」等场景统一调用 */
+    _clearSelection() {
+      this.selectedPaths = []
+      this.lastClickedPath = ''
+      this.lastClickedNode = null
+      // 点空白区域 = 退出当前文件夹浏览 → 焦点也归零回到 sid/ 根目录
+      // 用户再次 Cmd+V 会粘到根目录，符合「重置上下文」的直觉
+      this.focusDir = ''
     },
     _onBoxSelectMouseMove(event) {
       if (!this.boxSelect.active) return
-      const tree = this.$refs.treeListRef
+      const tree = this._boxContainer()
       if (!tree) return
       const rect = tree.getBoundingClientRect()
       const x = Math.max(0, Math.min(event.clientX - rect.left + tree.scrollLeft, tree.scrollWidth))
@@ -1049,7 +1178,7 @@ export default {
      * bbox 与矩形相交的全部加入 / 替换选区。
      */
     _updateBoxSelection() {
-      const tree = this.$refs.treeListRef
+      const tree = this._boxContainer()
       if (!tree) return
       const sel = this.boxSelect
       const sx = sel.x, sy = sel.y, sx2 = sel.x + sel.width, sy2 = sel.y + sel.height
@@ -1086,6 +1215,8 @@ export default {
           this.selectedPaths = []
           this.lastClickedPath = ''
           this.lastClickedNode = null
+          // 同 _clearSelection：点空白 → 焦点归零到根
+          this.focusDir = ''
         }
       } else {
         // 设 lastClicked = 第一个命中节点（让快捷键的 paste 能找到合理 target）
@@ -1118,6 +1249,152 @@ export default {
       // 这样空白右键也能继续操作已选中的节点（IDEA 风格：菜单项始终可用）
       event.preventDefault()
       this._showContextMenu(event.clientX, event.clientY, this._emptyMenuItems())
+    },
+    // ===== 拖拽 / 系统粘贴 =====
+    /**
+     * 内部拖拽：DataTreeNode dragstart 时 setData 了 application/x-lingxi-paths
+     * 系统拖拽：dataTransfer.types 含 'Files'（Finder/Explorer 拖文件进来）
+     * 用 setData('application/x-lingxi-paths', ...) 而不是裸 text/plain，避免和系统 text 冲突
+     */
+    _isInternalDrag(e) {
+      const types = e.dataTransfer && e.dataTransfer.types
+        ? Array.from(e.dataTransfer.types)
+        : []
+      return types.includes('application/x-lingxi-paths')
+    },
+    _isSystemDrag(e) {
+      const types = e.dataTransfer && e.dataTransfer.types
+        ? Array.from(e.dataTransfer.types)
+        : []
+      // Files + 无内部标记 → 系统拖拽
+      return types.includes('Files') && !types.includes('application/x-lingxi-paths')
+    },
+    /**
+     * 从 clientX/Y 反查当前落点节点：
+     * - 在目录行 → 该目录节点
+     * - 在文件行 → 文件的父目录（dragging 数据里没有父目录语义时，drop handler 自行取父）
+     * - 在空白 padding / empty-state → null（= 根目录）
+     * 通过 elementFromPoint + closest('.dtn-row') + data-node-path 实现
+     */
+    _resolveDropTarget(e) {
+      const el = document.elementFromPoint(e.clientX, e.clientY)
+      if (!el) return null
+      const row = el.closest && el.closest('.dtn-row')
+      if (!row) return null
+      const path = row.getAttribute('data-node-path')
+      if (!path) return null
+      return this._findNodeInTree(path) || null
+    },
+    /**
+     * 拖入 .files-tree 区域时设 overlay（dragenter 在子元素进出时也会触发）
+     * dragleave 时仅当 relatedTarget 不在 .files-tree 内才视为真正离开
+     */
+    onFilesTreeDragEnter(e) {
+      if (!this._isInternalDrag(e) && !this._isSystemDrag(e)) return
+      if (this._isSystemDrag(e)) this.systemDragHover = true
+    },
+    onFilesTreeDragOver(e) {
+      // 内部拖拽：找最近目录行作 drop target 高亮
+      if (this._isInternalDrag(e)) {
+        const target = this._resolveDropTarget(e)
+        this.dropTargetPath = target && target.type === 'directory' ? (target.path || '') : ''
+        try { e.dataTransfer.dropEffect = e.altKey ? 'copy' : 'move' } catch (_) {}
+        return
+      }
+      // 系统拖拽：维持 overlay 显示（dropEffect 提示给浏览器）
+      if (this._isSystemDrag(e)) {
+        try { e.dataTransfer.dropEffect = 'copy' } catch (_) {}
+        this.systemDragHover = true
+      }
+    },
+    onFilesTreeDragLeave(e) {
+      // relatedTarget 不在 .files-tree 内 → 视为真正离开整个区域
+      const tree = this.$refs.filesTreeRef
+      if (tree && e.relatedTarget && tree.contains(e.relatedTarget)) return
+      this.systemDragHover = false
+      this.dropTargetPath = ''
+    },
+    async onFilesTreeDrop(e) {
+      this.systemDragHover = false
+      // 1) 内部拖拽：DataTreeNode dragstart 的 application/x-lingxi-paths
+      if (this._isInternalDrag(e)) {
+        const raw = e.dataTransfer.getData('application/x-lingxi-paths')
+        let paths = []
+        try { paths = JSON.parse(raw || '[]') } catch (_) {}
+        const srcs = paths.map(p => this._extractRelativePath(p)).filter(Boolean)
+        if (!srcs.length) return
+        const targetNode = this._resolveDropTarget(e)
+        const targetDir = targetNode && targetNode.type === 'directory'
+          ? this._extractRelativePath(targetNode.path)
+          : ''
+        const mode = e.altKey ? 'copy' : 'cut'  // 'cut' = move（_batchCopyToDir 内部映射）
+        this.dropTargetPath = ''
+        const result = await this._batchCopyToDir(srcs, targetDir, { mode })
+        // 操作完成 → 焦点归零
+        if (result && result.ok) this.focusDir = ''
+        return result
+      }
+      // 2) 系统拖拽（Finder/Explorer 拖文件进来）
+      const files = e.dataTransfer && e.dataTransfer.files
+        ? Array.from(e.dataTransfer.files)
+        : []
+      if (this._isSystemDrag(e) && files.length) {
+        const targetNode = this._resolveDropTarget(e)
+        const targetDir = targetNode && targetNode.type === 'directory'
+          ? this._extractRelativePath(targetNode.path)
+          : ''
+        this.dropTargetPath = ''
+        return this._uploadSystemFiles(files, targetDir)
+      }
+    },
+    /**
+     * 系统粘贴的目标目录：
+     * - 优先：当前 lastClickedNode 是目录 → 该目录
+     * - 兜底：根（''）
+     *（与 `_shortcutPaste` 一致：避免粘到同名目录触发 self-paste 错误）
+     */
+    _resolveSystemPasteTargetDir() {
+      if (this.lastClickedNode && this.lastClickedNode.type === 'directory') {
+        return this._extractRelativePath(this.lastClickedNode.path)
+      }
+      return ''
+    },
+    /**
+     * OS 拖拽 / 系统 Cmd+V 共用上传函数：
+     * - 复用 /chat/{sid}/upload_file（走 chat_service.process_files 做文本/OCR 预处理，
+     *   **不触发 AI 对话** —— 见后端 main.py:336-383）
+     * - 关键：**不写 processedOutputs state**（不污染下次 /chat/send 的附件列表）
+     *   → Sidebar 不持有 processedOutputs；response 直接丢弃
+     * - 多文件 multipart 一次性 POST（与 MessageInput 上传同模式）
+     */
+    async _uploadSystemFiles(files, parentDir) {
+      if (!this.activeSessionId || !files.length) return
+      const sid = this.activeSessionId
+      const formData = new FormData()
+      for (const f of files) formData.append('files', f)
+      // 传空 processed_outputs —— 不继承 chat 端缓存，避免下次 send 误附加
+      formData.append('processed_outputs', '[]')
+      const url = `/chat/${encodeURIComponent(sid)}/upload_file`
+      try {
+        const resp = await fetch(url, { method: 'POST', body: formData })
+        if (!resp.ok) {
+          const detail = await resp.json().catch(() => ({}))
+          this._flash(`上传失败：${detail.msg || resp.statusText || `HTTP ${resp.status}`}`, 'error')
+          return
+        }
+        const data = await resp.json().catch(() => ({}))
+        const outputs = data.processed_outputs || []
+        // 统计自动改名（auto_rename 后追加 (1)/(2)...）
+        const renamed = outputs.filter(o => o && o.renamed).length
+        await this.checkFiles()
+        const target = parentDir ? `「${parentDir}」` : '根目录'
+        const msg = renamed > 0
+          ? `已上传 ${files.length} 项到${target}（${renamed} 项自动改名）`
+          : `已上传 ${files.length} 项到${target}`
+        this._flash(msg, 'success')
+      } catch (err) {
+        this._flash(`上传失败：${err.message || err}`, 'error')
+      }
     },
     // ===== IDEA 风文件编辑 =====
 
@@ -1351,23 +1628,27 @@ export default {
      * 粘贴（Cmd+V / 右键粘贴）：target 是目录时粘到 target 内部，否则默认到 sid/ 根目录。
      * 真正的批量 / 单条 / self-paste / flash 反馈全部委托给 _batchCopyToDir。
      * cut 模式成功后清空剪贴板 + 选区。
+     * 成功完成后 focusDir 归零（操作归零规则：操作完成后焦点回到根）。
+     * 返回 _batchCopyToDir 的结果 { ok, ... }，供 _shortcutPaste 等调用方按需响应。
      */
     async pasteInto(targetNode) {
-      if (!this.clipboard || !this.activeSessionId) return
+      if (!this.clipboard || !this.activeSessionId) return { ok: false }
       const items = this.clipboard.items || [{ src: this.clipboard.src, name: this.clipboard.name }]
       const srcs = items.map(i => i.src).filter(Boolean)
-      if (!srcs.length) return
+      if (!srcs.length) return { ok: false }
       let dstDir = (targetNode && targetNode.type === 'directory')
         ? this._extractRelativePath(targetNode.path) : ''
-      // Self-paste 静默回退：任何一个 src 是目录且 dstDir 是其自身/子目录时，
-      // 把整批重定向到根目录 —— 不再弹「不能把 X 复制到自身内部」红色警告。
-      // 用户真要粘到子目录：换到那个目录右键 → 「粘贴到 <dirname>」即可。
-      if (dstDir && srcs.some(src => this._isSelfPaste(src, dstDir))) {
+      const wasCut = this.clipboard.mode === 'cut'
+      // Self-paste 静默回退 ——**只对 cut/move 生效**：
+      //   - 移动到自身位置是 no-op，重定向到根（也是 no-op）符合「剪切后无操作」语义
+      //   - 复制到自身位置是标准行为（后端 auto_rename 生成 (1) 副本），不能重定向
+      //     —— 否则「复制 xxx/foo.txt 后点 xxx/ 再 Cmd+V」会被静默粘到根，违背 Finder 习惯
+      // 目录拖到自身子目录的递归死循环：cut 由 _batchCopyToDir 兜底拦截，copy 由后端检测
+      if (wasCut && dstDir && srcs.some(src => this._isSelfPaste(src, dstDir))) {
         dstDir = ''
       }
-      const wasCut = this.clipboard.mode === 'cut'
       const result = await this._batchCopyToDir(srcs, dstDir, { mode: this.clipboard.mode })
-      if (!result.ok) return
+      if (!result.ok) return { ok: false }
       if (wasCut) {
         // cut 成功 → 源已被移走，清剪贴板 + 选区，避免再次粘贴误删
         this.clipboard = null
@@ -1375,22 +1656,48 @@ export default {
         this.lastClickedPath = ''
         this.lastClickedNode = null
       }
+      // 粘贴完成 → **焦点保持不变**（用户大概率还在该目录里继续粘贴/重命名等连续操作，
+      // 强制归零会打断节奏）。其他破坏性操作（删除/新建/拖拽到位）才归零。
+      return result
+    },
+    /**
+     * 把当前 focusDir 解析成可用的目录节点：
+     * - focusDir 为空（默认状态）→ null（让 pasteInto 走根目录）
+     * - focusDir 路径在树里仍是有效目录 → 返回该节点
+     * - focusDir 失效（被删 / 切会话漏清等）→ null（兜底走根目录，不让粘贴崩）
+     */
+    _resolveFocusTargetNode() {
+      if (!this.focusDir) return null
+      const basePrefix = this.rootPath.endsWith('/') ? this.rootPath : this.rootPath + '/'
+      const absPath = basePrefix + this.focusDir
+      const node = this._findNodeInTree(absPath)
+      if (node && node.type === 'directory') return node
+      return null
     },
     /**
      * 批量复制 / 移动到指定目录 —— Cmd+V 粘贴 + Cmd+D 复制副本共用底座（drag-drop 未来也能用）。
      * - mode: 'copy' | 'cut'（'cut' = move）
      * - 单条 vs 批量：srcs.length === 1 → `/file/{op}`；否则 `/files/{op}`
      * - auto_rename=true：目标已存在时后端自动追加 (1)/(2)... 而不是 409
-     * - 客户端预校验 self-paste（src 是目录 AND dstDir 是 src 自身 / 子目录）→ 静默 return
-     *   （`pasteInto` 已经提前重定向到根目录，这里只是防御兜底 —— 给未来 drag-drop 等
-     *    入口一个安全网，避免递归复制打到后端）
+     * - self-paste 拦截**只对 cut/move 生效**：复制到自身位置是标准行为（后端 auto_rename 加 (1)），
+     *   不能拦截；移动到自身位置是 no-op，必须拦。`pasteInto` 已经提前重定向 move-self-paste 到根，
+     *   这里再 check 一遍是给 future-proof 安全网。
+     * - forceDuplicate=true：跳过 cut self-paste 检查，用于 Cmd+D（显式「在同目录复制副本」，
+     *   即使 cut-self-paste 也要落到后端让 auto_rename 追加 (1) 生成副本 —— 但 Cmd+D 实际是 copy，
+     *   走 mode='copy' 分支本就不检查，所以 forceDuplicate 主要是防御性兜底）
      * - 返回 { ok, renamedCount } —— ok=false 表示未发送请求或请求失败，调用方不应再做事
      */
-    async _batchCopyToDir(srcs, dstDir, { mode = 'copy' } = {}) {
+    async _batchCopyToDir(srcs, dstDir, { mode = 'copy', forceDuplicate = false } = {}) {
       if (!this.activeSessionId || !srcs.length) return { ok: false }
-      // self-paste 预校验（防御兜底，静默拦截，不弹红色警告）
-      for (const src of srcs) {
-        if (this._isSelfPaste(src, dstDir)) return { ok: false }
+      // self-paste 只对 cut/move 拦截：
+      //   - 移动到自身位置是 no-op（位置没变，前端拦掉避免无意义请求 + 后端 `_find_unique_name` 误判冲突加 (1)）
+      //   - 复制到自身位置是标准行为（Finder 习惯：后端 auto_rename 加 (1) 生成副本），不能拦截
+      //     —— 否则「复制 foo.txt 后点同目录 Cmd+V」会无文件生成，用户感知「粘贴不了」
+      // forceDuplicate=true 时同样跳过：Cmd+D 的语义就是「在同目录复制副本」，即便 self-paste 也进
+      if (mode === 'cut' && !forceDuplicate) {
+        for (const src of srcs) {
+          if (this._isSelfPaste(src, dstDir)) return { ok: false }
+        }
       }
       const isBatch = srcs.length > 1
       const op = mode === 'cut' ? 'move' : 'copy'
@@ -1504,6 +1811,8 @@ export default {
         this.selectedPaths = []
         this.lastClickedPath = ''
         this.lastClickedNode = null
+        // 操作完成 → 焦点归零（下次 Cmd+V 不该偷偷粘到刚删掉的目录里）
+        this.focusDir = ''
         await this.checkFiles()
         if (this.filesActiveTab === 'trash') {
           await this.checkTrash()
@@ -1529,6 +1838,8 @@ export default {
           this._flash(`重命名失败：${detail.detail || resp.statusText}`, 'error')
           return
         }
+        // 重命名完成 → **焦点保持不变**（用户大概率还在该目录里继续粘贴/重命名其他文件，
+        // 强制归零会打断连续编辑节奏）。
         await this.checkFiles()
         this._flash(`已重命名为「${newName}」`, 'success')
       } catch (e) {
@@ -1595,9 +1906,13 @@ export default {
           this._flash(`创建失败：${this._humanizeCreateError(detail.detail) || resp.statusText}`, 'error')
           return
         }
+        const data = await resp.json().catch(() => ({}))
         this.closeNewItemDialog()
+        // 操作完成 → 焦点归零
+        this.focusDir = ''
         await this.checkFiles()
-        this._flash(`已创建「${trimmed}」`, 'success')
+        // 后端同名时静默追加 (N)：foo → foo(1)，响应里直接给最终名；flash 只显示真名
+        this._flash(`已创建「${data.name || trimmed}」`, 'success')
       } catch (e) {
         console.error('[Sidebar] create failed:', e)
         this._flash(`创建失败：${e.message || e}`, 'error')
@@ -1660,6 +1975,37 @@ export default {
      *
      * 输入框 / textarea / contentEditable focus 时不抢键（用户在重命名/搜索时按方向键不应触发导航）。
      */
+    /**
+     * 全局 paste 事件 —— 系统剪贴板里有文件时（Finder/Explorer 复制了文件然后 Cmd+V）
+     * 直接上传到当前 lastClickedNode（若为目录）或根目录。
+     *
+     * - 内部 clipboard 非空 → 走原有 _shortcutPaste（in-app 复制/剪切）
+     * - 内部 clipboard 空 + 系统剪贴板有 file → 上传到 _resolveSystemPasteTargetDir()
+     * - 都不满足（如只粘了文本）→ 不响应，让浏览器默认行为接管
+     *
+     * 注意：不要在这里主动 _shortcutGuard 过滤 tagName —— paste 事件即便在输入框里也合理
+     * （用户可能在搜索框粘路径），但粘贴文件是非输入框语义，所以仍走 `_shortcutGuard` 屏蔽输入框。
+     */
+    onGlobalPaste(e) {
+      if (!this._shortcutGuard(e)) return
+      // 1) 内部 clipboard 非空 → 走原有 pasteInto（移动）
+      if (this.clipboard) {
+        e.preventDefault()
+        return this._shortcutPaste()
+      }
+      // 2) 系统剪贴板里有 file → 上传
+      const items = e.clipboardData && e.clipboardData.items
+        ? Array.from(e.clipboardData.items)
+        : []
+      const files = items
+        .filter(it => it && it.kind === 'file')
+        .map(it => it.getAsFile())
+        .filter(Boolean)
+      if (!files.length) return
+      e.preventDefault()
+      const targetDir = this._resolveSystemPasteTargetDir()
+      this._uploadSystemFiles(files, targetDir)
+    },
     onGlobalKeydown(e) {
       if (!this._shortcutGuard(e)) return
       const mod = this._isMac ? e.metaKey : e.ctrlKey
@@ -1766,12 +2112,14 @@ export default {
       this._flash(`已剪切 ${nodes.length} 项（粘贴后源会被移除）`, 'info')
     },
     /**
-     * Cmd+V：跨会话防御 + **永远默认到 sid/ 根目录**
+     * Cmd+V：跨会话防御 + 默认到当前焦点目录（focusDir）
      *
-     * 不管 lastClickedNode 是文件 / 目录 / 空，都走根 —— 用户复制了「和 lastClickedNode
-     * 同名的目录」时若粘进 lastClickedNode 会触发 `_isSelfPaste` 报错（例如复制 `data/`
-     * 后点击 `data/` 节点，再 Cmd+V → 不能把 `data` 复制到自身内部），违背快捷键预期。
-     * 真要粘到子目录必须显式右键目录 → 「粘贴到 <dirname>」。
+     * 焦点规则：
+     * - 用户普通点击了某目录行 → focusDir = 该目录（Cmd+V 会粘到这里）
+     * - 用户还没点过任何目录 → focusDir = '' → 落到根目录（与之前体验一致）
+     * - focusDir 失效（被删等）→ 兜底走根目录，不让粘贴崩
+     * 粘贴完成后 focusDir 自动归零（操作归零规则）。
+     * self-paste 静默重定向仍由 pasteInto 内部处理。
      */
     _shortcutPaste() {
       if (!this.clipboard) return this._flash('剪贴板为空，先按 Cmd+C 复制文件', 'info')
@@ -1779,11 +2127,14 @@ export default {
         this.clipboard = null
         return this._flash('剪贴板属于其他会话，已清空', 'info')
       }
-      this.pasteInto(null)
+      const target = this._resolveFocusTargetNode()
+      this.pasteInto(target)
     },
     /**
      * Cmd+D (Duplicate) —— 在同一父目录下复制副本（auto_rename 自动追加 (1)/(2)）。
      * 跨父目录多选 → 拒绝 + flash 提示，避免「不同目录的 (1) 副本」语义不清。
+     * 用 forceDuplicate=true 绕过 self-paste 检查 —— Cmd+D 的语义就是「在同目录复制副本」，
+     * 即便选中项的 dst 等于 src 自身也要落到后端，让 auto_rename 追加 (1) 生成副本。
      */
     _shortcutDuplicate(nodes) {
       if (!nodes.length) return this._flash('请先选中要复制副本的文件或文件夹', 'info')
@@ -1796,7 +2147,7 @@ export default {
       }
       const dstDir = [...parentDirs][0]
       const srcs = nodes.map(n => this._extractRelativePath(n.path)).filter(Boolean)
-      this._batchCopyToDir(srcs, dstDir, { mode: 'copy' })
+      this._batchCopyToDir(srcs, dstDir, { mode: 'copy', forceDuplicate: true })
     },
     _shortcutDelete(nodes) {
       if (!nodes.length) return this._flash('请先选中要删除的文件或文件夹', 'info')
@@ -1940,6 +2291,8 @@ export default {
         this.selectedPaths = []
         this.lastClickedPath = ''
         this.lastClickedNode = null
+        // 操作完成 → 焦点归零
+        this.focusDir = ''
         this.checkFiles()
         this._flash(`已删除「${this._basename(relPath)}」`, 'success')
       } catch (e) {
@@ -1964,20 +2317,30 @@ export default {
       return findIn(this.rootNode)
     },
     /**
-     * 自粘贴预校验：src 是目录 AND dstDir 是 src 自身或其后代目录
-     * → 后端 copy_file / move_file 会返回 400「不能把目录复制到自身子目录」
-     * 客户端拦截避免发无效请求 + 用户看到 alert
+     * 自粘贴预校验：move/copy 到自身当前所在位置 → no-op，必须拦截。
+     *
+     * 修复（v0.1.x）：原实现 `if (!srcRelPath || !dstDir) return false` + `if (srcNode.type !== 'directory') return false`
+     * 有两个 hole，会让自粘贴走到后端触发 auto_rename，结果原地 + (1) 后缀无限累加：
+     *   1. 顶层项目拖到根 padding（src=`A`，dstDir=``）—— src 已经在根
+     *   2. 文件拖到自己的父目录（src=`A/foo.txt`，dstDir=`A`）—— 文件已经在 A 里
+     *
+     * 统一规则：计算 move 后的目标 dstRelPath = dstDir + '/' + basename(src)，
+     * 若等于 srcRelPath → 目标路径 == 源路径 → 自粘贴，拦截。
      */
     _isSelfPaste(srcRelPath, dstDir) {
-      if (!srcRelPath || !dstDir) return false
-      // 源必须是目录（文件 self-paste 无意义）
+      if (!srcRelPath) return false
+      const srcName = srcRelPath.split('/').pop()
+      const dstRelPath = dstDir ? `${dstDir}/${srcName}` : srcName
+      // 1) 目标路径 == 源路径 → 自粘贴（no-op move）
+      if (dstRelPath === srcRelPath) return true
+      // 2) 目录拖到自身 / 自身子目录 → 递归死循环
       const basePrefix = this.rootPath.endsWith('/') ? this.rootPath : this.rootPath + '/'
       const srcNode = this._findNodeInTree(basePrefix + srcRelPath)
-      if (!srcNode || srcNode.type !== 'directory') return false
-      // 顶层目录（无 /）粘贴到根 → 不算 self-paste（视为合法的「移回根」操作）
-      if (!srcRelPath.includes('/') && !dstDir) return false
-      const srcAsDir = srcRelPath.endsWith('/') ? srcRelPath : srcRelPath + '/'
-      return dstDir === srcRelPath || dstDir.startsWith(srcAsDir)
+      if (srcNode && srcNode.type === 'directory') {
+        const srcAsDir = srcRelPath.endsWith('/') ? srcRelPath : srcRelPath + '/'
+        return dstDir === srcRelPath || (!!dstDir && dstDir.startsWith(srcAsDir))
+      }
+      return false
     },
     // _parentDirRelative 已删除 —— 默认粘贴永远是 sid/ 根目录，不再需要记录源父目录
     /** 命名冲突预校验：完整相对路径是否已存在于树中（避免 409 错误） */
@@ -2021,6 +2384,8 @@ export default {
           this._flash(`删除失败：${detail.detail || resp.statusText}`, 'error')
           return
         }
+        // 操作完成 → 焦点归零
+        this.focusDir = ''
         this.checkFiles()
         this._flash(`已删除「${this._basename(relPath)}」`, 'success')
       } catch (e) {
@@ -2034,6 +2399,17 @@ export default {
         return absolutePath.slice(basePrefix.length)
       }
       return absolutePath.split('/').pop()
+    },
+    /**
+     * 取节点的父目录相对路径（用于「点文件 → focus = 同级目录」语义）。
+     * 例如 node.path = 'cached/sid/xxx/foo.txt' → 返回 'xxx'
+     * 根目录下的文件（relPath 无 /）→ 返回 ''（焦点退化为根）
+     */
+    _parentRelPathOfNode(node) {
+      if (!node || !node.path) return ''
+      const rel = this._extractRelativePath(node.path)
+      const idx = rel.lastIndexOf('/')
+      return idx >= 0 ? rel.slice(0, idx) : ''
     },
     /** 取路径最后一段（basename），用于 flash 文案 */
     _basename(p) {
@@ -2315,6 +2691,8 @@ export default {
     window.addEventListener('resize', this.checkOverflow)
     // 全局键盘快捷键（文件编辑）—— 监听到文件视图的 root 元素 / document
     document.addEventListener('keydown', this.onGlobalKeydown)
+    // 全局 paste —— 系统剪贴板里有文件（Finder/Explorer 复制的文件）时接收上传
+    document.addEventListener('paste', this.onGlobalPaste)
     // 点别处关右键菜单
     document.addEventListener('click', this._onDocumentClickCloseMenu)
   },
@@ -2329,10 +2707,18 @@ export default {
     }
     window.removeEventListener('resize', this.checkOverflow)
     document.removeEventListener('keydown', this.onGlobalKeydown)
+    document.removeEventListener('paste', this.onGlobalPaste)
     document.removeEventListener('click', this._onDocumentClickCloseMenu)
     // box-select 兜底清理（防止组件在拖动中被卸载 → window 监听泄漏）
     window.removeEventListener('mousemove', this._onBoxSelectMouseMove)
     window.removeEventListener('mouseup', this._onBoxSelectMouseUp)
+    // 长按框选计时器清理
+    if (this._boxPressTimer) {
+      clearTimeout(this._boxPressTimer)
+      this._boxPressTimer = null
+    }
+    this._boxPressStart = null
+    this._boxPressActivated = false
     if (this.isResizing) {
       this.stopResize()
     }
@@ -2753,6 +3139,104 @@ export default {
   font-size: 13px;
 }
 
+/* —— 空状态：显眼的「新建」双按钮（替代之前的「右键空白处…」文字提示） —— */
+.empty-state-icon {
+  font-size: 28px;
+  opacity: 0.5;
+  margin-bottom: 6px;
+  line-height: 1;
+}
+.empty-state-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary, #111);
+  margin-bottom: 2px;
+}
+.empty-state-actions {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: center;
+}
+.empty-state-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  min-width: 130px;
+  justify-content: center;
+  background: var(--bg-primary, #fff);
+  border: 1px solid var(--border-color, #e5e7eb);
+  border-radius: 6px;
+  color: var(--text-primary, #111);
+  font-size: 12.5px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.empty-state-btn:hover {
+  background: rgba(59, 130, 246, 0.06);
+  border-color: rgba(59, 130, 246, 0.5);
+  color: var(--button-bg, #3b82f6);
+}
+.empty-state-btn:active {
+  background: rgba(59, 130, 246, 0.12);
+}
+.empty-state-btn .esb-icon {
+  font-size: 13px;
+  line-height: 1;
+}
+
+/* —— 非空状态：根级 + 操作行（贴在已有树条目下方） —— */
+/* padding-left: 30px 对齐根级 name 起点（depth 0 的 .dtn-row：18px 缩进占位 + 10px caret + 16px icon + gap 4px - 14px 因左右 padding 调整） */
+.tree-new-actions {
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px 6px 30px;
+  margin: 2px 4px 6px 4px;
+  border-top: 1px dashed var(--border-color, #e5e7eb);
+  border-radius: 0;
+}
+.tree-new-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--text-secondary, #6b7280);
+  font-size: 11.5px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.tree-new-btn:hover {
+  background: rgba(59, 130, 246, 0.06);
+  border-color: rgba(59, 130, 246, 0.4);
+  color: var(--button-bg, #3b82f6);
+}
+.tree-new-btn:active {
+  background: rgba(59, 130, 246, 0.12);
+}
+.tree-new-btn .tna-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  opacity: 0.7;
+}
+.tree-new-btn:hover .tna-icon {
+  opacity: 1;
+}
+
 .empty-state-hint {
   margin-top: 4px;
   font-size: 11.5px;
@@ -2982,4 +3466,24 @@ export default {
 }
 .flash-fade-leave-active { transition: opacity 0.18s ease-in; }
 .flash-fade-leave-to { opacity: 0; }
+
+/* —— OS 系统拖拽 overlay（仅当 Finder/Explorer 文件拖到文件树时显示） —— */
+.system-drag-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(2px);
+  z-index: 9998;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none; /* 不挡 drop 事件穿透到 .files-tree */
+  color: #ffffff;
+  gap: 12px;
+}
+.system-drag-icon { font-size: 56px; line-height: 1; }
+.system-drag-text { font-size: 16px; opacity: 0.92; font-weight: 500; }
+.system-drag-fade-enter-active, .system-drag-fade-leave-active { transition: opacity 0.15s ease; }
+.system-drag-fade-enter-from, .system-drag-fade-leave-to { opacity: 0; }
 </style>

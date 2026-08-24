@@ -4,11 +4,14 @@
     <div
       v-if="node.type === 'directory'"
       class="dtn-row dtn-dir"
-      :class="{ selected: isSelected, 'dtn-cut': isCutSource, 'dtn-copy': isCopySource }"
+      :class="{ selected: isSelected, 'dtn-cut': isCutSource, 'dtn-copy': isCopySource, 'drop-target': isDropTarget, 'focus-target': isFocusTarget }"
       :style="rowStyle"
       :data-node-path="node.path || ''"
+      :draggable="!renaming"
       @click="onRowClick"
       @contextmenu.prevent.stop="onContextMenu"
+      @dragstart.stop="onRowDragStart"
+      @dragend.stop="onRowDragEnd"
     >
       <span
         v-for="i in depth"
@@ -62,11 +65,14 @@
     <div
       v-else
       class="dtn-row dtn-file"
-      :class="{ selected: isSelected, 'dtn-cut': isCutSource, 'dtn-copy': isCopySource }"
+      :class="{ selected: isSelected, 'dtn-cut': isCutSource, 'dtn-copy': isCopySource, 'drop-target': isDropTarget }"
       :style="rowStyle"
       :data-node-path="node.path || ''"
+      :draggable="!renaming"
       @click="onClick"
       @contextmenu.prevent.stop="onContextMenu"
+      @dragstart.stop="onRowDragStart"
+      @dragend.stop="onRowDragEnd"
       :title="node.path"
     >
       <span
@@ -134,6 +140,9 @@
         :cut-path="cutPath"
         :copy-path="copyPath"
         :expanded-paths="expandedPaths"
+        :drop-target-path="dropTargetPath"
+        :focus-dir="focusDir"
+        :focus-dir-prop="focusDirProp"
         @node-select="$emit('node-select', $event)"
         @node-toggle-expand="$emit('node-toggle-expand', $event)"
         @file-click="$emit('file-click', $event)"
@@ -176,7 +185,15 @@ export default {
     // 剪贴板里的「copy 源」完整 path（命中本节点 → 加底色 + 角标提示）
     copyPath: { type: String, default: '' },
     // 共享展开状态（plain object { path: true }，由父级 Sidebar 维护，用于 Shift+click 范围选）
-    expandedPaths: { type: Object, default: () => ({}) }
+    expandedPaths: { type: Object, default: () => ({}) },
+    // 当前 hover 的内部拖拽目标绝对路径（'' = 无）—— 由 Sidebar.dropTargetPath 决定
+    // 每个 DataTreeNode 自己判断 `node.path === dropTargetPath` 来决定高亮
+    dropTargetPath: { type: String, default: '' },
+    // 当前焦点目录的相对路径（'' = 无焦点，即根）。Cmd+V 粘贴的目标目录。
+    // 视觉上：左侧一条纤细的强调色竖线（inset box-shadow），与 copy/cut 视觉区分清晰但保持简约。
+    focusDir: { type: String, default: '' },
+    // 当前焦点目录的**绝对路径**（与 node.path 同格式），用于直接 === 比较点亮视觉
+    focusDirProp: { type: String, default: '' }
   },
   emits: [
     'file-click',          // 兼容旧逻辑：选中 + 触发预览（按 modifier 转发）
@@ -214,9 +231,18 @@ export default {
       // 剪贴板 mode=cut 时的源节点 → 半透灰显示，明确告诉用户「这行即将被移走」
       return this.node.path && this.cutPath && this.node.path === this.cutPath
     },
+    isDropTarget() {
+      // 内部拖拽时此节点是 drop 目标（高亮目录行）—— 路径与 Sidebar 传下来的 dropTargetPath 一致
+      return !!(this.node.path && this.dropTargetPath && this.node.path === this.dropTargetPath)
+    },
     isCopySource() {
       // 剪贴板 mode=copy 时的源节点 → 浅蓝底 + 「复制」语义角标（不破坏原选中色）
       return this.node.path && this.copyPath && this.node.path === this.copyPath
+    },
+    isFocusTarget() {
+      // 当前目录是 Cmd+V 的目标目录 → 左侧纤细强调色竖线
+      // 直接用绝对路径比较（focusDirProp 是 Sidebar 拼好的绝对路径，与 node.path 同格式）
+      return !!(this.node.path && this.focusDirProp && this.node.path === this.focusDirProp)
     },
     sortedChildren() {
       if (!this.node.children) return []
@@ -289,6 +315,42 @@ export default {
     },
     onContextMenu(e) {
       this.$emit('node-context', { node: this.node, event: e })
+    },
+    /**
+     * 拖拽开始（HTML5 drag API）：
+     * - 多选整组拖拽：如果本节点在 selectedPaths 内且 selectedPaths.length > 1 → 拖整组
+     * - 单选：只拖本节点
+     * - setData('application/x-lingxi-paths', JSON) 给 Sidebar drop handler 解析
+     * - effectAllowed = 'copyMove' 让浏览器根据 Alt/Option 切换 copy/move 光标
+     */
+    onRowDragStart(e) {
+      if (!this.node.path || this.renaming) {
+        if (e && e.preventDefault) e.preventDefault()
+        return
+      }
+      const inSelection = this.selectedPaths.includes(this.node.path)
+      const draggingPaths = (inSelection && this.selectedPaths.length > 1)
+        ? [...this.selectedPaths]
+        : [this.node.path]
+      try {
+        e.dataTransfer.effectAllowed = 'copyMove'
+        e.dataTransfer.setData('application/x-lingxi-paths', JSON.stringify(draggingPaths))
+      } catch (_) {}
+      // 多选拖拽时给浏览器一个自定义拖拽图像（提示整组）
+      if (draggingPaths.length > 1) {
+        try {
+          const ghost = document.createElement('div')
+          ghost.textContent = `${draggingPaths.length} 项`
+          ghost.style.cssText = 'position:absolute;top:-9999px;left:-9999px;background:#3b82f6;color:#fff;padding:4px 10px;border-radius:12px;font-size:12px;font-weight:600;'
+          document.body.appendChild(ghost)
+          e.dataTransfer.setDragImage(ghost, 0, 0)
+          // 拖完后清理
+          setTimeout(() => { try { document.body.removeChild(ghost) } catch (_) {} }, 0)
+        } catch (_) {}
+      }
+    },
+    onRowDragEnd() {
+      // dragend 不需做事 —— Sidebar 的 _systemDragDepth / dropTargetPath 由 onFilesTreeDragLeave 清
     },
     onDeleteClick() {
       if (this.confirmingDelete) {
@@ -397,6 +459,12 @@ export default {
 .dtn-row:hover {
   background: var(--bg-hover, #f3f4f6);
 }
+/* 内部拖拽 drop target 高亮 —— 仅目录行生效，文件行会落到父目录所以不高亮 */
+.dtn-row.dtn-dir.drop-target {
+  background: rgba(59, 130, 246, 0.18);
+  outline: 2px dashed rgba(59, 130, 246, 0.7);
+  outline-offset: -2px;
+}
 .dtn-row.selected {
   background: rgba(59, 130, 246, 0.12);
 }
@@ -418,23 +486,29 @@ export default {
 .dtn-row.dtn-cut:hover {
   opacity: 0.7;
 }
-/* copy 源：复制后仍保留原位 → 浅蓝虚线左边框 + 角标 */
+/* copy 源：复制后仍保留原位 → 琥珀色（暖色系，与蓝色 focus 视觉分离）+ 角标 ⎘
+ * 与 focus 蓝色实心左边框 + selected 蓝色背景形成三态清晰区分：
+ *   - selected（多选/单选）: 蓝色浅底，无边框
+ *   - focus（Cmd+V 目标）:   蓝色浅底 + 蓝色实心左边框
+ *   - copy（剪贴板复制源）:  琥珀色浅底 + ⎘ 角标（无左边框）
+ *   - cut（剪贴板剪切源）:   灰色 + 斜体 + 划线
+ * 选蓝色 vs 琥珀色：copy 是「源（会保留）」，focus 是「目的（会粘到这里）」，
+ * 冷暖对比 + 角标 + 边框三层信号，扫一眼就能区分。
+ */
 .dtn-row.dtn-copy {
   position: relative;
-  background: rgba(59, 130, 246, 0.06);
-  box-shadow: inset 2px 0 0 rgba(59, 130, 246, 0.5);
+  background: rgba(245, 158, 11, 0.10);          /* amber 500，10% 不透明 */
 }
 .dtn-row.dtn-copy:hover {
-  background: rgba(59, 130, 246, 0.1);
+  background: rgba(245, 158, 11, 0.15);
 }
 .dtn-row.dtn-copy .dtn-name::after {
   content: '⎘';
   margin-left: 5px;
   font-size: 11px;
-  color: var(--primary-color, #3b82f6);
-  font-weight: 600;
+  color: #d97706;                                  /* amber 600 —— 比底色深一档 */
+  font-weight: 700;
   vertical-align: middle;
-  opacity: 0.75;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
@@ -568,5 +642,36 @@ export default {
 
 .dtn-children {
   position: relative;
+}
+
+/* —— 当前焦点目录（Cmd+V 目标） ——
+ * 视觉：左侧 2px 强调色竖线（inset box-shadow）+ 浅蓝背景叠加。
+ * 与「选中态 selected」「复制/剪切源」三者互斥视觉：
+ *   - selected：纯浅蓝背景（0.12 opacity）
+ *   - copy：浅蓝背景 + 浅蓝虚线左边框（0.5 opacity，2px）
+ *   - cut：半透灰 + 斜体
+ *   - focus：浅蓝背景 + 实心左边框（0.85 opacity，2px）—— 比 copy 略实，强调「这里是目的地」
+ * 多态共存时按 CSS 顺序：focus 写在最后，hover / cut 状态会覆盖背景但保留左侧竖线语义。
+ */
+.dtn-row.dtn-dir.focus-target {
+  background: rgba(59, 130, 246, 0.1);
+  box-shadow: inset 2px 0 0 rgba(59, 130, 246, 0.85);
+}
+.dtn-row.dtn-dir.focus-target:hover {
+  background: rgba(59, 130, 246, 0.16);
+}
+.dtn-row.dtn-dir.focus-target.selected {
+  background: rgba(59, 130, 246, 0.18);
+}
+.dtn-row.dtn-dir.focus-target.selected:hover {
+  background: rgba(59, 130, 246, 0.22);
+}
+/* 焦点 + 复制源共存：focus 蓝色实心左边框 + copy 琥珀色 ⎘ 角标同时显示 —— 两个信号独立不打架 */
+.dtn-row.dtn-dir.focus-target.dtn-copy {
+  background: rgba(245, 158, 11, 0.12);          /* 偏 amber，保留 copy 暖色基调 */
+  box-shadow: inset 2px 0 0 rgba(59, 130, 246, 0.85);  /* focus 蓝色左竖线保留 */
+}
+.dtn-row.dtn-dir.focus-target.dtn-copy:hover {
+  background: rgba(245, 158, 11, 0.18);
 }
 </style>

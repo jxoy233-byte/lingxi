@@ -1,6 +1,6 @@
 {
   "name": "lingxi-app",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "private": true,
   "description": "基于 LangGraph 的多智能体数据分析对话系统",
   "author": {

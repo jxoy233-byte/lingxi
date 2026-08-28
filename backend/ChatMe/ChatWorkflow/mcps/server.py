@@ -246,6 +246,19 @@ def find_skill(
     return find_skill_block(query)
 
 
+@server.tool
+def done() -> str:
+    """Mark your thinking chain as complete
+
+    Call `done` when the reasoning is finished: task complete, stuck, casual chat, or out of scope.
+
+    Use `interrupt(...)` instead when you need to ask the user a specific question mid-flow.
+    """
+    session_id = current_session_id.get()
+    logger.debug(f"会话 {session_id} 触发 done（思维链结束标记）")
+    return "Task marked as done. Graph will route to final_node for user-facing reply."
+
+
 def _stop_redis():
     """停止 redis 容器(使用 docker-compose)"""
     try:

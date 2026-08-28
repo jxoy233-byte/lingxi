@@ -81,8 +81,18 @@ async def shutdown_mcp() -> None:
     _mcp_session_ready = None
 
 
-def get_mcp_tools() -> List[Any]:
-    """返回已初始化的 MCP tools 列表(懒加载)"""
+def get_mcp_tools(include_done: bool = False) -> List[Any]:
+    """返回已初始化的 MCP tools 列表(懒加载)
+
+    Args:
+        include_done: False（默认）→ 返回不含 `done` 的工具集（旧 graph 用）
+                      True → 返回含 `done` 的工具集（新 graph `_create_graph_improved` 用）
+
+    `done` 是 v0.1.x+ 新增的思维链结束标记工具，旧 graph 不暴露。
+    `sub_agent`（deprecated）始终包含（无害，prompt 已不暴露）。
+    """
     if _mcp_tools_cache is None:
         raise RuntimeError("MCP tools not initialized yet; call init_mcp() first")
-    return _mcp_tools_cache
+    if include_done:
+        return _mcp_tools_cache
+    return [t for t in _mcp_tools_cache if getattr(t, "name", None) != "done"]

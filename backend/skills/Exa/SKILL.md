@@ -38,6 +38,10 @@ results = exa_search(
 from Exa import exa_search
 ```
 
+## 搜索策略
+
+单次结果 ≤5 条，先少量试探；信息不足时调整关键词 / 角度 / `type` **再搜一次**，而不是堆数量。**少量多次**优于单次多量。
+
 ## 函数
 
 ### `exa_search(query, num_results=5, type="auto", maxCharacters=2000, **kwargs)`

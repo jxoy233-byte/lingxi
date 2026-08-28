@@ -36,6 +36,12 @@ class ChatStateCore2(TypedDict):
     memory_tool_results: Annotated[List[str], "待写入memory的工具结果"]
     should_end_decision: Annotated[Optional[str], "should_end_node 的决策结果，end 或 retry"]
     should_end_retry_times: Annotated[int, "should_end_node 连续 retry 的次数，超过3次强制跳 final_node"]
+    # 新 graph（_create_graph_improved）：agent 连续输出无 tool_calls 的 AIMessage 的重试次数
+    agent_no_tool_call_retries: Annotated[int, "新 graph agent 输出无 tool_calls AIMessage 的连续重试次数"]
+    # 新 graph：context_assembly_node 检测到 agent 当前轮调了 done 的标志位
+    # —— done cycle 已 RemoveMessage,AIMessage(done) 在 messages 里消失,
+    # route_after_context_assembly 改看这个 flag 判 final_node
+    done_cycle_detected: Annotated[bool, "新 graph: context_assembly_node 是否检测到当前轮 agent 调了 done"]
 
     # ReAct 流程压缩：context_assembly_node 中按 tool_call 节拍整体覆盖
     context_summary_text: Annotated[Optional[str], "ReAct 压缩产物的纯文本；context_assembly_node 中按阈值整体覆盖更新"]
@@ -49,7 +55,11 @@ class ChatStateCore2(TypedDict):
     #           新结构 = memory + imp_ipt + summary + 最近 x 轮原文；清 pending 字段
     #   阶段 4 完成后回到阶段 1 重新检测，满足条件则再次触发新轮压缩（循环）
     pending_compaction_summary: Annotated[Optional[str], "待替换的 ReAct 压缩摘要；非 None 表示阶段 2 已完成，等待阶段 4 替换"]
-    pending_compaction_replace_at: Annotated[Optional[int], "在哪个 tool_call_times 触发阶段 4 替换；阶段 2 完成时设 = 当前 tool_call_times + REACT_COMPACT_REPLACE_AFTER"]
+    # ⚠️ 这是「完整 loop 数」阈值，不是 tool_call 次数。
+    # 阶段 2 完成时设 = 当前 _find_complete_tool_loops(context) 数 + REACT_KEEP_LOOPS，
+    # 这样无论并行调 1-3 个工具都稳定等价于「再走 N 轮完整 loop 才替换」。
+    # 用 tool_call_times 累加会因为 MAX_PARALLEL_TOOL_CALLS=3 的并行抖动导致 "+2" 不等于 "2 轮」。
+    pending_compaction_replace_at: Annotated[Optional[int], "阶段 4 替换的完整 loop 数阈值；阶段 2 完成时设 = 当前完整 loop 数 + REACT_KEEP_LOOPS（不基于 tool_call_times）"]
     last_compacted_loops_count: Annotated[int, "上一次压缩覆盖的 loop 数（排查用）"]
 
 

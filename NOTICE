@@ -1,0 +1,98 @@
+灵析 / Lingxi (ChatMe)
+Copyright © 2026 灵析
+
+================================================================================
+
+本项目基于 MIT License 发布 —— 详见 LICENSE 文件。
+
+本 NOTICE 文件按 MIT License 第 4 段惯例列示第三方归属要点；完整依赖列表与各
+组件许可证见 THIRD_PARTY_LICENSES.md。
+
+================================================================================
+
+商标
+
+「灵析™」与「Lingxi™」是本项目的商标。MIT 许可证不授予商标使用权，使用商标须
+经项目维护者书面授权。未经授权不得：
+
+- 将商标用于未经授权的衍生产品或服务名称
+- 使用商标暗示本项目背书、赞助或关联
+
+本项目内部代号 "ChatMe"（包名、配置目录 `~/.chatme/`、Redis key 前缀等）仅为
+技术标识符，不作为商标声明；其归属仍归本项目维护者。
+
+================================================================================
+
+主要上游依赖（不完整列表，详见 THIRD_PARTY_LICENSES.md）
+
+本项目依赖大量优秀的开源软件，按字母序列示核心组件及其归属：
+
+后端（Python，详见 backend/pyproject.toml）
+
+  - apscheduler ........................ MIT License
+  - docling ............................. MIT License
+  - fastapi ............................. MIT License
+  - fastmcp ............................. MIT License
+  - langchain / langchain-core / langchain-community / langchain-openai
+                                       MIT License
+  - langchain-tavily .................... MIT License
+  - langgraph / langgraph-checkpoint-redis / langgraph-sdk
+                                       MIT License
+  - oss2 ................................ MIT License
+  - pydantic / pydantic-core ............ MIT License
+  - python-dotenv ....................... BSD-3-Clause
+  - pyyaml .............................. MIT License
+  - redis / redisvl ..................... MIT License
+  - requests ........................... Apache-2.0
+  - uvicorn ............................. BSD-3-Clause
+
+数据分析与可视化（Python）
+
+  - altair .............................. BSD-3-Clause
+  - beautifulsoup4 ...................... MIT License
+  - bokeh ............................... BSD-3-Clause
+  - branca / folium ..................... MIT License
+  - jinja2 / markupsafe ................. BSD-3-Clause
+  - joblib .............................. BSD-3-Clause
+  - lxml ................................ BSD-3-Clause
+  - matplotlib / pillow ................. PSF-2.0 / HPND
+  - networkx / sympy .................... BSD-3-Clause
+  - numpy / pandas / scipy / scikit-learn
+                                       BSD-3-Clause
+  - openpyxl ............................ MIT License
+  - plotly .............................. MIT License
+  - pyecharts / pygal ................... MIT / LGPL-3.0
+  - seaborn ............................. BSD-3-Clause
+  - xlrd ................................ BSD License
+  - xyzservices ......................... BSD-3-Clause
+
+沙盒（Docker 容器，Python 3.12）
+
+  - Python .............................. PSF License
+  - 内置 Python 数据科学生态（与上述数据分析组件一致）
+
+前端（Node.js / Vue 3，详见 frontend/package.json）
+
+  - @vitejs/plugin-vue / vite ........... MIT License
+  - dompurify ........................... MPL-2.0 / Apache-2.0
+  - electron / electron-builder ......... MIT License
+  - highlight.js ....................... BSD-3-Clause
+  - katex ............................... MIT License
+  - marked .............................. MIT License
+  - mermaid ............................. MIT License
+  - vue / vue-router .................... MIT License
+
+================================================================================
+
+完整 license 报告生成
+
+完整 license 报告可通过以下工具自动生成：
+
+  - 后端 Python 依赖：
+      pip install pip-licenses
+      pip-licenses --format=markdown --output-file=THIRD_PARTY_PYTHON_LICENSES.md
+
+  - 前端 Node.js 依赖：
+      npx license-checker --production --markdown > THIRD_PARTY_NODE_LICENSES.md
+
+上述报告建议在每次发布版本前重新生成并归档。

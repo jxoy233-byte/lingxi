@@ -38,6 +38,10 @@ result = tavily_search(
 from Tavily import tavily_search
 ```
 
+## 搜索策略
+
+单次结果 ≤5 条，先少量试探；信息不足时调整关键词 / 角度**再搜一次**，而不是堆数量。**少量多次**优于单次多量。
+
 ## 函数
 
 ### `tavily_search(query, search_depth="basic", max_results=5, include_answer=False, **kwargs)`

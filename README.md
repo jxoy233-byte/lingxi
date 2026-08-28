@@ -1,4 +1,4 @@
-# Lingxi（灵析）
+# Lingxi™（灵析™）
 
 基于 LangGraph 的单智能体 + 多 LLM 角色数据分析对话系统。支持流式响应、工具调用、对话记忆管理、文档/图片多模态解析，以及基于 Docker 沙盒的安全 Python 代码执行。同时提供 Web 端和 Electron 桌面端两种运行形态。
 
@@ -56,6 +56,9 @@
 - **Linux 多格式打包（v0.1.7 新增）**：`electron-builder` 同时产出 AppImage / `.deb` / `.rpm`，x64 + arm64 双架构；`README` 增「Linux 安装与故障排查」段覆盖 FUSE 缺失、AppImage 直接解压等场景。
 - **文件树 Finder 化大优化（v0.1.8 新增）**：长按框选 / HTML5 拖拽移动 + 多选整组拖 / 焦点目录 `focusDir`（Cmd/Ctrl+V 粘到蓝竖线）/ copy 改琥珀 ⎘ focus 蓝色实心左边框三态区分 / 空状态 + 树底 `+文件夹 +文件` 操作行 / 系统拖拽 overlay / 拖拽事件穿透重构；详见 `CLAUDE.md` 偏好 33。
 - **后端文件操作体验优化（v0.1.8 新增）**：`_find_unique_name` 计数器剥除（`foo(1).py` 复制 → `foo(2).py` 不再无限累加）+ 无空格紧凑命名 + 自粘贴 no-op 兜底 + 创建同名静默追加 + 空 session 懒加载；详见 `CLAUDE.md` 偏好 33。
+- **图工作流大重构（v0.2.0 新增）**：新增 `_create_graph_improved`（替换 `_create_graph_core2` 作为默认图），用 MCP `done` 工具作为思维链结束标志替代 prompt "output Done 单词" 技巧；移除 `should_end_node` 决策节点，agent 无 tool_calls 走英文 SysMsg 重试（连续 3 次失败强制 final_node）；done cycle 由 `context_assembly_node` 用 `RemoveMessage` 清理（单 done 整轮删除 / 并发 done 仅删 done 的 ToolMessage）；前端 `mergeToolCallStart` + `_processBackendToolCalls` 两处过滤 done 工具调用避免 UI 闪一下再消失。
+- **ReAct 压缩健壮性（v0.2.0 新增）**：`pending_compaction_replace_at` 改用完整 loop 数（不再用 `tool_call_times`），绕开并行 1-3 个工具让 "+2" 不稳定的抖动；`DETECTION_MIN_ROUNDS` 4 → 5；新增 `compression_handled_this_round` 标记防同一轮 iteration 2+ 重复压缩；done cycle 跳过整个 ReAct 压缩段（避免无用压缩产物灌给 final_node + 后台 asyncio 任务泄漏）。
+- **许可证 + 商标（v0.2.0 新增）**：项目以 MIT License 发布（新增 `LICENSE` / `NOTICE` / `THIRD_PARTY_LICENSES.md`），`pyproject.toml` + `frontend/package.json` 加 `license` / `authors` 字段；「灵析™」与「Lingxi™」为产品名商标，MIT 不授予商标使用权，使用须经项目维护者书面授权。
 
 ## 界面预览
 
@@ -104,10 +107,12 @@
 | 节点                      | 职责                                                                              |
 | ----------------------- | ------------------------------------------------------------------------------- |
 | `input_parse_node`      | 输入预处理、文件解析（docling / VL）、输入优化，给 `imp_ipt` 打 `additional_kwargs.imp_ipt=True` 标记 |
-| `context_assembly_node` | 上下文组装 + **ReAct 流程压缩** + 中断检查                                                   |
-| `agent_node`            | AI 决策，决定调用工具或结束；工具调用超过 20 次会注入 SystemMessage 提示停止                               |
-| `tool_execution_node`   | 工具执行（搜索 / MCP / Docker 沙盒）；`PermissionedToolNode` 在官方 `ToolNode` 基础上包 `_awrap_tool_call` hook，`cmd` / `code` 执行前走 LangGraph `interrupt()` 弹审批，Redis 存 `permission:{sid}` hash 跨 SSE 流复用 |
+| `context_assembly_node` | 上下文组装 + **ReAct 流程压缩** + 中断检查 + **done cycle 清理**（RemoveMessage；v0.2.0 起）       |
+| `agent_node`            | AI 决策，决定调用工具或调 `done` 收尾（v0.2.0 起）；工具调用超过 50 次会注入 SystemMessage 提示停止；无 tool_calls 输出走英文 SysMsg 重试（连续 3 次放弃进 final_node） |
+| `tool_execution_node`   | 工具执行（搜索 / MCP / Docker 沙盒 / `done` 收尾标记；v0.2.0 起）；`PermissionedToolNode` 在官方 `ToolNode` 基础上包 `_awrap_tool_call` hook，`cmd` / `code` 执行前走 LangGraph `interrupt()` 弹审批，Redis 存 `permission:{sid}` hash 跨 SSE 流复用 |
 | `final_node`            | 最终回复生成（独立 LLM），用 dynamic system prompt 把 `imp_ipt` 注入 system 层，输出带 SUMMARY 标记   |
+
+> **v0.2.0 工作流升级**：`_create_graph_improved` 替换 `_create_graph_core2` 作为默认图（`init_graph` line 254）。新图**移除** `should_end_node`（老图里 LLM 决策 "Done / Retry" 的节点），改用「agent 输出 AIMessage 含 tool_calls → tool_execution_node；不含 → 重试或 final_node」纯结构化路由；思维链结束标志改为 MCP `done` 工具（老图是 prompt 强制 LLM 输出 `Done` 单词 + should_end_node 决策）。详细改造动机见 `CLAUDE.md` 偏好 34。
 
 State 定义在 `backend/ChatMe/ChatWorkflow/config/models.py`（`ChatStateCore2` / `FileParseState`）。完整工作流说明、ReAct 压缩实现、关键文件、协作偏好见 [`CLAUDE.md`](CLAUDE.md)。
 
@@ -197,7 +202,7 @@ OPENAI_PRESENCE_PENALTY=0.0
 {
   "app": {
     "name": "ChatMe",
-    "version": "v0.1.8",
+    "version": "v0.2.0",
     "host": "127.0.0.1",
     "port": 8211
   },
@@ -288,6 +293,9 @@ ChatMe/
 │   └── test_agent.md                     # AI 多轮对话测试 Agent 指南（见开发注意事项）
 ├── docker-compose.yml
 ├── docs/                                 # 文档
+├── LICENSE                               # MIT License（v0.2.0 起公开）
+├── NOTICE                                # 上游依赖归属
+├── THIRD_PARTY_LICENSES.md               # 第三方许可证汇总
 └── docker_data/
 ```
 
@@ -424,13 +432,13 @@ MCP 服务器（`mcps/server.py`，FastMCP 3.x，stdio transport）暴露以下�
 ```bash
 cd backend
 uv build --wheel
-# 输出: dist/ChatMe-0.1.8-py3-none-any.whl
+# 输出: dist/ChatMe-0.2.0-py3-none-any.whl
 ```
 
 ### 安装 wheel
 
 ```bash
-uv pip install dist/ChatMe-0.1.8-py3-none-any.whl
+uv pip install dist/ChatMe-0.2.0-py3-none-any.whl
 # 安装后 chatme_main 和 chatme_mcp 命令全局可用
 ```
 
@@ -462,17 +470,17 @@ npm run electron:build:mac      # macOS arm64 + x64（DMG + ZIP）
 npm run electron:build:win      # Windows NSIS（x64）
 ```
 
-桌面端通过 `electron-builder` 打包，应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.1.8）在 `frontend/electron/electron.config.js` 中配置。
+桌面端通过 `electron-builder` 打包，应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.2.0）在 `frontend/electron/electron.config.js` 中配置。
 
 **输出位置**：`../release/electron-builder/`（项目根，与 Vite 的 `dist/` / `frontend/` 区分开）：
 
 - `mac-arm64/灵析.app` — 直接打开
 - `mac/` — x64 .app
-- `灵析-0.1.8-arm64-mac.zip` / `灵析-0.1.8-mac.zip` — 分发包
+- `灵析-0.2.0-arm64-mac.zip` / `灵析-0.2.0-mac.zip` — 分发包
 - `linux-unpacked/` — Linux 解压目录
-- `灵析-0.1.8.AppImage` — Linux 便携版（需 FUSE，见下文）
-- `灵析-0.1.8.deb` — Debian / Ubuntu 安装包
-- `灵析-0.1.8.rpm` — Fedora / RHEL 安装包
+- `灵析-0.2.0.AppImage` — Linux 便携版（需 FUSE，见下文）
+- `灵析-0.2.0.deb` — Debian / Ubuntu 安装包
+- `灵析-0.2.0.rpm` — Fedora / RHEL 安装包
 - `win-unpacked.exe` — Windows 安装器
 
 ## 开发注意事项
@@ -481,4 +489,10 @@ npm run electron:build:win      # Windows NSIS（x64）
 
 ## 许可证
 
-本项目为内部项目，许可证信息请参考项目根目录 LICENSE 文件（如有）。
+本项目基于 **[MIT License](LICENSE)** 发布 —— 详见根目录 [LICENSE](LICENSE) 文件。
+
+主要上游依赖与第三方归属见 [NOTICE](NOTICE) 与 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。
+
+## 商标
+
+「**灵析™**」与「**Lingxi™**」为本项目产品名商标。MIT 许可证不授予商标使用权，使用商标须经项目维护者书面授权。本项目内部代号 "ChatMe"（包名、配置目录 `~/.chatme/`、Redis key 前缀等）仅为技术标识符，不作为商标声明。

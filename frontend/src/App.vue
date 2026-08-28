@@ -1911,6 +1911,13 @@ export default {
       this.showRestoreConfirm = true
     },
     mergeToolCallStart(message, data) {
+      // 隐藏 `done` 工具调用:它是新 graph 的"思维链结束标记",无信息价值,
+      // 显示在思考链里只会增加噪声(final_node 的回复本身就是"链结束"的视觉信号)。
+      // 后端 context_assembly_node 已用 RemoveMessage 把它从 messages 里删了,
+      // 这里再过滤一次确保流式响应过程中不会闪一下再消失。
+      if (data.content?.name === 'done') {
+        return message
+      }
       const toolCalls = [...(message.toolCalls || [])]
       // 1. 精确匹配：_pendingApproval && name===data.content.name
       //    （正常路径——前端 handlePermissionRequest 已按 tool_call_name 精确标过位）
@@ -5059,6 +5066,9 @@ export default {
                 const backendToolCalls = aiMsg.additional_kwargs?.tool_calls
                 if (backendToolCalls && backendToolCalls.length > 0) {
                   for (const tc of backendToolCalls) {
+                    // 兜底:后端 RemoveMessage 已保证 messages 里不会有 done,
+                    // 这里再防一道(老 checkpoint / 跨版本迁移场景的安全网)
+                    if (tc.name === 'done') continue
                     const idx = aiTurn.toolCalls.length
                     aiTurn.toolCalls.push({
                       name: tc.name || '工具调用',

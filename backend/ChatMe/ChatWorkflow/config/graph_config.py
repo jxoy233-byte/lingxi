@@ -83,7 +83,7 @@ User task → Understand intent
 │   YES → interrupt(...) or just `Done`
 │
 └─ Task complete or no further tools needed?
-    YES → output `Done` (one word, nothing else)
+    YES → output `Done`
 ```
 
 ## Project Operation Dir
@@ -276,6 +276,107 @@ def get_agent_node_prompt() -> str:
         platform.system_info_block,
         PROMPT_MAIN_TERMINATION,
     ])
+
+
+# ----- IMPROVED: 新 graph 专用 prompt 组件 -----
+# 新 graph（_create_graph_improved）使用 `done` tool 作为思维链结束标志，
+# 不再依赖 'output Done 单词' 的 prompt 技巧 + should_end_node 决策。
+# 老 prompt 函数 + 老组件一字不动；这里只追加 IMPROVED 版本。
+
+PROMPT_MAIN_ROLE_IMPROVED = """
+## Your Role
+You are a Task-Executing Agent. Your job:
+1. Understand and break down the user's task
+2. Call tools to gather information or execute actions
+3. When the thinking chain is complete, **call the `done` tool** — that IS your exit signal
+
+**You only output one of two things**: tool calls, or `done` tool call.
+"""
+
+PROMPT_MAIN_TERMINATION_IMPROVED = """
+## Termination — Call the `done` Tool
+When the thinking chain is complete, call the `done` tool.
+Remember you do not write the final answer — the graph does.
+
+Use `interrupt(...)` if you need to ask the user a specific question mid-flow.
+"""
+
+
+def get_agent_node_improved_prompt() -> str:
+    """
+    新 graph（_create_graph_improved）的 agent_node prompt。
+    复用 MAIN_FLOW / COMMON / system_info_block / platform tool blocks，
+    但把 "output Done" 字面量替换成 "call done tool"，并替换 role / termination 段。
+    """
+    from ChatMe.ChatWorkflow.mcps.tools.platforms import get_platform
+
+    platform = get_platform()
+
+    # MAIN_FLOW 是老 prompt 共享的大段，新版只把 "output Done" / "just `Done`" 三处
+    # 文本替换为 "call done tool"，其余一字不动（决策流骨架保持稳定）
+    flow = PROMPT_MAIN_FLOW
+    flow = flow.replace(
+        "output `Done` (one word, nothing else)",
+        "**call the `done` tool**"
+    )
+    flow = flow.replace(
+        "YES → output `Done`",
+        "YES → **call the `done` tool**"
+    )
+    flow = flow.replace(
+        "reply with paths, output `Done`.",
+        "reply with paths, then **call the `done` tool**."
+    )
+    flow = flow.replace(
+        "interrupt(...) or just `Done`",
+        "interrupt(...) or just **call the `done` tool**"
+    )
+
+    return "\n\n".join([
+        "# Agent Node — Task Execution Agent",
+        PROMPT_MAIN_ROLE_IMPROVED,
+        *platform.all_tool_prompt_blocks(),
+        flow,
+        PROMPT_COMMON,
+        platform.system_info_block,
+        PROMPT_MAIN_TERMINATION_IMPROVED,
+    ])
+
+
+def get_agent_node_improved_config():
+    """
+    新 graph（_create_graph_improved）的 agent_node 配置。
+    llm 参数与老 config 一致（同一模型 / 同一 temperature 等），只换 prompt。
+    老 `get_agent_node_config()` 一字不动（老 graph 继续用）。
+    """
+    load_dotenv()
+
+    active = _resolve_llm_config()
+    model_name = active.get("model_name")
+    api_key = active.get("api_key")
+    base_url = active.get("base_url")
+
+    temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.2"))
+    max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "16384"))
+    top_p = float(os.getenv("OPENAI_TOP_P", "1.0"))
+    timeout = int(os.getenv("OPENAI_TIMEOUT", "60"))
+    max_retries = 3
+
+    llm_config = {
+        "model": model_name,
+        "api_key": api_key,
+        "base_url": base_url,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "top_p": top_p,
+        "timeout": timeout,
+        "max_retries": max_retries,
+        "model_kwargs": {"stream_options": {"include_usage": True}},
+        "extra_body": distinguish_extra_body(model_name),
+    }
+
+    prompt = get_agent_node_improved_prompt()
+    return llm_config, prompt
 
 
 def build_sub_agent_prompt(task: str, prompt_addon: str = "") -> str:

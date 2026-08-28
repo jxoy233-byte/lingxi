@@ -50,6 +50,8 @@ Thumbs.db
 # test
 test/
 **/test/
+tests/
+**/tests/
 *.test
 
 NUL

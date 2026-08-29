@@ -37,10 +37,11 @@ import re
 import shutil
 from typing import Optional
 
-from fastapi import APIRouter, Body, HTTPException, Path
+from fastapi import APIRouter, Body, File, Form, HTTPException, Path, UploadFile
 from pydantic import BaseModel, Field
 
 from ChatMe.APIRouter.static_file import SESSION_ID_PATTERN
+from ChatMe.ChatService import FILE_MAX_LENGTH
 from ChatMe.LoggingManager.logging_config import get_logger
 from ChatMe.paths import BACKEND_ROOT, CACHED_DIR
 
@@ -677,5 +678,196 @@ async def create_file(
         "name": unique_name,
         "path": _relativize(dst, session_id),
         "size": dst.stat().st_size,
+        "session_id": session_id,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 上传文件 / 文件夹到文件树：POST /chat/{sid}/files/upload
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# 与 /chat/{sid}/upload_file 的区别：
+# - 不调 FilesLoaders → 不抽文本 / OCR / OSS 上传，只做纯文件落地
+# - 文件落在 parent/{path}，而不是 cached/{sid}/{file_id_with_filename}/ 随机子目录
+# - paths 数组与 files 一一对应，保留文件夹层级：
+#     - 单文件：paths=["foo.txt"] → parent/foo.txt
+#     - 文件夹：paths=["dir1/foo.txt", "dir1/sub/bar.txt"] → 自动 mkdir dir1/sub/ 后写入
+#     - 空 paths：所有文件用各自 basename 直接落到 parent/（保持向后兼容旧调用方）
+# - dirs 数组：纯目录路径（不含文件），用于支持「空文件夹」上传
+#     - dirs=["empty_dir"] → parent/empty_dir/（空目录）
+#     - dirs=["dir1/sub"] → parent/dir1/sub/（mkdir -p 自动建父目录）
+#
+# 为什么需要这个端点：
+# Sidebar 的 OS 拖拽 / Cmd+V 路径原本复用 /chat/{sid}/upload_file，结果文件落到
+# `{file_id}_filename/<random>_<filename>` 这种随机子目录（AI 文本提取专用布局），
+# 不在用户预期的 drop 目标里。本端点专为「Finder/Explorer 拖入保存到文件树」设计。
+# 原 /upload_file 保留给 MessageInput AI 链路（按 send 按钮时附文件走文本提取路径）。
+#
+# 冲突策略：与 create_folder / create_file 一致 —— 同名 _find_unique_name 追加 (1)/(2)...，
+# 不返回 409，符合 Finder/Explorer 「自动改名落地」直觉。
+@router.post(
+    "/{session_id}/files/upload",
+    summary="上传文件 / 文件夹到文件树（不触发 AI 处理）",
+)
+async def upload_files_to_tree(
+    session_id: str = Path(..., description="会话ID"),
+    parent: str = Form("", description="父目录路径（相对 cached/{sid}/），空=根"),
+    paths: str = Form(
+        "[]",
+        description="JSON 字符串数组，files 一一对应的相对路径（含子目录）。"
+                    "空数组或缺省：所有文件用各自 basename 直接落到 parent/",
+    ),
+    dirs: str = Form(
+        "[]",
+        description="JSON 字符串数组，纯目录路径（相对 parent/，不含 file）。"
+                    "用于支持拖入空文件夹 / 多文件夹混合场景；"
+                    "空数组：不创建额外目录",
+    ),
+    files: Optional[list[UploadFile]] = File(default=None, max_length=FILE_MAX_LENGTH),
+):
+    import json
+
+    if not SESSION_ID_PATTERN.match(session_id):
+        raise HTTPException(status_code=400, detail=f"非法 sid: {session_id!r}")
+
+    if not files and (not dirs or dirs == "[]"):
+        raise HTTPException(status_code=400, detail="无文件上传")
+
+    # 解析 paths 数组（前端从 _walkEntry 走 webkitGetAsEntry 拿到每个 file 的 _relativePath）
+    try:
+        path_list = json.loads(paths) if paths else []
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"paths JSON 解析失败: {e}")
+
+    if not isinstance(path_list, list):
+        raise HTTPException(status_code=400, detail="paths 必须是 JSON 数组")
+
+    # 解析 dirs 数组（前端从 _walkEntry 收集的纯目录路径）
+    try:
+        dirs_list = json.loads(dirs) if dirs else []
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"dirs JSON 解析失败: {e}")
+
+    if not isinstance(dirs_list, list):
+        raise HTTPException(status_code=400, detail="dirs 必须是 JSON 数组")
+
+    # paths 与 files 长度对齐校验 —— 长度不一致一定是前端 bug，需要 surface 出来
+    if path_list and len(path_list) != len(files):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"paths 与 files 长度不匹配: paths={len(path_list)}, files={len(files)}"
+            ),
+        )
+
+    # 校验 parent（与 create_folder 一致：空 parent 懒加载根目录）
+    parent_abs = _resolve_safe(session_id, parent)
+    if parent == "":
+        parent_abs.mkdir(parents=True, exist_ok=True)
+    elif not parent_abs.exists() or not parent_abs.is_dir():
+        raise HTTPException(
+            status_code=400, detail=f"父目录不存在或不是目录: {parent}"
+        )
+
+    # 先 mkdir dirs_list 里所有目录（空文件夹场景）；exist_ok=True 复用同名子目录
+    dirs_created = []
+    for d in dirs_list:
+        if not d or not isinstance(d, str):
+            continue
+        rel_path_obj = pathlib.Path(d)
+        if rel_path_obj.is_absolute():
+            raise HTTPException(status_code=400, detail=f"dirs 非法路径（绝对）: {d!r}")
+        if ".." in rel_path_obj.parts:
+            raise HTTPException(status_code=400, detail=f"dirs 非法路径（含 .. 段）: {d!r}")
+        target_dir = parent_abs
+        for part in rel_path_obj.parts:
+            if not part:
+                continue
+            target_dir = target_dir / part
+        target_dir.mkdir(parents=True, exist_ok=True)
+        dirs_created.append(str(pathlib.Path(*rel_path_obj.parts)))
+
+    saved_entries = []
+    renamed_count = 0
+
+    # files 可能为 None（curl 不传 files 时 FastAPI 给 None）→ 空列表兜底
+    files_iter = files or []
+    for idx, upload_file in enumerate(files_iter):
+        # 计算目标相对路径：优先用 paths[idx]，否则用 upload_file.filename
+        rel_path = (
+            path_list[idx]
+            if path_list and idx < len(path_list) and path_list[idx]
+            else (upload_file.filename or f"file_{idx}")
+        )
+
+        # 安全校验：剥离 .. 段 / 绝对路径前缀（防御前端传脏数据）
+        rel_path_obj = pathlib.Path(rel_path)
+        if rel_path_obj.is_absolute():
+            raise HTTPException(status_code=400, detail=f"非法路径（绝对）: {rel_path!r}")
+        if ".." in rel_path_obj.parts:
+            raise HTTPException(status_code=400, detail=f"非法路径（含 .. 段）: {rel_path!r}")
+
+        # 拆分子目录与文件名：'dir1/sub/foo.txt' → dir_parts=('dir1','sub'), name='foo.txt'
+        subdir_parts = rel_path_obj.parent.parts  # () 或 ('dir1',) 或 ('dir1','sub')
+        original_name = rel_path_obj.name
+
+        # 递归创建子目录（落到 parent_abs/{subdir}/）
+        target_dir = parent_abs
+        for part in subdir_parts:
+            if not part:
+                continue
+            target_dir = target_dir / part
+        # exist_ok=True：拖入含同名子目录时直接复用（Finder/Explorer 行为）
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        # 处理文件名冲突（与 create_file / create_folder 一致：_find_unique_name 追加 (1)/(2)...）
+        unique_name = _find_unique_name(target_dir, original_name)
+        renamed = unique_name != original_name
+        if renamed:
+            renamed_count += 1
+
+        # 写文件（二进制模式 —— 不做编码假设，与 upload_file 走文本提取不同）
+        dst = target_dir / unique_name
+        content = await upload_file.read()
+        dst.write_bytes(content)
+
+        # 计算实际写入路径（相对 cached/{sid}/，含子目录）
+        actual_rel = (
+            str(pathlib.Path(*subdir_parts) / unique_name)
+            if subdir_parts
+            else unique_name
+        )
+
+        saved_entries.append({
+            "name": unique_name,
+            "path": actual_rel,
+            "size": dst.stat().st_size,
+            "renamed": renamed,
+        })
+
+        logger.info(
+            f"[upload_files_to_tree] {session_id}: "
+            f"{rel_path!r} → {actual_rel} ({dst.stat().st_size} bytes)"
+            + (" (auto-renamed)" if renamed else "")
+        )
+
+    target_label = parent if parent else "根目录"
+    f_count = len(saved_entries)
+    d_count = len(dirs_created)
+    msg_parts = []
+    if f_count > 0:
+        msg_parts.append(f"{f_count} 个文件")
+    if d_count > 0:
+        msg_parts.append(f"{d_count} 个文件夹")
+    if msg_parts:
+        msg = f"已上传到 {target_label}：{' + '.join(msg_parts)}"
+    else:
+        msg = "无内容上传"
+    return {
+        "code": 200,
+        "msg": msg,
+        "saved": saved_entries,
+        "dirs_created": dirs_created,
+        "renamed_count": renamed_count,
         "session_id": session_id,
     }

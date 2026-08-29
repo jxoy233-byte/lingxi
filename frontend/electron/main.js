@@ -1256,10 +1256,13 @@ app.on('will-quit', (event) => {
         proc.kill('SIGTERM')
       }
       console.log(`[cleanup] sent SIGTERM to backend (pid=${proc.pid})`)
-      // 等 backend 退出(最长 5s),超时强杀
+      // 等 backend 退出(最长 8s),超时强杀。
+      // 8s = uvicorn timeout_graceful_shutdown(3s) + lifespan teardown(~1s) + 4s 缓冲,
+      // 确保活跃 SSE 流被强制关闭 + MCP stdio subprocess / APScheduler job / sandbox 容器全部清理完。
+      // 原来 5s 不够 —— uvicorn 等不到 3s SSE 超时就被 SIGKILL,cleanup 链全跳过 → 子进程残留。
       const exitTimeout = setTimeout(() => {
         try { proc.kill('SIGKILL') } catch {}
-      }, 5000)
+      }, 8000)
       proc.once('exit', () => {
         clearTimeout(exitTimeout)
         console.log('[cleanup] backend exited')

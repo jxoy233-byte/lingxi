@@ -164,7 +164,18 @@ def main():
     # 关键：直接传 app 对象，不要传 "main:app" 字符串
     # —— 字符串写法会让 uvicorn 重新 import 一次 main.py，
     # 触发模块体二次执行（banner 打两次、LLM 自检跑两遍、VL/OSS 重复检测）
-    uvicorn.run(app, host=app_host, port=app_port)
+    #
+    # timeout_graceful_shutdown=3：收到 SIGTERM 后最多等 3s 让活跃 SSE 流自然结束，
+    # 超时强制进入 lifespan teardown（shutdown_mcp / stop_scheduler / cleanup）。
+    # 之前没这个参数时，活跃 SSE 流会无限挂住 uvicorn 直到 Electron 5s 后 SIGKILL，
+    # SIGKILL 跳过整个 cleanup 链 → MCP stdio 子进程 / APScheduler job / sandbox 容器全部残留。
+    # 3s 配合 Electron will-quit 的 8s SIGKILL grace（~4s 缓冲）足够完成清理。
+    uvicorn.run(
+        app,
+        host=app_host,
+        port=app_port,
+        timeout_graceful_shutdown=3,
+    )
     # uvicorn.run("main:app", host=app_host, port=app_port, reload=True)
 
 if __name__ == "__main__":

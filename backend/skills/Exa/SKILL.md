@@ -1,6 +1,6 @@
 ---
 name: exa
-description: 深度语义搜索与相似网页发现，适合研究、原理、对比和综合分析
+description: 深度语义搜索与相似网页发现，适合研究、原理、对比和综合分析。默认少量结果（≤5 条），信息不足再调关键词/角度/type 重搜，少量多次优于单次多量。
 mount: ro
 aliases: [Exa, research, semantic_search, deep_search, find_similar]
 module: skills.Exa
@@ -8,7 +8,7 @@ module: skills.Exa
 
 # Exa
 
-Exa 是深度语义搜索技能，适合需要理解主题全貌、跨领域检索或查找相似网页的任务。
+> **搜索策略（硬性约束）**：单次 `num_results` 始终 ≤5，先少量试探；信息不足时调整关键词 / 角度 / `type` **再搜一次**，而不是堆数量。**少量多次**优于单次多量。
 
 ## 适用场景
 
@@ -38,20 +38,17 @@ results = exa_search(
 from Exa import exa_search
 ```
 
-## 搜索策略
-
-单次结果 ≤5 条，先少量试探；信息不足时调整关键词 / 角度 / `type` **再搜一次**，而不是堆数量。**少量多次**优于单次多量。
-
 ## 函数
 
 ### `exa_search(query, num_results=5, type="auto", maxCharacters=2000, **kwargs)`
 
-执行语义搜索并返回结果列表。`type` 可选：
+- **`num_results` 默认 5，强烈建议保持 ≤5**：信息不足就调整 query / `type` 再调一次
+- `type` 可选：
 
-- `instant`：约 200ms
-- `fast`：约 400ms
-- `auto`：自动选择，默认
-- `deep`：深度搜索，约 4–12s
+  - `instant`：约 200ms
+  - `fast`：约 400ms
+  - `auto`：自动选择，默认
+  - `deep`：深度搜索，约 4–12s
 
 每项通常包含 `title`、`url`、`publishedDate`、`highlights`、`author`。
 

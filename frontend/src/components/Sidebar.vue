@@ -1334,18 +1334,158 @@ export default {
         if (result && result.ok) this.focusDir = ''
         return result
       }
-      // 2) 系统拖拽（Finder/Explorer 拖文件进来）
-      const files = e.dataTransfer && e.dataTransfer.files
-        ? Array.from(e.dataTransfer.files)
-        : []
-      if (this._isSystemDrag(e) && files.length) {
+      // 2) 系统拖拽（Finder/Explorer 拖文件 / 文件夹）
+      // 文件树区域不限类型 + 支持文件夹（与对话框区域相反，对话框走 MessageInput
+      // 的 validateFile 严格过滤并显示警告横幅）。用 dataTransfer.items 走
+      // webkitGetAsEntry 拿 Folder 句柄递归展平；旧 e.dataTransfer.files 拿不到文件夹。
+      if (this._isSystemDrag(e)) {
+        const items = e.dataTransfer && e.dataTransfer.items
+          ? Array.from(e.dataTransfer.items)
+          : []
+        if (!items.length) return
         const targetNode = this._resolveDropTarget(e)
         const targetDir = targetNode && targetNode.type === 'directory'
           ? this._extractRelativePath(targetNode.path)
           : ''
         this.dropTargetPath = ''
-        return this._uploadSystemFiles(files, targetDir)
+        const result = await this._extractDroppedItems(items)
+        const files = result.files
+        const dirs = result.dirs
+        if (!files.length && !dirs.length) {
+          this._flash('未识别到任何可上传的文件', 'error')
+          return
+        }
+        return this._uploadSystemFiles(files, targetDir, { dirs })
       }
+    },
+
+    /**
+     * 解包 dataTransfer.items 为扁平 { files: File[], dirs: string[] }：
+     * - 文件 → 直接取 file
+     * - 文件夹 → 递归走 FileSystemDirectoryEntry 拿到所有文件（含嵌套子目录）
+     *   - **空文件夹** → 把目录相对路径推到 dirs（后端 mkdir）
+     * - 不支持 webkitGetAsEntry 的浏览器（Firefox 等）→ fallback 到 item.getAsFile()
+     *
+     * 给每个 File 对象挂一个 `_relativePath` 自定义字段，记录它在拖入树中的相对路径
+     * （含子目录层级）。后端 `/chat/{sid}/files/upload` 的 `paths` 字段读这个值来还原
+     * 目录结构 —— 例：拖 `reports/2025/data.csv` → `_relativePath="reports/2025/data.csv"`，
+     * 最终落到 `<parent>/reports/2025/data.csv`。
+     *
+     * 返回结构 `{ files, dirs }`：
+     * - files：所有文件 File 对象（每个挂 `_relativePath`）
+     * - dirs：纯目录相对路径数组（仅含**空目录**——非空目录由 files 的 _relativePath 隐式还原）
+     *
+     * 支持「多文件 + 多文件夹同时拖拽」混合场景（每个顶层 item 独立递归 + Promise.all 并行）。
+     */
+    async _extractDroppedItems(items) {
+      const files = []
+      const dirs = []
+      const tasks = []
+      for (const item of items) {
+        if (!item || item.kind !== 'file') continue
+        if (typeof item.webkitGetAsEntry === 'function') {
+          const entry = item.webkitGetAsEntry()
+          if (entry) {
+            // 顶层 entry 也可能是空文件夹（_walkEntry 内 childEntries.length===0 时 push dirs）
+            // —— 拖「reports/」非空文件夹会递归处理所有子文件；拖空文件夹会推 dirs
+            tasks.push(this._walkEntry(entry, files, [], dirs))
+            continue
+          }
+        }
+        // Fallback：浏览器不支持 webkitGetAsEntry（如 Firefox）或 entry 解析失败
+        const f = item.getAsFile && item.getAsFile()
+        if (f) {
+          // 单文件没目录结构，路径就是文件名
+          f._relativePath = f.name
+          files.push(f)
+        }
+      }
+      await Promise.all(tasks)
+      return { files, dirs }
+    },
+
+    /**
+     * 递归走 FileSystemEntry 树，把所有 leaf File 推到 out 数组。
+     * - FileSystemFileEntry → entry.file() 异步拿到 File，挂上 _relativePath = prefix + name
+     * - FileSystemDirectoryEntry → createReader() 循环 readEntries 拿子项（一次最多 100 条，必须循环读到空）
+     *   - 如果 childEntries 为空（**空目录**），把目录相对路径推到 dirsOut —— 后端负责 mkdir
+     *   - 否则递归走子项，子项的 _relativePath 自动带上这一层
+     */
+    async _walkEntry(entry, out, prefixParts = [], dirsOut = []) {
+      if (entry.isFile) {
+        const f = await this._readFileEntry(entry)
+        if (f) {
+          // 把每一层 entry.name 都拼上：顶层文件夹名也保留（Finder 行为）
+          f._relativePath = [...prefixParts, entry.name].join('/')
+          out.push(f)
+        }
+        return
+      }
+      if (entry.isDirectory) {
+        const reader = entry.createReader()
+        const childEntries = await this._readAllDirEntries(reader)
+        // 目录名加入 prefix，子项 file 的 _relativePath 会自然带上这一层
+        const newPrefix = [...prefixParts, entry.name]
+        if (!childEntries.length) {
+          // 空目录：把「顶层路径（保留顶层目录名）」推到 dirsOut
+          // 顶层空目录时 prefixParts=[]，newPrefix=['空目录名'] → '空目录名'
+          // 嵌套空目录如 'reports/2025/empty/' → dirsOut.push('reports/2025/empty')
+          dirsOut.push(newPrefix.join('/'))
+        } else {
+          await Promise.all(childEntries.map((e) => this._walkEntry(e, out, newPrefix, dirsOut)))
+        }
+      }
+    },
+
+    _readFileEntry(entry) {
+      return new Promise((resolve) => {
+        try {
+          entry.file(
+            (f) => resolve(f),
+            (err) => {
+              // 静默吞单个文件读取失败（权限不足 / 软链等）—— 继续处理其它文件
+              console.warn('[Sidebar] FileSystemEntry.file 失败:', err)
+              resolve(null)
+            }
+          )
+        } catch (err) {
+          console.warn('[Sidebar] _readFileEntry 异常:', err)
+          resolve(null)
+        }
+      })
+    },
+
+    /**
+     * createReader().readEntries() 一次最多返回 100 条目录项，
+     * 必须循环调用直到返回空数组才表示读完整目录（spec 标准用法）。
+     * 出错（权限被拒等）静默吞，返回当前已收集的部分。
+     */
+    _readAllDirEntries(reader) {
+      return new Promise((resolve) => {
+        const all = []
+        const read = () => {
+          try {
+            reader.readEntries(
+              (batch) => {
+                if (!batch || !batch.length) {
+                  resolve(all)
+                  return
+                }
+                all.push(...batch)
+                read()
+              },
+              (err) => {
+                console.warn('[Sidebar] readEntries 失败:', err)
+                resolve(all)
+              }
+            )
+          } catch (err) {
+            console.warn('[Sidebar] _readAllDirEntries 异常:', err)
+            resolve(all)
+          }
+        }
+        read()
+      })
     },
     /**
      * 系统粘贴的目标目录：
@@ -1361,37 +1501,67 @@ export default {
     },
     /**
      * OS 拖拽 / 系统 Cmd+V 共用上传函数：
-     * - 复用 /chat/{sid}/upload_file（走 chat_service.process_files 做文本/OCR 预处理，
-     *   **不触发 AI 对话** —— 见后端 main.py:336-383）
-     * - 关键：**不写 processedOutputs state**（不污染下次 /chat/send 的附件列表）
-     *   → Sidebar 不持有 processedOutputs；response 直接丢弃
-     * - 多文件 multipart 一次性 POST（与 MessageInput 上传同模式）
+     * - 调后端 /chat/{sid}/files/upload（file_ops.py 新增）—— **专用文件树写入端点**，
+     *   不走 FilesLoaders 文本提取 / OCR / OSS，纯文件落地到 `cached/{sid}/{parent}/{path}`
+     *   而不是 `{file_id}_filename/<random>` 随机子目录。
+     * - files 上挂的 `_relativePath` 来自 _walkEntry 递归走 FileSystemEntry 时拼上的
+     *   「从拖入根到该文件的完整路径」（含子目录），通过 `paths` JSON 字段传给后端
+     *   还原目录结构。例：拖 `reports/2025/data.csv` → `<parent>/reports/2025/data.csv`。
+     * - 单文件场景下 _extractDroppedItems 给 _relativePath = f.name，退化成纯 basename 写入。
+     * - dirs：纯目录相对路径数组（用于支持**空文件夹**上传）；后端 mkdir(parents=True, exist_ok=True)
+     *   自动建父目录 + 复用同名子目录（Finder/Explorer 行为）。
+     * - 冲突处理：后端 _find_unique_name 自动追加 (1)/(2)...（与 create_file 一致），
+     *   response 里 renamed_count 反馈给用户 —— flash 额外列重命名明细（最多 5 个）。
+     * - **不写 processedOutputs state**（不污染下次 /chat/send 附件列表）—— 本端点
+     *   跟 AI 链路完全解耦，response 直接丢掉 processed_outputs 字段。
      */
-    async _uploadSystemFiles(files, parentDir) {
-      if (!this.activeSessionId || !files.length) return
+    async _uploadSystemFiles(files, parentDir, options = {}) {
+      const dirs = options.dirs || []
+      if (!this.activeSessionId) return
+      if (!files.length && !dirs.length) return
       const sid = this.activeSessionId
       const formData = new FormData()
-      for (const f of files) formData.append('files', f)
-      // 传空 processed_outputs —— 不继承 chat 端缓存，避免下次 send 误附加
-      formData.append('processed_outputs', '[]')
-      const url = `/chat/${encodeURIComponent(sid)}/upload_file`
+      const pathList = []
+      for (const f of files) {
+        formData.append('files', f)
+        // _relativePath 由 _extractDroppedItems / _walkEntry 写入；
+        // 防御兜底：未挂字段时退回 f.name（兼容旧调用方 / 非文件夹场景）
+        pathList.push(f._relativePath || f.name)
+      }
+      formData.append('parent', parentDir || '')
+      formData.append('paths', JSON.stringify(pathList))
+      formData.append('dirs', JSON.stringify(dirs))
+      const url = `/chat/${encodeURIComponent(sid)}/files/upload`
       try {
         const resp = await fetch(url, { method: 'POST', body: formData })
         if (!resp.ok) {
           const detail = await resp.json().catch(() => ({}))
-          this._flash(`上传失败：${detail.msg || resp.statusText || `HTTP ${resp.status}`}`, 'error')
+          // FastAPI HTTPException 走 `detail` 字段；自定义 dict 走 `msg`；兜底 statusText
+          const msg = (detail && (detail.msg || (detail.detail && (typeof detail.detail === 'string' ? detail.detail : detail.detail.msg)))) || resp.statusText || `HTTP ${resp.status}`
+          this._flash(`上传失败：${msg}`, 'error')
           return
         }
         const data = await resp.json().catch(() => ({}))
-        const outputs = data.processed_outputs || []
-        // 统计自动改名（auto_rename 后追加 (1)/(2)...）
-        const renamed = outputs.filter(o => o && o.renamed).length
         await this.checkFiles()
+        const fCount = (data.saved || []).length
+        const dCount = (data.dirs_created || []).length
+        const renamed = data.renamed_count || 0
         const target = parentDir ? `「${parentDir}」` : '根目录'
-        const msg = renamed > 0
-          ? `已上传 ${files.length} 项到${target}（${renamed} 项自动改名）`
-          : `已上传 ${files.length} 项到${target}`
-        this._flash(msg, 'success')
+        const parts = []
+        if (fCount > 0) parts.push(`${fCount} 个文件${renamed > 0 ? `（${renamed} 项自动改名）` : ''}`)
+        if (dCount > 0) parts.push(`${dCount} 个文件夹`)
+        if (parts.length) {
+          this._flash(`已上传到${target}：${parts.join(' + ')}`, 'success')
+        }
+        // 重命名明细：把 saved 数组里 renamed=true 的 name 列出来（最多 5 个 + 省略号）
+        // —— 单文件同名冲突时让用户立刻看到实际写入的名字，避免误以为「上传失败」
+        if (renamed > 0 && Array.isArray(data.saved)) {
+          const renamedNames = data.saved.filter(s => s && s.renamed).map(s => s.name).slice(0, 5)
+          if (renamedNames.length) {
+            const more = renamed > renamedNames.length ? ` …（共 ${renamed} 项）` : ''
+            this._flash(`自动改名：${renamedNames.join('、')}${more}`, 'info')
+          }
+        }
       } catch (err) {
         this._flash(`上传失败：${err.message || err}`, 'error')
       }
@@ -2004,7 +2174,10 @@ export default {
       if (!files.length) return
       e.preventDefault()
       const targetDir = this._resolveSystemPasteTargetDir()
-      this._uploadSystemFiles(files, targetDir)
+      // 系统剪贴板里 folder 走 HTML5 spec fallback（item.getAsFile() 拿不到 Folder 内容），
+      // 只有单文件场景；空目录场景仅在 Finder/Explorer 拖拽时支持（_extractDroppedItems 走
+      // webkitGetAsEntry 拿 FileSystemEntry）。这里传空 dirs 即可。
+      this._uploadSystemFiles(files, targetDir, { dirs: [] })
     },
     onGlobalKeydown(e) {
       if (!this._shortcutGuard(e)) return
@@ -3093,6 +3266,12 @@ export default {
   overflow-x: hidden;
   padding: 4px 0;
   outline: none;   /* tabindex=-1 让容器可获焦以配合快捷键；不要画可见的 focus ring */
+  /* 系统拖拽 overlay 用 absolute 覆盖在 .files-tree 内（不外溢到 chat 区域）；
+     必须给 .files-tree 设 position: relative 作为 absolute 定位上下文，
+     否则会回退到外层 .sidebar（position: relative）= 整个侧栏列覆盖。
+     —— 配合 App.vue 的 .chat-drag-overlay（absolute inset 0 in .chat-area），
+     真正做到「拖到文件树只显示文件树 overlay / 拖到对话框只显示对话框 overlay」两片地方独立。 */
+  position: relative;
 }
 
 .files-tree::-webkit-scrollbar {
@@ -3469,11 +3648,17 @@ export default {
 
 /* —— OS 系统拖拽 overlay（仅当 Finder/Explorer 文件拖到文件树时显示） —— */
 .system-drag-overlay {
-  position: fixed;
+  /* v0.2.x：position: fixed → absolute（inset 0 不变）。
+     原来 fixed 覆盖整个视口，包括 chat 区域 —— 用户从 Finder 拖文件进文件树时，
+     chat 区域也会被这一层深色蒙层盖住，与 App.vue 的 .chat-drag-overlay 视觉撞车，
+     也违反「拖到文件树只显示文件树效果 / 拖到对话框只显示对话框效果」的区域划分。
+     改 absolute 后定位上下文是 .files-tree（已加 position: relative），
+     overlay 严格限制在文件树滚动容器内，不外溢到 chat-area。 */
+  position: absolute;
   inset: 0;
   background: rgba(0, 0, 0, 0.55);
   backdrop-filter: blur(2px);
-  z-index: 9998;
+  z-index: 10;
   display: flex;
   flex-direction: column;
   align-items: center;

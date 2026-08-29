@@ -83,6 +83,35 @@
       </div>
     </div>
 
+    <!-- 文件拖拽上传警告：拖入不被支持的文件类型时，列出文件名 + 原因 + ✕ 手动关闭。
+         5s 自动消失；与 file-list-container 内每个 file-error 红点是两套不同信号：
+           - 红点：错误文件**已添加**到 selectedFiles（混合拖拽时与合法文件共存）
+           - 本 banner：拖入**完全不被接受**的文件（含 all-invalid 早返场景）——
+             让用户清楚「拖进来但没生效」的原因，不会以为丢进去没反应。
+         文件树区域上传不限类型（Sidebar._uploadSystemFiles 无 validateFile），
+         只在对话框（AI 处理链路）才走这个警告路径。 -->
+    <transition name="drag-drop-warning">
+      <div v-if="dragDropWarning" class="drag-drop-warning">
+        <svg class="drag-drop-warning-icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+          <line x1="12" y1="9" x2="12" y2="13"/>
+          <line x1="12" y1="17" x2="12.01" y2="17"/>
+        </svg>
+        <span class="drag-drop-warning-text">{{ dragDropWarning }}</span>
+        <button
+          type="button"
+          class="drag-drop-warning-close"
+          @click="_dismissDragDropWarning"
+          title="关闭"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"/>
+            <line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </div>
+    </transition>
+
     <!-- 文件列表显示区域 - 横向紧凑布局 -->
     <div v-if="selectedFiles.length > 0" class="file-list-container">
       <div class="file-list-scroll">
@@ -236,24 +265,10 @@
       </button>
     </div>
 
-    <!-- 拖拽区域遮罩 —— 仅视觉提示，pointer-events: none 让事件穿透到下方元素，
-         真正的 drop 由 window-level handleWindowDrop 接收并按 e.target 区分：
-         - 落在 Sidebar .files-tree → Sidebar 处理（自己 @drop.stop.prevent）
-         - 落在其他地方 → 上传到 MessageInput（attach 到对话发送）
-         修复 v0.1.x：原 @drop.prevent="handleDrop" + overlay 拦截所有 drop 导致 file tree drop 失效。 -->
-    <div
-      v-if="isDragging"
-      class="drag-overlay"
-    >
-      <div class="drag-content">
-        <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-          <polyline points="17 8 12 3 7 8"/>
-          <line x1="12" y1="3" x2="12" y2="15"/>
-        </svg>
-        <p>释放文件以上传</p>
-      </div>
-    </div>
+    <!-- 拖拽逻辑保留在 MessageInput 内部处理（isDragging state + window-level drag/over/drop），
+         但视觉 overlay 不在这里渲染 —— 提到 App.vue 的 .chat-area 子元素渲染。
+         这样在 sidebarView === 'files' 时，chat 区域的 overlay 只覆盖 chat 区不盖 sidebar，
+         与 sidebar 的 system-drag-overlay 真正做到「两片地方分开」。 -->
 
     <!-- Slash 命令面板：行首输入 `/` 时弹出，Codex 风格 -->
     <SlashPalette
@@ -301,7 +316,7 @@ export default {
       default: () => []
     }
   },
-  emits: ['send', 'files-selected-need-session', 'update:quote', 'remove-queue-item', 'clear-queue', 'front-action'],
+  emits: ['send', 'files-selected-need-session', 'update:quote', 'remove-queue-item', 'clear-queue', 'front-action', 'chat-drag-state'],
   data() {
     return {
       inputText: '',
@@ -363,7 +378,11 @@ export default {
       },
       // refetch 节流：slash 面板「关闭 → 打开」时触发后台 refetch；面板已
       // 打开期间的连续打字不重复请求。
-      _slashPaletteWasVisible: false
+      _slashPaletteWasVisible: false,
+      // 文件拖拽上传警告：拖入不被支持的文件类型时显示（仅对话框区域）。
+      // 文件树区域（Sidebar._uploadSystemFiles）不限类型，不会触发这条警告。
+      dragDropWarning: null,
+      _dragDropWarningTimer: null
     }
   },
   computed: {
@@ -441,6 +460,12 @@ export default {
     }
   },
   watch: {
+    // 把 isDragging state 推到 App.vue，由 App.vue 在 .chat-area 子元素渲染 overlay
+    // —— 这样在 sidebarView === 'files' 时，chat overlay 只覆盖 chat 区，
+    // 与 sidebar 的 system-drag-overlay 真正做到「两片地方分开」。
+    isDragging(newVal) {
+      this.$emit('chat-drag-state', newVal)
+    },
     // chip 命令变化时重新测宽度。**不能用 immediate: true** —— immediate 触发
     // 时组件还在 created 生命周期，`this.$el` 还没就绪，`$el.querySelector` 直接
     // 抛 TypeError 把整个组件挂载砸掉。改成在 mounted + $nextTick 跑首次测量，
@@ -491,6 +516,12 @@ export default {
     window.removeEventListener('drop', this.handleWindowDrop)
     window.removeEventListener('dragend', this.handleDragEnd)
     document.removeEventListener('dragleave', this.handleDocumentDragLeave)
+
+    // 清理拖拽警告定时器，避免组件卸载后 setTimeout 回调仍尝试写已销毁的 data
+    if (this._dragDropWarningTimer) {
+      clearTimeout(this._dragDropWarningTimer)
+      this._dragDropWarningTimer = null
+    }
 
     // 清理预览 URL
     this.selectedFiles.forEach(file => {
@@ -1152,6 +1183,30 @@ export default {
       this.isDragging = false
     },
 
+    /**
+     * 设置拖拽上传警告横幅：5s 自动消失，手动 ✕ 立即关闭。
+     * 与 Sidebar 的 _flash 不同 —— 本警告只在输入框附近显示，且只服务
+     * 「对话框文件上传不被接受」这一种语义，作用域更窄。
+     */
+    _setDragDropWarning(message) {
+      this.dragDropWarning = message
+      if (this._dragDropWarningTimer) {
+        clearTimeout(this._dragDropWarningTimer)
+      }
+      this._dragDropWarningTimer = setTimeout(() => {
+        this.dragDropWarning = null
+        this._dragDropWarningTimer = null
+      }, 5000)
+    },
+
+    _dismissDragDropWarning() {
+      this.dragDropWarning = null
+      if (this._dragDropWarningTimer) {
+        clearTimeout(this._dragDropWarningTimer)
+        this._dragDropWarningTimer = null
+      }
+    },
+
     async addFiles(newFiles) {
       if (!newFiles || newFiles.length === 0) return
 
@@ -1165,14 +1220,19 @@ export default {
         }
       })
 
-      // 收集无效文件并显示错误
-      const invalidCount = validationResults.filter(r => !r.valid).length
-      if (invalidCount > 0) {
-        // 显示错误提示
-        console.warn('以下文件不符合要求:', validationResults.filter(r => !r.valid).map(f => `${f.file.name}: ${f.error}`))
-        // 如果所有文件都无效，直接返回
-        const validOnly = validationResults.filter(r => r.valid)
-        if (validOnly.length === 0) {
+      // 收集无效文件并显示警告横幅（让用户清楚「拖进来但没生效」的原因）
+      const invalidItems = validationResults.filter(r => !r.valid)
+      if (invalidItems.length > 0) {
+        console.warn('以下文件不符合要求:', invalidItems.map(r => `${r.file.name}: ${r.error}`))
+        // 拼简短文案：最多列 3 个文件名 + 「等 N 个」+ 第一条原因
+        // 文件名可能很长（Windows 路径 / Unicode），按 30 字截断避免横幅撑爆
+        const truncateName = (n) => (n && n.length > 30 ? n.slice(0, 27) + '…' : n)
+        const names = invalidItems.slice(0, 3).map(r => truncateName(r.file.name)).join('、')
+        const more = invalidItems.length > 3 ? ` 等 ${invalidItems.length} 个` : ''
+        const firstReason = invalidItems[0].error || '不支持的文件类型'
+        this._setDragDropWarning(`不支持：${names}${more}（${firstReason}）`)
+        // 如果所有文件都无效，直接返回（已弹警告，无需再走后续会话创建 / 入队逻辑）
+        if (invalidItems.length === validationResults.length) {
           return
         }
       }
@@ -1751,6 +1811,73 @@ export default {
   background: var(--bg-hover);
   color: var(--text-primary);
 }
+/* 拖拽上传警告横幅：仅在对话框（MessageInput）内显示，文件树区域不限类型不上警告。
+   amber 色 + ⚠ 图标，与现有 file-error 红点错开（红点是「已加入但上传失败」，
+   本 banner 是「拖进来但根本不被接受」）。5s 自动消失 + ✕ 手动关闭。 */
+.drag-drop-warning {
+  max-width: 900px;
+  margin: 0 auto 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 6px;
+  color: rgb(180, 83, 9);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+@media (max-width: 600px) {
+  .drag-drop-warning {
+    max-width: 100%;
+  }
+}
+
+.drag-drop-warning-icon {
+  flex-shrink: 0;
+  color: rgb(217, 119, 6);
+}
+
+.drag-drop-warning-text {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.drag-drop-warning-close {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  border-radius: 4px;
+  opacity: 0.6;
+  transition: opacity 0.12s, background 0.12s;
+}
+
+.drag-drop-warning-close:hover {
+  opacity: 1;
+  background: rgba(217, 119, 6, 0.12);
+}
+
+.drag-drop-warning-enter-active,
+.drag-drop-warning-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.drag-drop-warning-enter-from,
+.drag-drop-warning-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
 /* 文件列表容器 - 横向紧凑布局 */
 .file-list-container {
   max-width: 900px;
@@ -2237,47 +2364,10 @@ export default {
   cursor: not-allowed;
 }
 
-/* 拖拽遮罩 */
-.drag-overlay {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(0, 0, 0, 0.8);
-  z-index: 9999;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  /* 仅视觉：让 drag/drop 事件穿透到下方的 .files-tree / 对话区等真实元素，
-     真正的 drop 分流由 window-level handleWindowDrop + Sidebar 自己 @drop.stop.prevent 配合完成。 */
-  pointer-events: none;
-}
-
-.drag-content {
-  text-align: center;
-  color: white;
-  pointer-events: none;
-}
-
-.drag-content svg {
-  margin-bottom: 16px;
-  animation: bounce 1s infinite;
-}
-
-.drag-content p {
-  font-size: 18px;
-  font-weight: 500;
-}
-
-@keyframes bounce {
-  0%, 100% {
-    transform: translateY(0);
-  }
-  50% {
-    transform: translateY(-10px);
-  }
-}
+/* 拖拽遮罩：v0.2.x 起 drag-overlay 不再在 MessageInput 内部渲染，
+   由 App.vue 在 .chat-area 子元素渲染（position: absolute 覆盖 chat 区域），
+   避免 sidebarView === 'files' 时 chat overlay 全屏遮住 sidebar 的 system-drag-overlay。
+   —— 「两片地方分开」的核心重构。 */
 
 /* ===== 排队卡（流式中继续发送时进入 Redis 队列的待发消息） ===== */
 /* 走 lingxi 中性冷淡风格：全部 var(--*) 主题 token，无 brand 强调色；

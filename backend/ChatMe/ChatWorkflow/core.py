@@ -1780,10 +1780,21 @@ class ChatWorkflow:
             # 走 context_assembly_node → agent_node 重试；连续 RETRY_TIMES 次失败则放弃。
             # 成功调出 tool_calls 时清零（连续失败语义：一次成功即打断失败链）。
             retry_times = state.get("agent_no_tool_call_retries", 0) or 0
+            prev_retry = retry_times
             retry_warning_msg = None
             if not format_response.tool_calls:
                 retry_times += 1
                 if retry_times < RETRY_TIMES:
+                    # 业务日志 + 思维链日志：注入 SysMsg 强制重试
+                    self.logger.debug(
+                        f"会话 {thread_id} agent_node retry {retry_times}/{RETRY_TIMES}: "
+                        f"AIMessage 无 tool_calls, 注入英文 SysMsg 强制重试 (prev={prev_retry})"
+                    )
+                    self._write_thinking(
+                        thread_id,
+                        f"[agent_node_retry]: {retry_times}/{RETRY_TIMES}, "
+                        f"has_tool_calls=False, prev={prev_retry}, action=inject_warning"
+                    )
                     retry_warning_msg = SystemMessage(
                         content=(
                             "[Warning] Your previous response did not contain a valid tool call. "
@@ -1792,10 +1803,31 @@ class ChatWorkflow:
                             "Retry now."
                         )
                     )
-                # else: retry_times 已达上限，不再注入提示，由 route_agent_output 强制 final_node
+                else:
+                    # 业务 warning + 思维链：达上限, 由 route_agent_output 强制 final_node
+                    self.logger.warning(
+                        f"会话 {thread_id} agent_node retry 达上限 {RETRY_TIMES}: "
+                        f"AIMessage 连续无 tool_calls, 由 route_agent_output 强制 final_node (prev={prev_retry})"
+                    )
+                    self._write_thinking(
+                        thread_id,
+                        f"[agent_node_retry]: {retry_times}/{RETRY_TIMES}, "
+                        f"has_tool_calls=False, prev={prev_retry}, action=give_up_to_final"
+                    )
             else:
                 # 成功调出 tool_calls → 清零（一次成功打断连续失败链，给 agent 完整重试预算）
                 retry_times = 0
+                if prev_retry > 0:
+                    # 仅当确实从非零状态清零时才记日志（清零有意义的事件）
+                    self.logger.debug(
+                        f"会话 {thread_id} agent_node retry 清零: "
+                        f"成功调出 tool_calls, 失败链被打破 (prev={prev_retry})"
+                    )
+                    self._write_thinking(
+                        thread_id,
+                        f"[agent_node_retry_reset]: prev={prev_retry}, "
+                        f"has_tool_calls=True, action=clear_retry_counter"
+                    )
 
             result_messages = (
                 [format_response, retry_warning_msg]

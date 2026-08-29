@@ -272,7 +272,14 @@ export default {
           this.logs += `[启动] ❌ 失败：${this.launchError}\n`
         }
         // 成功路径：主进程会广播 services-ready-changed，App.vue 接管翻 appReady=true。
-        // 这里不需要主动通知；SetUpView 会在 watch 检测到 servicesReady 翻 true 后卸载。
+        // 防御性兜底：主进程 setServicesReady 有「servicesReady === ready 早返回」去重，
+        // 若之前的 broadcast 被 renderer 错过，第二次 bootstrap 不会重发 broadcast，
+        // 这里主动拉一次 servicesReady 同步状态 → 仍然 ready 且用户勾了自动进 → emit enter-app
+        // 让 App.vue 的 onEnterApp 兜底翻 appReady=true（idempotent，不会与 broadcast 路径重复）。
+        if (result?.ok && this.autoEnterFrontend && window.electronAPI?.getServicesReady) {
+          const ready = await window.electronAPI.getServicesReady()
+          if (ready) this.$emit('enter-app')
+        }
       } catch (e) {
         this.launchError = e.message || '启动失败'
         this.logs += `[启动] ❌ 异常：${this.launchError}\n`

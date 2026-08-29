@@ -287,6 +287,11 @@
               </div>
             </div>
             <div v-if="message.reasoning" class="reasoning-text">{{ message.reasoning }}</div>
+            <!-- 空状态：reasoning / toolCalls / 中断原因都为空时给用户一个明确提示 -->
+            <div
+              v-if="!hasThinkingContent"
+              class="thinking-empty"
+            >暂无思考内容</div>
           </div>
         </div>
 
@@ -748,9 +753,10 @@ export default {
       return this.renderSlashPills(text)
     },
     hasThinking() {
-      return (this.message.reasoning && this.message.reasoning.length > 0) ||
-             (this.message.toolCalls && this.message.toolCalls.length > 0) ||
-             (this.message.additional_kwargs?.type === 'REASONING')
+      // 始终显示 AI 消息的思考面板：耗时/耗量指标依赖面板容器承载。
+      // 即便 reasoning / toolCalls 都为空也要显示，避免用户看不到 elapsed_ms + token count。
+      // 空内容时面板默认折叠 + body 显示"暂无思考内容"占位（见 thinking-body 末尾）。
+      return this.message.role === 'ai'
     },
     displayInterruptReason() {
       const reason = this.message.interruptReason
@@ -820,6 +826,23 @@ export default {
       const tcLen = this.message.toolCalls && this.message.toolCalls.length
       if (tcLen > 6 && !this.thinkingOverflowExpanded) return true
       return this.thinkingCollapsed
+    },
+    /**
+     * thinking-body 是否真的有任何内容（reasoning / toolCalls / 中断原因）。
+     * 全空时显示"暂无思考内容"占位，避免用户展开面板看到一片空白。
+     */
+    hasThinkingContent() {
+      if (this.message.reasoning && this.message.reasoning.length > 0) return true
+      if (this.message.toolCalls && this.message.toolCalls.length > 0) return true
+      if (this.message.additional_kwargs?.type === 'REASONING') return true
+      // 中断原因面板展开时也算有内容
+      if (
+        this.isInterrupted &&
+        this.isLatestAiMessage &&
+        (this.isInterruptedSessionId === this.currentSessionId || this.isInterruptedSessionId === this.pendingInterruptSessionId) &&
+        this.interruptReasonExpanded
+      ) return true
+      return false
     },
     // 用户消息实际是否处于折叠态：
     // 内容超长（isContentCollapsed）且用户没主动展开过（isUserMessageCollapsed=false）→ 折叠
@@ -3907,6 +3930,15 @@ export default {
   overflow-y: auto;
   opacity: 0.8;
   padding: 2px 0;
+}
+
+/* 空状态：reasoning / toolCalls / 中断原因都为空时显示 */
+.thinking-empty {
+  font-size: 12px;
+  color: var(--text-secondary);
+  opacity: 0.55;
+  padding: 8px 2px 4px;
+  font-style: italic;
 }
 
 /* 中断原因提示 */

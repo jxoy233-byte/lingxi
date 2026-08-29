@@ -92,8 +92,26 @@
           @remove-queue-item="onRemoveQueueItem"
           @clear-queue="onClearQueue"
           @files-selected-need-session="handleFilesSelectedNeedSession"
+          @chat-drag-state="onChatDragState"
           v-model:quote="currentQuote"
         />
+
+        <!-- 拖拽遮罩：v0.2.x 起放在 .chat-area 子元素渲染（position: absolute），
+             只覆盖 chat 区不盖 sidebar，与 sidebar 的 system-drag-overlay 真正「两片分开」。
+             拖拽逻辑由 MessageInput 内部处理（_isDragOverFilesTree 区分），
+             isDragging state 通过 @chat-drag-state 上报到这里。 -->
+        <transition name="chat-drag-fade">
+          <div v-if="chatDragging" class="chat-drag-overlay">
+            <div class="chat-drag-content">
+              <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="17 8 12 3 7 8"/>
+                <line x1="12" y1="3" x2="12" y2="15"/>
+              </svg>
+              <p>释放文件以上传到对话</p>
+            </div>
+          </div>
+        </transition>
       </main>
 
       <CheckpointPanel
@@ -310,6 +328,10 @@ export default {
     return {
       isDarkTheme: false,
       sidebarCollapsed: false,
+      // chat 区拖拽 overlay 状态：由 MessageInput 通过 @chat-drag-state 上报。
+      // v0.2.x 起 chat overlay 不再 fixed 全屏，改在 .chat-area 子元素渲染，
+      // 在 sidebarView === 'files' 时与 sidebar 的 system-drag-overlay 视觉分离。
+      chatDragging: false,
       // 侧栏视图：'sessions' | 'files'，持久化到 localStorage（用户偏好）
       sidebarView: (() => {
         try {
@@ -494,21 +516,29 @@ export default {
         const autoEnter = !!(payload && payload.autoEnterFrontend)
         const wasReady = !!this.servicesReady
         this.servicesReady = ready
-        // cold start 完成 → ready 翻 true
-        if (ready && !wasReady && !this._conversationInited) {
-          if (autoEnter) {
-            // 勾了自动进：立即翻 appReady 让主界面接管
+        if (ready && autoEnter) {
+          // 勾了自动进：立即翻 appReady=true 让主界面接管（idempotent）。
+          // 【关键】这里**不**用 wasReady / _conversationInited 作 gate：
+          //   1) idempotent — 多次 broadcast 重复设 appReady=true 是无害的（Vue 3 reactivity 去重）；
+          //   2) 防 race — first broadcast 因订阅时序 / stale state 被旧分支条件跳过后，
+          //      后续 broadcast 也能补翻 appReady；
+          //   3) 防 main 早返回 — 主进程 setServicesReady 有「servicesReady === ready 则早返回」
+          //      去重，若第一次 bootstrap 的 broadcast 被 renderer 错过，第二次 bootstrap 不会
+          //      重发 broadcast。这里 idempotent 等价于「只要看到 ready=true && autoEnter=true
+          //      就翻 appReady」，覆盖这种 dead lock。
+          // _conversationInited 仅用来 gate initConversationState（避免重复 init）。
+          this.appReady = true
+          if (!this._conversationInited) {
             this._conversationInited = true
-            this.appReady = true
             this.$nextTick(() => this.initConversationState())
-          } else {
-            // 没勾自动进：保持 appReady=false，SetUpView 显示「进入应用」等用户点
-            this.appReady = false
           }
+        } else if (ready && !wasReady) {
+          // 没勾自动进 + cold start 完成：保持 appReady=false（默认），SetUpView 显示「进入应用」等用户点
         }
         // 后端从 true 变 false（重启中）：主界面回退到 disabled，SetUpView 重新显示
         if (!ready && wasReady) {
           this.appReady = false
+          // _conversationInited 保持 true — 同一 session 内的 initConversationState 只跑一次语义不变
         }
       })
     } else {
@@ -644,6 +674,15 @@ export default {
     },
   },
   methods: {
+    /**
+     * MessageInput 上报的拖拽状态：isDragging 变化时 emit 'chat-drag-state' 过来。
+     * 这里只接 state 不接逻辑（窗口级 drag/over/drop 监听还在 MessageInput 内部，
+     * 它通过 _isDragOverFilesTree 区分 chat 区 vs sidebar 文件树，
+     * 在 .files-tree 内主动 isDragging=false 把控制权交回 Sidebar）。
+     */
+    onChatDragState(isDragging) {
+      this.chatDragging = !!isDragging
+    },
     setTheme(isDark) {
       this.isDarkTheme = !!isDark
       localStorage.setItem('chatme-theme', this.isDarkTheme ? 'dark' : 'light')
@@ -5320,7 +5359,52 @@ body {
   flex-direction: column;
   background-color: var(--bg-primary);
   position: relative;
+  /* 子元素 .chat-drag-overlay 用 absolute 覆盖整个 chat 区，
+     不再 fixed 全屏（v0.2.x 之前 fixed + z-index 9999 会盖住 sidebar 的 system-drag-overlay）。
+     —— 「文件树 / 对话框两片地方分开显示」的核心重构。 */
 }
+
+/* 拖拽遮罩：覆盖整个 .chat-area，不盖 sidebar。
+   与 sidebar 的 .system-drag-overlay（fixed inset:0, z-index 9998）视觉上完全独立，
+   用户在 sidebarView === 'files' 时从 Finder 拖文件，落到 chat 区只显示这块 overlay，
+   落到 .files-tree 只显示 sidebar 自己的 overlay —— 真正两片地方独立上传。 */
+.chat-drag-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;  /* 不挡 drop 事件，由 window-level MessageInput handleWindowDrop 接管 */
+  z-index: 100;          /* chat-area 局部层级，只需高过 ChatHeader/MessageList/MessageInput 即可 */
+}
+
+.chat-drag-content {
+  text-align: center;
+  color: #ffffff;
+  pointer-events: none;
+}
+
+.chat-drag-content svg {
+  margin-bottom: 16px;
+  animation: chat-drag-bounce 1s infinite;
+}
+
+.chat-drag-content p {
+  font-size: 18px;
+  font-weight: 500;
+  letter-spacing: 0.5px;
+}
+
+@keyframes chat-drag-bounce {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-10px); }
+}
+
+.chat-drag-fade-enter-active,
+.chat-drag-fade-leave-active { transition: opacity 0.15s ease; }
+.chat-drag-fade-enter-from,
+.chat-drag-fade-leave-to   { opacity: 0; }
 
 .checkpoint-overlay {
   position: fixed;

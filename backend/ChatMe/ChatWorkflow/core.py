@@ -679,7 +679,7 @@ class ChatWorkflow:
 
         return cleaned
 
-    async def _try_compact_react(self, context: List[BaseMessage]) -> Optional[str]:
+    async def _try_compact_react(self, context: List[BaseMessage], thread_id: str = "") -> Optional[str]:
         """
         把 context 重组为"尽量压缩 AIMessage"格式后喂给 react_compact_llm，
         让它从用户意图 + 工具调用历史 + 元 SystemMessage 中产出 ≤4096 tokens 中文摘要。
@@ -722,6 +722,17 @@ class ChatWorkflow:
             resp = filter_thinking_content(resp)
             text = get_message_content_string(resp).strip()
 
+            # 打印 LLM 原始输出（filter 之后）+ 字符数 + 长度区间判定结果
+            # ——肉眼检查压缩摘要质量：是不是真把 ReAct 流程压成 markdown 摘要，
+            #   还是被 tool_call 残留污染 / 没理解 prompt 输出半截 / 短于 250 字符等
+            if thread_id:
+                self._write_thinking(
+                    thread_id,
+                    f"[react_compact_output]: chars={len(text)}, "
+                    f"in_range={bool(text and 250 <= len(text) <= 4096)}\n"
+                    f"{text}"
+                )
+
             # 长度兜底：[250, 4096] 字符范围。下限 250 是有效压缩的最低门槛——
             # 低于这个值说明 LLM 没有充分压缩（要么是 prompt 没理解，要么是输出被 tool_call 残留污染），
             # 这种"无效压缩"应该跳过本轮而不是写进 context_assembly（保留原 context 等下次重试）
@@ -755,7 +766,7 @@ class ChatWorkflow:
         异常被 catch 后写 None，下次检测看到 None 会跳过（不写 pending，保持原 context）。
         """
         try:
-            s_new = await self._try_compact_react(compact_context)
+            s_new = await self._try_compact_react(compact_context, thread_id=thread_id)
             self._background_compaction_results[thread_id] = s_new
             if s_new:
                 # 阶段 2 完成后立即把 summary 内容写到 thinking_chain，

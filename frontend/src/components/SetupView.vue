@@ -9,7 +9,7 @@
   步骤：
     0  欢迎页            — 4 类配置简介 + 「开始 / 跳过」
     1  API Key           — llm_providers.model1/2 (model_name/base_url/api_key)
-    2  搜索类 Key        — Bocha / Exa / Tavily（checkbox 启用 + input）
+    2  搜索类 Key        — Exa / Tavily（checkbox 启用 + input）
     3  审批 Policy       — approval_policy default/yolo + approved list 折叠
     4  完成页            — summary + 「完成 / 仍然跳过」
 
@@ -74,7 +74,7 @@
               </div>
               <ul class="welcome-list">
                 <li><strong>① API Key</strong> — 至少填一个 LLM provider；支持主用 + 备用</li>
-                <li><strong>② 搜索 Key</strong> — Exa / Tavily / Bocha；让 AI 可以联网检索（可选）</li>
+                <li><strong>② 搜索 Key</strong> — Exa / Tavily；让 AI 可以联网检索（可选）</li>
                 <li><strong>③ 审批策略</strong> — 选择 default（敏感命令每次询问）或 yolo（放行）</li>
                 <li><strong>④ Skills</strong> — 已启用 5 个默认预批准；高级里可微调</li>
               </ul>
@@ -325,8 +325,8 @@ export default {
       // 为什么不直接绑到 formConfig.skills.*_api_key：
       //   ① 用户没勾某项时就不应当发空串出去覆盖原值
       //   ② 用户勾 + 输入空字符串 = 等价于「不修改」，与勾选的语义保持一致
-      skillEnabled: { bocha: false, exa: false, tavily: false },
-      skillInputs:  { bocha: '',    exa: '',    tavily: ''    },
+      skillEnabled: { exa: false, tavily: false },
+      skillInputs:  { exa: '',    tavily: ''    },
 
       // provider 显隐 key（password / text）
       showKey: {},
@@ -344,7 +344,6 @@ export default {
       ],
 
       searchSkills: [
-        { key: 'bocha',  label: 'Bocha',  placeholder: '留空表示不修改' },
         { key: 'exa',    label: 'Exa',    placeholder: '留空表示不修改' },
         { key: 'tavily', label: 'Tavily', placeholder: '留空表示不修改' }
       ]
@@ -450,8 +449,11 @@ export default {
         this.showAdvanced = false
         this.restarting = false
         this.cleanupTimer()
-        // 拉最新配置
-        this.loadConfig()
+        // 拉最新配置 → loadConfig 完成（loading=false）后 focus 当前 step 按钮，
+        // 让 ↑↓ / Tab 直接生效，不用先点一下浮窗
+        this.loadConfig().finally(() => {
+          this.focusCurrentStep()
+        })
       } else {
         this.cleanupTimer()
       }
@@ -495,6 +497,22 @@ export default {
     goToStep(i) {
       if (i < 0 || i > 4 || this.saving || this.loading) return
       this.currentStep = i
+      // 键盘 ↑↓ 切换时把焦点跟着移到新 step 按钮上 — 视觉焦点跟得上，
+      // 屏幕阅读器也能听到正确的 step 标签
+      this.$nextTick(() => {
+        const ref = this.$refs[`step_${this.stepsMeta[i].key}`]
+        if (ref && ref[0] && typeof ref[0].focus === 'function') {
+          ref[0].focus()
+        }
+      })
+    },
+    focusCurrentStep() {
+      this.$nextTick(() => {
+        const ref = this.$refs[`step_${this.stepsMeta[this.currentStep].key}`]
+        if (ref && ref[0] && typeof ref[0].focus === 'function') {
+          ref[0].focus()
+        }
+      })
     },
     providerLabel(name) {
       const map = {
@@ -678,10 +696,28 @@ export default {
     },
     handleKeydown(e) {
       if (!this.visible) return
-      if (this.restarting || this.saving) return
+      if (this.restarting || this.saving || this.loading) return
+      // 输入框 / textarea / select / contenteditable 内不接管 ↑↓ —
+      // 让原生光标 / 选项切换行为正常（用户在 step 表单里编辑时优先本地编辑体验）
+      const ae = document.activeElement
+      const inEditable = ae && (
+        ae.tagName === 'INPUT' ||
+        ae.tagName === 'TEXTAREA' ||
+        ae.tagName === 'SELECT' ||
+        ae.isContentEditable
+      )
+      if (inEditable) return
+
       if (e.key === 'Escape') {
         e.preventDefault()
         this.close()
+      } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        // ↑↓ 切换左侧 step 模块（mac/win 共用 ArrowUp/ArrowDown key 名）
+        // 到边停止，不循环 — 避免误触一直找不到当前位置
+        e.preventDefault()
+        const dir = e.key === 'ArrowDown' ? 1 : -1
+        const next = Math.max(0, Math.min(this.stepsMeta.length - 1, this.currentStep + dir))
+        this.goToStep(next)
       }
     },
     flashTip(msg) {
@@ -806,6 +842,11 @@ export default {
 .step-item:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
 .step-item.active { background: var(--bg-hover); color: var(--text-primary); font-weight: 500; }
 .step-item:disabled { opacity: 0.6; cursor: not-allowed; }
+/* 键盘 ↑↓ 切换 step 时的焦点提示（不干扰鼠标点击的 hover 视觉） */
+.step-item:focus-visible {
+  outline: 2px solid var(--button-bg, #3b82f6);
+  outline-offset: 1px;
+}
 .step-item.done .step-index { color: var(--success-color, #34c759); }
 .step-index {
   width: 22px;

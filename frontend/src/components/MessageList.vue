@@ -5,9 +5,10 @@
         <h2>你好！我是灵析——数据分析智能助手</h2>
         <p>有什么我可以帮助你的吗？</p>
         <p class="welcome-hint">
-          初次使用？试试在对话框输入
+          初次使用？试试
           <button type="button" class="welcome-chip" @click="$emit('insert-suggestion', '/help')">/help</button>
-          快速了解所有功能
+          了解所有功能，或
+          <button type="button" class="welcome-chip" @click="$emit('insert-suggestion', '/setup')">进入配置向导</button>
         </p>
       </div>
 

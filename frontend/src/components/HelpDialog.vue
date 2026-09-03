@@ -22,11 +22,12 @@
             <h3>快捷键</h3>
             <ul>
               <li><kbd>//</kbd>（双击 <kbd>/</kbd>）：从任意位置聚焦输入框；输入框内按 <kbd>/</kbd> 正常输入不拦截</li>
-              <li><kbd>↑</kbd> <kbd>↓</kbd> / <kbd>Enter</kbd> / <kbd>Esc</kbd>：slash 面板、审批、列表通用导航</li>
+              <li><kbd>↑</kbd> <kbd>↓</kbd> / <kbd>Enter</kbd> / <kbd>Esc</kbd>：slash 面板、审批、列表通用导航；配置向导内 <kbd>↑</kbd> <kbd>↓</kbd> 切左侧步骤</li>
               <li><kbd>1</kbd>–<kbd>4</kbd>：审批 4 档快速选（取消 / 仅本次 / 反馈 / 批准）</li>
               <li><kbd>Shift+Enter</kbd>：输入框换行</li>
               <li><kbd>Ctrl+W</kbd>：关闭文件预览当前 tab</li>
             </ul>
+            <p class="help-hint">💡 提示：弹窗打开会自动抢焦点，回车 / 空格直接触发当前高亮按钮；多数场景键盘操作比鼠标点击更顺手 —— 输入框、slash 面板、审批、文件树、配置向导、文件预览 tab 全部支持完整键盘流。</p>
           </section>
 
           <section class="help-section">
@@ -48,6 +49,15 @@
             <h4>引用 & 撤回</h4>
             <ul>
               <li>AI 消息行内 <code>“</code> → 引用进下次输入；用户消息 ↶ → 回溯到上一轮</li>
+            </ul>
+
+            <h4>配置向导</h4>
+            <ul>
+              <li>入口：顶栏 🪄 按钮 / <code>/setup</code> 命令 / Settings 入口；任意时刻手动打开</li>
+              <li>打开即自动聚焦 — 回车直接触发当前高亮按钮，无需先点一下浮窗</li>
+              <li><kbd>↑</kbd> <kbd>↓</kbd> 切左侧步骤（mac/win 通用）；到边停止不循环</li>
+              <li><kbd>Tab</kbd> 在表单内切字段；<kbd>Esc</kbd> 关闭浮窗；输入框内 <kbd>↑</kbd> <kbd>↓</kbd> 走原生光标不动 step</li>
+              <li>4 类配置全部可选，全部可跳过；空字段不写入，已填字段才走 PUT <code>/admin/config</code> diff</li>
             </ul>
 
             <h4>产物导出</h4>

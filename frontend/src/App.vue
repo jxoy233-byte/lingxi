@@ -406,9 +406,12 @@ export default {
       toast: { visible: false, title: '', message: '' },
       // 静态 action 命令清单（永远在前，不依赖后端）：
       // 纯前端动作（打开弹窗 / 刷新页面），name 不会发往后端，无命名约束。
+      // 这份副本驱动 HelpDialog「命令」段渲染；input 输入框走 MessageInput.staticActionCommands（独立副本），
+      // 两边必须保持一致，否则 /help 弹窗里看不到新增的 action 命令。
       staticActionCommands: [
         { name: 'backtrack', kind: 'action', description: '打开历史版本面板' },
         { name: 'settings',  kind: 'action', description: '打开设置弹窗' },
+        { name: 'setup',     kind: 'action', description: '打开安装 / 配置向导（首启推荐）' },
         { name: 'reload',    kind: 'action', description: '刷新当前会话' },
         { name: 'worktree',  kind: 'action', description: '打开当前会话工作树' },
         { name: 'help',      kind: 'action', description: '显示本项目功能速览' }

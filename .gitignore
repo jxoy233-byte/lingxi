@@ -4,7 +4,7 @@ __pycache__/
 *$py.class
 *.so
 .Python/
-build/
+/build/  # 只 ignore 仓库根的 Python build 输出；frontend/build/（Electron 图标）必须随仓库提交，不在此列
 develop-eggs/
 dist/
 downloads/

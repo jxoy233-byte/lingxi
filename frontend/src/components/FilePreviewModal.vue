@@ -1,7 +1,7 @@
 <template>
   <div v-if="visible" class="modal-overlay" @click="close">
     <div class="modal-content" @click.stop>
-      <button class="close-button" @click="close" title="关闭">
+      <button ref="closeBtn" class="close-button" @click="close" title="关闭">
         <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <line x1="18" y1="6" x2="6" y2="18"/>
           <line x1="6" y1="6" x2="18" y2="18"/>
@@ -139,6 +139,17 @@ export default {
     }
   },
   emits: ['close'],
+  watch: {
+    // 弹窗打开时焦点抢到关闭按钮，Esc 已走 document 兜底，这里只让 Tab / ↑↓ 立刻能用
+    visible(val) {
+      if (val) {
+        this.$nextTick(() => {
+          const btn = this.$refs.closeBtn
+          if (btn && btn.focus) btn.focus()
+        })
+      }
+    }
+  },
   data() {
     return {
       mermaidTab: 'rendered', // 'raw' | 'rendered'

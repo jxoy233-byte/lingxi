@@ -216,7 +216,19 @@ export default {
   watch: {
     // servicesReady 由父级 (App.vue) 通过 prop 下传；这里只追加日志，不重复触发 launch。
     servicesReady(ready) {
-      if (ready) this.logs += '[启动] ✅ 后端与 MCP 已就绪\n'
+      if (ready) {
+        this.logs += '[启动] ✅ 后端与 MCP 已就绪\n'
+        // 「进入应用」按钮刚变为 enabled 时立即抢焦点，回车直接进 app
+        this.$nextTick(this.focusPrimaryBtn)
+      }
+    },
+    // launching / autoEnterFrontend 切换也会改按钮状态（启动中→可启动 / 自动进）
+    launching() { this.$nextTick(this.focusPrimaryBtn) },
+    autoEnterFrontend() { this.$nextTick(this.focusPrimaryBtn) },
+    items: {
+      // 项目目录 / python / docker 检测结果回填后，按钮的 disabled 状态可能翻转
+      deep: true,
+      handler() { this.$nextTick(this.focusPrimaryBtn) }
     }
   },
   async mounted() {
@@ -266,8 +278,21 @@ export default {
     if (this.autoEnterFrontend && !this.servicesReady && this.allOk) {
       this.$nextTick(() => this.launch())
     }
+
+    // 抢焦点到主按钮（启动应用 / 进入应用 / 启动中…），回车直接触发。
+    // 主按钮 v-if 三态（启动中 disabled / 进入应用 / 启动应用），自动选第一个非 disabled 的
+    this.$nextTick(this.focusPrimaryBtn)
   },
   methods: {
+    /**
+     * 把焦点抢到主按钮（启动应用 / 进入应用）；跳过 disabled 的「启动中…」按钮。
+     * 不抢焦点到 overlay 容器（避免遮罩 click.self 行为异常）；
+     * 主按钮本身就是焦点入口，回车 / 空格即可触发。
+     */
+    focusPrimaryBtn() {
+      const btn = this.$el.querySelector('.btn-primary:not(:disabled)')
+      if (btn && typeof btn.focus === 'function') btn.focus()
+    },
     async recheck() {
       this.checking = true
       try {

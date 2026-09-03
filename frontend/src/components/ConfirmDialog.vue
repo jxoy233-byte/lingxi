@@ -15,7 +15,7 @@
           <p class="modal-message">{{ message }}</p>
         </div>
         <div class="modal-footer">
-          <button class="btn-cancel" @click="handleCancel">
+          <button ref="cancelBtn" class="btn-cancel" @click="handleCancel">
             {{ cancelText }}
           </button>
           <button class="btn-confirm" @click="handleConfirm">
@@ -53,6 +53,18 @@ export default {
     }
   },
   emits: ['confirm', 'cancel'],
+  watch: {
+    // 弹窗打开时焦点抢到取消按钮 — 避免用户按错回车直接确认重要操作，
+    // 默认焦点落在「取消」上更安全；Tab / ← → 可再移到「确认」
+    visible(val) {
+      if (val) {
+        this.$nextTick(() => {
+          const btn = this.$refs.cancelBtn
+          if (btn && btn.focus) btn.focus()
+        })
+      }
+    }
+  },
   mounted() {
     document.addEventListener('keydown', this.handleKeydown)
   },

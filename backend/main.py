@@ -1,5 +1,6 @@
 from datetime import datetime
 from contextlib import asynccontextmanager
+from typing import Optional
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -72,14 +73,22 @@ app.add_middleware(
 logger.info(f"\n{'='*60}\n  {app_name} {version} 启动 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n{'='*60}")
 
 # ========== LLM 端到端自检（核心依赖，必须通过）==========
+# 注意：fresh clone / 用户没填 API key 时不应阻塞后端启动 —— 后端先起来，让
+# 前端能进 Settings 页引导用户填 key 再重启。所以下面两处历史 raise RuntimeError
+# 改为 logger.warning，详见 module-level `_llm_active` 与 /health 的 `llm_ready` 字段。
+_llm_active: Optional[str] = None
 try:
     check = self_check_llm(timeout=10)
     p, b, active = check["primary"], check["backup"], check["active"]
 
     if not p and not b:
-        raise RuntimeError(
-            "llm_providers 中没有任何可用的 LLM 配置，请检查 config.json"
+        # llm_providers 链完全为空 —— 用户没配任何有效 provider
+        logger.warning(
+            "⚠️  llm_providers 中没有任何可用的 LLM 配置。"
+            "请到 Settings → LLM 配置页填写 API Key 后重启。"
+            "后端继续启动，但 /chat/* 调用会失败。"
         )
+        # 不 raise：用户能在 UI 里配 key
 
     if p:
         tag = "✅ 主用 LLM 自检通过" if p["ok"] else "❌ 主用 LLM 自检失败"
@@ -89,23 +98,29 @@ try:
         tag = "🔁 备用 LLM 自检通过" if b["ok"] else "❌ 备用 LLM 自检失败"
         logger.info(f"{tag}: {b['name']} | {b['msg']}")
 
-    if not active:
-        raise RuntimeError(
-            "主用与备用 LLM 端到端自检均失败：\n"
-            f"  - 主用 {p['name'] if p else '?'}: {p['msg'] if p else '未配置'}\n"
-            f"  - 备用 {b['name'] if b else '?'}: {b['msg'] if b else '未配置'}\n"
-            "请检查 config.json 中的 llm_providers 或网络连通性"
+    if not active and (p or b):
+        # 链非空但所有 probe 都失败（无效 api_key / 网络不通等）
+        logger.warning(
+            "⚠️  主用与备用 LLM 端到端自检均失败：\n"
+            f"     - 主用 {p['name'] if p else '?'}: {p['msg'] if p else '未配置'}\n"
+            f"     - 备用 {b['name'] if b else '?'}: {b['msg'] if b else '未配置'}\n"
+            "请检查 config.json 中的 llm_providers 或网络连通性。"
+            "后端继续启动，但 /chat/* 调用会失败。"
         )
+        # 不 raise：用户能在 UI 里修 key / 检查网络
 
     if active == (p and p["name"]):
         logger.info(f"🚀 当前生效: 主用 LLM ({active})")
-    else:
+        _llm_active = active
+    elif active:
         logger.warning(f"⚠️  主用不可用，已降级到备用 LLM ({active})")
-except RuntimeError:
-    raise
+        _llm_active = active
+    # active=None / (p is None and b is None) 时 _llm_active 保持 None
 except Exception as e:
-    # 自检过程本身崩了（导入失败、代码异常等）也视为核心依赖不可用
-    raise RuntimeError(f"LLM 自检过程异常: {e}") from e
+    # 自检过程本身崩了（导入失败、代码异常等）也不再阻塞启动 —— 让用户
+    # 至少能进 Settings / 看 /health 排查；之前会硬崩主进程无路可走。
+    logger.error(f"LLM 自检过程异常: {e}")
+    # 不 raise：让后端继续启动
 # =================================================
 
 app.include_router(ChatMe_app)
@@ -155,8 +170,12 @@ async def root():
 
 @app.get("/health")
 async def health():
-    """Electron 启动时轮询此端点判断后端是否就绪。"""
-    return {"status": "ok"}
+    """Electron 启动时轮询此端点判断后端是否就绪。
+
+    llm_ready=False 表示 llm_providers 自检未通过（用户没配 API key、配置了
+    但 key 无效、或网络不通等）。前端可以据此判断是否需要在首页展示引导 banner。
+    """
+    return {"status": "ok", "llm_ready": bool(_llm_active)}
 
 def main():
     # 确保全局配置存在

@@ -1,6 +1,7 @@
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { app } from 'electron'
+import { IS_WIN } from './platform.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -54,9 +55,13 @@ export default {
     // __dirname 在 asar 内解析为 .../app.asar/electron，../dist 即 .../app.asar/dist，asar patch 支持。
     indexHtml: path.join(__dirname, '../dist/index.html'),
     preload: path.join(__dirname, 'preload.js'),
-    // 窗口图标（macOS 标题栏 / Windows 标题栏 / Linux 任务栏）：打包后从包外取
+    // 窗口图标（macOS 标题栏 / Windows 标题栏 / Linux 任务栏）：打包后从包外取。
+    // Windows 任务栏 / 标题栏首选 .ico（Electron 自动转换；OS 也直接支持），
+    // 其他平台用 .png。
     icon: app.isPackaged
-      ? path.join(process.resourcesPath, 'build', 'icon.png')
+      ? (IS_WIN
+          ? path.join(process.resourcesPath, 'build', 'icon.ico')
+          : path.join(process.resourcesPath, 'build', 'icon.png'))
       : path.join(__dirname, 'public/favicon.png'),
     // macOS Dock 图标（必须在 dev 模式下通过 app.dock.setIcon 显式设置，
     // 因为 BrowserWindow.icon 在 macOS 不影响 Dock）。

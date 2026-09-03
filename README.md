@@ -131,7 +131,7 @@ State 定义在 `backend/ChatMe/ChatWorkflow/config/models.py`（`ChatStateCore2
 ```bash
 docker-compose up -d redis
 # Redis 容器端口 6379 -> 主机 6024
-# RedisInsight 端口 8001 -> 主机 8111
+# RedisInsight 端口 8001 -> 主机 28001
 # 密码：123456
 ```
 

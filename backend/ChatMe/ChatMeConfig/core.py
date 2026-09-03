@@ -4,6 +4,7 @@ ChatMe 全局配置加载器
 """
 import os
 import json
+import shutil
 from pathlib import Path
 from typing import Any, Optional
 
@@ -839,6 +840,10 @@ def ensure_global_config() -> None:
 
     路径判定走 ChatMe.paths.get_chatme_dir()：cwd 下存在 .chatme/ 即视为
     local，否则视为 global（~/.chatme）。generate 目标 = 判定后的根目录。
+
+    模板优先：fresh clone 场景下仓库只含 config.json.tmp 而无 config.json，
+    拷贝模板出来比 _generate_default_config 写一份最小默认更完整（保留 vl
+    / skills / 完整 permissions 等用户已配置的段落），用户只需补 api_key 即可。
     """
     # 1. 如果局部配置存在，直接返回（local 优先，不会落到 generate 分支）
     if (Path.cwd() / ".chatme" / "config.json").exists():
@@ -849,6 +854,15 @@ def ensure_global_config() -> None:
     if target.exists():
         return
 
-    # 3. 都不存在 → generate 到 target（get_chatme_dir 兜底为 ~/.chatme，
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    # 3. 同目录有 config.json.tmp → 拷贝模板（fresh clone 主路径，
+    #    比 _generate_default_config 多保留 vl / skills / scoped permissions）
+    tmp_file = target.parent / "config.json.tmp"
+    if tmp_file.exists():
+        shutil.copy(tmp_file, target)
+        return
+
+    # 4. 都没有 → generate 到 target（get_chatme_dir 兜底为 ~/.chatme，
     #    所以这里等价于原代码的 global_path 生成行为）
     config._generate_default_config(target)

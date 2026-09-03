@@ -20,6 +20,7 @@
     "electron:build": "vite build && electron-builder",
     "electron:build:mac": "vite build && electron-builder --mac",
     "electron:build:win": "vite build && electron-builder --win",
+    "electron:build:win:clean": "vite build && electron-builder --win && rm -rf release/electron-builder/win-unpacked",
     "electron:build:linux": "vite build && electron-builder --linux"
   },
   "build": {
@@ -73,6 +74,19 @@
           ]
         }
       ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "灵析",
+      "deleteAppDataOnUninstall": false,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "uninstallDisplayName": "灵析 ${version}"
     },
     "linux": {
       "icon": "build/icon.png",

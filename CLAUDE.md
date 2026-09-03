@@ -22,7 +22,7 @@ ChatMe（产品名「灵析」Lingxi）是一个基于 LangGraph 的多智能体
 
 - **Web**: Vue 3 + Vite（端口 18211）；**桌面端**: Electron 41 + electron-builder 26
 - **样式**: CSS Variables + 原生 CSS；**Markdown / 数学**: marked + highlight.js + katex
-- **Electron 关键能力**：`file://` 协议拦截（→ 后端代理等价 Vite dev proxy）、SSE 流透传、↻ 页面刷新按钮（ChatHeader + DataAnalysisTree 共用 SVG path `M20.49 15a9 9 0 1 1-2.12-9.36L23 10`）、多环境切换（dev/test/prod）、**单窗口架构** + SetUpView 浮窗 + `servicesReady` IPC 状态机 + autoEnter 三态按钮（详见偏好 22 / 23）
+- **Electron 关键能力**：`file://` 协议拦截（→ 后端代理等价 Vite dev proxy）、SSE 流透传、↻ 页面刷新按钮（ChatHeader + DataAnalysisTree 共用 SVG path `M20.49 15a9 9 0 1 1-2.12-9.36L23 10`）、多环境切换（dev/test/prod）、**单窗口架构** + BootstrapView 浮窗 + `servicesReady` IPC 状态机 + autoEnter 三态按钮（详见偏好 22 / 23）
 
 ## 架构
 
@@ -268,13 +268,13 @@ docker-compose up -d redis       # 端口 6024，密码 123456
     - **App.vue 必保留逻辑**：`deleteConversation(sessionId)` 直接执行的版本**必须**保留 finally 块的三件套清理（`stopStreamTimer` + `_activeStreamingSessions.delete` + `_streamingMessages.delete` + `_streamingMeta.delete` + `new Set(...)` 触发响应式）+ 当前会话切换（关 SSE + `cleanupLoadingState()` + `createNewChat()`）；不要因为去掉弹窗就把 finally 一并删了
     - **emit 契约不变**：Sidebar 的 `@delete-conversation="deleteConversation"`、ConversationItem 的 `emits: ['delete']` 都不用动，只有 App.vue 的 `deleteConversation` 内部从"弹窗 + 确认"变成"直接执行"
 23. **Electron 单窗口架构 + autoEnter 三态按钮**：早期双 BrowserWindow 关闭引导窗触发 GPU process 重启 + renderer 崩溃；v0.0.4 改单窗口架构：
-    - **架构**：`main.js` 始终一个 BrowserWindow；主界面永远在 DOM 里（`appReady=false` 时加 `.app-disabled` 灰显禁用），`<SetUpView>` 是浮窗叠加（fixed + z-index 1000 + backdrop-filter 模糊）。完全消除窗口创建/销毁竞态。
+    - **架构**：`main.js` 始终一个 BrowserWindow；主界面永远在 DOM 里（`appReady=false` 时加 `.app-disabled` 灰显禁用），`<BootstrapView>` 是浮窗叠加（fixed + z-index 1000 + backdrop-filter 模糊）。完全消除窗口创建/销毁竞态。
     - **状态机**：主进程模块级 `let servicesReady = false`；bootstrap 完成后调 `setServicesReady(true, { autoEnterFrontend })` 通过 `webContents.send('startup:services-ready-changed', { ready, autoEnterFrontend })` 推 object payload 给 renderer。
-    - **初始 gate**：`App.vue` 新增 `_isInitializing: true` + `servicesReady: null` 兜底 IPC 还没回的窗口期（5-50ms）。warm start（`getServicesReady=true` → 直接进主界面）/ cold start（`false` → SetUpView 浮窗）/ warm refresh（`webContents.reload()`，同 warm path）三条路径一律不闪 SetUpView。
-    - **三态按钮**：SetUpView 主按钮 v-if 三态：`launching=true` → 「启动中...」disabled；`servicesReady=true && !autoEnterFrontend` → 「进入应用」enabled emit `enter-app`；其他 → 「启动应用」（`!allOk` 时 disabled）。
-    - **避免双源真相**：`SetUpView.servicesReady` 是 prop（App.vue 下传），不重复 invoke `getServicesReady`；`SetUpView` 只通过 `@enter-app` 通知父级，所有 `appReady` 翻转都在 App.vue 一处。
+    - **初始 gate**：`App.vue` 新增 `_isInitializing: true` + `servicesReady: null` 兜底 IPC 还没回的窗口期（5-50ms）。warm start（`getServicesReady=true` → 直接进主界面）/ cold start（`false` → BootstrapView 浮窗）/ warm refresh（`webContents.reload()`，同 warm path）三条路径一律不闪 BootstrapView。
+    - **三态按钮**：BootstrapView 主按钮 v-if 三态：`launching=true` → 「启动中...」disabled；`servicesReady=true && !autoEnterFrontend` → 「进入应用」enabled emit `enter-app`；其他 → 「启动应用」（`!allOk` 时 disabled）。
+    - **避免双源真相**：`BootstrapView.servicesReady` 是 prop（App.vue 下传），不重复 invoke `getServicesReady`；`BootstrapView` 只通过 `@enter-app` 通知父级，所有 `appReady` 翻转都在 App.vue 一处。
     - **重启路径**：`restartBackend()` 完成后也调 `setServicesReady(true, { autoEnterFrontend: true })` —— 用户已在 app 里（被踢回 disabled），重启恢复直接交回交互权，不再弹「进入应用」。
-    - **失败兜底**：bootstrap catch 块调 `setServicesReady(false)` 回到冷启动态，SetUpView 重新挂载显示「启动应用」重试。
+    - **失败兜底**：bootstrap catch 块调 `setServicesReady(false)` 回到冷启动态，BootstrapView 重新挂载显示「启动应用」重试。
 
 24. **DataAnalysis 数据库分析（只读 + 跨会话配置 + 自动中断）**：
     - **能力边界**：`skills/DataAnalysis/database/` 提供 MySQL / SQLite / PostgreSQL / MongoDB 4 个引擎只读分析，写操作（SQL `INSERT/UPDATE/DELETE/DROP/ALTER/CREATE/TRUNCATE/GRANT/REVOKE/MERGE/CALL/REPLACE` + Mongo `$out/$merge/$where/$function/$accumulator/mapReduce/eval`）一律拦截。

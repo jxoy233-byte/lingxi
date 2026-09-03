@@ -19,6 +19,10 @@ export const IS_WIN = process.platform === 'win32'
 export const IS_MAC = process.platform === 'darwin'
 export const ARCH = process.arch  // 'arm64' | 'x64' | 'ia32'
 
+// lingxi 项目 GitHub 仓库地址（autoClone 唯一来源；main 进程的 silent auto-clone
+// 与 BootstrapView 用户确认卡片两条路径都引用这里，改地址只改这一行）
+export const LINGXI_REPO_URL = 'https://github.com/jxoy233-byte/lingxi.git'
+
 /**
  * 跨平台 venv Python 路径
  * - macOS / Linux:  .venv/bin/python
@@ -261,6 +265,23 @@ function bfsFrom(root, maxDepth, maxVisits) {
   return null
 }
 
+// ==================== 最近 clone 路径临时变量 ====================
+//
+// 模块级临时变量：记录最近一次 autoCloneProject 的成功路径。
+// 作用：clone 后 discoverProjectRoot 重检测时优先用这个值（避免 BFS 扫盘，
+//       也兜底 saveProjectRoot 写盘失败导致 saved 路径不命中的场景）。
+// 进程重启后自动重置为 null——跨启动靠 readSavedProjectRoot 命中。
+let lastCloneTarget = null
+
+/** 暴露给 caller 主动覆盖（pickProjectRoot 选了不同目录时调） */
+export function setLastCloneTarget(dir) {
+  lastCloneTarget = dir && isValidProjectRoot(dir) ? dir : null
+}
+
+export function getLastCloneTarget() {
+  return lastCloneTarget
+}
+
 /**
  * 找项目根：先扫 home 下的常见工作目录（绝大多数用户场景命中），
  * 找不到再降级到 home 全量 BFS。深度提到 5——之前 4 在
@@ -364,6 +385,14 @@ export function discoverProjectRoot(app) {
     return { root: process.env.LINGXI_PROJECT_ROOT, source: 'env' }
   }
 
+  // 优先检查刚刚 clone 出来的路径（clone 后用户还没做任何事，肯定想用这个）。
+  // 兜底场景：saveProjectRoot 写 userData 失败 / saved 路径被别处 lingxi/ 覆盖，
+  // 这时 lastCloneTarget 是「本进程最权威」的当前路径。
+  // env 优先级最高：用户主动设置 LINGXI_PROJECT_ROOT 时不被临时变量抢占。
+  if (lastCloneTarget && isValidProjectRoot(lastCloneTarget)) {
+    return { root: lastCloneTarget, source: 'clone' }
+  }
+
   const saved = readSavedProjectRoot(app)
   if (saved) return { root: saved, source: 'saved' }
 
@@ -383,4 +412,194 @@ export function discoverProjectRoot(app) {
   }
 
   return { root: null, source: 'none' }
+}
+
+// ==================== Git 自动 clone ====================
+
+/**
+ * 检测 git 是否安装。返回 { ok, detail }。
+ * 用 execInUserShell 拿与用户终端一致的 PATH（pyenv / Homebrew / Git for Windows）。
+ */
+export async function detectGitInstalled() {
+  try {
+    const out = await execInUserShell('git --version', { timeout: 5000 })
+    return { ok: true, detail: out.trim() }
+  } catch {
+    return { ok: false, detail: 'git 未安装（请安装 Git for Windows / Xcode Command Line Tools）' }
+  }
+}
+
+/**
+ * 启动 Docker Desktop（daemon 未跑时用）。
+ * 跨平台策略：
+ *   - macOS: `open -a Docker`（靠 LaunchServices 找 /Applications/Docker.app）
+ *   - Windows: 常见安装路径探测 Docker Desktop.exe 并 spawn；找不到时回退 Start Menu
+ *     的 `docker`（PATH 里走通时打开 Docker Desktop 入口）
+ *   - Linux: `systemctl start docker`（service 兜底）——多数发行版通用
+ * 返回 { ok, error? }。不验证 daemon 是否真的起来（启动慢，UI 端轮询 recheck）。
+ */
+export async function startDockerDesktop() {
+  try {
+    if (IS_MAC) {
+      await new Promise((resolve, reject) => {
+        exec('open -a Docker', { timeout: 5_000 }, (err, _stdout, stderr) => {
+          if (err) reject(new Error(stderr?.trim() || err.message))
+          else resolve()
+        })
+      })
+      return { ok: true }
+    }
+
+    if (IS_WIN) {
+      // 常见安装路径，按 Newer→Older 顺序探测（Docker 4.x 改 LOCALAPPDATA）
+      const candidates = [
+        path.join(process.env.LOCALAPPDATA || '', 'Docker', 'Docker', 'Docker Desktop.exe'),
+        path.join(process.env.PROGRAMFILES || 'C:\\Program Files', 'Docker', 'Docker', 'Docker Desktop.exe'),
+        path.join(process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)', 'Docker', 'Docker', 'Docker Desktop.exe'),
+      ].filter(Boolean)
+
+      let exe = null
+      for (const c of candidates) {
+        if (c && fs.existsSync(c)) { exe = c; break }
+      }
+      if (!exe) {
+        return { ok: false, error: '未找到 Docker Desktop.exe，请确认 Docker Desktop 已安装' }
+      }
+      // 用 spawn 解耦，detached 让 Docker Desktop 独立进程脱离父进程生命周期
+      const child = spawn(exe, [], { detached: true, stdio: 'ignore', windowsHide: true })
+      child.unref()
+      return { ok: true }
+    }
+
+    // Linux: 优先 systemctl，失败回退 service
+    await new Promise((resolve, reject) => {
+      exec('systemctl start docker', { timeout: 10_000 }, (err, _stdout, stderr) => {
+        if (err) {
+          exec('service docker start', { timeout: 10_000 }, (err2, _stdout2, stderr2) => {
+            if (err2) reject(new Error(stderr2?.trim() || stderr?.trim() || err.message))
+            else resolve()
+          })
+        } else resolve()
+      })
+    })
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, error: err.message || String(err) }
+  }
+}
+
+/**
+ * 自动 git clone 项目到 targetDir/lingxi/。已存在且合法 → 复用；已存在但不合法 → 拒绝。
+ *
+ * 注意 targetDir 是「父目录」（git 会按仓库名自动建 lingxi/ 子目录），
+ * caller 必须传父目录，不能传 ~/lingxi/ 本身——否则 git 会在 ~/lingxi/lingxi/ 嵌套。
+ * 仓库名从 opts.repoUrl 末段提取（去掉 .git 后缀）。
+ *
+ * @param {Electron.App} app — 用于 saveProjectRoot 持久化
+ * @param {object} opts
+ * @param {string} [opts.targetDir] — 默认 ~/(git 会建 ~/lingxi/)
+ * @param {string} [opts.repoUrl]  — 默认 LINGXI_REPO_URL（platform.js 顶部常量）
+ * @param {(msg: string) => void} [opts.onLog] — 实时日志回调（main 进程 silent 时传 () => {}）
+ * @returns {Promise<{ok: boolean, projectRoot?: string, source?: 'existing'|'cloned', error?: string}>}
+ */
+export async function autoCloneProject(app, opts = {}) {
+  const targetDir = opts.targetDir || os.homedir()
+  const repoUrl = opts.repoUrl || LINGXI_REPO_URL
+  const onLog = opts.onLog || (() => {})
+
+  // 从 URL 末段提取仓库名作为 git clone 自动创建的子目录名
+  // 例：https://github.com/jxoy233-byte/lingxi.git → 'lingxi'
+  const repoName = (repoUrl.split('/').pop() || 'lingxi').replace(/\.git$/, '') || 'lingxi'
+  const projectRoot = path.join(targetDir, repoName)
+
+  // 1) 已存在且合法 → 复用
+  if (fs.existsSync(projectRoot) && isValidProjectRoot(projectRoot)) {
+    onLog(`[clone] 复用已存在的项目根：${projectRoot}\n`)
+    setLastCloneTarget(projectRoot)  // 进程内优先用这个（即便 saved 没命中也能找到）
+    try { saveProjectRoot(app, projectRoot) } catch (e) {
+      console.error('[clone] userData 持久化失败：', e.message)
+    }
+    return { ok: true, projectRoot, source: 'existing' }
+  }
+
+  // 2) 已存在但不是 lingxi → 拒绝（防覆盖）
+  if (fs.existsSync(projectRoot)) {
+    return {
+      ok: false,
+      error: `${projectRoot} 已存在但不是有效的 lingxi 项目根（缺 backend/pyproject.toml 或 docker-compose.yml）。请手动选择其他目录。`,
+    }
+  }
+
+  // 3) clone
+  // ⚠️ Win 上 `git clone "<url>" "<path>"` 走 cmd.exe /c 字符串拼装经常翻车：
+  //   - 中文用户名 / 路径含空格 → cmd.exe 引号转义把路径搞坏
+  //   - git for Windows 2.40+ 在某些 home 子目录路径上报
+  //     `fatal: could not create leading directories ...: Invalid argument`（git bug）
+  // 修法：直接 spawn('git', ['clone', url, path]) 用数组参数，完全绕开 cmd.exe 字符串解析。
+  // PATH 用用户 shell 真实 PATH（mac/linux: printenv PATH；Win: echo %PATH%），
+  // 保证能命中 git 命令（git 在 `C:\Program Files\Git\cmd\git.exe`，不在 Electron 父进程 PATH 里）。
+  //
+  // cwd 选 os.tmpdir() 而不是 targetDir / homedir：
+  //   - cwd = targetDir 时 git 在自己下面建 repoName/（某些 git 版本会触发上面那个 bug）
+  //   - cwd = homedir 时若 targetDir = ~/(用户选了 home)，cwd == targetDir，危险
+  //   - tmpdir 永远不是用户项目父目录，绝对不会撞上 cwd == targetDir 的边界场景
+  onLog(`[clone] git clone ${repoUrl} ${projectRoot}\n`)
+  try {
+    const { spawn: childSpawn } = await import('child_process')
+    // 拿用户 shell 真实 PATH
+    let shellPath = ''
+    try {
+      const cmd = IS_WIN ? 'echo %PATH%' : 'printenv PATH'
+      const out = await execInUserShell(cmd, { timeout: 3000 })
+      // 过滤掉非路径行（zsh 偶尔的 "Restored session" 噪音）
+      const validLine = out.split('\n')
+        .map(l => l.trim())
+        .find(l => IS_WIN
+          ? /^[A-Za-z]:[\\/]/.test(l) || l.includes(':\\')
+          : l.startsWith('/'))
+      shellPath = validLine || process.env.PATH || ''
+    } catch {
+      shellPath = process.env.PATH || ''
+    }
+    const sep = IS_WIN ? ';' : ':'
+    const merged = [...new Set([
+      ...(shellPath ? shellPath.split(sep) : []),
+      ...((process.env.PATH || '').split(sep)),
+    ])].join(sep)
+    const env = { ...process.env, PATH: merged }
+
+    const child = childSpawn('git', ['clone', repoUrl, projectRoot], {
+      env,
+      cwd: os.tmpdir(),  // 避免 cwd == targetDir 触发 git Win bug
+      timeout: 300_000,  // 5 分钟
+      windowsHide: true,
+    })
+    let stdout = '', stderr = ''
+    child.stdout?.on('data', d => { stdout += d.toString(); onLog(d.toString()) })
+    child.stderr?.on('data', d => { stderr += d.toString(); onLog(d.toString()) })
+
+    await new Promise((resolve, reject) => {
+      child.on('error', reject)
+      child.on('close', code => {
+        if (code === 0) resolve()
+        else reject(new Error(`exit ${code}: ${(stderr || stdout).trim().slice(0, 500)}`))
+      })
+    })
+  } catch (err) {
+    return { ok: false, error: `git clone 失败：${err.message}` }
+  }
+
+  // 4) clone 完校验（防御网络中间人或 repo 错误）
+  if (!isValidProjectRoot(projectRoot)) {
+    return { ok: false, error: `clone 完成但目录结构校验失败：${projectRoot}` }
+  }
+
+  // 5) 持久化（让下次启动 discoverProjectRoot 第 2 级 saved 直接命中）
+  setLastCloneTarget(projectRoot)  // 进程内优先用这个（discoverProjectRoot 第 1.5 级）
+  try { saveProjectRoot(app, projectRoot) } catch (e) {
+    console.error('[clone] userData 持久化失败：', e.message)
+  }
+  persistProjectRootToShell(projectRoot).catch(() => {})  // best-effort
+
+  return { ok: true, projectRoot, source: 'cloned' }
 }

@@ -202,7 +202,7 @@ export default {
 .not-found-overlay {
   position: fixed;
   inset: 0;
-  /* 高于 SetUpView (1500) 和 SettingsDialog (1500)，确保盖住所有浮层 */
+  /* 高于 BootstrapView (1000) 和 SetupView (1500) 和 SettingsDialog (1500)，确保盖住所有浮层 */
   z-index: 1800;
   display: flex;
   align-items: center;

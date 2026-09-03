@@ -16,8 +16,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 检查是否为测试环境
   isTest: () => process.env.NODE_ENV === 'test',
 
-  // ===== 启动引导相关（SetUpView 用）=====
-  // 单窗口架构：始终一个 BrowserWindow，渲染层根据 servicesReady 决定显示 SetUpView 还是主界面。
+  // ===== 启动引导相关（BootstrapView 用）=====
+  // 单窗口架构：始终一个 BrowserWindow，渲染层根据 servicesReady 决定显示 BootstrapView 还是主界面。
   // 不再区分引导窗口 / 主窗口（也不需要 isSetupWindow 标志）。
 
   // 探测 3 项基础环境（projectRoot / python / docker）。uv/redis/sandbox/venv
@@ -30,8 +30,25 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 弹目录选择框手动指定项目根，返回 { ok, projectRoot?, error? }
   pickProjectRoot: () => ipcRenderer.invoke('startup:pick-project-root'),
 
+  // 弹目录选择框选「clone 父目录」，只返回 targetDir 不触发 clone。
+  // BootstrapView 克隆确认卡片走这个 → 拿目录后再 invoke autoClone。
+  pickCloneTarget: () => ipcRenderer.invoke('startup:pick-clone-target'),
+
+  // 返回默认 clone 父目录（os.homedir()）。BootstrapView 卡片显示用。
+  // 用户看到的是父目录（git 会按仓库名自动创建 lingxi/ 子目录），不是 ~/lingxi/。
+  getDefaultCloneTarget: () => ipcRenderer.invoke('startup:get-default-clone-target'),
+
+  // 自动 git clone 项目到 ~/lingxi。已存在且合法 → 复用；不存在 → 拉；
+  // 已存在但不是 lingxi → 拒绝；git 未装会返回 ok=false 含 stderr 错误。
+  // onLog 推送走 'startup:log' 通道（onStartupLog 订阅）。
+  autoClone: (opts = {}) => ipcRenderer.invoke('startup:auto-clone', opts),
+
+  // 手动启动 Docker Desktop（probe-all 检测到 docker 已装但 daemon 没跑时用）。
+  // 跨平台由 main 端 startDockerDesktop 负责；调用后 UI 自己 recheck 直到 daemon up 或超时。
+  startDocker: () => ipcRenderer.invoke('startup:start-docker'),
+
   // 一键 bootstrap：uv → redis → sandbox → venv → mcp → backend 串行执行。
-  // 完成后主进程 broadcast servicesReady=true，App.vue 翻 appReady=true → SetUpView 自动消失。
+  // 完成后主进程 broadcast servicesReady=true，App.vue 翻 appReady=true → BootstrapView 自动消失。
   bootstrap: (options = {}) => ipcRenderer.invoke('startup:bootstrap', options),
 
   getStartupPreferences: () => ipcRenderer.invoke('startup:get-preferences'),
@@ -48,7 +65,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   //   - getServicesReady：返 bool（warm path 拉快照够用）
   //   - onServicesReadyChange：返 { ready, autoEnterFrontend? }；
   //     cold start 完成时 main 带 autoEnterFrontend 让 renderer 决定是否立刻翻 appReady；
-  //     autoEnterFrontend=undefined 时 SetUpView 不需要重渲染按钮（warm / false 都是 noop）。
+  //     autoEnterFrontend=undefined 时 BootstrapView 不需要重渲染按钮（warm / false 都是 noop）。
   getServicesReady: () => ipcRenderer.invoke('startup:get-services-ready'),
   onServicesReadyChange: (callback) => {
     const handler = (_event, payload) => callback(payload)

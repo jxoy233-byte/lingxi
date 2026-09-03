@@ -2,9 +2,9 @@
   <!--
     双路径（按 isElectron 分流）+ 初始 gate（按 _isInitializing 分流）：
     - _isInitializing 期间（首次 servicesReady IPC 还没回，约 5-50ms）：只渲染空白底色占位，
-      既不显示主界面也不显示 SetUpView——避免「已知 warm 还要闪一下 SetUpView / 已知 cold 还要闪一下空主界面」。
+      既不显示主界面也不显示 BootstrapView——避免「已知 warm 还要闪一下 BootstrapView / 已知 cold 还要闪一下空主界面」。
     - 拿到结果后：
-      - Electron cold（servicesReady=false）：主界面灰显 + SetUpView 叠加 → bootstrap 完成 → 解除 disabled + SetUpView 淡出
+      - Electron cold（servicesReady=false）：主界面灰显 + BootstrapView 叠加 → bootstrap 完成 → 解除 disabled + BootstrapView 淡出
       - Electron warm（servicesReady=true）/ Web：主界面直接挂载，不再有任何闪烁
   -->
   <div v-if="_isInitializing" class="app-loading-bg"></div>
@@ -52,6 +52,7 @@
         <ChatHeader
           :has-session="!!currentSessionId"
           @open-settings="settingsVisible = true"
+          @open-setup="setupVisible = true"
           @toggle-checkpoints="toggleCheckpoints"
           @toggle-sidebar="toggleMobileSidebar"
           @refresh="refreshPage"
@@ -240,6 +241,14 @@
       @close="helpVisible = false"
     />
 
+    <!-- 配置向导浮窗（顶栏 🪄 按钮 + /setup 命令共用）
+         非阻塞：主界面 `.app-disabled` 不加上，用户看到浮窗时仍可点底栏。
+         z-index 由 SetupView 内部样式控制，与 BootstrapView 同档位。组件自管 v-if + transition，外部一直挂载。 -->
+    <SetupView
+      :visible="setupVisible"
+      @close="setupVisible = false"
+    />
+
     <!-- 通用简洁提示弹窗（slash 命令前置条件不满足时用） -->
     <ToastDialog
       :visible="toast.visible"
@@ -252,14 +261,14 @@
   <!--
     启动浮窗：仅 Electron 路径 + 主界面还没启用（!appReady）时挂载。
     包含 3 种状态：
-      - cold start：servicesReady=false，SetUpView 显示「启动应用」按钮
-      - cold start 完成后未勾自动进：servicesReady=true && appReady=false，SetUpView 显示「进入应用」
-      - warm start：appReady=true，SetUpView 不挂载（不闪一下）
-    当后端从 health→crash 时 appReady 重置为 false，SetUpView 重新显示「启动应用」。
-    v-if 切换走淡入淡出过渡，不直接 v-show（v-show 会让 .setup-overlay 的 animation 反复触发）。
+      - cold start：servicesReady=false，BootstrapView 显示「启动应用」按钮
+      - cold start 完成后未勾自动进：servicesReady=true && appReady=false，BootstrapView 显示「进入应用」
+      - warm start：appReady=true，BootstrapView 不挂载（不闪一下）
+    当后端从 health→crash 时 appReady 重置为 false，BootstrapView 重新显示「启动应用」。
+    v-if 切换走淡入淡出过渡，不直接 v-show（v-show 会让 .bootstrap-overlay 的 animation 反复触发）。
   -->
-  <transition name="setup-fade">
-    <SetUpView
+  <transition name="bootstrap-fade">
+    <BootstrapView
       v-if="isElectron && !appReady"
       :services-ready="servicesReady === true"
       @enter-app="onEnterApp"
@@ -268,7 +277,7 @@
 
   <!--
     NotFound 浮层：访问不存在的 URL 时浮现 10 秒，倒计时 + 进度条 + 像素鹿跳动。
-    z-index 1800（NotFoundView 内部样式）比 SetUpView 1500 高，确保盖住所有 UI。
+    z-index 1800（NotFoundView 内部样式）比 BootstrapView 1500 高，确保盖住所有 UI。
     任何点击 → _navigateHome → hide + location.replace('/')，跳回主页并清理 pathname。
   -->
   <transition name="not-found-fade">
@@ -287,7 +296,7 @@ import ChatHeader from './components/ChatHeader.vue'
 import MessageList from './components/MessageList.vue'
 import MessageInput from './components/MessageInput.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
-import SetUpView from './components/SetUpView.vue'
+import BootstrapView from './components/BootstrapView.vue'
 import CheckpointPanel from './components/CheckpointPanel.vue'
 import WebPreviewPanel from './components/WebPreviewPanel.vue'
 import FilePreviewPanel from './components/FilePreviewPanel.vue'
@@ -295,6 +304,7 @@ import SettingsDialog from './components/SettingsDialog.vue'
 import HelpDialog from './components/HelpDialog.vue'
 import ToastDialog from './components/ToastDialog.vue'
 import NotFoundView from './components/NotFoundView.vue'
+import SetupView from './components/SetupView.vue'
 import mermaid from 'mermaid'
 import {
   MAX_TEXT_PREVIEW_BYTES,
@@ -315,14 +325,15 @@ export default {
     MessageList,
     MessageInput,
     ConfirmDialog,
-    SetUpView,
+    BootstrapView,
     CheckpointPanel,
     WebPreviewPanel,
     FilePreviewPanel,
     SettingsDialog,
     HelpDialog,
     ToastDialog,
-    NotFoundView
+    NotFoundView,
+    SetupView
   },
   data() {
     return {
@@ -343,15 +354,15 @@ export default {
       // 加载会话失败时的错误消息（用户可见），空字符串 = 成功或尚未加载
       conversationsLoadError: '',
       // 是否在 Electron 环境运行（仅有 electronAPI）；web 永远 false
-      // 控制是否走 servicesReady 状态机 + 渲染 SetUpView 浮窗
+      // 控制是否走 servicesReady 状态机 + 渲染 BootstrapView 浮窗
       isElectron: false,
       // 后端服务就绪状态：null = 首次 IPC 还没回（gate 期间不渲染任何东西，避免闪烁）；
-      // true = 后端可用；false = 后端未启动（cold start，需要走 bootstrap + SetUpView 浮窗）
+      // true = 后端可用；false = 后端未启动（cold start，需要走 bootstrap + BootstrapView 浮窗）
       servicesReady: null,
       // 启动引导完成标志（区分 servicesReady：appReady 表示「主界面启用 + 会话已初始化」，
       // 后端重启可能让 appReady 重置但 servicesReady 翻 true 时同样需要重 init）
       appReady: false,
-      // 首次 servicesReady 检查还没回来时为 true，期间不渲染主界面也不渲染 SetUpView。
+      // 首次 servicesReady 检查还没回来时为 true，期间不渲染主界面也不渲染 BootstrapView。
       // Electron IPC 单次往返通常 < 10ms，最多 50ms 左右，体感几乎不可见；
       // 但换来「warm start 不闪浮窗 / cold start 不闪空主界面」的干净体验。
       _isInitializing: true,
@@ -390,6 +401,7 @@ export default {
       currentQuote: null,  // 当前引用内容：{ content: string }
       settingsVisible: false,  // 设置弹窗可见性
       helpVisible: false,  // /help 弹窗可见性
+      setupVisible: false,  // 配置向导浮窗可见性（顶栏 🪄 按钮 + /setup 共用）
       // 简洁提示弹窗（slash 命令前置条件不满足时用，例如「/backtrack 当前没有会话」）
       toast: { visible: false, title: '', message: '' },
       // 静态 action 命令清单（永远在前，不依赖后端）：
@@ -473,8 +485,8 @@ export default {
     }
   },
   mounted() {
-    // 单窗口架构（Electron）：主界面永远 mount，SetUpView 浮窗叠加在 .app-disabled 主界面上方。
-    // Web 端：根本不渲染 SetUpView（直接进主界面），不走 servicesReady 状态机。
+    // 单窗口架构（Electron）：主界面永远 mount，BootstrapView 浮窗叠加在 .app-disabled 主界面上方。
+    // Web 端：根本不渲染 BootstrapView（直接进主界面），不走 servicesReady 状态机。
     //        isElectron = !!window.electronAPI 控制两套路径分流。
     const savedTheme = localStorage.getItem('chatme-theme')
     if (savedTheme) {
@@ -496,8 +508,8 @@ export default {
       this.isElectron = true
       // 拉一次 servicesReady 快照（避免订阅前错过早期事件），然后订阅后续变更。
       // 路径分流：
-      //   - ready=true（warm）：servicesReady=true，直接 init，SetUpView 永远不渲染（不闪）
-      //   - ready=false（cold）：servicesReady=false，SetUpView 浮窗渲染，主界面灰显
+      //   - ready=true（warm）：servicesReady=true，直接 init，BootstrapView 永远不渲染（不闪）
+      //   - ready=false（cold）：servicesReady=false，BootstrapView 浮窗渲染，主界面灰显
       window.electronAPI.getServicesReady().then(ready => {
         this.servicesReady = !!ready
         this._isInitializing = false
@@ -509,7 +521,7 @@ export default {
       })
       // 后续变更：bootstrap 完成 / 后端重启。
       // payload = { ready, autoEnterFrontend? }：cold 完成时主进程带 autoEnterFrontend，
-      // =true 立刻翻 appReady，=false 保留 SetUpView 等用户点「进入应用」。
+      // =true 立刻翻 appReady，=false 保留 BootstrapView 等用户点「进入应用」。
       // warm / restart / crash-to-false 这几条路径只读 ready 字段。
       window.electronAPI.onServicesReadyChange((payload) => {
         const ready = !!(payload && payload.ready)
@@ -533,9 +545,9 @@ export default {
             this.$nextTick(() => this.initConversationState())
           }
         } else if (ready && !wasReady) {
-          // 没勾自动进 + cold start 完成：保持 appReady=false（默认），SetUpView 显示「进入应用」等用户点
+          // 没勾自动进 + cold start 完成：保持 appReady=false（默认），BootstrapView 显示「进入应用」等用户点
         }
-        // 后端从 true 变 false（重启中）：主界面回退到 disabled，SetUpView 重新显示
+        // 后端从 true 变 false（重启中）：主界面回退到 disabled，BootstrapView 重新显示
         if (!ready && wasReady) {
           this.appReady = false
           // _conversationInited 保持 true — 同一 session 内的 initConversationState 只跑一次语义不变
@@ -714,10 +726,10 @@ export default {
       }
     },
     /**
-     * 用户在 SetUpView 上点「进入应用」：
+     * 用户在 BootstrapView 上点「进入应用」：
      * 翻 appReady=true 触发 .app-disabled 解除 + initConversationState。
      * 与 warm path / cold autoEnter=true 同路径（自动翻 + init），只是入口从 IPC 广播
-     * 变成 SetUpView 的主动 emit。
+     * 变成 BootstrapView 的主动 emit。
      */
     onEnterApp() {
       if (!this.appReady) {
@@ -1500,6 +1512,7 @@ export default {
      * 与 ChatHeader 按钮完全等价：
      *   /backtrack ↔ ChatHeader ⏱ 按钮（toggleCheckpoints → CheckpointPanel）
      *   /settings   ↔ ChatHeader ⚙ 按钮（settingsVisible = true）
+     *   /setup     ↔ ChatHeader 🪄 按钮（setupVisible = true）
      *   /worktree   ↔ DataAnalysisTree 触发按钮（openPanel()）
      *   /reload     刷新当前会话（refreshConversation，重拉 messages）
      *   /help       独立弹窗（HelpDialog）
@@ -1520,6 +1533,10 @@ export default {
         }
         case 'settings':
           this.settingsVisible = true
+          return
+        case 'setup':
+          // 非阻塞浮窗：不需要 sid，无前置条件
+          this.setupVisible = true
           return
         case 'reload':
           if (!sid) {
@@ -5261,7 +5278,7 @@ body {
 /*
  * 首次 servicesReady IPC 等待期间的占位背景色。
  * Electron IPC 单次往返通常 < 10ms，warm path 用户几乎感觉不到这一帧；
- * cold path 也只是一闪——比「warm 时 SetUpView 弹一下再消失」「cold 时先露空主界面再叠浮窗」都干净。
+ * cold path 也只是一闪——比「warm 时 BootstrapView 弹一下再消失」「cold 时先露空主界面再叠浮窗」都干净。
  * 暗色主题下也是这个浅色占位（几十 ms 内看不全，且避免主题判断的额外 IPC），
  * 主界面亮起时如果是暗色主题会立即接管，看起来跟主界面错位一帧——可接受。
  */
@@ -5273,7 +5290,7 @@ body {
 
 /*
  * 启动期主界面灰显 + 禁用交互：后端未就绪时主界面已经在 DOM 里（用户能隐约看到布局），
- * 但不能点；SetUpView 浮窗叠在上方（z-index 1000），bootstrap 完成后 SetUpView 淡出、
+ * 但不能点；BootstrapView 浮窗叠在上方（z-index 1000），bootstrap 完成后 BootstrapView 淡出、
  * app-disabled 解除，主界面自动 loadConversations。
  */
 .app-container.app-disabled {
@@ -5632,16 +5649,16 @@ body {
 }
 
 /*
- * SetUpView 浮窗淡入淡出：appReady 翻 true 时整组淡出，避免 v-if 突然消失的硬切。
- * SetUpView 内部已经有 .setup-overlay 自己的 fade-in animation，
+ * BootstrapView 浮窗淡入淡出：appReady 翻 true 时整组淡出，避免 v-if 突然消失的硬切。
+ * BootstrapView 内部已经有 .bootstrap-overlay 自己的 fade-in animation，
  * 这里用 Vue transition 钩子同步 enter/leave 曲线。
  */
-.setup-fade-enter-active,
-.setup-fade-leave-active {
+.bootstrap-fade-enter-active,
+.bootstrap-fade-leave-active {
   transition: opacity 0.25s ease-out;
 }
-.setup-fade-enter,
-.setup-fade-leave-to {
+.bootstrap-fade-enter,
+.bootstrap-fade-leave-to {
   opacity: 0;
 }
 </style>

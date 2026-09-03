@@ -47,6 +47,24 @@
           <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
         </svg>
       </button>
+      <button
+        @click="$emit('open-setup')"
+        class="setup-btn"
+        title="安装 / 配置向导"
+      >
+        <!-- 摩法棒：与 ⚙ 视觉区隔，纯前端动作入口（点开 SetupView） -->
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M15 4V2"/>
+          <path d="M15 16v-2"/>
+          <path d="M8 9h2"/>
+          <path d="M20 9h2"/>
+          <path d="M17.8 11.8L19 13"/>
+          <path d="M15 9h0"/>
+          <path d="M17.8 6.2L19 5"/>
+          <path d="m3 21 9-9"/>
+          <path d="M12.2 6.2L11 5"/>
+        </svg>
+      </button>
     </div>
   </header>
 </template>
@@ -60,7 +78,7 @@ export default {
       default: false
     }
   },
-  emits: ['open-settings', 'toggle-checkpoints', 'toggle-sidebar', 'refresh']
+  emits: ['open-settings', 'open-setup', 'toggle-checkpoints', 'toggle-sidebar', 'refresh']
 }
 </script>
 
@@ -124,7 +142,8 @@ export default {
 
 .checkpoint-btn,
 .settings-btn,
-.refresh-btn {
+.refresh-btn,
+.setup-btn {
   width: 40px;
   height: 40px;
   border: none;
@@ -164,6 +183,15 @@ export default {
 }
 
 .settings-btn:hover {
+  background: var(--bg-hover);
+  color: var(--button-bg);
+  opacity: 0.8;
+}
+
+.setup-btn {
+  color: var(--text-secondary);
+}
+.setup-btn:hover {
   background: var(--bg-hover);
   color: var(--button-bg);
   opacity: 0.8;

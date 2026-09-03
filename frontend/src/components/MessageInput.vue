@@ -359,6 +359,7 @@ export default {
       staticActionCommands: [
         { name: 'backtrack', kind: 'action', description: '打开历史版本面板' },
         { name: 'settings',  kind: 'action', description: '打开设置弹窗' },
+        { name: 'setup',     kind: 'action', description: '打开安装 / 配置向导（首启推荐）' },
         { name: 'reload',    kind: 'action', description: '刷新当前会话' },
         { name: 'worktree',  kind: 'action', description: '打开当前会话工作树' },
         { name: 'help',      kind: 'action', description: '显示本项目功能速览' }

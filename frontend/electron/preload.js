@@ -72,8 +72,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('startup:services-ready-changed', handler)
   },
 
-  // ===== 健康监测（10s 轮询）=====
-  // 拉一次当前状态（首次 mount 用，避免等下一个 10s 周期）
+  // ===== 健康监测（5s 轮询）=====
+  // 拉一次当前状态（首次 mount 用，避免等下一个 5s 周期）
   getHealth: () => ipcRenderer.invoke('startup:get-health'),
 
   // 订阅状态变化推送（仅在状态切换时触发，避免每秒无效事件）
@@ -84,6 +84,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // 用户在 banner 上点「重新连接」：杀 mcp/backend 后串行重启
   restartBackend: () => ipcRenderer.invoke('startup:restart-backend'),
+
+  // ===== 安装向导 SetupView 用 =====
+  // 探测本地 LibreOffice：返 { installed, version?, path? }。
+  // 已装 → UI 显示绿✓ + 版本号；未装 → 显示说明 + 通用下载链接到 libreoffice.org/download。
+  probeLibreOffice: () => ipcRenderer.invoke('setup:probe-libreoffice'),
 
   // 头部 ↻ 刷新按钮：走主进程 webContents.reload()，比 window.location.reload() 更可靠
   // （file:// + protocol.handle 拦截器下 JS 级 reload 偶尔没可见反馈）

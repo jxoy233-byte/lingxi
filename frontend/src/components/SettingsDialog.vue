@@ -644,8 +644,8 @@ export default {
       }
       return hasDiff ? result : null
     },
-    async pollHealth(maxWaitSec = 90) {
-      // 每 2s 一次：本机启动 VL 模型冷启动可能耗 1 分钟，60s 不够
+    async pollHealth(maxWaitSec = 120) {
+      // 每 2s 一次：本机启动 docling + QwenVL 冷启动可能耗 90 秒以上，90s 不够
       for (let i = 0; i < maxWaitSec; i += 2) {
         try {
           await healthCheck()

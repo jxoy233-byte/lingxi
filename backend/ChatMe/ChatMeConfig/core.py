@@ -400,7 +400,7 @@ class ChatMeConfig:
                 elif env_value is not None:
                     result[key] = str(env_value).lower() in ("true", "1", "yes")
                 else:
-                    result[key] = True  # 默认 True（旧行为）
+                    result[key] = False  # 默认 False：走 _resolve_vl_fallback 到主用 LLM，不下载 Qwen3-VL（约 2GB）；要本机独立 VL 模型再显式设 local=True
 
         for key in ["temperature", "max_tokens", "top_p", "frequency_penalty", "presence_penalty"]:
             env_value = os.getenv(f"VL_{key.upper()}", None)

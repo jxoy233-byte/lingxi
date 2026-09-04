@@ -54,10 +54,10 @@ let lastBackendHealth = null   // null = 还没探过
 
 function startHealthMonitor() {
   if (healthMonitorInterval) return
-  console.log('[health] monitor started (10s interval)')
-  // 立即跑一次（不等 10s），首屏状态更快落到 UI
+  console.log('[health] monitor started (5s interval)')
+  // 立即跑一次（不等 5s），首屏状态更快落到 UI
   runHealthCheck()
-  healthMonitorInterval = setInterval(runHealthCheck, 10_000)
+  healthMonitorInterval = setInterval(runHealthCheck, 5_000)
 }
 
 function stopHealthMonitor() {
@@ -69,7 +69,7 @@ function stopHealthMonitor() {
 
 /**
  * 单次健康检查：探 backend；只有状态变了才推 IPC，避免
- * 每 10s 一次无意义的事件风暴（main → renderer）。
+ * 每 5s 一次无意义的事件风暴（main → renderer）。
  */
 async function runHealthCheck() {
   const backendOk = await checkBackendHealth()
@@ -947,6 +947,44 @@ async function tryRedisPing(root) {
   }
 }
 
+/**
+ * 探测 LibreOffice 是否已装。
+ * 用途：SetupView「旧版文件解析」step 显示已装 / 未装状态 + 引导下载。
+ * 检测：跨平台统一跑 `soffice --version`（soffice 是 LibreOffice 标准可执行文件名；
+ *   macOS/Windows 安装器默认装的就是这个，Linux 包名 `libreoffice` 但二进制也是 soffice）。
+ *
+ * 返回 { installed: bool, version?: string, path?: string }：
+ *   - installed=true 时附 version 字符串给 SetupView 显示（"LibreOffice 24.2.7.2"）
+ *   - path 是 soffice 完整路径，让用户在 detail 里知道装在哪（macOS /Applications/...）
+ */
+async function probeLibreOffice() {
+  // 1) 命令是否存在（避免 --version 找不到时输出空字符串误判已装）
+  const whichCmd = IS_WIN ? 'where soffice' : 'which soffice'
+  let execPath = ''
+  try {
+    const out = await execInUserShell(whichCmd, { timeout: 3_000 })
+    // 提取首个有效行（mac/linux which 只返一条；win where 可能多条，去首个；
+    //   顺手过滤 zsh "Restored session" 噪音）
+    const firstLine = out.split(/\r?\n/).map(l => l.trim()).find(l => l && !/Restored session/i.test(l))
+    if (!firstLine) return { installed: false }
+    execPath = firstLine
+  } catch {
+    return { installed: false }
+  }
+
+  // 2) 拿版本号
+  try {
+    const out = await execInUserShell(`"${execPath}" --version`, { timeout: 5_000 })
+    // soffice --version 输出形如 "LibreOffice 24.2.7.2" 或含路径噪音
+    const m = out.match(/LibreOffice\s+([\d.]+)/i)
+    const version = m ? m[1] : (out.trim().split(/\s+/).slice(-1)[0] || '')
+    return { installed: true, version, path: execPath }
+  } catch {
+    // 命令存在但 --version 失败（极少数损坏安装） → 仍算「装了但可能有问题」
+    return { installed: true, version: '', path: execPath }
+  }
+}
+
 async function probeRedisContainer() {
   try {
     // 用 `docker ps -a` 同时看运行 + exited 容器——区分 3 种状态给 fixRedis 用
@@ -1323,8 +1361,8 @@ async function startBackend(onLog) {
     if (backendProcRef.value === proc) backendProcRef.value = null
   })
 
-  // 轮询 /health（最多 90s；docling + QwenVL 首次加载可能慢）
-  const deadline = Date.now() + 90_000
+  // 轮询 /health（最多 120s；docling + QwenVL 首次加载可能慢）
+  const deadline = Date.now() + 120_000
   try {
     while (Date.now() < deadline) {
       try {
@@ -1411,6 +1449,15 @@ function registerStartupIpc() {
       python: { ...await probePython(), downloadUrl: pythonDownloadUrl() },
       docker: { ...await probeDocker(), downloadUrl: dockerDownloadUrl() },
     }
+  })
+
+  /**
+   * SetupView「旧版文件解析」step 用：探测本地 LibreOffice。
+   * 返回 { installed, version?, path? } —— 装了就返版本 + 路径，未装只返 installed: false。
+   * 失败一律走 false（不抛），前端根据 ok 字段渲染已装 / 下载按钮。
+   */
+  ipcMain.handle('setup:probe-libreoffice', async () => {
+    return await probeLibreOffice()
   })
 
   /**

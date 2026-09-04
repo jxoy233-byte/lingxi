@@ -1,7 +1,7 @@
 <!--
   SetupView：安装 / 配置向导浮窗。
   入口：ChatHeader 🪄 按钮 / slash 命令 /setup（任意时刻手动打开）。
-  设计：4 step + 完成页（5 个 pane）；浮窗形式（fixed + z-index 1000 + backdrop blur），
+  设计：5 step + 完成页（6 个 pane）；浮窗形式（fixed + z-index 1000 + backdrop blur），
   与 BootstrapView 视觉一致，但**非阻塞** —— 用户主界面始终可点。
   复用：getConfig / putConfig / restartBackend / healthCheck（utils/api.js）。
   不复用 SettingsDialog scoped style —— 自带 scoped 副本，保持组件边界清晰。
@@ -11,9 +11,10 @@
     1  API Key           — llm_providers.model1/2 (model_name/base_url/api_key)
     2  搜索类 Key        — Exa / Tavily（checkbox 启用 + input）
     3  审批 Policy       — approval_policy default/yolo + approved list 折叠
-    4  完成页            — summary + 「完成 / 仍然跳过」
+    4  旧版文件解析      — LibreOffice 已装 / 未装（probe-libreoffice IPC）+ 下载链接
+    5  完成页            — summary + 「完成 / 仍然跳过」
 
-  进度条 + 顶部 step 导航均按 4 个核心 step 计数（欢迎/完成页不算 step）。
+  进度条 + 顶部 step 导航均按 5 个核心 step 计数（欢迎/完成页不算 step）。
 -->
 <template>
   <transition name="setup-fade">
@@ -234,8 +235,46 @@
               </div>
             </section>
 
-            <!-- ====== Step 4：完成页 ====== -->
+            <!-- ====== Step 4：旧版文件解析（LibreOffice） ====== -->
             <section v-else-if="currentStep === 4" class="section">
+              <div class="section-header">
+                <h4>旧版文件解析（可选）</h4>
+                <p class="section-desc">
+                  LibreOffice 用于把 <code>.doc</code> / <code>.ppt</code> / <code>.xls</code>
+                  等老版本 Office 文件转成 PDF / 图片后让 AI 看。
+                  <strong>不装也能用</strong>，只是这类文件不能直接上传解析。
+                </p>
+              </div>
+
+              <!--
+                探测态卡片：libreOfficeStatus 是 null（探测中）/ 'ok'（已装）/ 'missing'（未装）。
+                ok → 绿底 + 版本号 + 路径；missing → 橙底 + 下载按钮；null → 灰底 + 「检测中…」
+                走主进程 setup:probe-libreoffice IPC（which/where soffice + soffice --version）。
+                visible watch 触发时自动探测；用户也可以重开 SetupView 重测（再次触发 visible=true）。
+              -->
+              <div :class="['lo-card', libreOfficeStatus || 'loading']">
+                <div class="lo-info">
+                  <span class="lo-icon">{{ libreOfficeIcon }}</span>
+                  <div class="lo-text">
+                    <div class="lo-label">{{ libreOfficeLabel }}</div>
+                    <div class="lo-detail">{{ libreOfficeDetail }}</div>
+                  </div>
+                </div>
+                <a
+                  v-if="libreOfficeStatus === 'missing'"
+                  class="lo-download"
+                  href="https://www.libreoffice.org/download/"
+                  @click.prevent="openLibreOfficeDownload"
+                >下载 LibreOffice</a>
+              </div>
+
+              <p class="welcome-foot">
+                下载安装后再次打开本向导即可看到 ✓ 已装状态；后端无需重启。
+              </p>
+            </section>
+
+            <!-- ====== Step 5：完成页 ====== -->
+            <section v-else-if="currentStep === 5" class="section">
               <div class="section-header">
                 <h4>已完成</h4>
                 <p class="section-desc">{{ summaryDesc }}</p>
@@ -261,7 +300,7 @@
             <button class="btn-text" @click="onSkipStep" :disabled="saving || loading">
               {{ currentStep === 0 ? '稍后再说' : '跳过本步' }}
             </button>
-            <button v-if="currentStep < 4" class="btn-primary" @click="onNext" :disabled="saving || loading">
+            <button v-if="currentStep < 5" class="btn-primary" @click="onNext" :disabled="saving || loading">
               下一步 →
             </button>
             <button v-else class="btn-primary" @click="onFinish" :disabled="saving || loading">
@@ -298,15 +337,25 @@ export default {
   data() {
     return {
       currentStep: 0,
-      // 0 欢迎 / 1 apikey / 2 search / 3 policy / 4 完成 — 共 5 个 pane 但 nav 只展示 1-3 三个 step
-      // （0/4 是入口和出口，不是 step）
+      // 0 欢迎 / 1 apikey / 2 search / 3 policy / 4 libreoffice / 5 完成 — 共 6 个 pane 但 nav 展示 1-4 四个核心 step
+      // （0/5 是入口和出口，不是 step）
       stepsMeta: [
-        { key: 'welcome', label: '欢迎' },
-        { key: 'apikey',  label: 'API Key' },
-        { key: 'search',  label: '搜索 Key' },
-        { key: 'policy',  label: '审批策略' },
-        { key: 'done',    label: '完成' }
+        { key: 'welcome',     label: '欢迎' },
+        { key: 'apikey',      label: 'API Key' },
+        { key: 'search',      label: '搜索 Key' },
+        { key: 'policy',      label: '审批策略' },
+        { key: 'libreoffice', label: '旧版文件解析' },
+        { key: 'done',        label: '完成' }
       ],
+
+      // ====== Step 4 LibreOffice 探测态 ======
+      // null（探测中）→ ok（已装 + version/path）→ missing（未装）→ error（探测异常）。
+      // 状态机只在本组件内自维护：visible=true 触发 loadConfig 之后异步调 probe，
+      // 不依赖后端 /admin/config，单独走 setup:probe-libreoffice IPC。
+      libreOfficeStatus: null,
+      libreOfficeVersion: '',
+      libreOfficePath: '',
+      libreOfficeError: '',
 
       loading: false,
       loadError: '',
@@ -434,12 +483,46 @@ export default {
     footerHint() {
       if (this.currentStep === 0) return '随时跳过，向导不会保存任何空字段'
       if (this.currentStep === 4) {
+        return 'LibreOffice 仅本机探测，不改动任何配置项'
+      }
+      if (this.currentStep === 5) {
         return this.willRestart
           ? '⚠️ 含 LLM 配置改动，保存后将重启后端'
           : '任何项都可保留原状不动，向导只发「实际改了」的字段'
       }
       return '任何字段都可留空（保留原值），填了字段才算改动'
-    }
+    },
+    /**
+     * LibreOffice 卡片展示用 computed。集中到一处便于在多模板点引用一致。
+     */
+    libreOfficeIcon() {
+      switch (this.libreOfficeStatus) {
+        case 'ok':     return '✓'
+        case 'missing':return '✗'
+        case 'error':  return '!'
+        default:       return '⋯'
+      }
+    },
+    libreOfficeLabel() {
+      switch (this.libreOfficeStatus) {
+        case 'ok':     return this.libreOfficeVersion
+          ? `LibreOffice ${this.libreOfficeVersion} 已安装`
+          : 'LibreOffice 已安装'
+        case 'missing':return 'LibreOffice 未安装'
+        case 'error':  return 'LibreOffice 检测失败'
+        default:       return '检测中...'
+      }
+    },
+    libreOfficeDetail() {
+      if (this.libreOfficeStatus === 'ok') return this.libreOfficePath || 'soffice 在 PATH 中'
+      if (this.libreOfficeStatus === 'missing') {
+        return '点击下方「下载」到 libreoffice.org/download 安装；安装后重新打开本向导自动探测'
+      }
+      if (this.libreOfficeStatus === 'error') {
+        return this.libreOfficeError || '请稍后重试或检查 PATH'
+      }
+      return '正在扫描本地 soffice 命令...'
+    },
   },
   watch: {
     visible(val) {
@@ -449,11 +532,11 @@ export default {
         this.showAdvanced = false
         this.restarting = false
         this.cleanupTimer()
-        // 拉最新配置 → loadConfig 完成（loading=false）后 focus 当前 step 按钮，
-        // 让 ↑↓ / Tab 直接生效，不用先点一下浮窗
+        // 拉最新配置 + 异步探测 LibreOffice 并行（不互相依赖）
         this.loadConfig().finally(() => {
           this.focusCurrentStep()
         })
+        this.probeLibreOffice()
       } else {
         this.cleanupTimer()
       }
@@ -481,21 +564,21 @@ export default {
       // 跳过当前 step：欢迎页视为彻底跳过 → 关闭；其他 step 视为「本步不改」→ 推进
       if (this.currentStep === 0) {
         this.close()
-      } else if (this.currentStep === 4) {
+      } else if (this.currentStep === 5) {
         // 完成页的「仍然跳过」等价关弹窗
         this.close()
       } else {
-        this.goToStep(Math.min(this.currentStep + 1, 4))
+        this.goToStep(Math.min(this.currentStep + 1, 5))
       }
     },
     onPrev() {
       if (this.currentStep > 0) this.goToStep(this.currentStep - 1)
     },
     onNext() {
-      if (this.currentStep < 4) this.goToStep(this.currentStep + 1)
+      if (this.currentStep < 5) this.goToStep(this.currentStep + 1)
     },
     goToStep(i) {
-      if (i < 0 || i > 4 || this.saving || this.loading) return
+      if (i < 0 || i > 5 || this.saving || this.loading) return
       this.currentStep = i
       // 键盘 ↑↓ 切换时把焦点跟着移到新 step 按钮上 — 视觉焦点跟得上，
       // 屏幕阅读器也能听到正确的 step 标签
@@ -569,6 +652,58 @@ export default {
       } finally {
         this.loading = false
       }
+    },
+    /**
+     * 探测本地 LibreOffice：调 setup:probe-libreoffice IPC。
+     * - installed=true → libreOfficeStatus='ok' + version/path 展示
+     * - installed=false → libreOfficeStatus='missing'（显示下载按钮）
+     * - IPC 异常 → libreOfficeStatus='error'（仍可重试，无破坏性）
+     *
+     * 异步探测独立于 loadConfig —— 即便 loadConfig 拖累 1-2s，lo 卡片也能快速亮起。
+     * 不发任何 payload，不影响 buildPayload / willRestart。
+     */
+    async probeLibreOffice() {
+      if (!window.electronAPI?.probeLibreOffice) {
+        // 主进程没暴露（dev / 旧版本）→ 当作未装处理，不阻断向导
+        this.libreOfficeStatus = 'missing'
+        this.libreOfficeVersion = ''
+        this.libreOfficePath = ''
+        return
+      }
+      try {
+        const result = await window.electronAPI.probeLibreOffice()
+        if (result?.installed) {
+          this.libreOfficeStatus = 'ok'
+          this.libreOfficeVersion = result.version || ''
+          this.libreOfficePath    = result.path || ''
+          this.libreOfficeError   = ''
+        } else {
+          this.libreOfficeStatus = 'missing'
+          this.libreOfficeVersion = ''
+          this.libreOfficePath    = ''
+          this.libreOfficeError   = ''
+        }
+      } catch (e) {
+        console.warn('[SetupView] probeLibreOffice failed:', e)
+        this.libreOfficeStatus = 'error'
+        this.libreOfficeError  = e?.message || String(e)
+      }
+    },
+    /**
+     * 在系统默认浏览器打开 LibreOffice 通用下载页。
+     * 走 window.electron.openExternal bridge（preload.js 直接调 shell.openExternal），
+     * 不重复造 IPC 通道 —— 与 BootstrapView 的 downloadUrl 路径同源。
+     */
+    openLibreOfficeDownload() {
+      const url = 'https://www.libreoffice.org/download/'
+      // setTimeout 0 让 click 事件先返回，避免部分浏览器引擎把 shell 调用当 popup 拦掉
+      setTimeout(() => {
+        try {
+          window.electron?.openExternal?.(url)
+        } catch (e) {
+          console.error('[SetupView] openLibreOfficeDownload failed:', e)
+        }
+      }, 0)
     },
     removeApproved(idx) {
       this.formConfig.permissions.approved_commands.splice(idx, 1)
@@ -665,7 +800,7 @@ export default {
         console.warn('[SetupView] restart request ended (expected):', e)
       }
 
-      const ok = await this.pollHealth(90)
+      const ok = await this.pollHealth(120)
       this.cleanupTimer()
       this.restarting = false
 
@@ -677,7 +812,7 @@ export default {
         this.close()
       }
     },
-    async pollHealth(maxWaitSec = 90) {
+    async pollHealth(maxWaitSec = 120) {
       for (let i = 0; i < maxWaitSec; i += 2) {
         try {
           await healthCheck()
@@ -1095,6 +1230,76 @@ export default {
 }
 .advanced-toggle:hover { background: var(--bg-hover); color: var(--text-primary); }
 .advanced-block { margin-top: 12px; }
+
+/* ===== Step 4 LibreOffice 卡 ===== */
+/* 视觉沿用 BootstrapView 的 .check-item ok/fail/fixing 三态，但 step 内更紧凑 */
+.lo-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  transition: border-color 0.15s, background 0.15s;
+}
+.lo-card.loading { border-color: var(--border-color); background: var(--bg-secondary); }
+.lo-card.ok      { border-color: var(--success-color, #34c759); background: rgba(52, 199, 89, 0.06); }
+.lo-card.missing { border-color: var(--warning-color, #ff9500); background: rgba(255, 149, 0, 0.06); }
+.lo-card.error   { border-color: var(--danger-color,  #ff3b30); background: rgba(255, 59, 48, 0.06); }
+
+.lo-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+}
+.lo-icon {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+.lo-card.ok      .lo-icon { color: var(--success-color, #34c759); }
+.lo-card.missing .lo-icon { color: var(--warning-color, #ff9500); }
+.lo-card.error   .lo-icon { color: var(--danger-color,  #ff3b30); }
+
+.lo-text { min-width: 0; flex: 1; }
+.lo-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+.lo-detail {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+  word-break: break-all;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* 下载按钮 — 走 BootstrapView 的 .btn-download 视觉（border + accent 蓝）保持品牌一致 */
+.lo-download {
+  flex-shrink: 0;
+  padding: 6px 14px;
+  font-size: 12px;
+  border: 1px solid var(--accent-color, #007aff);
+  background: transparent;
+  color: var(--accent-color, #007aff);
+  border-radius: 6px;
+  cursor: pointer;
+  text-decoration: none;
+  font-family: inherit;
+  transition: background 0.15s, color 0.15s;
+}
+.lo-download:hover { background: var(--accent-color, #007aff); color: white; }
 
 /* ===== cmd list（policy approved/denied）===== */
 .empty-list {

@@ -257,37 +257,29 @@
             <span v-else>配置改动需重启后端</span>
           </div>
           <div class="footer-actions">
-            <button class="btn-text" @click="close" :disabled="saving || restarting">Cancel</button>
-            <button class="btn-text" @click="saveOnly" :disabled="saving || restarting || activeTab === 'appearance'">
+            <button class="btn-text" @click="close" :disabled="saving">Cancel</button>
+            <button class="btn-text" @click="saveOnly" :disabled="saving || activeTab === 'appearance'">
               {{ saving ? 'Saving...' : 'Save' }}
             </button>
             <!-- Save & Restart 只在 llm tab 显示：模型连接字段（ChatOpenAI / Redis / VL weights
                  是启动期常驻对象，写 config 不影响已构造的 client，必须重启才生效。
-                 permissions / skills / appearance 都是热加载，不需要重启按钮。 -->
-            <button v-if="activeTab === 'llm'" class="btn-primary" @click="saveAndRestart" :disabled="saving || restarting">
-              {{ restarting ? 'Restarting...' : 'Save & Restart' }}
+                 permissions / skills / appearance 都是热加载，不需要重启按钮。
+                 点击后 emit('restart-requested') → App.vue 接管，弹出全局 restart-mask
+                 （与 banner「重新连接」共用同一套 spinner + 倒计时）。dialog 立即关闭，
+                 不在 dialog 内自渲染遮罩（避免重复 / 焦点错位）。 -->
+            <button v-if="activeTab === 'llm'" class="btn-primary" @click="saveAndRestart" :disabled="saving">
+              Save & Restart
             </button>
           </div>
         </div>
 
-        <!-- 重启遮罩 -->
-        <transition name="fade">
-          <div v-if="restarting" class="restart-mask">
-            <div class="restart-card">
-              <div class="spinner"></div>
-              <h4>Restarting backend</h4>
-              <p>This will take a few seconds.</p>
-              <p class="restart-progress">{{ restartElapsed }}s</p>
-            </div>
-          </div>
-        </transition>
       </div>
     </div>
   </transition>
 </template>
 
 <script>
-import { getConfig, putConfig, restartBackend, healthCheck } from '@/utils/api.js'
+import { getConfig, putConfig } from '@/utils/api.js'
 
 export default {
   name: 'SettingsDialog',
@@ -295,7 +287,7 @@ export default {
     visible: { type: Boolean, default: false },
     isDarkTheme: { type: Boolean, default: false }
   },
-  emits: ['close', 'theme-change'],
+  emits: ['close', 'theme-change', 'restart-requested'],
   data() {
     return {
       activeTab: 'appearance',
@@ -331,9 +323,10 @@ export default {
       showKey: {},
 
       saving: false,
-      restarting: false,
-      restartElapsed: 0,
-      restartTimer: null
+      // 重启遮罩 / 计时器 / IPC 都搬到 App.vue（_backendRestarting / _restartElapsed / _restartTimer），
+      // Settings 通过 emit('restart-requested') 让 App.vue 跑统一重启流程。
+      // banner「重新连接」与 Settings「Save & Restart」共用同一份 IPC + reload 链路，
+      // 也避免每个组件各写一份 timer 失同步。
     }
   },
   watch: {
@@ -348,7 +341,7 @@ export default {
           if (nav && nav.focus) nav.focus()
         })
       } else {
-        this.cleanupTimer()
+        // dialog 关闭时无 timer 需清理（重启遮罩 / timer 已搬到 App.vue 统一管理）
       }
     },
     theme(newVal) {
@@ -363,7 +356,6 @@ export default {
   },
   methods: {
     close() {
-      this.cleanupTimer()
       this.$emit('close')
     },
     /**
@@ -416,7 +408,7 @@ export default {
      */
     handleKeydown(e) {
       if (!this.visible) return
-      if (this.restarting || this.saving) return
+      if (this.saving) return
       if (e.key === 'Escape') {
         e.preventDefault()
         this.close()
@@ -521,25 +513,15 @@ export default {
       }
       this.saving = false
 
-      this.restarting = true
-      this.restartElapsed = 0
-      this.restartTimer = setInterval(() => { this.restartElapsed++ }, 1000)
-
-      try {
-        await restartBackend()
-      } catch (e) {
-        console.warn('[SettingsDialog] restart request ended (expected):', e)
-      }
-
-      const ok = await this.pollHealth()
-      this.cleanupTimer()
-
-      if (ok) {
-        window.location.reload()
-      } else {
-        this.restarting = false
-        alert('重启超时，请检查后端日志并手动重启。')
-      }
+      // 通知父级（App.vue）跑统一重启流程：开全局 spinner 遮罩 + IPC restart + reload。
+      // 不在这里自己重启——分散实现会让 Settings dialog 与 banner「重新连接」
+      // 走两条不同路径，时序 / banner状态 / reload 时机不一致。
+      // emit('restart-requested') 让 App.vue 接管，App.vue.handleRestartBackend
+      // 与 banner「重新连接」共用同一份实现。
+      this.$emit('restart-requested')
+      // 关闭 dialog：用户已看到重启反馈（全局遮罩），dialog 不需要继续留着
+      // （留着会让 dialog 在 reload 那一帧还占据 DOM，造成视觉抖动）。
+      this.close()
     },
     buildPayload() {
       // 只发跟 originalConfig 对比有修改的段（llm_providers / skills / permissions）。
@@ -643,24 +625,6 @@ export default {
         }
       }
       return hasDiff ? result : null
-    },
-    async pollHealth(maxWaitSec = 120) {
-      // 每 2s 一次：本机启动 docling + QwenVL 冷启动可能耗 90 秒以上，90s 不够
-      for (let i = 0; i < maxWaitSec; i += 2) {
-        try {
-          await healthCheck()
-          return true
-        } catch (e) {
-          await new Promise(r => setTimeout(r, 2000))
-        }
-      }
-      return false
-    },
-    cleanupTimer() {
-      if (this.restartTimer) {
-        clearInterval(this.restartTimer)
-        this.restartTimer = null
-      }
     },
     flashTip(msg) {
       const tip = document.createElement('div')
@@ -1127,56 +1091,6 @@ export default {
 .btn-primary:disabled {
   opacity: 0.4;
   cursor: not-allowed;
-}
-
-/* ===== Restart overlay ===== */
-.restart-mask {
-  position: absolute;
-  inset: 0;
-  background: rgba(255, 255, 255, 0.85);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 10;
-  border-radius: 12px;
-}
-.dark-theme .restart-mask {
-  background: rgba(33, 33, 33, 0.85);
-}
-
-.restart-card {
-  text-align: center;
-  padding: 24px;
-}
-.restart-card h4 {
-  margin: 14px 0 4px;
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-.restart-card p {
-  margin: 4px 0;
-  font-size: 13px;
-  color: var(--text-secondary);
-}
-.restart-progress {
-  margin-top: 8px !important;
-  font-size: 12px !important;
-  color: var(--text-primary) !important;
-  font-weight: 500;
-}
-
-.spinner {
-  width: 28px;
-  height: 28px;
-  border: 2px solid var(--border-color);
-  border-top-color: var(--text-primary);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-  margin: 0 auto;
-}
-@keyframes spin {
-  to { transform: rotate(360deg); }
 }
 
 /* ===== Transitions ===== */

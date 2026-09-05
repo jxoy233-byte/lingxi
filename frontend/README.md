@@ -35,9 +35,12 @@ Vue 3 + Vite 单页应用，提供 **Web 端** 和 **Electron 桌面端** 两种
 - **权限审批内嵌**：`cmd` / `code` 工具触发审批时把按钮内嵌到对应 `toolCall` 行（高亮上下文），不走独立 modal 弹窗；4 档决策 approve / this-time-only / deny / feedback:<text>
 - **消息排队**：AI 流式期间输入框不再禁用，新消息进 Redis `queue:{sid}` FIFO，本轮 `done` 后自动出队续发；用户切走会话时推迟 drain，切回再发
 - **定时任务内嵌**：v0.1.5 起改为**每个会话底部内嵌** ⏰ 触发按钮（仅 `tasks.length > 0` 渲染）+ 展开任务列表；支持启停 / 立即运行 / 行内二次确认删除；展开状态按 `lingxi.scheduledTasksExpanded` localStorage 持久化；创建走对话（agent 调 Scheduler skill）
-- **头部刷新按钮**：↻ 按钮 + `Cmd/Ctrl+R` + 菜单 → 视图 → 刷新，触发 `window.location.reload()` 走完整重载
+- **头部刷新按钮**：↻ 按钮 + `Cmd/Ctrl+R` + 菜单 → 视图 → 刷新，触发 `refreshPage()`（Electron 走主进程 `webContents.reload()`，比 JS 级 reload 在 `protocol.handle('file')` 拦截器下更可靠）
 - **Electron 多环境**：开发 / 测试 / 正式三套配置，菜单栏与窗口标题栏上以颜色徽章区分
-- **file:// 协议拦截**：Electron 桌面端用 `protocol.handle('file', ...)` 把 `/chat/*` 和 `/static/*` 转发到后端，等价于 Vite dev 模式的代理
+- **file:// 协议拦截**：Electron 桌面端用 `protocol.handle('file', ...)` 把 `/chat/*` 和 `/static/*` 转发到后端，等价于 Vite dev 模式的代理；v0.2.1 起 Windows 路径剥盘符（`/C:/chat/xxx` → `/chat/xxx`）避免误判 403
+- **配置向导 SetupView（v0.2.1 新增）**：6 个 pane（欢迎 → API Key → 搜索 Key → 审批策略 → LibreOffice 探测 → 完成）；顶栏 🪄 按钮 + `/setup` 命令打开；保存走 `/admin/config` segment 级热加载（仅 `llm_providers` 改动需重启）；完成页触发全局 restart-mask
+- **启动引导浮窗 BootstrapView（v0.2.1 重构）**：cold start 显示 + autoEnter 三态按钮 + 项目根自动迁移横幅（saved PROJECT_ROOT 版本落后时弹琥珀色「已自动切换到更新的项目目录」）
+- **全局重启遮罩（v0.2.1 统一化）**：banner「重新连接」/ Settings「Save & Restart」/ SetupView 完成含 `llm_providers` 改动 → 统一走 App.vue 的 `handleRestartBackend()`，弹同一个 `.restart-mask`（z-index 1900）+ spinner + 倒计时；`refreshPage()` 走 Electron `webContents.reload()` 避免 `protocol.handle('file')` 下 JS 级 reload 被拦截
 
 ## 技术栈
 
@@ -131,7 +134,9 @@ frontend/
 │   ├── App.vue                 # 根组件：全局状态、SSE 连接、错误气泡保护、刷新页面
 │   ├── router/index.js         # 路由表
 │   └── components/             # 业务组件
-│       ├── ChatHeader.vue      # 顶部条（含 ↻ 刷新按钮）
+│       ├── App.vue (父组件)
+│       ├── BootstrapView.vue   # 启动引导浮窗（v0.2.1 起的 SetUpView 重命名；cold start 显示 + autoEnter 三态按钮 + 项目根自动迁移横幅）
+│       ├── ChatHeader.vue      # 顶部条（含 ↻ 刷新按钮 + 🪄 配置向导入口）
 │       ├── CheckpointPanel.vue
 │       ├── ConfirmDialog.vue
 │       ├── ConversationItem.vue
@@ -144,7 +149,8 @@ frontend/
 │       ├── MessageList.vue
 │       ├── ScheduledTaskItem.vue     # 单条定时任务卡片（v0.1.5 起移入 ConversationItem 内嵌展开）
 │       ├── SearchResults.vue
-│       ├── SettingsDialog.vue       # 设置弹窗（Appearance / Models / Skills / Permissions 4 tab + vl.local 开关 + 按段热加载 + 立即清理 checkpoint 按钮 v0.1.5）
+│       ├── SettingsDialog.vue       # 设置弹窗（Appearance / Models / Skills / Permissions 4 tab + vl.local 开关 + 按段热加载 + 立即清理 checkpoint 按钮 v0.1.5）；v0.2.1 起 Save & Restart 走全局 restart-mask
+│       ├── SetupView.vue            # 配置向导（v0.2.1 新增；顶栏 🪄 按钮 + /setup 命令打开；6 个 pane 向导）
 │       ├── Sidebar.vue
 │       └── WebPreviewPanel.vue
 ├── tips/                       # 用户提示插图（img.png 等）
@@ -155,7 +161,7 @@ frontend/
 
 | 组件 | 职责 |
 |------|------|
-| `App.vue` | 全局状态中心；维护 SSE 连接、错误气泡保护集合 `_sessionHadError: Set<session_id>`、当前会话切换；`refreshPage()` 触发 `window.location.reload()`；v0.1.5 起维护 `scheduledTasksMap: Map<session_id, ScheduledTask[]>` + `_scheduledTasksRefreshing: bool` + 三 Set 侧栏状态点（`_activeStreamingSessions` / `_approvalPendingSessions` / `_completedSessions` / `_errorSessions`） |
+| `App.vue` | 全局状态中心；维护 SSE 连接、错误气泡保护集合 `_sessionHadError: Set<session_id>`、当前会话切换；`refreshPage()` 触发 Electron `webContents.reload()`（web fallback `location.reload()`）；v0.1.5 起维护 `scheduledTasksMap: Map<session_id, ScheduledTask[]>` + `_scheduledTasksRefreshing: bool` + 三 Set 侧栏状态点（`_activeStreamingSessions` / `_approvalPendingSessions` / `_completedSessions` / `_errorSessions`）；v0.2.1 起 `_hasEverConnected` gate 抑制启动期 banner + `_backendRestarting/_restartElapsed/_restartTimer` 全局重启遮罩状态 + `_swappedProjectRoot`/`_currentProjectRoot` 项目根迁移横幅数据；统一 `handleRestartBackend()` 是 banner/Settings/SetupView 三处入口的 IPC + reload 通路 |
 | `Sidebar.vue` | 会话列表容器，支持新建 / 删除 / 切换会话；v0.1.5 起把每个会话的定时任务触发状态、展开按钮下发给 ConversationItem |
 | `ConversationItem.vue` | 单个会话项：双击编辑标题、悬停显示删除按钮、相对时间显示（分钟/小时/天数）、四色侧栏状态点（streaming 蓝闪 / approval 黄脉冲 / errored 红常 / completed 绿常）；**v0.1.5 起** 底部内嵌 ⏰ 触发按钮（仅 `tasks.length > 0` 渲染）+ `<transition name="scheduled-expand">` 展开任务列表（`max-height: 0 → 110px`，超过 3 条滚动）；展开状态按 `lingxi.scheduledTasksExpanded` localStorage 持久化 |
 | `ChatHeader.vue` | 顶部条：主题切换、Checkpoint 面板、**↻ 刷新页面按钮**（与 `DataAnalysisTree` 同款 SVG），新对话按钮 |
@@ -168,7 +174,9 @@ frontend/
 | `DataAnalysisTree.vue` / `DataTreeNode.vue` | 数据分析生成的目录树（递归节点），面板头部含 reload 按钮 |
 | `ScheduledTaskItem.vue` | **v0.1.5 起** 单条定时任务卡片：状态圆点 + cron + 上次运行时间 + 累计次数；⏸/▶ 启停、⚡ 立即运行、🗑 行内小红叉二次确认删除（参考偏好 21 状态机：`confirmingDelete` + document click 取消） |
 | `SearchResults.vue` | 搜索结果列表渲染 |
-| `SettingsDialog.vue` | 设置弹窗：Appearance / Models / Skills / Permissions 4 tab；VL `local` 开关 + fallback 解释；LLM provider / Skills API Key 脱敏编辑 + Save & Restart（**只有 `llm_providers` 段需要重启**，permissions/skills 改动立即生效）；`buildPayload()` diff-only（`_deepDiff` + `_stripEmptyObjects`，避免「改一字段把整个 llm_providers 都带上」误判）；已批准 / 已拒绝命令列表行内删除；**v0.1.5 新增**「立即清理 checkpoint」按钮（POST `/admin/checkpoints/prune`） |
+| `SettingsDialog.vue` | 设置弹窗：Appearance / Models / Skills / Permissions 4 tab；VL `local` 开关 + fallback 解释；LLM provider / Skills API Key 脱敏编辑 + Save & Restart（**只有 `llm_providers` 段需要重启**，permissions/skills 改动立即生效）；`buildPayload()` diff-only（`_deepDiff` + `_stripEmptyObjects`，避免「改一字段把整个 llm_providers 都带上」误判）；已批准 / 已拒绝命令列表行内删除；**v0.1.5 新增**「立即清理 checkpoint」按钮（POST `/admin/checkpoints/prune`）；**v0.2.1 起** Save & Restart 走 `emit('restart-requested')` 让 App.vue 接管全局 restart-mask，自己不写 timer / reload |
+| `SetupView.vue` | **v0.2.1 新增** 配置向导（1223 行大组件）：6 个 pane（欢迎 → API Key → 搜索 Key → 审批策略 → LibreOffice 探测 → 完成）；顶栏 🪄 按钮 + `/setup` 命令打开；LibreOffice 探测独立 IPC；保存走 `/admin/config` segment 级热加载（仅 `llm_providers` 改动需重启）；完成页 diff 摘要告诉用户哪几段被改、是否触发全局重启遮罩。**注意**：本组件**不**混用 BootstrapView——后者是首次启动浮窗，本组件是任何时候可打开的向导；自己**不**写 `setInterval` / `window.location.reload()`，重启全部 `emit('restart-requested')` 交给 App.vue |
+| `BootstrapView.vue` | **v0.2.1 重命名** 启动引导浮窗（v0.2.0 之前叫 SetUpView）：cold start 显示 + autoEnter 三态按钮（启动中 / 进入应用 / 启动应用）+ 项目根自动迁移琥珀色横幅（saved PROJECT_ROOT 版本落后于 BFS 候选时弹）；详见偏好 22 / 23 |
 | `WebPreviewPanel.vue` | Electron 内嵌网页预览窗口（IPC `open-web-preview`） |
 
 ### 全局状态（App.vue）
@@ -360,7 +368,7 @@ const isTest = process.env.NODE_ENV === 'test'
 | `app.name` | `灵析` | 应用名（菜单栏第一项、`app.getName()`） |
 | `app.title` | `灵析——数据分析智能助手` | 窗口标题 / 关于弹窗 |
 | `app.identifier` | `com.chatme.app` | bundle identifier |
-| `app.version` | `0.2.0` | 同步后端版本号 |
+| `app.version` | `0.2.1` | 同步后端版本号 |
 | `window.width × height` | `1100 × 720` | 主窗口尺寸 |
 | `window.minWidth × minHeight` | `650 × 480` | 最小尺寸 |
 | `devServer.url` | 从 Vite 导入的 `http://localhost:18211` | Electron 开发时加载的 URL |
@@ -494,8 +502,8 @@ DMG 阶段需要 `dmgbuild-bundle-arm64-*.tar.gz` 包，npmmirror 当前缺这�
 release/electron-builder/
 ├── mac-arm64/
 │   └── 灵析.app          ← 直接打开
-├── 灵析-0.2.0-arm64-mac.zip
-└── 灵析-0.2.0-mac.zip
+├── 灵析-0.2.1-arm64-mac.zip
+└── 灵析-0.2.1-mac.zip
 ```
 
 打开方式：
@@ -507,7 +515,7 @@ open ~/coding/projects/ChatMe/release/electron-builder/mac-arm64/灵析.app
 "~/coding/projects/ChatMe/release/electron-builder/mac-arm64/灵析.app/Contents/MacOS/灵析"
 
 # 解压 zip 后再打开
-unzip 灵析-0.2.0-arm64-mac.zip -d ~/Downloads
+unzip 灵析-0.2.1-arm64-mac.zip -d ~/Downloads
 open ~/Downloads/灵析.app
 ```
 

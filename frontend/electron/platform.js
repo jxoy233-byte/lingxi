@@ -186,6 +186,104 @@ export function isValidProjectRoot(dir) {
   }
 }
 
+// ==================== 版本指纹 ====================
+//
+// 目的：当用户换了新代码库（重新 git pull / 换目录 / 多副本共存）时，
+// saved PROJECT_ROOT（userData/project-root.json 持久化）可能指向旧副本，
+// 旧副本的 `app_config.get("port", N)` 兜底端口 / pyproject 版本号都还是老值，
+// 启动时 main.js 的端口探测拿到的是老值 → 全部端口错乱。
+//
+// 解决：每次 discoverProjectRoot 都读 saved 路径 + BFS 候选的指纹，
+// 谁的版本号更新用谁；端口字段变化了也能识别（不在 saved 段时仍以 saved 为准，
+// BFS 里有更新版本才迁移）。
+//
+// 为什么不直接用 saved 路径永远赢：因为 Windows 重启 / 中途断电 / 换硬盘时
+// 旧目录可能不可达或被新目录取代；纯 cached path 永远跟新代码脱节。
+
+/**
+ * 读 pyproject.toml 第一段 `version = "X.Y.Z"`。
+ * 不引入 toml 解析（避免给主进程加重型依赖），用正则够用——pyproject 顶层
+ * version 总是单行 `version = "..."` 格式（PEP 621）。
+ */
+function _readPyprojectVersion(projectRoot) {
+  try {
+    const text = fs.readFileSync(path.join(projectRoot, 'backend', 'pyproject.toml'), 'utf8')
+    const m = text.match(/^\s*version\s*=\s*["']([^"']+)["']/m)
+    return m ? m[1] : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 读 backend/main.py 兜底端口 `app_config.get("port", NNNNN)`。
+ * 这个数字一旦变了（比如 8211 → 38211），BFS 候选里的新值就是权威。
+ * 只匹配主入口里的字面值，不深入（兜底端口通常写在一行；具体生效逻辑靠 ChatMeConfig）。
+ */
+function _readMainPyPort(projectRoot) {
+  try {
+    const text = fs.readFileSync(path.join(projectRoot, 'backend', 'main.py'), 'utf8')
+    const m = text.match(/app_config\.get\(\s*["']port["']\s*,\s*(\d{4,6})\s*\)/)
+    return m ? parseInt(m[1], 10) : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 取一个项目根的「版本指纹」。
+ * 返回 { version: string|null, port: number|null }；任一字段缺失为 null（不抛）。
+ *
+ * 后续 _compareFingerprints 用这两个字段决定哪个更新：version 不同以 version 为主，
+ * version 相同才看 port（port 不一致说明用户改了端口但没 bump version，照样走更新）。
+ */
+export function _readProjectFingerprint(projectRoot) {
+  return {
+    version: _readPyprojectVersion(projectRoot),
+    port: _readMainPyPort(projectRoot),
+  }
+}
+
+/**
+ * 简单 semver 比较（major.minor.patch，忽略 prerelease / build）。
+ * 任一为 null → 返回 0（视为相等，由调用方决定 fallback）。
+ * 返回：a > b → 正数；a < b → 负数；相等 → 0。
+ */
+function _compareSemver(a, b) {
+  if (!a || !b) return 0
+  const pa = a.split('.').map(n => parseInt(n, 10) || 0)
+  const pb = b.split('.').map(n => parseInt(n, 10) || 0)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] || 0, y = pb[i] || 0
+    if (x !== y) return x - y
+  }
+  return 0
+}
+
+/**
+ * 比较两个指纹谁更新。
+ * 规则：
+ *   1) version 双方都有 → 以 semver 判定（-1/0/+1）
+ *   2) version 有一方缺失 → 用 port 是否变化判定（任一方缺失视为「不知道」，返 0）
+ *   3) 全部相同 → 0
+ *
+ * 调用方通常用 > 0 表示「b 比 a 新」；相同版本但 port 不同也算 b 更新（罕见，但兜底）。
+ */
+function _compareFingerprints(a, b) {
+  if (a.version && b.version) {
+    const v = _compareSemver(a.version, b.version)
+    if (v !== 0) return v
+  }
+  // version 相同或缺失 → 看 port 是否变了
+  if (a.port && b.port && a.port !== b.port) {
+    // port 不一致：按「端口数字更大」为更新约定不靠谱（迁移可能升也可能降）；
+    // 用 saved vs candidate 的相对位置来判：candidate 端口是未来端口 → candidate 更新。
+    // 实际上发现 port 变化且 version 没变通常是开发期手工改的，candidate 优先即可。
+    return 1
+  }
+  return 0
+}
+
 const STARTUP_PREFERENCES_FILE = 'startup-preferences.json'
 
 function startupPreferencesPath(app) {
@@ -234,11 +332,22 @@ export function saveProjectRoot(app, dir) {
 }
 
 /**
- * BFS 收窄版本：只从传入的 root 目录开始下钻，命中即返回。
+ * BFS 收窄版本：从传入的 root 目录开始下钻，命中即返回第一个 valid 根。
+ * 旧路径，给保留为单元用——discoverProjectRoot 现在改用 _bfsCollectAll 拿全候选。
  */
 function bfsFrom(root, maxDepth, maxVisits) {
+  const found = _bfsCollectAll(root, maxDepth, maxVisits)
+  return found.length > 0 ? found[0] : null
+}
+
+/**
+ * BFS 全量收：返回所有命中的 valid 项目根（[{path, fingerprint}, ...]）。
+ * 不再「命中即返回」——升级判断要拿全候选对比 fingerprint。
+ */
+function _bfsCollectAll(root, maxDepth, maxVisits) {
   const queue = [[root, 0]]
   let visits = 0
+  const results = []
 
   while (queue.length && visits < maxVisits) {
     const [dir, depth] = queue.shift()
@@ -257,12 +366,13 @@ function bfsFrom(root, maxDepth, maxVisits) {
 
       const full = path.join(dir, e.name)
       if (CANDIDATE_NAMES.includes(e.name.toLowerCase()) && isValidProjectRoot(full)) {
-        return full
+        results.push({ path: full, fingerprint: _readProjectFingerprint(full) })
+        // 不 return，继续下钻（深度可能更深还有同名 lingxi/）
       }
       if (depth + 1 < maxDepth) queue.push([full, depth + 1])
     }
   }
-  return null
+  return results
 }
 
 // ==================== 最近 clone 路径临时变量 ====================
@@ -286,20 +396,44 @@ export function getLastCloneTarget() {
  * 找项目根：先扫 home 下的常见工作目录（绝大多数用户场景命中），
  * 找不到再降级到 home 全量 BFS。深度提到 5——之前 4 在
  * `~/work/org/repo/lingxi` 这种结构下会漏。
+ *
+ * 返回 [{path, fingerprint}, ...]（不去重）；discoverProjectRoot 自己挑 best。
+ * 兼容旧行为：调用方拿首个就当作旧 scanForProjectRoot 的返回值。
  */
-function scanForProjectRoot(maxDepth = 5, maxVisits = 4000) {
+function _scanAllProjectRoots(maxDepth = 5, maxVisits = 4000) {
   const home = os.homedir()
+  const collected = []
+  const seen = new Set()
+
+  const pushUnique = (cands) => {
+    for (const c of cands) {
+      if (!seen.has(c.path)) {
+        seen.add(c.path)
+        collected.push(c)
+      }
+    }
+  }
 
   // 先扫 home 直下的常见工作目录
   for (const d of COMMON_WORK_DIRS) {
     const full = path.join(home, d)
     if (!fs.existsSync(full)) continue
-    const found = bfsFrom(full, maxDepth, maxVisits)
-    if (found) return found
+    pushUnique(_bfsCollectAll(full, maxDepth, maxVisits))
   }
 
   // 降级：home 全量
-  return bfsFrom(home, maxDepth, maxVisits)
+  pushUnique(_bfsCollectAll(home, maxDepth, maxVisits))
+
+  return collected
+}
+
+/**
+ * 旧 API 兼容：从全量扫描里取第一个有效根。
+ * 新代码应直接用 _scanAllProjectRoots + discoverProjectRoot 的版本比较逻辑。
+ */
+function scanForProjectRoot(maxDepth = 5, maxVisits = 4000) {
+  const all = _scanAllProjectRoots(maxDepth, maxVisits)
+  return all.length > 0 ? all[0].path : null
 }
 
 /**
@@ -370,7 +504,9 @@ export function persistProjectRootToShell(dir) {
 /**
  * 项目根定位，按优先级：
  *   1. LINGXI_PROJECT_ROOT 环境变量（CLI / 调试 / 特殊部署）
- *   2. 用户上次手动选择并保存到 userData 的路径
+ *   2. 用户上次手动选择并保存到 userData 的路径 —— **带版本指纹校验**：
+ *      如果 BFS 能扫到比 saved 更新（version 大 / port 变化）的 lingxi/，自动迁移
+ *      到新路径并返回 `swappedFrom` 字段供 UI 提示用户。
  *   3. dev 模式（未打包）：__dirname 上溯（frontend/electron → frontend → 根）
  *   4. home 下 BFS 扫 lingxi/ ChatMe/
  *
@@ -379,6 +515,13 @@ export function persistProjectRootToShell(dir) {
  * 全部没命中返回 null —— 由引导页让用户手动选目录（startup:pick-project-root）。
  *
  * ⚠️ app.isPackaged 要在 app.whenReady() 之后才准，所以不要在模块顶层调用本函数。
+ *
+ * 返回 { root, source, swappedFrom? }：
+ *   - root: 最终使用的项目根路径
+ *   - source: 'env' | 'clone' | 'saved' | 'dev' | 'scan' | 'swap' | 'none'
+ *     - 'swap': saved 路径被自动迁移到更新版本（root 是新值）
+ *     - 其他值与旧语义一致
+ *   - swappedFrom: 仅当发生自动迁移时存在，{ path, fingerprint } 指向旧 saved
  */
 export function discoverProjectRoot(app) {
   if (isValidProjectRoot(process.env.LINGXI_PROJECT_ROOT)) {
@@ -394,21 +537,59 @@ export function discoverProjectRoot(app) {
   }
 
   const saved = readSavedProjectRoot(app)
-  if (saved) return { root: saved, source: 'saved' }
+  if (saved) {
+    // saved 命中 → 但还是要跑一次 BFS 收集候选，比 fingerprint 看是否有过期副本。
+    // 为什么不直接信任 saved：Windows 启动失败场景里 saved 路径可能指向旧 lingxi/ 副本，
+    // 副本里 backend/main.py 还写着兜底端口 8211，新 lingxi/ 已经迁移到 38211。
+    // 不比对的话 saved 永远赢 → 后端永远起不来。
+    const savedFp = _readProjectFingerprint(saved)
+    const candidates = _scanAllProjectRoots().filter(c => c.path !== saved)
+
+    let bestCandidate = null
+    for (const c of candidates) {
+      if (_compareFingerprints(savedFp, c.fingerprint) < 0) {
+        // c 比 saved 更新 → 候选赢；多个候选时挑 version 最大的（port 仅作 tie-break）
+        if (!bestCandidate || _compareFingerprints(bestCandidate.fingerprint, c.fingerprint) < 0) {
+          bestCandidate = c
+        }
+      }
+    }
+
+    if (bestCandidate) {
+      // 自动迁移：持久化新路径 + log warn（main.js console 能看到，调试用）
+      console.warn(
+        `[setup] ⚠️ saved PROJECT_ROOT 落后于 BFS 候选，自动迁移: ` +
+        `${saved} (v${savedFp.version || '?'}:${savedFp.port || '?'}) → ` +
+        `${bestCandidate.path} (v${bestCandidate.fingerprint.version || '?'}:${bestCandidate.fingerprint.port || '?'})`
+      )
+      try { saveProjectRoot(app, bestCandidate.path) } catch (e) {
+        console.error('[setup] 迁移时 userData 持久化失败:', e.message)
+      }
+      persistProjectRootToShell(bestCandidate.path).catch(() => {})
+      return {
+        root: bestCandidate.path,
+        source: 'swap',
+        swappedFrom: { path: saved, fingerprint: savedFp },
+      }
+    }
+
+    return { root: saved, source: 'saved' }
+  }
 
   if (!app.isPackaged) {
     const devRoot = path.resolve(__dirname, '..', '..')
     if (isValidProjectRoot(devRoot)) return { root: devRoot, source: 'dev' }
   }
 
-  const scanned = scanForProjectRoot()
-  if (scanned) {
-    // 首次 BFS 命中 → 持久化，best-effort 不阻塞主流程
-    try { saveProjectRoot(app, scanned) } catch (e) {
+  const candidates = _scanAllProjectRoots()
+  if (candidates.length > 0) {
+    // 首次 BFS 命中 → 持久化第一个，best-effort 不阻塞主流程
+    const first = candidates[0]
+    try { saveProjectRoot(app, first.path) } catch (e) {
       console.error('[setup] userData 持久化失败:', e.message)
     }
-    persistProjectRootToShell(scanned).catch(() => {})
-    return { root: scanned, source: 'scan' }
+    persistProjectRootToShell(first.path).catch(() => {})
+    return { root: first.path, source: 'scan' }
   }
 
   return { root: null, source: 'none' }

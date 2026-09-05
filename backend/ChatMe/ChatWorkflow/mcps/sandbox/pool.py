@@ -109,6 +109,9 @@ class SandboxPool:
         self.temp_containers: Set[str] = set()
         # 所有已知 cid（含 idle + in-use）
         self.all_containers: Set[str] = set()
+        # 容器名生成计数器：pid + time + counter → sha1[:8] 作为 short_id 后缀，
+        # 让 `docker ps -q --filter name=chatme-python-sandbox` 能命中所有 Lingxi 沙盒。
+        self._container_counter = 0
         # 容器最近一次归还时间戳（用于 LRU GC）
         self.last_released_ts: Dict[str, float] = {}
 
@@ -169,8 +172,24 @@ class SandboxPool:
         try:
             self._generate_sandbox_config()
 
+            # 容器命名 + label —— Electron 兜底停的关键:
+            # - name=chatme-python-sandbox-<short> → frontend stopLingxiContainers
+            #   `docker ps -q --filter name=chatme-python-sandbox` 直接命中；
+            # - label=com.chatme.sandbox=true → 备用筛选维度（万一 name 重名可走 label）
+            # 短 id 用 hashlib.sha1(pid + time + counter) 前 8 位 hex —— Docker name 限制 64 chars，
+            # 拼接后 31 chars 富余。同名冲突极低（同进程同一秒内不可能多次创建），
+            # 真撞名让 Docker 报 "name already in use" → _create_container 返 None → GC 重建。
+            import hashlib
+            import os as _os
+            _seed = f"{_os.getpid()}-{_os.time()}-{self._container_counter}".encode()
+            short_id = hashlib.sha1(_seed).hexdigest()[:8]
+            self._container_counter += 1
+            container_name = f"chatme-python-sandbox-{short_id}"
+
             cmd = [
                 "docker", "run", "-d",
+                "--name", container_name,
+                "--label", "com.chatme.sandbox=true",
                 *self._build_skill_mount_args(),
                 # cached 读写：用户上传立即可见，沙盒生成图表立即给用户
                 "-v", f"{self.cached_path}:/cached:rw",
@@ -194,7 +213,7 @@ class SandboxPool:
             assert cmd[-2:] == ["sleep", "infinity"]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             container_id = result.stdout.strip()
-            self._logger.debug(f"[SandboxPool] 创建容器: {container_id}")
+            self._logger.debug(f"[SandboxPool] 创建容器: {container_id} ({container_name})")
             return container_id
         except Exception as e:
             self._logger.warning(f"[SandboxPool] 创建容器失败: {e}")

@@ -52,6 +52,12 @@ let servicesReady = false
 
 let healthMonitorInterval = null
 let lastBackendHealth = null   // null = 还没探过
+let consecutiveHealthFailures = 0  // 连续失败计数；任一次成功立即清零
+// 阈值 = 2 → 至少 2 × 5s = 10s 持续失败才推 banner false。
+// 单次 / 偶发抖动（kill 间隙 / OS 回收 socket / 后端短暂 GC）不触发 banner；
+// 阈值 = 1 会被抖动误判 → 闪烁；阈值 = 3 太长（15s）后端真挂了用户感知慢。
+// 2 是单次抖动容忍 + 后端真挂快速反馈的折中点。
+const HEALTH_FAILURE_THRESHOLD = 2
 
 function startHealthMonitor() {
   if (healthMonitorInterval) return
@@ -71,14 +77,37 @@ function stopHealthMonitor() {
 /**
  * 单次健康检查：探 backend；只有状态变了才推 IPC，避免
  * 每 5s 一次无意义的事件风暴（main → renderer）。
+ *
+ * 关键：单次探测失败可能是网络抖动（端口刚 kill 完 / OS 回收 socket / 后端处理慢），
+ * 不能立刻推 false → renderer 会闪 banner。只有连续 N 次探测都失败才算真挂。
+ * 连续失败计数到阈值 → 推 backendHealth=false（banner 显示）；
+ * 任何一次成功 → 立即推 backendHealth=true（banner 消失，不等下一帧）。
  */
 async function runHealthCheck() {
   const backendOk = await checkBackendHealth()
-  if (backendOk === lastBackendHealth) return
-  lastBackendHealth = backendOk
-  console.log(`[health] changed: backend=${backendOk}`)
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('backend-health-changed', { backend: backendOk })
+  if (backendOk) {
+    // 健康：立即推 true（不论之前几次失败，banner 必须立刻消失）
+    if (lastBackendHealth !== true) {
+      lastBackendHealth = true
+      consecutiveHealthFailures = 0
+      console.log('[health] changed: backend=true (recovered)')
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('backend-health-changed', { backend: true })
+      }
+    }
+    return
+  }
+  // 探测失败：累加计数，达到阈值才推 IPC
+  consecutiveHealthFailures = (consecutiveHealthFailures || 0) + 1
+  console.log(`[health] probe failed (${consecutiveHealthFailures}/${HEALTH_FAILURE_THRESHOLD})`)
+  if (consecutiveHealthFailures < HEALTH_FAILURE_THRESHOLD) return
+  // 达到阈值：判定为真失联，推 IPC
+  if (lastBackendHealth !== false) {
+    lastBackendHealth = false
+    console.log('[health] changed: backend=false (consecutive failures)')
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('backend-health-changed', { backend: false })
+    }
   }
 }
 
@@ -254,13 +283,20 @@ function registerFileProtocolInterceptor() {
     const url = new URL(request.url)
     const pathname = url.pathname
 
+    // 🔧 Win 上 file:///C:/.../dist/index.html 协议下，renderer `fetch('/chat/xxx')`
+    // 会解析成 file:///C:/chat/xxx —— `new URL(...).pathname` = `/C:/chat/xxx`（带盘符）。
+    // 直接 startsWith('/chat/') 命中失败 → 落到下面静态资源分支 → distDir 白名单校验 403。
+    // 解法：API 转发判定前先剥掉 `/<盘符>:` 前缀，恢复 Unix 形态 `/chat/xxx`。
+    // macOS / Linux 没有盘符，/foo 是真绝对路径，不能剥（保留 pathname 即可）。
+    const apiPathname = IS_WIN ? pathname.replace(/^\/[A-Za-z]:/, '') : pathname
+
     // API 路径转发到后端
     // 必须转发 method / headers / body —— 否则 POST /chat/ 会变成 GET，
     // 流式响应（SSE）的请求体也会被丢。
     // SSE 响应（text/event-stream）需要 duplex: 'half' 才能正确转发流式请求体；
     // 同时显式重建 Response 把 body stream 透传，避免 protocol.handle buffer。
-    if (pathname.startsWith('/chat/') || pathname.startsWith('/static/') || pathname.startsWith('/admin/')) {
-      const backendUrl = `${config.backend.apiUrl}${pathname}${url.search}`
+    if (apiPathname.startsWith('/chat/') || apiPathname.startsWith('/static/') || apiPathname.startsWith('/admin/')) {
+      const backendUrl = `${config.backend.apiUrl}${apiPathname}${url.search}`
       console.log('[proxy]', request.method, request.url, '→', backendUrl)
 
       const init = {
@@ -753,7 +789,10 @@ function checkBackendHealth() {
       resolve(res.statusCode === 200)
     })
     req.on('error', () => resolve(false))
-    req.setTimeout(1500, () => { req.destroy(); resolve(false) })
+    // 3s timeout（之前 1.5s 太短）：FastAPI 启动期 uvicorn 已经 LISTEN 但 lifespan
+    // 还没跑完时 /health 会 timeout，1.5s 内返回 → 判 false → banner 误闪。
+    // 3s 给 lifespan import 链（QwenVL weights 加载）更多缓冲；上层有连续失败计数兜底。
+    req.setTimeout(3000, () => { req.destroy(); resolve(false) })
   })
 }
 
@@ -1224,12 +1263,23 @@ async function stopLingxiContainers() {
     // 1. Redis。--time 5 比默认 10s 短,空闲容器秒停。
     await quietShell(`docker stop --time 5 chatme-redis ${nul}`, 8_000)
 
-    // 2. sandbox 容器。先列再停,空列表直接跳过 docker stop 调用。
-    const listOut = await quietShell(
+    // 2. sandbox 容器。SandboxPool 创建容器时用 `--name chatme-python-sandbox-<short>`
+    //    + `--label com.chatme.sandbox=true` 双标识；name filter 是主路径，
+    //    label filter 兜底（旧版 sandbox 没有 --name 时 label 仍能命中）。
+    //    去重合并两个 filter 的 id 列表（旧的 sandbox 可能只挂 label 没 name）。
+    const byName = await quietShell(
       `docker ps -q --filter "name=chatme-python-sandbox"`,
       5_000
     )
-    const ids = listOut.trim().split(/\r?\n/).filter(Boolean)
+    const byLabel = await quietShell(
+      `docker ps -q --filter "label=com.chatme.sandbox=true"`,
+      5_000
+    )
+    const idSet = new Set()
+    for (const out of [byName, byLabel]) {
+      out.trim().split(/\r?\n/).filter(Boolean).forEach(id => idSet.add(id))
+    }
+    const ids = [...idSet]
     if (ids.length > 0) {
       // 单行 docker stop <id1> <id2> ... 比逐个 stop 快(并行 SIGTERM + SIGKILL)。
       // 多个 id 加在一起 5s + 余量,3 个容器最多 ~7s。
@@ -1474,18 +1524,27 @@ async function startBackend(onLog) {
   config.backend.apiUrl = `http://127.0.0.1:${port}`
 
   // 把实际端口写进 config.json.app.port，后端启动时会读这个值（避免硬编码端口错位）
+  // 关键：必须能处理「config.json 不存在」的场景 —— fresh clone / 用户删了 .chatme/
+  // 时 fs.readFileSync 会抛 ENOENT，旧写法直接 catch + 跳过 write → 后端退回到
+  // 全局 ~/.chatme/config.json，可能从之前 lingxi 安装残留读到旧端口（8211）。
+  // 这里改成「读不到就用空对象」，确保写入一定发生，local config.json 一定被建出来。
   const configPath = path.join(root, 'backend', '.chatme', 'config.json')
   try {
-    const cfg = JSON.parse(fs.readFileSync(configPath, 'utf-8'))
+    let cfg = {}
+    try {
+      cfg = JSON.parse(fs.readFileSync(configPath, 'utf-8'))
+    } catch (readErr) {
+      // config.json 不存在 / 解析失败 → 用空对象继续,writeFileSync 会创建文件
+      console.log(`[backend] config.json 不存在或解析失败，新建: ${(readErr?.message || '').slice(0, 100)}`)
+    }
     cfg.app = cfg.app || {}
     cfg.app.port = port
+    fs.mkdirSync(path.dirname(configPath), { recursive: true })
     fs.writeFileSync(configPath, JSON.stringify(cfg, null, 4))
     console.log(`[backend] config.json.app.port 同步为 ${port}`)
   } catch (e) {
     console.warn('[backend] 同步 config.json 端口失败（继续启动）:', e.message)
   }
-
-  console.log('[backend] starting:', pythonExe, 'main.py', 'on port', port)
 
   const proc = spawn(pythonExe, ['main.py'], {
     cwd: backendDir,
@@ -1507,7 +1566,16 @@ async function startBackend(onLog) {
   })
   proc.on('exit', (code) => {
     console.log('[backend] exited:', code)
-    if (backendProcRef.value === proc) backendProcRef.value = null
+    // 后端意外退出（非 0 退出码 + 不是正常 SIGTERM/SIGKILL）→ 立即推一次 health check
+    // 让 banner 尽早出现。50ms 后跑 runHealthCheck（连失败阈值=2，约 10s 内出 banner）。
+    // 之前 5s 间隔发现 → 用户看到 403 一脸懵；现在提前到 next tick 推 + 连失败阈值兜底。
+    if (code !== 0 && code !== null && backendProcRef.value === proc) {
+      backendProcRef.value = null
+      consecutiveHealthFailures = 0  // 重置计数，让这次 50ms 后的探测开始新一轮累计
+      setTimeout(runHealthCheck, 50)
+    } else if (backendProcRef.value === proc) {
+      backendProcRef.value = null
+    }
   })
 
   // 轮询 /health（最多 120s；docling + QwenVL 首次加载可能慢）
@@ -1559,10 +1627,33 @@ function setServicesReady(ready, payload = {}) {
     mainWindow.webContents.send('startup:services-ready-changed', {
       ready,
       autoEnterFrontend: payload.autoEnterFrontend,
+      // 启动期自动迁移的 saved PROJECT_ROOT（旧路径 → 新路径），
+      // App.vue / BootstrapView 看到后弹黄色横幅告知用户「我们自动换到更新版本了」。
+      swappedProjectRoot: payload.swappedProjectRoot || null,
+      // source='restart' 让 App.vue 知道这是重启恢复（区别于首次启动），
+      // 重启中不应把用户踢回 BootstrapView 浮窗——保持 appReady=true + 主界面 disabled，
+      // 仅 banner 提示「重启中」。
+      source: payload.source || null,
     })
   }
-  // 健康检查同步更新 banner（之前 backend false，现在应都 true）
-  if (ready) runHealthCheck()
+  // 同步重置 health 状态：让 renderer 在收到 services-ready-changed 的同一帧
+  // 拿到一致的 banner 状态（之前 false 现在 true 的变化要走 runHealthCheck 推，
+  // 否则 App.vue 端 banner 状态依赖 5s 间隔轮询，期间会出现 servicesReady 翻转
+  // 但 backendHealth banner 状态不一致的闪烁）。
+  if (ready) {
+    // 启动 / 重启完成：让 health probe 立即跑一次推当前状态（让 banner 同步消失）。
+    // 重置失败计数（重启期间可能累加了计数）。
+    consecutiveHealthFailures = 0
+    runHealthCheck()
+  } else if (payload?.source === 'restart') {
+    // 重启窗口期：立即推 backendHealth=false，让 banner 立刻出现，不等 5s 间隔。
+    // 这是权威信号（用户主动点重启），不走连续失败计数阈值。
+    lastBackendHealth = null
+    consecutiveHealthFailures = 0  // 重置计数，避免 kill 间隙的探测失败累加干扰
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('backend-health-changed', { backend: false })
+    }
+  }
 }
 
 // ---------- 注册 startup IPC ----------
@@ -1576,13 +1667,24 @@ function setServicesReady(ready, payload = {}) {
  * - 失败抛错，由 IPC 兜底返回 { ok: false, error } 让前端给用户反馈
  */
 async function restartBackend() {
+  // 重启窗口期先推 servicesReady=false：renderer 看到 _hasEverConnected 已 true，
+  // 翻 appReady=false + 显示 banner（用户感知「重启中」）。这一步必须在 kill 前发，
+  // 否则 renderer 一帧内还在用旧 backend，banner / disabled 状态延后翻转。
+  // source='restart' 让 App.vue 不踢回 BootstrapView 浮窗。
+  setServicesReady(false, { source: 'restart' })
+  // 重置 health cache，让 runHealthCheck 把新一轮 false → true 都推给 renderer
+  // （kill 后 health probe 必然 false，起来后 true；两次状态变化都要通知）。
+  lastBackendHealth = null
+
   killChild(backendProcRef, 'backend')
   // 给 OS 回收旧 socket / 释放端口的时间（FastAPI 软关闭可能 1-2s 没收完）
   await new Promise(r => setTimeout(r, 500))
   await startBackend()
   // 推 servicesReady 状态（让 renderer 翻 appReady=true + initConversation）+
   // 即时健康检查（让 banner 立即消失）。两者独立：前者解除 disabled，后者驱动 banner。
-  setServicesReady(true, { autoEnterFrontend: true })
+  // source='restart' 保持，App.vue 据此跳过 initConversationState（reload 由
+  // SettingsDialog 自己触发，不靠 servicesReady 翻 true 的路径）。
+  setServicesReady(true, { autoEnterFrontend: true, source: 'restart' })
   runHealthCheck()
 }
 
@@ -1792,9 +1894,23 @@ function registerStartupIpc() {
    * 状态变化走 mainWindow.webContents.send('backend-health-changed', ...) push，无需 renderer 轮询
    */
   ipcMain.handle('startup:get-health', async () => {
-    const backend = await checkBackendHealth()
-    lastBackendHealth = backend
-    return { backend }
+    // 与 runHealthCheck 同语义：连续失败阈值才判 false；成功立即判 true。
+    // 注意：返回结果**不**写 lastBackendHealth —— 这是 renderer 首次 mount 的快照，
+    // 真实状态由 runHealthCheck 的 5s 间隔维护，避免 get-health 调用和 runHealthCheck
+    // 互相干扰 lastBackendHealth 状态机。
+    const probe = await checkBackendHealth()
+    if (probe) {
+      consecutiveHealthFailures = 0
+      return { backend: true }
+    }
+    // 单次失败不直接返回 false —— 累加计数到阈值才返回 false
+    consecutiveHealthFailures = (consecutiveHealthFailures || 0) + 1
+    if (consecutiveHealthFailures >= HEALTH_FAILURE_THRESHOLD) {
+      return { backend: false }
+    }
+    // 还在累计中：返回当前 lastBackendHealth（可能还是 null / true）
+    // renderer 端 App.vue 拿非 false 不会显示 banner
+    return { backend: lastBackendHealth === false ? false : true }
   })
 
   ipcMain.handle('startup:restart-backend', async () => {
@@ -1912,6 +2028,9 @@ app.whenReady().then(async () => {
   // ② 等 BootstrapView mount 时 clone 已完成，卡片不显示，用户不知道发生了什么。
   // 改完后：发现路径失败 → BootstrapView 显示「未找到 lingxi 项目目录」+ 「确认克隆 / 选择其他目录」栈按钮，
   // 用户点哪个才走对应路径。
+  //
+  // discovered.swappedFrom 在 saved 路径版本落后于 BFS 时被填入（discoverProjectRoot 自动迁移场景），
+  // 后面 warm-path 推送 servicesReady(true) 时带过去给 renderer，BootstrapView 显示「已自动迁移」横幅。
   const discovered = discoverProjectRoot(app)
   PROJECT_ROOT = discovered.root
   console.log(
@@ -1943,8 +2062,14 @@ app.whenReady().then(async () => {
   // 服务已健康 → 同步置 servicesReady=true，触发 BootstrapView 消失。
   // 这必须在 registerStartupIpc() 之后（renderer 已能收到事件），且在 createWindow 之后（renderer 已挂载）。
   // warm path 总是 autoEnter=true（用户已经在 app 里了，无需等点「进入应用」）。
+  // 如果 discoverProjectRoot 检测到 saved PROJECT_ROOT 过期并自动迁移，附上 swappedFrom 让 UI 提示。
   if (backendOk) {
-    setServicesReady(true, { autoEnterFrontend: true })
+    setServicesReady(true, {
+      autoEnterFrontend: true,
+      swappedProjectRoot: discovered.swappedFrom
+        ? { from: discovered.swappedFrom.path, fromFingerprint: discovered.swappedFrom.fingerprint }
+        : null,
+    })
   }
 })
 

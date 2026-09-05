@@ -1,6 +1,6 @@
 {
   "name": "lingxi-app",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "license": "MIT",
   "description": "基于 LangGraph 的多智能体数据分析对话系统",

@@ -309,31 +309,22 @@
           </div>
         </div>
 
-        <!-- 重启 mask（沿用 SettingsDialog 的遮罩视觉） -->
-        <transition name="fade">
-          <div v-if="restarting" class="restart-mask">
-            <div class="restart-card">
-              <div class="spinner"></div>
-              <h4>Restarting backend</h4>
-              <p>This will take a few seconds.</p>
-              <p class="restart-progress">{{ restartElapsed }}s</p>
-            </div>
-          </div>
-        </transition>
+        <!-- 重启 mask 移到 App.vue（全局共享），本组件 emit('restart-requested') 让父级
+             接管 —— 与 banner「重新连接」/ Settings「Save & Restart」共用同一套 UI。 -->
       </div>
     </div>
   </transition>
 </template>
 
 <script>
-import { getConfig, putConfig, restartBackend, healthCheck } from '@/utils/api.js'
+import { getConfig, putConfig } from '@/utils/api.js'
 
 export default {
   name: 'SetupView',
   props: {
     visible: { type: Boolean, default: false }
   },
-  emits: ['close'],
+  emits: ['close', 'restart-requested'],
   data() {
     return {
       currentStep: 0,
@@ -383,9 +374,9 @@ export default {
       showAdvanced: false,
 
       saving: false,
-      restarting: false,
-      restartElapsed: 0,
-      restartTimer: null,
+      // 重启遮罩 / 计时器 / IPC 都搬到 App.vue（_backendRestarting / _restartElapsed / _restartTimer），
+      // SetupView 通过 emit('restart-requested') 让 App.vue 跑统一重启流程。
+      // banner「重新连接」/ Settings「Save & Restart」/ SetupView apikey 改动共用同一份实现。
 
       policyOptions: [
         { value: 'default', label: 'Default', desc: '敏感命令（写 / code / 网络）每次执行前询问' },
@@ -530,15 +521,12 @@ export default {
         // 复位状态机（防止上次开着 setup 时改外部状态再开回来不一致）
         this.currentStep = 0
         this.showAdvanced = false
-        this.restarting = false
-        this.cleanupTimer()
+        // 重启遮罩 / timer 都搬到 App.vue,这里不需要清理
         // 拉最新配置 + 异步探测 LibreOffice 并行（不互相依赖）
         this.loadConfig().finally(() => {
           this.focusCurrentStep()
         })
         this.probeLibreOffice()
-      } else {
-        this.cleanupTimer()
       }
     },
     skillEnabled: {
@@ -778,7 +766,7 @@ export default {
         const needsRestart = segments.includes('llm_providers')
 
         if (needsRestart) {
-          await this.restartAndReload()
+          this.restartAndReload()
         } else {
           this.flashTip('已保存，立即生效')
           this.close()
@@ -789,49 +777,19 @@ export default {
         this.saving = false
       }
     },
-    async restartAndReload() {
-      this.restarting = true
-      this.restartElapsed = 0
-      this.restartTimer = setInterval(() => { this.restartElapsed++ }, 1000)
-
-      try {
-        await restartBackend()
-      } catch (e) {
-        console.warn('[SetupView] restart request ended (expected):', e)
-      }
-
-      const ok = await this.pollHealth(120)
-      this.cleanupTimer()
-      this.restarting = false
-
-      if (ok) {
-        // reload 主页面让 Vue 重新发对话 / 重新探测 health 等
-        window.location.reload()
-      } else {
-        alert('重启超时，请检查后端日志并手动重启。')
-        this.close()
-      }
-    },
-    async pollHealth(maxWaitSec = 120) {
-      for (let i = 0; i < maxWaitSec; i += 2) {
-        try {
-          await healthCheck()
-          return true
-        } catch (e) {
-          await new Promise(r => setTimeout(r, 2000))
-        }
-      }
-      return false
-    },
-    cleanupTimer() {
-      if (this.restartTimer) {
-        clearInterval(this.restartTimer)
-        this.restartTimer = null
-      }
+    restartAndReload() {
+      // 重启逻辑全部交给 App.vue：emit('restart-requested') 让 App.vue 跑
+      //   handleRestartBackend：开全局 spinner 遮罩 → IPC restartBackend（主进程
+      //   会等 /health 通,最长 120s）→ this.refreshPage()（webContents.reload）。
+      // 不在 SetupView 内自渲染遮罩 / 自 poll health / 自重启,避免和 banner / Settings
+      // 出现三套不一致实现（之前就是这样导致 timer 显示 0s / 遮罩不消失等）。
+      this.$emit('restart-requested')
+      // 关闭 SetupView：用户已看到全局遮罩反馈,继续留着会在 reload 那一帧抖动。
+      this.close()
     },
     handleKeydown(e) {
       if (!this.visible) return
-      if (this.restarting || this.saving || this.loading) return
+      if (this.saving || this.loading) return
       // 输入框 / textarea / select / contenteditable 内不接管 ↑↓ —
       // 让原生光标 / 选项切换行为正常（用户在 step 表单里编辑时优先本地编辑体验）
       const ae = document.activeElement
@@ -1406,33 +1364,6 @@ export default {
 .btn-primary:hover:not(:disabled) { opacity: 0.88; }
 .btn-text:disabled,
 .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
-
-/* ===== Restart mask（沿用 SettingsDialog 视觉） ===== */
-.restart-mask {
-  position: absolute;
-  inset: 0;
-  background: rgba(255, 255, 255, 0.92);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 10;
-  border-radius: 12px;
-}
-.dark-theme .restart-mask { background: rgba(33, 33, 33, 0.92); }
-.restart-card { text-align: center; padding: 24px; }
-.restart-card h4 { margin: 14px 0 4px; font-size: 15px; font-weight: 600; color: var(--text-primary); }
-.restart-card p { margin: 4px 0; font-size: 13px; color: var(--text-secondary); }
-.restart-progress { margin-top: 8px !important; font-size: 12px !important; color: var(--text-primary) !important; font-weight: 500; }
-.spinner {
-  width: 28px;
-  height: 28px;
-  border: 2px solid var(--border-color);
-  border-top-color: var(--text-primary);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-  margin: 0 auto;
-}
-@keyframes spin { to { transform: rotate(360deg); } }
 
 /* ===== Transitions ===== */
 .setup-fade-enter-active,

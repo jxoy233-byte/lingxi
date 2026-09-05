@@ -59,6 +59,10 @@
 - **图工作流大重构（v0.2.0 新增）**：新增 `_create_graph_improved`（替换 `_create_graph_core2` 作为默认图），用 MCP `done` 工具作为思维链结束标志替代 prompt "output Done 单词" 技巧；移除 `should_end_node` 决策节点，agent 无 tool_calls 走英文 SysMsg 重试（连续 3 次失败强制 final_node）；done cycle 由 `context_assembly_node` 用 `RemoveMessage` 清理（单 done 整轮删除 / 并发 done 仅删 done 的 ToolMessage）；前端 `mergeToolCallStart` + `_processBackendToolCalls` 两处过滤 done 工具调用避免 UI 闪一下再消失。
 - **ReAct 压缩健壮性（v0.2.0 新增）**：`pending_compaction_replace_at` 改用完整 loop 数（不再用 `tool_call_times`），绕开并行 1-3 个工具让 "+2" 不稳定的抖动；`DETECTION_MIN_ROUNDS` 4 → 5；新增 `compression_handled_this_round` 标记防同一轮 iteration 2+ 重复压缩；done cycle 跳过整个 ReAct 压缩段（避免无用压缩产物灌给 final_node + 后台 asyncio 任务泄漏）。
 - **许可证 + 商标（v0.2.0 新增）**：项目以 MIT License 发布（新增 `LICENSE` / `NOTICE` / `THIRD_PARTY_LICENSES.md`），`pyproject.toml` + `frontend/package.json` 加 `license` / `authors` 字段；「灵析™」与「Lingxi™」为产品名商标，MIT 不授予商标使用权，使用须经项目维护者书面授权。
+- **配置向导 SetupView（v0.2.1 新增）**：1223 行大组件把首装 / 改 apikey / 改模型连接 / 改权限策略的 UI 化：6 个 pane（欢迎 → API Key → 搜索 Key → 审批策略 → LibreOffice 探测 → 完成），顶栏 🪄 按钮 + `/setup` 命令打开；LibreOffice 探测独立 IPC；保存走 `/admin/config` segment 级热加载（仅 `llm_providers` 改动需重启）；完成页 diff 摘要告诉用户哪几段被改、是否触发全局重启遮罩。**注意**：BootstrapView 是首次启动浮窗（cold start 显示），SetupView 是配置向导（任何时候可打开），不要混用。
+- **应用启动链路健壮性（v0.2.1 修复）**：`fixRedis` 加 ping-first 兜底（`redis-cli ping` 返 PONG 直接跳过修复）+ 状态字符串归一化（trim + 剥引号 + 小写，避免 Windows cmd 偶发包裹 `"running"` miss）+ `docker start` 失败不 throw 改 `waitForRedisReady` 兜底探；`startBackend` 启动前调 `killPortIfListening(38211)` 清理旧 backend 残留（防旧进程占端口 + 新 spawn 静默 EADDRINUSE + `/health` 错连旧实例的伪成功）；Windows `file://` 协议拦截器 API 转发剥盘符（`/C:/chat/xxx` → `/chat/xxx`）；健康监测启动期 banner 抑制（`_hasEverConnected` gate + `HEALTH_FAILURE_THRESHOLD=2` 连续失败计数）；`source='restart'` payload 让重启窗口期主界面保持 `.app-disabled` 灰显 + banner 提示，不踢回 BootstrapView；`proc.on('exit')` 立即推 health 检查让 banner 10s 内出现；`checkBackendHealth` timeout 1.5s → 3s 给 QwenVL 冷启动留 buffer；`discoverProjectRoot` 加 version fingerprint 自动迁移（saved PROJECT_ROOT 旧版本自动切到 BFS 候选的新版本，BootstrapView 弹「已自动切换」琥珀横幅）。
+- **SandboxPool 容器名 + label 双标识（v0.2.1 新增）**：`docker run --name chatme-python-sandbox-<sha1[:8]> --label com.chatme.sandbox=true`，主进程 `stopLingxiContainers` 走 `name filter + label filter` 去重合并（兼容老 sandbox 仅 label 没 name 的情况）；sha1 seed = `pid + time + counter`，同进程同一秒内不可能多次创建。
+- **全局重启遮罩（v0.2.1 统一化）**：banner「重新连接」/ Settings「Save & Restart」/ SetupView 完成含 `llm_providers` 改动 → 统一走 App.vue 的 `handleRestartBackend()`，弹同一个 `.restart-mask`（z-index 1900）+ spinner + 倒计时（`_restartElapsed` 显式赋值防 Vue 3 Proxy ++ 自增响应性丢失）+ `refreshPage()`（Electron 走 `webContents.reload()` 而非 `window.location.reload()`，后者在 `protocol.handle('file')` 下偶尔被拦截导致遮罩卡住不消失）；子组件 emit('restart-requested') 后立即 close()，不留「dialog 在 reload 帧还占 DOM」视觉抖动。
 
 ## 界面预览
 
@@ -202,7 +206,7 @@ OPENAI_PRESENCE_PENALTY=0.0
 {
   "app": {
     "name": "ChatMe",
-    "version": "v0.2.0",
+    "version": "v0.2.1",
     "host": "127.0.0.1",
     "port": 38211
   },
@@ -432,13 +436,13 @@ MCP 服务器（`mcps/server.py`，FastMCP 3.x，stdio transport）暴露以下�
 ```bash
 cd backend
 uv build --wheel
-# 输出: dist/ChatMe-0.2.0-py3-none-any.whl
+# 输出: dist/ChatMe-0.2.1-py3-none-any.whl
 ```
 
 ### 安装 wheel
 
 ```bash
-uv pip install dist/ChatMe-0.2.0-py3-none-any.whl
+uv pip install dist/ChatMe-0.2.1-py3-none-any.whl
 # 安装后 chatme_main 和 chatme_mcp 命令全局可用
 ```
 
@@ -470,17 +474,17 @@ npm run electron:build:mac      # macOS arm64 + x64（DMG + ZIP）
 npm run electron:build:win      # Windows NSIS（x64）
 ```
 
-桌面端通过 `electron-builder` 打包，应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.2.0）在 `frontend/electron/electron.config.js` 中配置。
+桌面端通过 `electron-builder` 打包，应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.2.1）在 `frontend/electron/electron.config.js` 中配置。
 
 **输出位置**：`../release/electron-builder/`（项目根，与 Vite 的 `dist/` / `frontend/` 区分开）：
 
 - `mac-arm64/灵析.app` — 直接打开
 - `mac/` — x64 .app
-- `灵析-0.2.0-arm64-mac.zip` / `灵析-0.2.0-mac.zip` — 分发包
+- `灵析-0.2.1-arm64-mac.zip` / `灵析-0.2.1-mac.zip` — 分发包
 - `linux-unpacked/` — Linux 解压目录
-- `灵析-0.2.0.AppImage` — Linux 便携版（需 FUSE，见下文）
-- `灵析-0.2.0.deb` — Debian / Ubuntu 安装包
-- `灵析-0.2.0.rpm` — Fedora / RHEL 安装包
+- `灵析-0.2.1.AppImage` — Linux 便携版（需 FUSE，见下文）
+- `灵析-0.2.1.deb` — Debian / Ubuntu 安装包
+- `灵析-0.2.1.rpm` — Fedora / RHEL 安装包
 - `win-unpacked.exe` — Windows 安装器
 
 ## 开发注意事项

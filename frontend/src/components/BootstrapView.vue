@@ -101,6 +101,27 @@
         <div v-else class="log-placeholder">点击"启动应用"后，这里会显示自动配置进度</div>
       </div>
 
+      <!--
+        项目根自动迁移横幅（discoverProjectRoot 检测到 saved 路径版本落后于 BFS 时触发）：
+        - 用户上次启动用的是旧 lingxi/ 副本（端口 8211 / 老 pyproject version）
+        - 这次启动扫到更新副本（端口 38211 / 新 version），自动切过去
+        - 不告诉用户会一脸懵「我的旧项目去哪了」——明确告知「我们帮你换了」
+      -->
+      <div v-if="swappedProjectRoot" class="swap-banner" role="status">
+        <span class="swap-icon">🔄</span>
+        <div class="swap-info">
+          <div class="swap-title">已自动切换到更新的项目目录</div>
+          <div class="swap-detail">
+            旧：{{ shortenPath(swappedProjectRoot.from) }}
+            <span v-if="swappedProjectRoot.fromFingerprint" class="swap-fp">
+              (v{{ swappedProjectRoot.fromFingerprint.version || '?' }}:{{ swappedProjectRoot.fromFingerprint.port || '?' }})
+            </span>
+            <br />
+            新：<strong>{{ shortenPath(currentProjectRoot) }}</strong>
+          </div>
+        </div>
+      </div>
+
       <label class="auto-enter-option">
         <input
           v-model="autoEnterFrontend"
@@ -156,7 +177,18 @@ export default {
     servicesReady: {
       type: Boolean,
       default: false
-    }
+    },
+    // discoverProjectRoot 自动迁移标记：saved PROJECT_ROOT 版本落后于 BFS 候选时
+    // 主进程会带 swappedProjectRoot 字段推送 servicesReady=true，App.vue 把这个 prop 下传
+    swappedProjectRoot: {
+      type: Object,
+      default: null
+    },
+    // 当前生效的 PROJECT_ROOT（同样由 App.vue 下传；用于横幅显示新路径）
+    currentProjectRoot: {
+      type: String,
+      default: ''
+    },
   },
   data() {
     return {
@@ -220,6 +252,18 @@ export default {
         this.logs += '[启动] ✅ 后端与 MCP 已就绪\n'
         // 「进入应用」按钮刚变为 enabled 时立即抢焦点，回车直接进 app
         this.$nextTick(this.focusPrimaryBtn)
+      }
+    },
+    // 主进程 servicesReadyChange IPC 推送的 payload 不会作为 prop 进来（BootstrapView
+    // 只接 servicesReady: Boolean），但 App.vue 触发 onServicesReadyChange 时我们可以
+    // 直接通过 window.electronAPI 拿到 swappedProjectRoot 字段。挂一个全局 hook。
+    // 实际上更简洁的做法：在 App.vue 里把 swappedProjectRoot 复制到 BootstrapView 的 prop。
+    // 暂时保留简单方案：通过 _onGlobalSwapEvent 触发（mounted 里挂监听）。
+    // 主进程服务 ready 推送 payload 里有 swappedProjectRoot 时记日志（App.vue 会通过
+    // prop 下传显示横幅；这里只追加一行日志方便用户看 timeline）
+    swappedProjectRoot(val) {
+      if (val) {
+        this.logs += `\n[启动] 🔄 已自动迁移到更新版本项目（旧：${val.from}）\n`
       }
     },
     // launching / autoEnterFrontend 切换也会改按钮状态（启动中→可启动 / 自动进）
@@ -292,6 +336,18 @@ export default {
     focusPrimaryBtn() {
       const btn = this.$el.querySelector('.btn-primary:not(:disabled)')
       if (btn && typeof btn.focus === 'function') btn.focus()
+    },
+    /**
+     * 路径展示压缩：保留末 2 段目录 + 中间用 … 替代，避免横幅里塞满长路径
+     * （Win 上 C:\Users\xxx\Documents\lingxi 这种显示出来很丑）。
+     * 路径 < 50 字符原样返回。
+     */
+    shortenPath(p) {
+      if (!p) return ''
+      if (p.length < 50) return p
+      const parts = p.split(/[/\\]/)
+      if (parts.length <= 3) return p
+      return `${parts[0]}/…/${parts.slice(-2).join('/')}`
     },
     async recheck() {
       this.checking = true
@@ -851,5 +907,38 @@ export default {
   color: var(--danger-color, #ff3b30);
   border-radius: 6px;
   font-size: 13px;
+}
+
+/* 项目根自动迁移横幅：amber 浅底 + 蓝字，告诉用户「我们换到新版本了」。
+   视觉上跟 error-bar 区分（红 vs 琥珀），跟 info-banner 也分（蓝条 vs amber 块）。 */
+.swap-banner {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin-top: 12px;
+  padding: 10px 14px;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 6px;
+  font-size: 13px;
+}
+.swap-banner .swap-icon {
+  font-size: 18px;
+  line-height: 1;
+}
+.swap-banner .swap-title {
+  font-weight: 600;
+  color: #b45309;
+  margin-bottom: 2px;
+}
+.swap-banner .swap-detail {
+  color: var(--text-secondary, #555);
+  line-height: 1.5;
+  word-break: break-all;
+}
+.swap-banner .swap-fp {
+  color: var(--text-tertiary, #888);
+  font-size: 11px;
+  font-family: var(--font-mono, monospace);
 }
 </style>

@@ -181,11 +181,12 @@
         @click="showCheckpoints = false"
       />
 
-      <!-- 后端失联 banner：主进程每 10s 探一次 /health + MCP ready，
-           仅在状态变化时推 backend-health-changed。失联时显示顶部条 + 重新连接按钮，
+      <!-- 后端失联 banner：主进程每 5s 探一次 /health，仅在状态变化时推 backend-health-changed。
+           启动期 backend=false 是预期（后端冷启动）→ 不弹 banner；只有 _hasEverConnected
+           之后再次 false 才显示 banner（用户已在 app 里感知后端挂了）。
            用户点「重新连接」后由主进程 kill + restart mcp/backend，banner 自动消失。 -->
       <div
-        v-if="backendHealth === false"
+        v-if="backendHealth === false && _hasEverConnected"
         class="backend-health-banner"
         role="alert"
       >
@@ -233,6 +234,7 @@
       :is-dark-theme="isDarkTheme"
       @close="settingsVisible = false"
       @theme-change="setTheme"
+      @restart-requested="handleRestartBackend"
     />
 
     <!-- 帮助弹窗（由 /help 命令触发） -->
@@ -248,6 +250,7 @@
     <SetupView
       :visible="setupVisible"
       @close="setupVisible = false"
+      @restart-requested="handleRestartBackend"
     />
 
     <!-- 通用简洁提示弹窗（slash 命令前置条件不满足时用） -->
@@ -272,6 +275,8 @@
     <BootstrapView
       v-if="isElectron && !appReady"
       :services-ready="servicesReady === true"
+      :swapped-project-root="_swappedProjectRoot"
+      :current-project-root="_currentProjectRoot"
       @enter-app="onEnterApp"
     />
   </transition>
@@ -287,6 +292,27 @@
       :remaining="_notFoundRemaining"
       @click-anywhere="_navigateHome"
     />
+  </transition>
+
+  <!--
+    全局后端重启遮罩：所有触发点（Settings「Save & Restart」/ banner「重新连接」）
+    都共用这一个 spinner 动画。z-index 1900 比 NotFoundView 1800 + BootstrapView 1500 都高，
+    确保重启中全屏盖住，用户的鼠标 / 键盘输入被屏蔽（背景 click 事件禁用）。
+
+    状态机：
+      _backendRestarting=true  →  调 window.electronAPI.restartBackend() 阻塞等待
+      IPC 返 ok               →  this.refreshPage()（走 webContents.reload() 清 stale + 重连 SSE）
+      IPC 失败                →  _backendRestarting=false + alert 让用户感知失败
+  -->
+  <transition name="restart-fade">
+    <div v-if="_backendRestarting" class="restart-mask">
+      <div class="restart-card">
+        <div class="spinner"></div>
+        <h4>Restarting backend</h4>
+        <p>This will take a few seconds.</p>
+        <p class="restart-progress">{{ _restartElapsed }}s</p>
+      </div>
+    </div>
   </transition>
   </template>
 </template>
@@ -472,10 +498,28 @@ export default {
       _sendingLock: new Map(),
       // —— 后端健康监测 —— null = 还没拉过；true = 健康；false = 失联 → 显示 banner
       backendHealth: null,
+      // 「曾经健康过」gate：启动期 backend=false 不弹 banner（后端冷启动是预期），
+      // 只有 _hasEverConnected=true 后再次变 false 才显示 banner。
+      // 用户点「重新连接」调 restartBackend 后变 false → 已被 _hasEverConnected=true
+      // 解锁，banner 立刻出现，用户能感知"重启中"。
+      _hasEverConnected: false,
       restartingBackend: false,  // 用户点「重新连接」期间 disable 按钮，避免重复触发
+      // _backendRestarting 是全局「后端重启中」遮罩开关，被多处共享：
+      //   - Settings 的「Save & Restart」按钮（emit('restart-requested') → handleRestartBackend）
+      //   - SetupView 完成时若含 llm_providers 改动（emit('restart-requested')）
+      //   - banner 失联后的「重新连接」按钮（直接调 handleRestartBackend）
+      // 触发后调 window.electronAPI.restartBackend() 阻塞等待（主进程等 /health 通），
+      // IPC 完成 = this.refreshPage()（走 webContents.reload() 清掉所有 stale 状态 + 重连 SSE）。
+      _backendRestarting: false,
+      _restartElapsed: 0,
+      _restartTimer: null,
       // appReady 从 false→true 触发的 initConversationState 只跑一次，避免 servicesReady
       // 反复变化时（比如重启后端）重复初始化会话
       _conversationInited: false,
+      // —— 项目根自动迁移通知 —— 主进程 IPC payload.swappedProjectRoot 有值时存这里
+      // 由 BootstrapView 横幅展示；appReady 翻 true 后这条横幅不再显示（BootstrapView 已卸载）
+      _swappedProjectRoot: null,
+      _currentProjectRoot: '',
       // —— 定时任务缓存（per session） ——
       // session_id -> ScheduledTask[]；空数组 = 该 session 无任务（面板不渲染）
       scheduledTasksMap: new Map(),
@@ -528,16 +572,32 @@ export default {
         }
       })
       // 后续变更：bootstrap 完成 / 后端重启。
-      // payload = { ready, autoEnterFrontend? }：cold 完成时主进程带 autoEnterFrontend，
-      // =true 立刻翻 appReady，=false 保留 BootstrapView 等用户点「进入应用」。
-      // warm / restart / crash-to-false 这几条路径只读 ready 字段。
+      // payload = { ready, autoEnterFrontend?, swappedProjectRoot?, source? }：
+      //   - ready: 必备
+      //   - autoEnterFrontend: cold 完成时主进程带 =true 立即翻 appReady；=false 保留 BootstrapView
+      //   - swappedProjectRoot: discoverProjectRoot 自动迁移时携带 { from, fromFingerprint }，
+      //     BootstrapView 显示「我们自动换到新版本」横幅用
+      //   - source: 'restart' 表示用户主动重启后端（banner 路径，不踢回 BootstrapView），
+      //     undefined 表示冷启动 / 自动迁移路径
       window.electronAPI.onServicesReadyChange((payload) => {
         const ready = !!(payload && payload.ready)
         const autoEnter = !!(payload && payload.autoEnterFrontend)
         const wasReady = !!this.servicesReady
+        const isRestart = payload?.source === 'restart'
         this.servicesReady = ready
-        if (ready && autoEnter) {
-          // 勾了自动进：立即翻 appReady=true 让主界面接管（idempotent）。
+        // 捕获迁移信息供 BootstrapView 横幅用——只在 ready=true && 还没 appReady 时显示，
+        // appReady 一旦翻 true 就没机会展示了（BootstrapView 已卸载）
+        if (ready && payload?.swappedProjectRoot) {
+          this._swappedProjectRoot = payload.swappedProjectRoot
+          // 拉一下当前 PROJECT_ROOT 给横幅展示新路径
+          if (window.electronAPI?.getProjectRoot) {
+            window.electronAPI.getProjectRoot().then(r => {
+              if (r?.ok) this._currentProjectRoot = r.projectRoot
+            }).catch(() => {})
+          }
+        }
+        if (ready && autoEnter && !isRestart) {
+          // cold start autoEnter 路径：立即翻 appReady=true 让主界面接管（idempotent）。
           // 【关键】这里**不**用 wasReady / _conversationInited 作 gate：
           //   1) idempotent — 多次 broadcast 重复设 appReady=true 是无害的（Vue 3 reactivity 去重）；
           //   2) 防 race — first broadcast 因订阅时序 / stale state 被旧分支条件跳过后，
@@ -552,13 +612,21 @@ export default {
             this._conversationInited = true
             this.$nextTick(() => this.initConversationState())
           }
-        } else if (ready && !wasReady) {
+        } else if (ready && !wasReady && !autoEnter) {
           // 没勾自动进 + cold start 完成：保持 appReady=false（默认），BootstrapView 显示「进入应用」等用户点
         }
-        // 后端从 true 变 false（重启中）：主界面回退到 disabled，BootstrapView 重新显示
+        // 后端从 true 变 false：
+        //   - source='restart'（用户主动重启）：保持 appReady=true 不踢回 BootstrapView，
+        //     主界面走 .app-disabled 灰显，banner 显示「后端服务已断开连接」
+        //   - 其他（crash）：踢回 BootstrapView 让用户走重启 / 修复流程
         if (!ready && wasReady) {
-          this.appReady = false
-          // _conversationInited 保持 true — 同一 session 内的 initConversationState 只跑一次语义不变
+          if (isRestart) {
+            // 主动重启：保持主界面可见 + disabled）即可，不需要 BootstrapView
+            // （main 进程已完成 kill，banner 会由 _hasEverConnected + backendHealth=false 自动出现）
+          } else {
+            this.appReady = false
+            // _conversationInited 保持 true — 同一 session 内的 initConversationState 只跑一次语义不变
+          }
         }
       })
     } else {
@@ -576,11 +644,19 @@ export default {
 
     // 订阅后端健康监测：主进程 10s 探一次，仅在状态变化时推 backend-health-changed；
     // 首次 mount 拉一次 get-health 拿到「没在推事件」时的当前状态（如一直健康从未变化）。
+    //
+    // 启动期 vs 运行中区分：启动期 backend=false 是预期状态（后端还没起来 / 正在重启），
+    // 不应该弹 banner 打扰用户。只有曾经健康过（_hasEverConnected=true）再变 false 才是
+    // 真失联 → 显示 banner。这样冷启动 banner 不闪；用户已在 app 里后端挂了 banner 正常出。
     if (window.electronAPI?.getHealth) {
       window.electronAPI.getHealth().then(h => {
-        if (h && typeof h.backend === 'boolean') this.backendHealth = h.backend
+        if (h && typeof h.backend === 'boolean') {
+          if (h.backend) this._hasEverConnected = true
+          this.backendHealth = h.backend
+        }
       })
       window.electronAPI.onHealthChange(({ backend }) => {
+        if (backend) this._hasEverConnected = true
         this.backendHealth = backend
       })
     }
@@ -774,19 +850,46 @@ export default {
     },
     /**
      * 用户点 banner 上的「重新连接」：调 IPC 让主进程 kill mcp/backend 后串行重启。
-     * 完成后主进程会主动推 backend-health-changed，banner 自动消失；
+     * 走统一的全局重启遮罩（_backendRestarting）—— 与 Settings 的「Save & Restart」共用，
+     * 用户能看到 spinner + 倒计时。IPC 完成 = 主进程确认 backend 健康 → reload 清 stale。
      * 失败用 alert 提示（重启通常意味着后端进程死掉，原因多样，没必要做精细错误分类）。
      */
     async handleRestartBackend() {
-      if (this.restartingBackend) return
-      this.restartingBackend = true
+      if (this._backendRestarting) return  // 防双触发
+      this._backendRestarting = true
+      this._restartElapsed = 0
+      // 显式赋值（不用 `_restartElapsed++`）:Vue 3 Proxy 对 ++ 自增行为在某些 babel / minify 路径
+      // 下会丢失响应性追踪（旧 issue）。set + get 两段式最稳,保证 0s → 1s → 2s... 都能渲染。
+      this._restartTimer = setInterval(() => {
+        this._restartElapsed = (this._restartElapsed || 0) + 1
+      }, 1000)
       try {
         const r = await window.electronAPI.restartBackend()
         if (!r?.ok) {
           alert('重新连接失败：' + (r?.error || '未知错误'))
+          this._cleanupRestartTimer()
+          this._backendRestarting = false
+          return
         }
-      } finally {
-        this.restartingBackend = false
+      } catch (e) {
+        console.error('[App] IPC restart failed:', e)
+        alert('重新连接失败：' + (e.message || e))
+        this._cleanupRestartTimer()
+        this._backendRestarting = false
+        return
+      }
+      // IPC 完成 = backend 健康,清 stale SSE / 长生命周期 client。
+      // 必须走 refreshPage()（内部用 webContents.reload()）,不能直接 window.location.reload():
+      //   Electron + protocol.handle('file') 拦截器下 JS 级 reload 偶尔被拦截 / 没可见反馈,
+      //   _backendRestarting 不会被重置,用户就会看到 spinner 遮罩卡住不消失。
+      // reload 前清 timer,避免 setInterval 持有 component 引用影响 GC。
+      this._cleanupRestartTimer()
+      this.refreshPage()
+    },
+    _cleanupRestartTimer() {
+      if (this._restartTimer) {
+        clearInterval(this._restartTimer)
+        this._restartTimer = null
       }
     },
     /**
@@ -5697,6 +5800,74 @@ body {
 }
 .bootstrap-fade-enter,
 .bootstrap-fade-leave-to {
+  opacity: 0;
+}
+
+/*
+ * Restart overlay:所有触发后端重启的入口共用一套 UI —— banner「重新连接」/ Settings
+ * 「Save & Restart」/ SetupView 修改 apikey 后必重启等。z-index 1900 比 NotFoundView 1800
+ * + BootstrapView 1500 都高，确保重启中全屏盖住，用户输入被屏蔽。
+ * CSS 写在 App.vue 顶层（非 scoped），因为 .restart-mask / .spinner 是 template 里直接
+ * 写的全局 class,scoped 限定会拿不到。
+ */
+.restart-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1900;
+}
+.dark-theme .restart-mask {
+  background: rgba(0, 0, 0, 0.75);
+}
+.restart-card {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.25);
+  text-align: center;
+  padding: 28px 36px;
+  min-width: 260px;
+  max-width: 90vw;
+}
+.restart-card h4 {
+  margin: 14px 0 4px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.restart-card p {
+  margin: 4px 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.restart-progress {
+  margin-top: 8px !important;
+  font-size: 12px !important;
+  color: var(--text-primary) !important;
+  font-weight: 500;
+}
+.spinner {
+  width: 28px;
+  height: 28px;
+  border: 2px solid var(--border-color);
+  border-top-color: var(--text-primary);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin: 0 auto;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+.restart-fade-enter-active,
+.restart-fade-leave-active {
+  transition: opacity 0.18s ease;
+}
+.restart-fade-enter-from,
+.restart-fade-leave-to {
   opacity: 0;
 }
 </style>

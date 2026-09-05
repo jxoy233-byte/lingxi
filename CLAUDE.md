@@ -405,6 +405,45 @@ docker-compose up -d redis       # 端口 6024，密码 123456
     - **测试清理**（`.gitignore` line 50+）：`tests/` / `**/tests/` 加入 ignore 列表，18 个 `backend/tests/` 测试文件 staged for deletion；今后单测跟随 .venv 落在本地，不入 git。**`pyproject.toml` 仍保留 `[dependency-groups] dev = ["pytest>=9.1.1"]`** 让本地能跑。
     - **许可证 + 商标**：项目以 **MIT License** 发布（`LICENSE` / `NOTICE` / `THIRD_PARTY_LICENSES.md` 三件套）；`pyproject.toml` 加 `license = "MIT"` / `license-files` / `authors = [{name = "灵析"}]`；`frontend/package.json` 加 `"license": "MIT"` + `author` 顶层字段。「灵析™」与「Lingxi™」为产品名商标（README「商标」段），MIT 不授予商标使用权，使用须经项目维护者书面授权。
     - **新图 / 老图共存保留路径**：v0.2.0 起 `_create_graph_core2`（line 891-1354）**完整保留**作为回滚基线；切换通过 `init_graph` 一行注释切换（`# self.graph = await self._create_graph_core2()` 注释 + 上面行 active）。回滚时把注释行启用 + 把 `_create_graph_improved` 行注释即可，无须 git revert。新图 prompt / 状态字段 / 工具集与老图严格隔离，不互相污染。
+35. **v0.2.1 新增约定 —— 配置向导 SetupView + 应用启动链路健壮性**：
+    - **BootstrapView ≠ SetupView 职责拆分**：v0.2.1 起 `frontend/src/components/` 既有 `BootstrapView.vue`（首启 / 服务未就绪时浮窗 + bootstrap 进度 + autoEnter 三态按钮）又有 `SetupView.vue`（独立配置向导，**首次启动 + 任何时候 🪄 按钮**都能打开，覆盖 bootstrap 后改 apikey / 模型 / permissions 等场景）。**注意**：偏好 22 / 23 描述的「SetUpView」是 BootstrapView 的前身（v0.2.0 之前的命名），新代码用 BootstrapView；SetupView 是独立组件，**不要混用**。
+    - **SetupView 关键约束**（1223 行大组件，新加步骤 / 选项卡必须沿用）：
+      - **`emit('close')` / `emit('restart-requested')` 必须双声明在 `emits: []`**（Vue 3 运行时只对声明过的事件往父级传，见偏好 `feedback_vue3_emits_declared_required`）；App.vue 父级 `@close="setupVisible = false"` + `@restart-requested="handleRestartBackend"`。
+      - **重启逻辑完全交给 App.vue**：SetupView 自己**不**写 `setInterval` / `restartBackend` / `window.location.reload()`，只 `emit('restart-requested')`；否则重启遮罩三套副本并存（Settings + SetupView + App.vue）状态不同步。
+      - **多步骤表单 localStorage 持久化按 step key 命名**（`lingxi.setup.step.<key>`），刷新页面 / 关掉再开都能续填；首屏只渲染当前步骤，其他步骤不挂 DOM（避免 5 个 step 配置全挂在内存 / IO 触发慢）。
+    - **fixRedis ping-first + 状态归一化（启动链路 bug 修复核心）**：`frontend/electron/main.js` 的 `probeRedisContainer` / `fixRedis` 不能直接相信 `docker inspect` 返回的 status 字符串（Windows cmd 偶发包裹引号、daemon 状态混乱、端口冲突下用户容器实际在跑但 start 报错）。**三段判定**：
+      1. **`tryRedisPing` 第一步**：`docker exec chatme-redis redis-cli -a 123456 --no-auth-warning ping` → 返 PONG 视为「Redis 健康」**完全跳过修复**（用户核心诉求：已经在跑就别折腾）。
+      2. **ping 失败 + `inspectOut` 为 `running`/`restarting`**：只 `waitForRedisReady` 探，不再 `docker start`（**避免端口重绑冲突**）。
+      3. **ping 失败 + status = exited/created/paused/dead**：`docker start chatme-redis` 拉起；**`docker start` 失败不立即 throw**——日志记一下 + 改 `waitForRedisReady` 兜底探，Redis 通了就当修复成功（用户真实场景：docker start 报端口冲突但容器实际在跑）。
+      4. **ping 失败 + 容器不存在**：`docker compose up -d redis` 创建。
+      - **`normalizeDockerStatus(s)`**：trim + 剥首尾成对引号 + toLowerCase，让 `running` / `"running"` / `'RUNNING'` 都映射成 `running`。`probeRedisContainer` 用归一化后字符串判断；`restarting` 仍归为 not-ok（probe 严格，SetupView 不应在重启中误显示绿 ✓）。
+    - **startBackend 启动前端口预检**：`killPortIfListening(port)` 跨平台 helper（Win `netstat -ano | findstr :PORT → taskkill /F /PID`；Unix `lsof -ti:PORT -sTCP:LISTEN | xargs kill -9`），spawn backend 前调一次清理 38211 上残留进程——避免旧 backend 异常退出后占着端口、新 spawn 静默 EADDRINUSE 退出、但 `/health` 探测错连旧实例返回 200 导致用户看到「启动成功」实际是旧版。**只针对本应用专用端口**（38211 backend / 8211 老端口），不误杀同名其他服务。
+    - **discoverProjectRoot 自动迁移（saved PROJECT_ROOT 版本落后时）**：用户多副本共存（`~/lingxi` / `~/lingxi-v2`）+ 重新 git pull 后，旧 saved 路径指向老副本（端口 8211 / 旧 pyproject version）会跟新副本（38211 / 新 version）冲突。新增 `_readProjectFingerprint` 读 pyproject `version = "X.Y.Z"` + main.py `app_config.get("port", NNNNN)`，`_compareFingerprints` 比较；candidate 更新 → 自动 swap → 主进程 `setServicesReady(true, { swappedProjectRoot: { from, fromFingerprint } })` 推送 → App.vue 下传给 BootstrapView → 弹琥珀色「已自动切换到更新的项目目录」横幅（不告诉用户会一脸懵「我的旧项目去哪了」）。`bfsFrom` 仍保留为单元兼容入口，主路径走 `_bfsCollectAll` 拿全候选。
+    - **健康监测启动期 banner 抑制（`_hasEverConnected` gate）**：冷启动 backend=false 是预期（后端还没起来 / 正在重启）→ **不**弹 banner 打扰用户；只有 `_hasEverConnected=true` 后再次变 false 才显示 banner（用户已在 app 里感知后端挂了）。App.vue 监听 `onHealthChange` 时只要 `backend=true` 就 set `_hasEverConnected=true`，`getHealth()` 拉首次快照同语义。**主进程 `HEALTH_FAILURE_THRESHOLD=2` 连续失败计数**：单次探测失败可能是网络抖动（端口刚 kill / OS 回收 socket / 后端处理慢）→ 不能立刻推 false，连续 2 次失败（约 10s）才推 IPC（threshold=1 闪、=3 太长 15s 后端真挂感知慢）。
+    - **`source='restart'` 重启窗口期不走 BootstrapView**：用户主动点「重新连接」/「Save & Restart」时主进程先 `setServicesReady(false, { source: 'restart' })` → App.vue 看到 source='restart' 保持 `appReady=true`，主界面走 `.app-disabled` 灰显 + banner 「后端服务已断开连接」提示，但不踢回 BootstrapView 浮窗（用户已经点过「进入应用」了，再弹浮窗是回退）。启动完成 `setServicesReady(true, { ..., source: 'restart' })` 不再触发 `initConversationState`（reload 由 SettingsDialog 自己负责）。
+    - **`proc.on('exit')` 立即推 health 检查**：后端意外退出（非 0 + 非 SIGTERM/SIGKILL）→ 50ms 后跑 `runHealthCheck` + 重置 `consecutiveHealthFailures=0` 让下一轮累计从 0 开始，banner 通过阈值在 10s 内出现（之前 5s 间隔发现 → 用户看到 403 一脸懵）。
+    - **`checkBackendHealth` timeout 1.5s → 3s**：FastAPI 启动期 uvicorn 已经 LISTEN 但 lifespan 还没跑完时 /health 会 timeout；1.5s 太短误判 false → banner 闪。3s 给 lifespan import 链（QwenVL weights 加载）更多缓冲；上层有连续失败计数兜底（多 1.5s 不会拖死健康路径）。
+    - **Windows `file://` API 转发路径修复**：`file:///C:/.../dist/index.html` 协议下，renderer `fetch('/chat/xxx')` 会解析成 `file:///C:/chat/xxx` —— `new URL(...).pathname` = `/C:/chat/xxx`（带盘符），`pathname.startsWith('/chat/')` 命中失败 → 落静态资源分支 → distDir 白名单校验 403。**解法**：API 转发判定前先 `apiPathname = IS_WIN ? pathname.replace(/^\/[A-Za-z]:/, '') : pathname`，恢复 Unix 形态 `/chat/xxx`。macOS / Linux 没有盘符不需要剥。
+    - **startBackend config.json 不存在兜底**：fresh clone / 用户删 `.chatme/` 时 `fs.readFileSync` 会抛 ENOENT，旧写法 `catch + 跳过 write` → 后端退回到全局 `~/.chatme/config.json` 可能读到旧端口 8211。改成「读不到就用空对象 + `fs.mkdirSync(parent, { recursive: true })`」——写入一定发生，local config.json 一定被建出来。
+    - **SandboxPool 容器名 + label 双标识**：v0.2.1 起 `docker run --name chatme-python-sandbox-<sha1[:8]> --label com.chatme.sandbox=true`，主进程 `stopLingxiContainers` 走 `name filter + label filter` 去重合并（老的 sandbox 可能只挂 label 没 name）。`short_id = sha1(pid + time + counter)[:8]` —— 同进程同一秒内不可能多次创建，极端冲突让 Docker 报 `name already in use` → `_create_container` 返 None → GC 重建。
+
+36. **v0.2.1 新增约定 —— 全局重启遮罩（unified overlay）**：
+    - **三处入口共用一份 UI**：banner「重新连接」/ Settings「Save & Restart」/ SetupView 修改 apikey 后必重启 → **统一走 App.vue 的 `handleRestartBackend()`**，弹同一个 `.restart-mask`（z-index 1900，比 NotFoundView 1800 + BootstrapView 1500 都高）+ spinner + 倒计时。不再每个组件各写一份 `setInterval` / `pollHealth` / `window.location.reload()` 状态不同步。
+    - **`emit('restart-requested')` 契约**：SettingsDialog / SetupView 在 `emits: []` 数组里加 `'restart-requested'`（Vue 3 运行时只对声明过的事件往父级传，见偏好 `feedback_vue3_emits_declared_required`），父级 App.vue 写 `@restart-requested="handleRestartBackend"`。**子组件 emit 后立即 `close()`**（dialog / wizard 关闭），不留「dialog 在 reload 那一帧还占据 DOM」的视觉抖动。
+    - **`handleRestartBackend` 状态机**：`_backendRestarting` / `_restartElapsed` / `_restartTimer` 三个 data 字段都在 App.vue。`setInterval` 内 `this._restartElapsed = (this._restartElapsed || 0) + 1` —— **显式赋值不用 `_restartElapsed++`**：Vue 3 Proxy 对 ++ 自增行为在某些 babel / minify 路径下会丢失响应性追踪（旧 issue），set + get 两段式最稳。
+    - **`refreshPage()` 而非 `window.location.reload()`**：reload 前必须清 timer（避免 `setInterval` 持有 component 引用影响 GC），然后调 `this.refreshPage()`（内部 Electron 走 `window.electronAPI.refreshPage()` → 主进程 `webContents.reload()`，web 端 fallback 到 `window.location.reload()`）。**Electron + `protocol.handle('file')` 拦截器下 JS 级 reload 偶尔被拦截 / 没可见反馈**，reload 失败 → `_backendRestarting` 不会被重置 → 用户看到 spinner 卡住不消失。preload.js + main.js 在 `refreshPage` IPC 处都明确注释了这一点。
+
+37. **v0.2.1 新增约定 —— SetupView wizard 多步骤配置（独立组件）**：
+    - **背景**：v0.2.0 之前用户改 LLM API key 只能手编辑 `backend/.chatme/config.json`，首装失败排查路径长。SetupView 把这套 UI 化：用户点顶栏 🪄 / `/setup` 命令打开向导，按 5 个 step 走基础检查 → 模型连接 → skill 开关 → 权限策略 → 完成；任一步都能 back / next / save。
+    - **入口复用**：`/setup` slash 命令 + 顶栏 🪄 按钮 + 首启兜底（`/chat` 路径 404 时弹）。`setupVisible` 在 App.vue 维护，SetupView 自身只接 `visible: Boolean` prop + `close`/`restart-requested` emit。
+    - **step 1 基础检查**：依赖 / Redis 端口 / 路径探测 走主进程 `probe-all` + `setup:probe-libreoffice` IPC；探测失败的项高亮 + 给「重新探测」按钮，**不**阻塞用户往后走（用户可能就想跳过先改 LLM key）。
+    - **step 2 LLM 模型连接**：列出当前 `llm_providers` 三元组（OpenAI / DeepSeek / VL），每条带「测试连接」按钮 → 后端 `/admin/config/test-llm` 端点；测试时显示 spinner + 错误文案（不允许本地 VL 时给 fallback 主用 LLM 的解释 tooltip）。
+    - **step 3 skill 开关**：列出 `backend/skills/*` 全部技能（实时走 `/chat/skills`），用户勾选启用哪些；保存到 config.json `skills` 段（v0.1.5 的热加载约定，**不需重启**）。
+    - **step 4 权限策略**：白名单命令 / 危险命令检测 / 4 档决策（approve / this-time-only / deny / feedback）解释；保存到 `permissions` 段（**不需重启**）。
+    - **step 5 完成**：显示 diff 摘要（哪几段会被改、是否需要重启）；点「保存」→ `putConfig` → 若 `llm_providers` 在改动段里 → `emit('restart-requested')` → App.vue 接管重启流程。
+    - **保存逻辑**：`/admin/config` 沿用 v0.1.5 的 segment 级热加载：只有改 `llm_providers` 才需重启；改 `skills` / `permissions` 立即生效、点完成直接关 wizard、不走重启。
+    - **LibreOffice 探测**：单独 IPC `setup:probe-libreoffice` 返 `{ installed, version?, path? }`，已装 → 绿 ✓ + 版本号；未装 → 说明 + 通用下载链接（指向 `libreoffice.org/download`）。**不**阻塞流程（用户可能不用 office 文档解析）。
+    - **首启 / 重启后恢复**：SetupView 自身有 localStorage 持久化（按 step key），但**真正的配置改动通过 `putConfig` 落盘**；两者解耦——向导刷新时表单从后端 `/admin/config` 重拉（不依赖 localStorage 缓存），避免「表单填了但保存失败」的悬空状态。
 
 ### 代码 / 提交风格
 

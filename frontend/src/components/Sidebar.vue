@@ -89,7 +89,7 @@
         <div v-if="loadError" class="empty-state load-error">
           <div>加载对话列表失败</div>
           <div class="load-error-detail">{{ loadError }}</div>
-          <div class="load-error-hint">请确认灵析后端服务已启动</div>
+          <div class="load-error-hint">{{ loadErrorHint }}</div>
         </div>
         <div v-else-if="conversations.length === 0" class="empty-state">
           暂无历史对话
@@ -432,6 +432,12 @@ export default {
     approvalPendingSessions: { type: Set, default: () => new Set() },
     errorSessions: { type: Set, default: () => new Set() },
     loadError: { type: String, default: '' },
+    // 错误文案 hint（按 HTTP status 分支:502=后端不可达/403=路径异常/5xx=后端异常）
+    // 默认 fallback 到历史文案「请确认灵析后端服务已启动」
+    loadErrorHint: {
+      type: String,
+      default: '请确认灵析后端服务已启动'
+    },
     scheduledTasksMap: { type: Map, default: () => new Map() },
     scheduledTasksBusy: { type: Boolean, default: false },
     // 当前激活的视图：'sessions' | 'files' —— 由 App.vue 控制（持久化到 localStorage）

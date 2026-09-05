@@ -1246,7 +1246,7 @@ def get_model_vl_config():
 
     model_name = vl_config.get("model_name") or os.getenv("VL_MODEL_NAME", "Qwen3-VL-2B")
     api_key = vl_config.get("api_key") or os.getenv("VL_API_KEY", "empty")
-    base_url = vl_config.get("base_url") or os.getenv("VL_BASE_URL", "http://127.0.0.1:8211/api/v1")
+    base_url = vl_config.get("base_url") or os.getenv("VL_BASE_URL", "http://127.0.0.1:38211/api/v1")
     local = vl_config.get("local")
 
     temperature = float(os.getenv("VL_TEMPERATURE", "0.5"))

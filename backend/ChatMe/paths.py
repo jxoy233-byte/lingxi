@@ -53,8 +53,9 @@ def get_chatme_dir() -> Path:
         还没创建（ensure_global_config 之后才存在），导入期定不下来。
       - 测试场景下 cwd 可能中途切换（chdir），常量会变成过期快照。
 
-    为什么不走环境变量 override：ChatMeConfig 自己也没暴露 CHATME_DIR，
-    加这里会让"override 在哪生效"的语义跨两个模块。需要时再统一加。
+    为什么不走环境变量 override：ChatMeConfig 自己也没暴露 LINGXI_CONFIG_DIR
+    （虽然 `_find_config_file` 注释里提到过它），加这里会让"override 在哪生效"
+    的语义跨两个模块。需要时再统一加。
     """
     local = Path.cwd() / ".chatme"
     if local.exists():

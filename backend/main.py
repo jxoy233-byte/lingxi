@@ -35,7 +35,7 @@ version = app_config.get("version", "v0.2.0")
 app_name = app_config.get("name", "ChatMe")
 app_description = app_config.get("description", "")
 app_host = app_config.get("host", "127.0.0.1")
-app_port = app_config.get("port", 8211)
+app_port = app_config.get("port", 38211)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

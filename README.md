@@ -141,7 +141,7 @@ docker-compose up -d redis
 cd backend
 uv sync                                          # 安装依赖
 
-# 启动主服务（端口 8211，stdio 模式下会 fork MCP 子进程）
+# 启动主服务（默认端口 38211，stdio 模式下会 fork MCP 子进程）
 # 首次启动会自动：1) 检查 Redis  2) 清理残留沙盒容器  3) 初始化沙盒池
 uv run chatme_main                               # 等价于 uv run python main.py
 
@@ -204,7 +204,7 @@ OPENAI_PRESENCE_PENALTY=0.0
     "name": "ChatMe",
     "version": "v0.2.0",
     "host": "127.0.0.1",
-    "port": 8211
+    "port": 38211
   },
   "redis": {
     "checkpointer_url": "redis://:123456@localhost:6024/0",
@@ -213,7 +213,7 @@ OPENAI_PRESENCE_PENALTY=0.0
   "llm_providers": {
     "openai":   { "model_name": "gpt-4o", "api_key": "...", "base_url": "https://api.openai.com/v1" },
     "deepseek": { "model_name": "deepseek-chat", "api_key": "...", "base_url": "https://api.deepseek.com/" },
-    "vl":       { "model_name": "Qwen3-VL-2B", "base_url": "http://127.0.0.1:8211/api/v1", "local": true }
+    "vl":       { "model_name": "Qwen3-VL-2B", "base_url": "http://127.0.0.1:38211/api/v1", "local": true }
   },
   "oss": {
     "access_key_id": "...",
@@ -411,7 +411,7 @@ MCP 服务器（`mcps/server.py`，FastMCP 3.x，stdio transport）暴露以下�
 | `cancel_scheduled_task(task_id)`                      | 取消，支持 task_id 前缀匹配            |
 | `run_scheduled_task_now(task_id)`                     | 立即触发一次，不改 cron                |
 
-- **必须 `local=True`**：4 个函数内部走 HTTP 调 `127.0.0.1:8211/admin/scheduled-tasks/*`，沙盒网络不可靠且缺 `apscheduler` / `redis` 包
+- **必须 `local=True`**：4 个函数内部走 HTTP 调 `127.0.0.1:38211/admin/scheduled-tasks/*`，沙盒网络不可靠且缺 `apscheduler` / `redis` 包
 - **调度器**：APScheduler `AsyncIOScheduler + RedisJobStore`，时区 `Asia/Shanghai`，后端重启从 Redis 恢复全部任务
 - **lifespan 嵌套顺序**：`chat_service_lifespan → scheduler_lifespan → cleanup_lifespan`——scheduler 的 handler 依赖 `chat_service.message_stream`，必须嵌在 chat_service 之内
 - **错误格式**：统一 `[类型] 描述 | 建议`（`[BadRequest]` / `[NotFound]` / `[ServiceUnavailable]` / `[ConnectionError]`），LLM 看前缀就知道换策略

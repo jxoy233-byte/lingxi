@@ -488,7 +488,7 @@ marked.use({
 
       // 处理相对路径，转成 /static/ 开头的绝对路径（不带 origin）。
 // 不带 origin 是关键：vite dev 下浏览器解析成 http://localhost:18211/static/...
-// 走 vite proxy → 8211；Electron file:// 下解析成 file:///static/... → file:// 协议
+// 走 vite proxy → 38211；Electron file:// 下解析成 file:///static/... → file:// 协议
 // 拦截器命中 pathname.startsWith('/static/') → net.fetch 转 backend。
 // 若带 window.location.origin（file:// 时为 "null"），浏览器把 "null/..." 视作无效 URL
 // 直接静默失败，<img> 不发请求——mmd/html 没这问题是因为它们直接用相对路径

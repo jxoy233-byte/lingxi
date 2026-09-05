@@ -27,6 +27,7 @@
         :scheduled-tasks-map="scheduledTasksMap"
         :scheduled-tasks-busy="_scheduledTasksRefreshing"
         :load-error="conversationsLoadError"
+        :load-error-hint="conversationsLoadHint"
         @toggle="toggleSidebar"
         @new-chat="createNewChat"
         @select-conversation="loadConversation"
@@ -353,6 +354,10 @@ export default {
       conversations: [],
       // 加载会话失败时的错误消息（用户可见），空字符串 = 成功或尚未加载
       conversationsLoadError: '',
+      // 加载失败时的 HTTP status code（null = 网络层失败 / 尚未尝试 / 加载成功）。
+      // Sidebar 按 status 分支显示不同提示文案（502=后端不可达 / 403=路径异常 / 5xx=后端异常）。
+      // Electron protocol.handle 兜底: net.fetch reject → 自动 502 + JSON body（详见 main.js）。
+      conversationsLoadStatus: null,
       // 是否在 Electron 环境运行（仅有 electronAPI）；web 永远 false
       // 控制是否走 servicesReady 状态机 + 渲染 BootstrapView 浮窗
       isElectron: false,
@@ -661,6 +666,32 @@ export default {
     scheduledTasksForCurrentSession() {
       if (!this.currentSessionId) return []
       return this.scheduledTasksMap.get(this.currentSessionId) || []
+    },
+    /**
+     * 加载会话失败时的 hint 文案(给 Sidebar load-error-hint 用)
+     * - 502: 后端不可达(Electron 兜底 / 后端未启动 / 端口被占)→ 引导去检查后端
+     * - 403: 后端拒绝访问 → 项目根路径 / 配置可能错位
+     * - 5xx: 后端异常 → 让用户去查后端日志
+     * - null(网络层失败):通用文案「检查网络 / 后端是否启动」
+     */
+    conversationsLoadHint() {
+      const s = this.conversationsLoadStatus
+      if (s === null || s === undefined) {
+        return '请检查网络连接或灵析后端服务是否已启动'
+      }
+      if (s === 502) {
+        return '灵析后端服务未启动或端口 38211 被占用,请检查引导页状态'
+      }
+      if (s === 403) {
+        return '后端拒绝访问,请检查项目根路径配置或后端服务状态'
+      }
+      if (s >= 500) {
+        return '灵析后端服务异常,请查看后端日志'
+      }
+      if (s === 404) {
+        return 'API 路径不存在,请确认后端版本与客户端一致'
+      }
+      return '请确认灵析后端服务已启动'
     },
     /**
      * 当前会话的排队消息列表（用于 MessageInput 渲染卡片）
@@ -3297,6 +3328,7 @@ export default {
           // 后端返回完整会话列表，前端一次性展示，CSS 溢出时显示滚动条
           this.conversations = data
           this.conversationsLoadError = ''
+          this.conversationsLoadStatus = null
           // 并行拉每个会话的定时任务，写入 scheduledTasksMap
           // ——侧栏每行的 ⏰ 指示靠这个 Map 渲染，单拉当前会话不够
           // 失败静默由 fetchScheduledTasks 内部 console.warn 兜底
@@ -3305,12 +3337,15 @@ export default {
           )
         } else {
           // 非 2xx：留个话到 UI 提示用户「后端没起」/「端口被占」等常见原因（否则静默失败用户一脸懵）
+          // status code 留给 conversationsLoadHint computed 按分支给提示文案。
           this.conversationsLoadError = `HTTP ${response.status} ${response.statusText}`
+          this.conversationsLoadStatus = response.status
           console.warn('[conversations] 接口返回非 OK:', this.conversationsLoadError)
         }
       } catch (error) {
         // 网络层失败（CORS / fetch 本身失败 / JSON 解析错误）—— 静默吞 console 用户看不到
         this.conversationsLoadError = error?.message || '网络请求失败'
+        this.conversationsLoadStatus = null  // 无 status code,conversationsLoadHint 给通用文案
         console.error('加载对话列表失败:', error)
       }
     },

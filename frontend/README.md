@@ -82,7 +82,7 @@ Web 端走 Vite dev server，Electron 端在窗口内嵌同一个 URL 或 `file:
 # 启动 Redis（端口 6024，密码 123456）
 docker-compose up -d redis
 
-# 启动主服务（端口 8211，stdio 模式下自动 fork MCP 子进程）
+# 启动主服务（默认端口 38211，stdio 模式下自动 fork MCP 子进程）
 cd backend
 uv run chatme_main
 
@@ -234,7 +234,7 @@ refreshPage() {
 
 ## API 接口
 
-Vite dev server 通过代理把 `/chat` 和 `/static` 转发到 `http://127.0.0.1:8211`，因此前端调用 `/chat/xxx` 与直接访问后端等价。
+Vite dev server 通过代理把 `/chat` 和 `/static` 转发到 `http://127.0.0.1:38211`，因此前端调用 `/chat/xxx` 与直接访问后端等价。
 
 ### 聊天接口（`/chat` 前缀）
 
@@ -364,7 +364,7 @@ const isTest = process.env.NODE_ENV === 'test'
 | `window.width × height` | `1100 × 720` | 主窗口尺寸 |
 | `window.minWidth × minHeight` | `650 × 480` | 最小尺寸 |
 | `devServer.url` | 从 Vite 导入的 `http://localhost:18211` | Electron 开发时加载的 URL |
-| `backend.apiUrl` | `http://127.0.0.1:8211`（从 Vite 代理读取） | 后端地址 |
+| `backend.apiUrl` | `http://127.0.0.1:38211`（从 Vite 代理读取） | 后端地址 |
 | `paths.indexHtml` | `dist/index.html`（asar 内） | Electron 正式模式加载的入口 HTML |
 | `paths.preload` | `electron/preload.js`（asar 内） | preload 脚本路径 |
 | `paths.icon` | dev: `electron/public/favicon.png`<br>packaged: `process.resourcesPath/build/icon.png` | 跨平台窗口图标 |
@@ -511,7 +511,7 @@ unzip 灵析-0.2.0-arm64-mac.zip -d ~/Downloads
 open ~/Downloads/灵析.app
 ```
 
-**前置依赖**：必须先启动后端（`uv run chatme_main`，端口 8211），否则前端 `/chat/*` 请求全部失败。
+**前置依赖**：必须先启动后端（`uv run chatme_main`，默认端口 38211），否则前端 `/chat/*` 请求全部失败。
 
 ## 常见问题
 
@@ -519,8 +519,8 @@ open ~/Downloads/灵析.app
 
 - 检查后端 Redis 是否启动（端口 6024）
 - 检查 MCP 子进程是否随主服务拉起（stdio 模式：MCP 由 chatme_main 自动 fork，`ps -ef | grep chatme` 应见父子两进程）
-- 检查主服务是否启动（端口 8211）
-- Vite 代理 `/chat` 和 `/static` 到 8211；如改了后端端口，需同步 `vite.config.js` 的 `proxy`
+- 检查主服务是否启动（默认端口 38211）
+- Vite 代理 `/chat` 和 `/static` 到 38211；如改了后端端口，需同步 `vite.config.js` 的 `proxy`
 
 ### 2. macOS Dock 显示的图标不是准备好的图标
 
@@ -532,7 +532,7 @@ open ~/Downloads/灵析.app
 
 ### 3. Vite 代理提示 404 / 后端接口调用失败
 
-检查 `vite.config.js` 的 `proxy` 配置：`/chat` 与 `/static` 都代理到 `http://127.0.0.1:8211`，没有 `changeOrigin` 设置的话跨域 header 会丢。
+检查 `vite.config.js` 的 `proxy` 配置：`/chat` 与 `/static` 都代理到 `http://127.0.0.1:38211`，没有 `changeOrigin` 设置的话跨域 header 会丢。
 
 ### 4. npm install 时 electron 下载慢
 

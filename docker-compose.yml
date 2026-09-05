@@ -1,4 +1,10 @@
 # ChatMe/docker-compose.yml
+#
+# ⚠️ docker-compose 不支持变量嵌入 host 端口，6024 / 28001 写死后必须与下面保持同步：
+#   - backend/.chatme/config.json redis.checkpointer_url / state_saver_url
+#   - backend/ChatMe/ChatMeConfig/core.py 默认配置生成器
+#   - frontend/electron/main.js findExternalPortListeners([6024, 28001])
+#   改端口流程：先改 config.json → 同步本文件 + ChatMeConfig 默认值 + Electron main.js。
 services:
   redis:
     image: redis/redis-stack:latest
@@ -9,8 +15,8 @@ services:
       - ./docker_data/redis-stack/data:/data
       - ./docker_data/redis-stack/redisinsight:/var/lib/redisinsight
     ports:
-      - "6024:6379"
-      - "28001:8001"
+      - "6024:6379"   # 容器内 6379 → host 6024
+      - "28001:8001"  # 容器内 8001 → host 28001
     restart: unless-stopped
     networks:
       - chatme-net

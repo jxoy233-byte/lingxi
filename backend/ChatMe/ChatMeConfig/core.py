@@ -37,7 +37,7 @@ class ChatMeConfig:
 
     def _find_config_file(self) -> Path:
         """查找配置文件路径
-        优先级：局部 .chatme/config.json > 全局 CHATME_CONFIG_DIR 或 ~/.chatme/config.json
+        优先级：局部 .chatme/config.json > 全局 LINGXI_CONFIG_DIR 或 ~/.chatme/config.json
 
         注：local/global 的判定统一走 ChatMe.paths.get_chatme_dir()（cwd 下
         存在 .chatme 就用 local，否则用 ~/.chatme）。这里和 get_chatme_dir()
@@ -132,7 +132,7 @@ class ChatMeConfig:
                 "version": "v0.2.0",
                 "description": "ChatMe LangGraph Workflow",
                 "host": "127.0.0.1",
-                "port": 8211,
+                "port": 38211,
             },
             "llm_providers": {
                 "openai": {
@@ -474,7 +474,7 @@ class ChatMeConfig:
             "exa_api_key": self.get("skills.exa_api_key", fallback_env="EXA_API_KEY"),
             "tavily_api_key": self.get("skills.tavily_api_key", fallback_env="TAVILY_API_KEY"),
             "vl_base_url": self.get("llm_providers.vl.base_url", fallback_env="VL_BASE_URL",
-                                     default="http://127.0.0.1:8211/api/v1"),
+                                     default="http://127.0.0.1:38211/api/v1"),
             "vl_api_key": self.get("llm_providers.vl.api_key", fallback_env="VL_API_KEY", default="empty"),
             "vl_model_name": self.get("llm_providers.vl.model_name", fallback_env="VL_MODEL_NAME",
                                         default="Qwen3-VL-2B"),

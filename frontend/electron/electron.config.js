@@ -12,7 +12,7 @@ const __dirname = path.dirname(__filename)
 // 这里只复制 vite.config.js 里 viteServerConfig 的两个值——port 和 proxy target。
 // 同步规则：改 vite.config.js 的 port / proxy target 时也要同步改这里。
 const VITE_DEV_PORT = 18211
-const VITE_PROXY_BACKEND = 'http://127.0.0.1:8211'
+const VITE_PROXY_BACKEND = 'http://127.0.0.1:38211'
 
 export default {
   // 应用基本信息

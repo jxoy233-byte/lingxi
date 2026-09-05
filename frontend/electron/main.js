@@ -7,6 +7,7 @@ import { promisify } from 'util'
 import fsSync from 'fs'
 import os from 'os'
 import http from 'http'
+import nodeNet from 'net'
 
 import {
   IS_WIN, IS_MAC, ARCH,
@@ -267,7 +268,29 @@ function registerFileProtocolInterceptor() {
         headers: request.headers,
         ...(request.body && { body: request.body, duplex: 'half' })
       }
-      const upstream = await net.fetch(backendUrl, init)
+
+      // 兜底：net.fetch reject（ECONNREFUSED / ENOTFOUND / 监听中但未响应）时，
+      // Electron protocol.handle 默认行为是返回 403 Forbidden，跟我们想表达的
+      // 「后端不可达」语义不符，前端 banner 会显示"加载对话列表失败 HTTP 403"误导用户。
+      // 改成显式 502 Bad Gateway + JSON body，让前端能按 status 区分文案。
+      let upstream
+      try {
+        upstream = await net.fetch(backendUrl, init)
+      } catch (e) {
+        const errMsg = (e?.message || String(e)).slice(0, 200)
+        console.error('[proxy] backend fetch failed:', backendUrl, errMsg)
+        return new Response(
+          JSON.stringify({
+            detail: `后端不可达 (${backendUrl}): ${errMsg}`,
+            proxy_error: 'backend_unreachable',
+          }),
+          {
+            status: 502,
+            statusText: 'Bad Gateway',
+            headers: { 'Content-Type': 'application/json; charset=utf-8' },
+          }
+        )
+      }
 
       // 显式重建 Response：确保 body 是 ReadableStream（不是 buffer）+ headers 全透传。
       // SSE 场景必须这样，否则 Electron 会等全部响应收完才一次性吐给 renderer，
@@ -725,7 +748,7 @@ function setupSecurityPolicies() {
  */
 function checkBackendHealth() {
   return new Promise(resolve => {
-    const req = http.get('http://127.0.0.1:8211/health', res => {
+    const req = http.get(`http://127.0.0.1:${currentBackendPort}/health`, res => {
       res.resume()
       resolve(res.statusCode === 200)
     })
@@ -1176,6 +1199,50 @@ async function waitForRedisReady(root, onLog) {
   throw new Error('Redis 启动 30s 未就绪')
 }
 
+/**
+ * will-quit 兜底清理 Lingxi 管理的 Docker 容器。
+ *
+ * 为什么需要这个:Windows 走 taskkill /F 强杀 backend,lifespan cleanup 跑不到 →
+ * chatme-redis + chatme-python-sandbox-* 全部残留。Mac 走 SIGTERM 软退时
+ * backend 自己 `_shutdown_resources()` 已经清了,但跑这条仍幂等 no-op,作为兜底。
+ *
+ * 分两步:
+ *   1. docker stop chatme-redis (单命令,跨平台一致)
+ *   2. docker ps -q --filter name=chatme-python-sandbox → docker stop <ids>
+ *      拆成两步避免 cmd `for /f` in `cmd /c` 上下文里的解析边角情况,
+ *      也避免空 stdin 时 docker stop 报 "requires at least 1 argument"。
+ *
+ * 永远不抛——best-effort 兜底,失败只 warn。已停止的容器 docker stop 返回
+ * 非零 exit 码也吞掉(容器不存在比残留无害)。
+ */
+async function stopLingxiContainers() {
+  const nul = IS_WIN ? '2>nul' : '2>/dev/null'
+  const quietShell = (cmd, timeoutMs) =>
+    execInUserShell(cmd, { timeout: timeoutMs }).catch(() => '')
+
+  try {
+    // 1. Redis。--time 5 比默认 10s 短,空闲容器秒停。
+    await quietShell(`docker stop --time 5 chatme-redis ${nul}`, 8_000)
+
+    // 2. sandbox 容器。先列再停,空列表直接跳过 docker stop 调用。
+    const listOut = await quietShell(
+      `docker ps -q --filter "name=chatme-python-sandbox"`,
+      5_000
+    )
+    const ids = listOut.trim().split(/\r?\n/).filter(Boolean)
+    if (ids.length > 0) {
+      // 单行 docker stop <id1> <id2> ... 比逐个 stop 快(并行 SIGTERM + SIGKILL)。
+      // 多个 id 加在一起 5s + 余量,3 个容器最多 ~7s。
+      const totalTimeout = Math.min(8_000 + ids.length * 2_000, 20_000)
+      await quietShell(`docker stop --time 5 ${ids.join(' ')} ${nul}`, totalTimeout)
+    }
+
+    console.log(`[cleanup] Lingxi 容器已停止 (chatme-redis + ${ids.length} sandbox 容器)`)
+  } catch (e) {
+    console.warn(`[cleanup] stopLingxiContainers 兜底失败(容器可能已停):`, (e?.message || '').slice(0, 200))
+  }
+}
+
 async function fixSandbox(onLog) {
   const root = requireProjectRoot()
   await execStream(
@@ -1251,16 +1318,86 @@ function killPid(pid) {
 }
 
 /**
+ * 后端 fallback 端口列表。
+ *
+ * - 第 1 项（38211）是 canonical 端口；config.json / vite.config.js / electron.config.js
+ *   全部默认指向它。所有「正常启动」路径走这个端口。
+ * - 后续候选是 Windows Hyper-V 端口预留冲突的兜底：
+ *   Windows 把 8000-9000 段划给 Hyper-V / ICS / WSL 等系统服务（excludedportrange），
+ *   用户偶发遇到 WSAEACCES (10013) bind 失败；连续 9 个候选覆盖大多数冲突场景。
+ * - 选定端口后会同步：① 写 config.json.app.port ② 更新 config.backend.apiUrl 端口段
+ *   ③ 通知 renderer 重新解析（避免 vite proxy / Electron 转发错位）。
+ *
+ * 注意：fallback 端口只用于「canonical 端口被外部占用」的兜底；本应用残留进程会被
+ * killPortIfListening 杀掉后复用 38211，不进 fallback。
+ */
+const BACKEND_PORT_FALLBACK = [38211, 38212, 38213, 38214, 38215, 38216, 38217, 38218, 38219]
+
+/**
+ * 实际启动后端用的端口（模块级可变，startBackend 选定后写一次，protocol.handle 用此值）。
+ * 默认 38211；startBackend 失败 fallback 后更新。
+ */
+let currentBackendPort = 38211
+
+/**
+ * 探测端口是否「空闲」（没人 LISTEN）。
+ * 用 net.createServer().listen(port) 试 bind：成功 → 空闲；EADDRINUSE → 被占用。
+ * bound 后立刻 close 释放——避免对 OS 端口状态造成中间抖动。
+ */
+function isPortFree(port) {
+  return new Promise(resolve => {
+    const tester = nodeNet.createServer()
+      .once('error', err => {
+        // EADDRINUSE = 占用；其他错误（权限 / 协议）按占用处理，保守优先
+        resolve(false)
+        tester.close?.()
+      })
+      .once('listening', () => {
+        tester.close(() => resolve(true))
+      })
+      .listen(port, '127.0.0.1')
+  })
+}
+
+/**
+ * 在 BACKEND_PORT_FALLBACK 中找第一个空闲端口。返回端口号；都失败抛错。
+ * 被占用且能 kill 的本应用残留进程会被杀 + 等 500ms 让 OS 回收，然后复用同一个端口
+ * （不进 fallback 链，保持 canonical 端口语义）。
+ */
+async function pickBackendPort() {
+  for (const port of BACKEND_PORT_FALLBACK) {
+    if (await isPortFree(port)) {
+      console.log(`[backend] 端口 ${port} 空闲`)
+      return port
+    }
+    const killed = await killPortIfListening(port)
+    if (killed) {
+      // 给 OS 释放端口时间（lsof/kill 异步；Windows taskkill 也可能有残留）
+      await new Promise(r => setTimeout(r, 800))
+      if (await isPortFree(port)) {
+        console.log(`[backend] 端口 ${port} 清理了残留进程，复用`)
+        return port
+      }
+    }
+    console.log(`[backend] 端口 ${port} 被外部占用，尝试下一个候选`)
+  }
+  throw new Error(
+    `BACKEND_PORT_FALLBACK ${BACKEND_PORT_FALLBACK.join(',')} 全部被占用，` +
+    `请检查系统服务（Hyper-V / ICS / WSL 经常占 8000-9000 段）`
+  )
+}
+
+/**
  * 检测指定端口是否有进程在监听；若有则杀。返回 true 表示杀了 ≥1 个进程。
  *
  * 跨平台：
  *   - Win: netstat -ano | findstr :PORT → 提取 LISTENING 行的 PID → taskkill /F /PID
  *   - Unix: lsof -ti:PORT -sTCP:LISTEN → kill -9
  *
- * 用于 startBackend 之前清理 8211 上残留的旧 backend 进程（异常退出 / 孤儿进程等场景）：
+ * 用于 startBackend 之前清理 BACKEND_PORT_FALLBACK 任一端口上残留的旧 backend 进程（异常退出 / 孤儿进程等场景）：
  *   旧进程占着端口 → 新 spawn 静默 EADDRINUSE → /health 探测会错连旧实例返回 200 →
  *   用户看到"成功"但实际是旧版 backend（checkpoint / 配置全错位）。
- * 只针对 8211 这个本应用专用端口做，不会误杀同名其他服务。
+ * 只针对本应用专用端口做，不会误杀同名其他服务。
  */
 async function killPortIfListening(port) {
   try {
@@ -1271,7 +1408,7 @@ async function killPortIfListening(port) {
       )
       const pids = new Set()
       out.split('\n').forEach(line => {
-        // 格式示例：TCP    0.0.0.0:8211    0.0.0.0:0    LISTENING    1234
+        // 格式示例：TCP    0.0.0.0:38211    0.0.0.0:0    LISTENING    1234
         const m = line.match(/LISTENING\s+(\d+)/i) || line.match(/\s(\d+)\s*$/)
         if (m) pids.add(m[1])
       })
@@ -1329,14 +1466,26 @@ async function startBackend(onLog) {
   // 保证后端及其间接启动的命令继承用户 shell 的完整 PATH。
   await getShellAugmentedPath()
 
-  // 启动前清理 8211 上残留的旧 backend 进程（异常退出 / 孤儿进程 / Ctrl+C 等场景）：
-  // 旧进程占着端口 → 新 spawn 静默 EADDRINUSE → 但 /health 探测会错连旧实例返回 200 →
-  // 用户看到"成功" 实际是旧版（checkpoint / 配置错位）。
-  // 只针对 8211 这个本应用专用端口，不会误杀其他服务。
-  const killed = await killPortIfListening(8211)
-  if (killed) console.log('[backend] 清理了 8211 上残留进程')
+  // 选端口：canonical 38211 被外部占 → 走 BACKEND_PORT_FALLBACK 顺序；
+  // 本应用残留会被 killPortIfListening 杀掉后复用 canonical 端口，不进 fallback。
+  const port = await pickBackendPort()
+  currentBackendPort = port
+  // 同步到 config.backend.apiUrl，protocol.handle /chat /static /admin 转发用此值
+  config.backend.apiUrl = `http://127.0.0.1:${port}`
 
-  console.log('[backend] starting:', pythonExe, 'main.py')
+  // 把实际端口写进 config.json.app.port，后端启动时会读这个值（避免硬编码端口错位）
+  const configPath = path.join(root, 'backend', '.chatme', 'config.json')
+  try {
+    const cfg = JSON.parse(fs.readFileSync(configPath, 'utf-8'))
+    cfg.app = cfg.app || {}
+    cfg.app.port = port
+    fs.writeFileSync(configPath, JSON.stringify(cfg, null, 4))
+    console.log(`[backend] config.json.app.port 同步为 ${port}`)
+  } catch (e) {
+    console.warn('[backend] 同步 config.json 端口失败（继续启动）:', e.message)
+  }
+
+  console.log('[backend] starting:', pythonExe, 'main.py', 'on port', port)
 
   const proc = spawn(pythonExe, ['main.py'], {
     cwd: backendDir,
@@ -1367,7 +1516,7 @@ async function startBackend(onLog) {
     while (Date.now() < deadline) {
       try {
         await new Promise((resolve, reject) => {
-          const req = http.get('http://127.0.0.1:8211/health', res => {
+          const req = http.get(`http://127.0.0.1:${port}/health`, res => {
             res.resume()
             resolve(res.statusCode === 200)
           })
@@ -1812,6 +1961,9 @@ app.on('window-all-closed', () => {
  *
  * 关键:必须给 backend 发 SIGTERM(软退出)而不是 SIGKILL(强杀),
  * 否则 chatme_main 没机会跑 lifespan cleanup → MCP subprocess / sandbox / redis 全残留。
+ * 但 Windows 没有等价于 SIGTERM 的优雅信号(taskkill /F 强杀、taskkill 不带 /F
+ * 对 console 进程无效),所以 backend 'exit' 后还要跑 stopLingxiContainers()
+ * 兜底清掉 Lingxi 管的 Docker 容器(MCP subprocess 仍残留,用户下次启动会被覆盖)。
  */
 app.on('will-quit', (event) => {
   // 0. 停止健康监测定时器，避免跑空检查 + IPC 到已销毁的 webContents
@@ -1820,10 +1972,30 @@ app.on('will-quit', (event) => {
   // 1. tracked shell 子进程(docker build / uv sync / redis up)—— SIGKILL 强杀
   killTrackedChildren('will-quit')
 
-  // 2. spawn 出来的 backend —— SIGTERM 软退出,等真正退出再 app.exit()
+  // 2. 不管 backend 是不是还活着,都先 preventDefault,等 docker 兜底完才真退。
+  //    - backend 还活着:走 SIGTERM/taskkill 等它死 → docker 兜底 → app.exit
+  //    - backend 已死(早崩了 / 用户 bootstrap 中途取消):跳过 kill 直接 docker 兜底
+  //    两条路径都覆盖 Lingxi 管的 Docker 容器清理,Windows 强杀路径必跑。
+  event.preventDefault()
+
+  /**
+   * will-quit 收尾:docker 兜底停 Lingxi 容器,然后 app.exit。
+   * 抽出来给两条路径共用(backend 还活着 / backend 已死)。
+   * 内部 try/catch 永不让 app.exit 跑不到。
+   */
+  const finishQuit = async () => {
+    try {
+      await stopLingxiContainers()
+    } catch (e) {
+      // stopLingxiContainers 自己 try/catch,理论上 catch 不到;保险。
+      console.warn('[cleanup] finishQuit docker stop 异常:', (e?.message || '').slice(0, 200))
+    }
+    app.exit(0)
+  }
+
+  // 3. spawn 出来的 backend —— SIGTERM 软退出,等真正退出再 finishQuit
   const proc = backendProcRef.value
   if (proc) {
-    event.preventDefault()  // 推迟 Electron 退出,等 backend 自然死
     try {
       if (IS_WIN) {
         exec(`taskkill /pid ${proc.pid} /T /F`, () => {})
@@ -1842,13 +2014,17 @@ app.on('will-quit', (event) => {
         clearTimeout(exitTimeout)
         console.log('[cleanup] backend exited')
         backendProcRef.value = null
-        app.exit(0)
+        finishQuit()
       })
     } catch (e) {
       console.error(`[cleanup] failed to kill backend:`, e.message)
-      app.exit(0)
+      finishQuit()
     }
+    return  // 已 preventDefault,后续不跑到
   }
+
+  // 4. backend 不在跑(早崩了 / 用户 bootstrap 中途取消)—— 直接 docker 兜底退出
+  finishQuit()
 })
 
 /**

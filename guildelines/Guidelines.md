@@ -19,7 +19,7 @@
 | Electron appId | `com.chatme.app` |
 | productName | `灵析` |
 | 默认 favicon | `/favicon.ico` |
-| 主服务端口 | 8211（FastAPI；stdio 模式下 fork MCP 子进程，无需独立端口） / 18211（Vite dev） |
+| 主服务端口 | 38211（FastAPI；stdio 模式下 fork MCP 子进程，无需独立端口） / 18211（Vite dev） |
 
 ---
 

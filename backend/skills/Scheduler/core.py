@@ -56,7 +56,7 @@ def _parse_redis_url(url: str) -> dict:
     RedisJobStore 用 redis.Redis(db=int(db), password=..., host=..., port=...)
     直接传 redis_url 也可以，但显式传更清晰
     """
-    # redis://:123456@localhost:6024/0
+    # redis://:123456@localhost:6024/0  （实际端口见 ChatMe.paths）
     if not url.startswith("redis://"):
         return {}
     rest = url[len("redis://"):]

@@ -6,23 +6,27 @@ import { fileURLToPath } from 'url'
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
+// 与后端 .chatme/config.json app.port / frontend/electron/main.js / electron.config.js
+// VITE_PROXY_BACKEND 三处保持一致。改值需同步上述三处。
+// Vite dev server 端口 18211；与 frontend/electron/electron.config.js devServer.port /
+// frontend/package.json wait-on URL 一致。
 export const viteServerConfig = {
   host:'0.0.0.0',
   port: 18211,
   strictPort: true,
   proxy: {
     '/chat': {
-      target: 'http://127.0.0.1:8211',
+      target: 'http://127.0.0.1:38211',
       changeOrigin: true,
       rewrite: (path) => path
     },
     '/static': {
-      target: 'http://127.0.0.1:8211',
+      target: 'http://127.0.0.1:38211',
       changeOrigin: true,
       rewrite: (path) => path
     },
     '/admin': {
-      target: 'http://127.0.0.1:8211',
+      target: 'http://127.0.0.1:38211',
       changeOrigin: true,
       rewrite: (path) => path
     }

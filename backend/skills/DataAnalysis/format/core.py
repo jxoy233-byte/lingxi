@@ -29,7 +29,7 @@ def _format_check_error(status_code, exception, path, url, port) -> str:
         if "Connection" in exc_name or "refused" in exc_msg.lower():
             return (
                 f"[后端未连通] 无法连接 {url} | 检查后端服务 (port {port}) 是否启动，"
-                f"可通过 CHATME_BACKEND_HOST/CHATME_BACKEND_PORT 环境变量覆盖"
+                f"可通过 LINGXI_BACKEND_HOST/LINGXI_BACKEND_PORT 环境变量覆盖"
             )
         if "timeout" in exc_name.lower() or "timeout" in exc_msg.lower():
             return "[请求超时] 5 秒内未响应 | 网络较慢或后端无响应，可稍后重试"
@@ -230,8 +230,8 @@ class ChatDataAnalysisFormat:
         `error` 失败时统一为 `[类型] 描述 | 建议`，AI 可直接 parse。
         """
         # 沙盒用 host.docker.internal，本机用 127.0.0.1
-        host = os.getenv("CHATME_BACKEND_HOST", "host.docker.internal" if _is_sandbox() else "127.0.0.1")
-        port = os.getenv("CHATME_BACKEND_PORT", "8211")
+        host = os.getenv("LINGXI_BACKEND_HOST", "host.docker.internal" if _is_sandbox() else "127.0.0.1")
+        port = os.getenv("LINGXI_BACKEND_PORT", "38211")
         url = f"http://{host}:{port}/static/{path}"
 
         try:

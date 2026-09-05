@@ -92,7 +92,7 @@ State 定义在 [`backend/ChatMe/ChatWorkflow/config/models.py`](backend/ChatMe/
 ### 工作流启动入口
 
 ```bash
-# 主服务（端口 8211，stdio 模式下会 fork MCP 子进程，无需单独起）
+# 主服务（默认端口 38211，stdio 模式下会 fork MCP 子进程，无需单独起）
 uv run chatme_main
 
 # 开发模式单独起 MCP 服务（stdio 模式，监听 stdin/stdout ——
@@ -176,7 +176,7 @@ uv run chatme_mcp
 
 ```bash
 # 安装 wheel 后全局可用
-chatme_main                      # 主服务（端口 8211），stdio 模式下 fork MCP 子进程
+chatme_main                      # 主服务（默认端口 38211），stdio 模式下 fork MCP 子进程
 chatme_mcp                       # 仅开发模式单独起 MCP（stdio，正常运行不需要）
 
 # 开发模式（不进 wheel）

@@ -1,10 +1,10 @@
 {
   "app": {
     "name": "Lingxi",
-    "version": "v0.1.5",
+    "version": "v0.2.1",
     "description": "AI data-analysis chat assistant with tool use, command approval, code execution, and persistent memory across conversations",
     "host": "127.0.0.1",
-    "port": 8211
+    "port": 38211
   },
   "redis": {
     "checkpointer_url": "redis://:123456@localhost:6024/0",
@@ -24,7 +24,7 @@
     "vl": {
       "model_name": "Qwen3-VL-2B",
       "api_key": "empty",
-      "base_url": "http://127.0.0.1:8211/api/v1",
+      "base_url": "http://127.0.0.1:38211/api/v1",
       "local": false
     }
   },

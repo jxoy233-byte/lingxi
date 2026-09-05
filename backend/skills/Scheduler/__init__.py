@@ -90,7 +90,7 @@ import requests
 # 配置：HOST / PORT 优先级
 # =========================================================================
 # 沙盒容器内默认走 host.docker.internal（与 DataAnalysis check_static_file 同款）；
-# 本机直接调（不在沙盒里）走 127.0.0.1。CHATME_BACKEND_HOST / CHATME_BACKEND_PORT 可覆盖。
+# 本机直接调（不在沙盒里）走 127.0.0.1。LINGXI_BACKEND_HOST / LINGXI_BACKEND_PORT 可覆盖。
 # =========================================================================
 
 _DOCKERENV_MARKER = "/.dockerenv"
@@ -104,10 +104,10 @@ def _is_sandbox() -> bool:
 def _backend_base() -> str:
     """拼出后端 base URL，schema://host:port，无尾斜杠。"""
     host = os.getenv(
-        "CHATME_BACKEND_HOST",
+        "LINGXI_BACKEND_HOST",
         "host.docker.internal" if _is_sandbox() else "127.0.0.1",
     )
-    port = os.getenv("CHATME_BACKEND_PORT", "8211")
+    port = os.getenv("LINGXI_BACKEND_PORT", "38211")
     return f"http://{host}:{port}"
 
 
@@ -139,7 +139,7 @@ def _format_network_error(exc: Exception) -> str:
     exc_msg = str(exc)
     base = _backend_base()
     if "Connection" in exc_name or "refused" in exc_msg.lower():
-        return f"[ConnectionError] cannot reach ChatMe backend at {base} | 确认后端服务在 :8211 运行"
+        return f"[ConnectionError] cannot reach Lingxi backend at {base} | 确认后端服务在 :38211 运行"
     if "timeout" in exc_name.lower() or "timeout" in exc_msg.lower():
         return f"[Timeout] {_TIMEOUT}s 内未响应 | 网络较慢或后端无响应，可稍后重试"
     return f"[NetworkError] {exc_name}: {exc_msg} | 检查网络连接和后端服务状态"

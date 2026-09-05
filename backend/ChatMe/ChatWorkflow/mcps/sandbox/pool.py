@@ -184,7 +184,7 @@ class SandboxPool:
                 # WORKDIR=/ 让代码中的相对路径（如 open('cached/xxx')）也能解析。
                 # 不再挂 tmpfs —— 代码直接写到根目录 /code.py，跟 /cached、/skills 同级
                 "-e", "PYTHONPATH=/",
-                # 用于访问 host 上的后端 VL 模型（127.0.0.1:8211）
+                # 用于访问 host 上的后端 VL 模型（127.0.0.1:38211）
                 "--add-host=host.docker.internal:host-gateway",
                 self.image,
                 "sleep", "infinity"

@@ -20,7 +20,7 @@ module: skills.Scheduler
 
 ## ⚠️ 调 `code()` 必须传 `local=True`
 
-主进程跑（不走沙盒），4 个函数内部走 HTTP 调 `127.0.0.1:8211/admin/scheduled-tasks/*`；沙盒网络层在本项目不可靠且缺 `apscheduler`/`redis` 包，`local=False` 会卡死 / `ModuleNotFoundError`。看到 `ConnectionError` / `Timeout` / `ModuleNotFoundError` → 检查是否漏了 `local=True`。
+主进程跑（不走沙盒），4 个函数内部走 HTTP 调 `127.0.0.1:38211/admin/scheduled-tasks/*`；沙盒网络层在本项目不可靠且缺 `apscheduler`/`redis` 包，`local=False` 会卡死 / `ModuleNotFoundError`。看到 `ConnectionError` / `Timeout` / `ModuleNotFoundError` → 检查是否漏了 `local=True`。
 
 ```python
 # code("""...""", local=True)
@@ -96,7 +96,7 @@ from Scheduler import create_scheduled_task
 - `[BadRequest] cron expression invalid: ...` → 用 5-field Asia/Shanghai TZ，例如 `"0 9 * * *"`
 - `[NotFound] task abc12345 not found` → 调 `list_scheduled_tasks` 查 task_id
 - `[ServiceUnavailable] scheduler not started` → 检查后端 lifespan 日志
-- `[ConnectionError] cannot reach ChatMe backend at {host}` → 确认后端在 :8211 启动
+- `[ConnectionError] cannot reach Lingxi backend at {host}` → 确认后端在 :38211 启动
 
 ## 注意事项
 

@@ -105,11 +105,11 @@ def _build_vl_llm() -> ChatOpenAI:
     from ChatMe.ChatMeConfig import get_skills_config
     try:
         skills = get_skills_config()
-        base_url = skills.get("vl_base_url") or os.getenv("VL_BASE_URL", "http://127.0.0.1:8211/api/v1")
+        base_url = skills.get("vl_base_url") or os.getenv("VL_BASE_URL", "http://127.0.0.1:38211/api/v1")
         api_key = skills.get("vl_api_key") or os.getenv("VL_API_KEY", "empty")
         model_name = skills.get("vl_model_name") or os.getenv("VL_MODEL_NAME", "Qwen3-VL-2B")
     except Exception:
-        base_url = os.getenv("VL_BASE_URL", "http://127.0.0.1:8211/api/v1")
+        base_url = os.getenv("VL_BASE_URL", "http://127.0.0.1:38211/api/v1")
         api_key = os.getenv("VL_API_KEY", "empty")
         model_name = os.getenv("VL_MODEL_NAME", "Qwen3-VL-2B")
 

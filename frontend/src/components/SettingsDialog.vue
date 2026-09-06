@@ -134,6 +134,21 @@
               </div>
               <div class="group">
                 <div class="field">
+                  <label>BochaSearch</label>
+                  <div class="password-wrap">
+                    <input
+                      v-model="formConfig.skills.bocha_api_key"
+                      :type="showKey.bocha_api_key ? 'text' : 'password'"
+                      placeholder="留空表示不修改"
+                      autocomplete="off"
+                    />
+                    <button type="button" class="toggle-eye" @click="showKey.bocha_api_key = !showKey.bocha_api_key">
+                      {{ showKey.bocha_api_key ? 'Hide' : 'Show' }}
+                    </button>
+                  </div>
+                  <p class="field-hint">已脱敏。留空 = 保留原 key；填写 = 覆盖。国内中文搜索推荐。</p>
+                </div>
+                <div class="field">
                   <label>Exa</label>
                   <div class="password-wrap">
                     <input
@@ -161,7 +176,7 @@
                       {{ showKey.tavily_api_key ? 'Hide' : 'Show' }}
                     </button>
                   </div>
-                  <p class="field-hint">已脱敏。留空 = 保留原 key；填写 = 覆盖。</p>
+                  <p class="field-hint">已脱敏。留空 = 保留原 key；填写 = 覆盖。海外 API 需稳定连外网。</p>
                 </div>
               </div>
             </section>

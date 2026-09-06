@@ -8,6 +8,7 @@ from typing import List, Dict, Any, Literal
 import requests
 
 from ChatMe.ChatMeConfig import get_skills_config
+from skills._search_health import format_others_available
 
 
 class TavilySearch:
@@ -91,7 +92,7 @@ class TavilySearch:
             }
 
         except requests.RequestException as e:
-            raise Exception(f"Tavily 搜索失败：{str(e)}")
+            raise Exception(f"Tavily 搜索失败：{str(e)}{format_others_available('Tavily')}")
 
 
 def tavily_search(

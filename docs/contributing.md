@@ -21,7 +21,7 @@
 
 启动 Redis / 后端 / 前端 / 构建沙盒镜像的命令见 [README → 快速开始](../README.md#快速开始)。下述为开发侧的额外约定与踩坑：
 
-- **MCP 服务器必须单独启动**：首次启动会自动执行 ① 检查 Redis  ② 清理残留沙盒容器  ③ 初始化沙盒池（默认 2 个常驻容器）
+- **MCP 服务器必须单独启动**：首次启动会自动执行 ① 检查 Redis  ② 清理残留沙盒容器  ③ 初始化沙盒池（min=1, max=4, per_container_concurrency=8）
 - **Redis** 通过 `docker-compose up -d redis` 启动，端口 6024，密码 `123456`
 - **代码沙盒**需要先 `docker-compose build sandbox` 构建镜像（镜像名 `chatme-python-sandbox:latest`）
 - **unstructured 首次使用**：CSV / MD / XML 解析会自动下载 NLTK 数据（punkt、averaged_perceptron_tagger 等），需外网环境

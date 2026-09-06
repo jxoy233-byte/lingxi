@@ -10,8 +10,6 @@
 
 - [项目特性](#项目特性)
 - [界面预览](#界面预览)
-- [技术栈](#技术栈)
-- [工作流](#工作流)
 - [快速开始](#快速开始)
 - [配置说明](#配置说明)
 - [项目结构](#项目结构)
@@ -28,41 +26,27 @@
 
 ## 项目特性
 
-- **单智能体 + 多 LLM 角色工作流**：基于 LangGraph StateGraph 实现 `input_parse → context_assembly → agent_node ↔ tool_execution_node → final_node` 循环；5 个独立 LLM（core / agent / summary / react_compact / imp_ipt）各司其职，共用一个图状态
-- **ReAct 流程压缩**：`context_assembly_node` 按 4 阶段循环自动压缩长 ReAct 轨迹，后台 LLM 异步推进不阻塞工作流，`imp_ipt` 标记做切分锚点，最近 keep 轮原文保留；`final_node` 用 dynamic system prompt 把 `imp_ipt` 注入 system 层独占最高注意力位（详见 CLAUDE.md）
-- **流式 SSE 响应**：前端通过 EventSource 实时接收 `content` / `reasoning` / `tool_call_*` / `memory_wait_*` 事件
-- **多模态文件解析**：图片（OSS / base64）、文本（CSV / JSON / MD / TXT / XML）、文档（PDF / Word / PowerPoint / Excel），docling + qwen-vl-utils + unstructured
-- **Docker 沙盒执行**：预启动容器池 + tmpfs 隔离，提供安全的 Python 数据分析环境
-- **多 LLM Provider**：OpenAI / DeepSeek / 本地 VL（Qwen3-VL-2B）统一抽象，5 个独立 LLM（core / agent / summary / react_compact / imp_ipt）可分别配参
-- **对话记忆**：Redis checkpointer 状态恢复 + 自建 memory manager 长期记忆；per-thread Lock + 原子写 + 后台任务串行
-- **节点异常统一兜底**：`@node_guard` 装饰器包住所有 LangGraph 节点，异常后 SSE 外层统一返回 `error` 事件
-- **命令级权限审批**：`cmd` / `code` 工具走 `PermissionedToolNode`（基于官方 `ToolNode` + `_awrap_tool_call` hook），敏感命令执行前触发 LangGraph `interrupt()` 弹审批；4 档决策（`approve` / `this-time-only` / `deny` / `feedback:<text>`）走 Redis `permission:{sid}` hash；`code` 工具按 imports + calls + lang + sandbox 计算 fingerprint 做永久批准匹配
-- **OSS 对象存储**：阿里云 OSS，图片 / 文件上传后通过 URL 直接访问
-- **桌面端打包**：Electron 41 + electron-builder 26 多平台打包，含 `file://` 协议拦截器等价 Vite dev proxy、↻ 刷新按钮、网页预览窗口
-- **数据库分析**：DataAnalysis skill 支持 MySQL / SQLite / PostgreSQL / MongoDB 只读查询（agent 在 `data_analysis/` 工作树模式下可主动调用 `query_sql` / `query_mongo`，配置跨会话保存在 `skills/DataAnalysis/database/.runtime/`）
-- **一键导出**：
-  - 文件树「会话文件」面板头部的 ⬇ / 👁 按钮把 `data_analysis/` 产物打包成 ZIP 或单文件 HTML 预览（marked.js + mermaid.js CDN，PNG/SVG 转 base64 内嵌，CSV/JSON 转 HTML 表格）
-  - AI 消息气泡下方按钮排的 ⬇ 「导出到本轮」按钮，截至该 checkpoint 导出 OpenAI Chat Completions 格式 JSON + 自家完整 state 备份 JSON（ZIP 下载，后续可恢复）
-- **定时任务**：`Scheduler` skill 把一段 prompt 配成 cron，到点自动注入指定 session 跑完整一轮 LangGraph agent；APScheduler `AsyncIOScheduler + RedisJobStore`（Asia/Shanghai）持久化，后端重启自动恢复；**v0.1.5 起**每个会话底部内嵌 ⏰ 触发按钮 + 展开任务列表（仅 `tasks.length > 0` 渲染；展开状态 localStorage 持久化）
-- **消息排队**：AI 流式期间用户仍可输入，消息进 Redis `queue:{sid}` FIFO（最多 20 条 × 4000 字符），本轮 `done` 后自动出队续发；用户切走会话时推迟 drain，切回再发
-- **Memory 跨会话记忆（v0.1.5 新增）**：`Memory` skill 把精确事实 / 用户偏好持久化到 `.chatme/memory/{tid|global}/{facts|preference}.md`，`context_assembly_node` 每轮开头自动合并注入，让未来对话开箱即用。**remember 必须 `code(..., local=True)`**（沙盒挂 ro）；recall 在沙盒里也支持（挂到 `/memory`）。
-- **SkillForge 动态创建 skill（v0.1.5 新增）**：`SkillForge` skill 让 agent / 用户写一段 Python wrapper 落到 `/skills/<name>/`，立即被 `find_skill` 发现（registry 按 mtime 自动重扫，无需重启）。
-- **Settings 4 tab + 热加载（v0.1.5 新增）**：`vl.local` 开关决定是否加载本地 VL 模型 + fallback 主用 LLM；`/admin/config` GET / PUT（白名单 llm_providers / skills / permissions）；**按段决定 `restart_required`** —— permissions / skills 改动立即生效，llm_providers 需重启；`/admin/restart` + `/admin/health` 支持前端轮询等待重启恢复。**前端 `buildPayload()` diff-only**（`_deepDiff` + `_stripEmptyObjects`），避免「在 Permissions 改一字段把 llm_providers 全部带上」的误判。
-- **Checkpoint 清理端点（v0.1.5 新增）**：LangGraph `AsyncRedisSaver` 每节点 aput 会攒几十～几百个 checkpoint，dump.rdb 膨胀且启动慢；`POST /admin/checkpoints/prune` 手动清理（dry_run 预览 / 真删两种），前端 Settings「立即清理」按钮调用；后台已自动 hook 进 `_save_round_checkpoint` 每轮 round 收尾时异步 prune。
-- **Slash 命令面板（v0.1.7 新增）**：行首输入 `/` 弹出 Codex 风格面板，分「命令 / 技能」两组；静态 action（`/backtrack` `/settings` `/reload` `/worktree` `/help`）+ 动态 skill（后端 `/chat/skills` 实时拉取，按目录名 PascalCase 显示）。选中后以 `/[SkillName]` chip 形态浮在输入框左侧，`handleSend` 时还原成 `/[xxx] ` 前缀发给后端。prompt 注入对应 hint：前缀一字不改、args 可优化；非 slash 输入不要凭空加 `/[SkillName]`。
-- **文件树行内删除 + 软删除 .trash/（v0.1.7 新增）**：文件 / 文件夹行内 × 红叉二次确认调 `DELETE /chat/{sid}/file`，文件移到 `backend/.trash/{sid}/{timestamp}_{rel_path}`；每天 11:30 APScheduler 定时清空，前端 DataAnalysisTree 头部 🗑 「清空回收站」按钮手动触发 `DELETE /chat/{sid}/trash`。误删可找回。
-- **标题自动派生（v0.1.7 新增）**：`PUT /chat/{sid}/title` title 为空时后端从 state 最新 HumanMessage 派生（剥 `<quote>` 引用块 + `/[xxx]` slash pill + 截断 12 字符），返回实际写入的 `new_title`，前端不再依赖客户端 substring 兜底。
-- **后端路径中心化（v0.1.7 新增）**：`backend/ChatMe/paths.py` 集中导出 `BACKEND_ROOT` / `CACHED_DIR` / `SKILLS_ROOT` / `TRASH_DIR` / `get_chatme_dir()`，替代所有模块里散落的 `Path.cwd()` / `parents[N]` 调用；从任意 cwd 启动后端都不会漂移。
-- **Linux 多格式打包（v0.1.7 新增）**：`electron-builder` 同时产出 AppImage / `.deb` / `.rpm`，x64 + arm64 双架构；`README` 增「Linux 安装与故障排查」段覆盖 FUSE 缺失、AppImage 直接解压等场景。
-- **文件树 Finder 化大优化（v0.1.8 新增）**：长按框选 / HTML5 拖拽移动 + 多选整组拖 / 焦点目录 `focusDir`（Cmd/Ctrl+V 粘到蓝竖线）/ copy 改琥珀 ⎘ focus 蓝色实心左边框三态区分 / 空状态 + 树底 `+文件夹 +文件` 操作行 / 系统拖拽 overlay / 拖拽事件穿透重构；详见 `CLAUDE.md` 偏好 33。
-- **后端文件操作体验优化（v0.1.8 新增）**：`_find_unique_name` 计数器剥除（`foo(1).py` 复制 → `foo(2).py` 不再无限累加）+ 无空格紧凑命名 + 自粘贴 no-op 兜底 + 创建同名静默追加 + 空 session 懒加载；详见 `CLAUDE.md` 偏好 33。
-- **图工作流大重构（v0.2.0 新增）**：新增 `_create_graph_improved`（替换 `_create_graph_core2` 作为默认图），用 MCP `done` 工具作为思维链结束标志替代 prompt "output Done 单词" 技巧；移除 `should_end_node` 决策节点，agent 无 tool_calls 走英文 SysMsg 重试（连续 3 次失败强制 final_node）；done cycle 由 `context_assembly_node` 用 `RemoveMessage` 清理（单 done 整轮删除 / 并发 done 仅删 done 的 ToolMessage）；前端 `mergeToolCallStart` + `_processBackendToolCalls` 两处过滤 done 工具调用避免 UI 闪一下再消失。
-- **ReAct 压缩健壮性（v0.2.0 新增）**：`pending_compaction_replace_at` 改用完整 loop 数（不再用 `tool_call_times`），绕开并行 1-3 个工具让 "+2" 不稳定的抖动；`DETECTION_MIN_ROUNDS` 4 → 5；新增 `compression_handled_this_round` 标记防同一轮 iteration 2+ 重复压缩；done cycle 跳过整个 ReAct 压缩段（避免无用压缩产物灌给 final_node + 后台 asyncio 任务泄漏）。
-- **许可证 + 商标（v0.2.0 新增）**：项目以 MIT License 发布（新增 `LICENSE` / `NOTICE` / `THIRD_PARTY_LICENSES.md`），`pyproject.toml` + `frontend/package.json` 加 `license` / `authors` 字段；「灵析™」与「Lingxi™」为产品名商标，MIT 不授予商标使用权，使用须经项目维护者书面授权。
-- **配置向导 SetupView（v0.2.1 新增）**：1223 行大组件把首装 / 改 apikey / 改模型连接 / 改权限策略的 UI 化：6 个 pane（欢迎 → API Key → 搜索 Key → 审批策略 → LibreOffice 探测 → 完成），顶栏 🪄 按钮 + `/setup` 命令打开；LibreOffice 探测独立 IPC；保存走 `/admin/config` segment 级热加载（仅 `llm_providers` 改动需重启）；完成页 diff 摘要告诉用户哪几段被改、是否触发全局重启遮罩。**注意**：BootstrapView 是首次启动浮窗（cold start 显示），SetupView 是配置向导（任何时候可打开），不要混用。
-- **应用启动链路健壮性（v0.2.1 修复）**：`fixRedis` 加 ping-first 兜底（`redis-cli ping` 返 PONG 直接跳过修复）+ 状态字符串归一化（trim + 剥引号 + 小写，避免 Windows cmd 偶发包裹 `"running"` miss）+ `docker start` 失败不 throw 改 `waitForRedisReady` 兜底探；`startBackend` 启动前调 `killPortIfListening(38211)` 清理旧 backend 残留（防旧进程占端口 + 新 spawn 静默 EADDRINUSE + `/health` 错连旧实例的伪成功）；Windows `file://` 协议拦截器 API 转发剥盘符（`/C:/chat/xxx` → `/chat/xxx`）；健康监测启动期 banner 抑制（`_hasEverConnected` gate + `HEALTH_FAILURE_THRESHOLD=2` 连续失败计数）；`source='restart'` payload 让重启窗口期主界面保持 `.app-disabled` 灰显 + banner 提示，不踢回 BootstrapView；`proc.on('exit')` 立即推 health 检查让 banner 10s 内出现；`checkBackendHealth` timeout 1.5s → 3s 给 QwenVL 冷启动留 buffer；`discoverProjectRoot` 加 version fingerprint 自动迁移（saved PROJECT_ROOT 旧版本自动切到 BFS 候选的新版本，BootstrapView 弹「已自动切换」琥珀横幅）。
-- **SandboxPool 容器名 + label 双标识（v0.2.1 新增）**：`docker run --name chatme-python-sandbox-<sha1[:8]> --label com.chatme.sandbox=true`，主进程 `stopLingxiContainers` 走 `name filter + label filter` 去重合并（兼容老 sandbox 仅 label 没 name 的情况）；sha1 seed = `pid + time + counter`，同进程同一秒内不可能多次创建。
-- **全局重启遮罩（v0.2.1 统一化）**：banner「重新连接」/ Settings「Save & Restart」/ SetupView 完成含 `llm_providers` 改动 → 统一走 App.vue 的 `handleRestartBackend()`，弹同一个 `.restart-mask`（z-index 1900）+ spinner + 倒计时（`_restartElapsed` 显式赋值防 Vue 3 Proxy ++ 自增响应性丢失）+ `refreshPage()`（Electron 走 `webContents.reload()` 而非 `window.location.reload()`，后者在 `protocol.handle('file')` 下偶尔被拦截导致遮罩卡住不消失）；子组件 emit('restart-requested') 后立即 close()，不留「dialog 在 reload 帧还占 DOM」视觉抖动。
+### v0.1.x 核心能力
+
+- 多智能体工作流 + ReAct 压缩（5 LLM 角色 + 4 阶段后台异步压缩）
+- 流式 SSE / 多模态文件解析 / Docker 沙盒 / Redis checkpoint
+- 命令级权限审批（`cmd`/`code` 走 LangGraph interrupt()，4 档决策 + Redis hash）
+- 数据库只读分析（MySQL / SQLite / PostgreSQL / MongoDB 跨会话配置）
+- 一键导出（产物 ZIP / HTML + 对话历史 OpenAI JSON + state 备份）
+
+### v0.2.0 工作流升级
+
+- `_create_graph_improved` 替换老图，引入 MCP `done` 工具作为收尾信号
+- 移除 `should_end_node` LLM 决策节点，纯结构化路由
+- ReAct 压缩健壮性（pending loop 数阈值 / DETECTION_MIN 4→5 / 防重复压缩 flag）
+- 许可证 + 商标（MIT + 「灵析™」/「Lingxi™」）
+
+### v0.2.1 配置 + 启动链路
+
+- SetupView 向导（5 步配置，segment 级热加载）
+- 应用启动链路健壮性（`fixRedis` ping-first / 端口预检 / Windows 盘符修复 / `_hasEverConnected` banner 抑制）
+- SandboxPool 容器名 + label 双标识 + sha1 seed（pid+time+counter）
+- 全局重启遮罩（统一 `handleRestartBackend()`，3 处入口共用）
 
 ## 界面预览
 
@@ -70,55 +54,7 @@
 
 主界面分区：左侧会话列表（支持新建 / 切换 / 删除）+ 中间对话区（流式 SSE 实时渲染 `reasoning` / `tool_call_*` / `content` 事件）+ 下方输入框（文件上传 / 语音输入 / 发送）。思考过程可折叠展开，工具调用次数实时统计。
 
-## 技术栈
-
-### 后端
-
-| 模块     | 选型                                       |
-| ------ | ---------------------------------------- |
-| Web 框架 | FastAPI                                  |
-| 工作流引擎  | LangGraph + LangChain                    |
-| 状态管理   | Redis (checkpointer + state saver)       |
-| MCP 工具 | FastMCP 3.x                              |
-| 代码沙盒   | Docker 容器池                               |
-| 文档解析   | docling + qwen-vl-utils + unstructured   |
-| 对象存储   | oss2（阿里云 OSS）                            |
-| 定时任务   | apscheduler                              |
-| LLM    | OpenAI 兼容 API（OpenAI / DeepSeek / 本地 VL） |
-| 包管理    | uv                                       |
-
-### 前端
-
-| 模块            | 选型                                       |
-| ------------- | ---------------------------------------- |
-| Web 框架        | Vue 3 + Vite                             |
-| 桌面端           | Electron 41 + electron-builder 26        |
-| 样式            | CSS Variables + 原生 CSS                   |
-| Markdown / 数学 | marked + highlight.js + katex            |
-| 桌面端关键能力       | `file://` 协议拦截 + SSE 流透传 + 单窗口架构 + autoEnter 启动引导 |
-| 特性            | 流式 SSE、主题切换、响应式布局、网页预览                   |
-
-## 工作流
-
-```
-用户输入 → input_parse_node → context_assembly_node
-                                    ↓
-                              agent_node ──→ tool_execution_node (循环)
-                                    ↓
-                              final_node → END
-```
-
-| 节点                      | 职责                                                                              |
-| ----------------------- | ------------------------------------------------------------------------------- |
-| `input_parse_node`      | 输入预处理、文件解析（docling / VL）、输入优化，给 `imp_ipt` 打 `additional_kwargs.imp_ipt=True` 标记 |
-| `context_assembly_node` | 上下文组装 + **ReAct 流程压缩** + 中断检查 + **done cycle 清理**（RemoveMessage；v0.2.0 起）       |
-| `agent_node`            | AI 决策，决定调用工具或调 `done` 收尾（v0.2.0 起）；工具调用超过 50 次会注入 SystemMessage 提示停止；无 tool_calls 输出走英文 SysMsg 重试（连续 3 次放弃进 final_node） |
-| `tool_execution_node`   | 工具执行（搜索 / MCP / Docker 沙盒 / `done` 收尾标记；v0.2.0 起）；`PermissionedToolNode` 在官方 `ToolNode` 基础上包 `_awrap_tool_call` hook，`cmd` / `code` 执行前走 LangGraph `interrupt()` 弹审批，Redis 存 `permission:{sid}` hash 跨 SSE 流复用 |
-| `final_node`            | 最终回复生成（独立 LLM），用 dynamic system prompt 把 `imp_ipt` 注入 system 层，输出带 SUMMARY 标记   |
-
-> **v0.2.0 工作流升级**：`_create_graph_improved` 替换 `_create_graph_core2` 作为默认图（`init_graph` line 254）。新图**移除** `should_end_node`（老图里 LLM 决策 "Done / Retry" 的节点），改用「agent 输出 AIMessage 含 tool_calls → tool_execution_node；不含 → 重试或 final_node」纯结构化路由；思维链结束标志改为 MCP `done` 工具（老图是 prompt 强制 LLM 输出 `Done` 单词 + should_end_node 决策）。详细改造动机见 `CLAUDE.md` 偏好 34。
-
-State 定义在 `backend/ChatMe/ChatWorkflow/config/models.py`（`ChatStateCore2` / `FileParseState`）。完整工作流说明、ReAct 压缩实现、关键文件、协作偏好见 [`CLAUDE.md`](CLAUDE.md)。
+工作流架构、节点职责、ReAct 压缩实现、5 LLM 角色分工见 [`CLAUDE.md`](CLAUDE.md)。
 
 ## 快速开始
 
@@ -173,7 +109,7 @@ npm run electron:dev:all    # 同时启动 Vite + Electron
 ```bash
 docker-compose build sandbox
 # 镜像名：chatme-python-sandbox:latest
-# 容器池默认 2 个常驻容器，SandboxPool（mcps/sandbox/pool.py）自动按需取用
+# 容器池 min=1, max=4（per_container_concurrency=8）；按需动态扩缩容 + 闲置 GC（见 `ChatWorkflow/mcps/sandbox/pool.py`）
 ```
 
 ## 配置说明
@@ -234,73 +170,29 @@ OPENAI_PRESENCE_PENALTY=0.0
 ChatMe/
 ├── backend/
 │   ├── ChatMe/
-│   │   ├── ChatMeConfig/                 # 配置加载器
-│   │   ├── ChatService/
-│   │   │   ├── core.py                   # ChatService，SSE 流式输出 + 记忆任务调度
-│   │   │   ├── RedisStateSaver/          # 自建 checkpoint 索引
-│   │   │   └── FilesLoaders/             # 文件加载 + 大文件截断
-│   │   ├── ChatWorkflow/
-│   │   │   ├── core.py                   # 工作流定义，5 个 LLM 实例 + ReAct 压缩
-│   │   │   ├── decorators.py             # node_guard 装饰器
-│   │   │   ├── config/
-│   │   │   │   ├── graph_config.py       # prompts 与模型配置
-│   │   │   │   └── models.py             # ChatStateCore2 / FileParseState
-│   │   │   ├── mcps/
-│   │   │   │   ├── server.py             # FastMCP 入口（CLI: chatme_mcp）
-│   │   │   │   ├── session.py            # MCP stdio session
-│   │   │   │   ├── tools/                # 工具实现
-│   │   │   │   │   ├── code_fingerprint.py
-│   │   │   │   │   ├── deprecated.py     # (sub_agent 废弃保留)
-│   │   │   │   │   └── platforms/        # 跨平台 adapter（darwin/linux/windows）
-│   │   │   │   ├── sandbox/              # 沙盒基础设施
-│   │   │   │   │   └── pool.py           # Docker 容器池
-│   │   │   │   └── permissions/          # 权限系统
-│   │   │   │       └── core.py           # PermissionedToolNode + 中断审批
-│   │   │   └── Memory/                   # 长期记忆
-│   │   ├── APIRouter/
-│   │   │   ├── main.py                   # /chat 前缀主对话路由 + 会话树
-│   │   │   ├── static_file.py            # /static 静态文件 + 文件树接口
-│   │   │   ├── data_export.py            # /export/artifacts + /export/turn（DataAnalysis ZIP/HTML 预览 + 对话历史导出）
-│   │   │   ├── scheduled_tasks.py        # /admin/scheduled-tasks CRUD + 立即运行
-│   │   │   ├── checkpoint_janitor.py     # /admin/checkpoints/prune（v0.1.5 新增；checkpoint prune HTTP 层）
-│   │   │   ├── admin_config.py           # /admin/config GET / PUT + /admin/restart + /admin/health（v0.1.5 新增）
-│   │   │   ├── message_queue.py          # /chat/{sid}/queue 排队消息 FIFO
-│   │   │   └── timed_clean / model_vl
-│   │   ├── LoggingManager/               # 异步日志
-│   │   └── test/
+│   │   ├── ChatMeConfig/                 # 配置加载（_load mtime + 热加载）
+│   │   ├── ChatService/                  # SSE 流式 + 记忆任务调度
+│   │   ├── ChatWorkflow/                 # LangGraph 5 节点 + ReAct 压缩 + Memory + mcps(server/session/permissions/sandbox/tools)
+│   │   ├── LoggingManager/               # QueueHandler 异步日志
+│   │   └── APIRouter/                    # /chat /static /api /admin
 │   ├── skills/
-│   │   ├── DataAnalysis/                  # 数据分析 skill（mount: rw）
-│   │   │   ├── SKILL.md                  # 主规范（生成图表 / 报告 / CSV 等）
-│   │   │   ├── format/                   # ChatDataAnalysisFormat（拆分为 base / artifacts / manifest / database）
-│   │   │   ├── database/                 # 数据库分析（MySQL/SQLite/PostgreSQL/MongoDB 只读查询 + 跨会话配置；lazy skill）
-│   │   │   └── fonts/                    # matplotlib 中文字体（v0.1.6 起随 skill 进 git，自动 mount 到容器 /skills/DataAnalysis/fonts/）
-│   │   ├── Scheduler/                    # 定时任务 skill（APScheduler + RedisJobStore；models/handlers/registry/core 四层）
-│   │   ├── Memory/                       # 跨会话记忆 skill（v0.1.5 新增；remember/recall）
-│   │   ├── SkillForge/                   # 动态创建 skill skill（v0.1.5 新增；create_skill/list_skills/read_skill）
-│   │   ├── Exa/                          # 搜索 skill
-│   │   ├── Tavily/                       # 搜索 skill
-│   │   └── ImageParser/                  # 图片解析 skill
-│   ├── ChatMe/ChatWorkflow/
-│   │   ├── skills/                       # SkillRegistry（v0.1.5 起扫描 SKILL.md frontmatter + find_skill 工具 prompt）
-│   │   ├── CheckpointJanitor.py          # checkpoint prune 业务（v0.1.5 起 hook 进 _save_round_checkpoint 自动 prune）
-│   │   └── ...（其余业务节点）
+│   │   ├── DataAnalysis/                 # 数据分析 + 数据库（只读 4 引擎）+ 中文字体
+│   │   ├── Scheduler/                    # 定时任务 skill
+│   │   ├── Memory/                       # 跨会话记忆
+│   │   ├── SkillForge/                   # 动态创建 skill
+│   │   ├── Bocha / Exa / Tavily          # 搜索 skill（GET ping 探活见 _search_health.py）
+│   │   └── ImageParser/                  # 图片解析
 │   ├── .chatme/
 │   ├── pyproject.toml
-│   └── main.py
-├── sandbox/
-│   └── Dockerfile                        # Python 3.12 + 数据分析库
-├── frontend/
-│   ├── electron/                         # 桌面端
-│   ├── src/                              # Vue 组件
-│   └── vite.config.js
-├── .test_agent/
-│   └── test_agent.md                     # AI 多轮对话测试 Agent 指南（见开发注意事项）
-├── docker-compose.yml
-├── docs/                                 # 文档
-├── LICENSE                               # MIT License（v0.2.0 起公开）
+│   └── main.py                           # FastAPI 入口
+├── sandbox/Dockerfile                    # Python 3.12 + 数据分析库
+├── frontend/                             # Vue 3 + Electron 桌面端
+├── .test_agent/test_agent.md             # AI 多轮对话测试 Agent 指南
+├── docker-compose.yml                    # Redis 服务编排（端口 6024）
+├── LICENSE                               # MIT License
 ├── NOTICE                                # 上游依赖归属
 ├── THIRD_PARTY_LICENSES.md               # 第三方许可证汇总
-└── docker_data/
+└── docs/
 ```
 
 ## API 概览
@@ -377,7 +269,7 @@ Redis key：`scheduled:tasks`（索引）/ `scheduled:meta:{task_id}` / `schedul
 
 `backend/ChatMe/ChatWorkflow/mcps/sandbox/pool.py`（`SandboxPool` 类）提供基于 Docker 容器的安全代码执行：
 
-- **预启动容器池**：默认 2 个常驻容器（`sleep infinity`），按需取用 / 归还
+- **预启动容器池**：min=1, max=4（per_container_concurrency=8），按需动态扩缩容 + 闲置 GC
 - **隔离环境**：tmpfs 限制 `/tmp`、`/sandbox`（各 64m，noexec）
 - **预装库**：numpy / pandas / scipy / scikit-learn / sympy / matplotlib / seaborn / plotly / bokeh / altair / pygal / pyecharts / folium / networkx / requests / bs4 / lxml / openpyxl / xlrd / pillow / jinja2 / markupsafe（阿里云 PyPI 镜像）
 - **两个执行入口**：
@@ -489,7 +381,7 @@ npm run electron:build:win      # Windows NSIS（x64）
 
 ## 开发注意事项
 
-启动 Redis / 后端 / 前端 / 构建沙盒镜像的命令见 [快速开始](#快速开始)。开发侧的额外约定与踩坑（unstructured NLTK 下载、配置脱敏提交规范、流式 SSE 事件类型、桌面端 DMG 镜像绕坑等）见 [`docs/contributing.md`](docs/contributing.md)。
+启动命令见 [快速开始](#快速开始)。开发侧的额外约定与踩坑（unstructured NLTK 下载、配置脱敏提交规范、流式 SSE 事件类型、桌面端 DMG 镜像绕坑等）见 [`docs/contributing.md`](docs/contributing.md)。
 
 ## 许可证
 

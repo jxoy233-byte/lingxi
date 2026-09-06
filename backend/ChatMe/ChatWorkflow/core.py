@@ -370,7 +370,16 @@ class ChatWorkflow:
         if tool_calls:
             MAX_PARALLEL_TOOL_CALLS = 3
             ai_message.tool_calls = tool_calls[:MAX_PARALLEL_TOOL_CALLS]
-            ai_message.content = content
+            # parse 后主动清掉 <tool_calls>...</tool_calls> 文本块：避免残留 <invoke>...</invoke> /
+            # JSON 数组等伪 tool_call 内容污染 final_node input（filter 第 5 条会保留含 <invoke> 的块
+            # 给 parse 兜底，但 parse 完已不需要这段文本）。
+            cleaned_content = re.sub(
+                r'<tool_calls?>.*?\[?</?tool_calls?>\]?',
+                '',
+                content,
+                flags=re.DOTALL,
+            )
+            ai_message.content = cleaned_content
 
         return ai_message
 
@@ -1165,10 +1174,15 @@ class ChatWorkflow:
                     await self.check_and_trigger_interrupt(thread_id)
             response = self._merge_chunks(response_chunks)
 
-            response = filter_thinking_content(response)
-
             # 符合ToolNode节点的AIMessage(REASONING)
+            # ⚠️ 必须先 parse 再 filter：M3 偶发只把 tool_call 序列化到 content、不填结构化 tool_calls 字段
+            # （如 `<tool_calls>[{"name":"done","args":{}}]</tool_calls>`），filter 第 5 条会把整段剥掉
+            # → parse 拿空 content → 走 `if not raw_content: return ai_message` 兜底 → tool_calls=[] →
+            # agent_no_tool_call_retries 注入 SysMsg，最多 3 次后才强制 final_node（实测「你好」轻量对话
+            # 也会触发 2 次空转，浪费 4-6s）。调换顺序后：parse 拿完整 content 提取 tool_calls + 清掉
+            # <tool_calls> 文本块 → filter 后 content 干净（清思考标签 / 孤立 debris / 方括号包装）。
             format_response = self._parse_content_to_tool_calls(response)
+            format_response = filter_thinking_content(format_response)
 
             # 思维链日志：agent_node 输出（带 tool_calls 的 AIMessage）
             self._write_thinking(thread_id, f"[agent_node_out]:\n{format_thinking_chain([format_response])}")
@@ -1734,10 +1748,15 @@ class ChatWorkflow:
                     await self.check_and_trigger_interrupt(thread_id)
             response = self._merge_chunks(response_chunks)
 
-            response = filter_thinking_content(response)
-
             # 符合ToolNode节点的AIMessage(REASONING)
+            # ⚠️ 必须先 parse 再 filter：M3 偶发只把 tool_call 序列化到 content、不填结构化 tool_calls 字段
+            # （如 `<tool_calls>[{"name":"done","args":{}}]</tool_calls>`），filter 第 5 条会把整段剥掉
+            # → parse 拿空 content → 走 `if not raw_content: return ai_message` 兜底 → tool_calls=[] →
+            # agent_no_tool_call_retries 注入 SysMsg，最多 3 次后才强制 final_node（实测「你好」轻量对话
+            # 也会触发 2 次空转，浪费 4-6s）。调换顺序后：parse 拿完整 content 提取 tool_calls + 清掉
+            # <tool_calls> 文本块 → filter 后 content 干净（清思考标签 / 孤立 debris / 方括号包装）。
             format_response = self._parse_content_to_tool_calls(response)
+            format_response = filter_thinking_content(format_response)
 
             # 思维链日志：agent_node 输出（带 tool_calls 的 AIMessage）
             self._write_thinking(thread_id, f"[agent_node_out]:\n{format_thinking_chain([format_response])}")

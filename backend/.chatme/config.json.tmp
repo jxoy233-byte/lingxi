@@ -29,6 +29,7 @@
     }
   },
   "skills": {
+    "bocha_api_key": "",
     "exa_api_key": "241f5e-d-4xx4e-ax7-xx90x",
     "tavily_api_key": "tvly-dev-xxT"
   },

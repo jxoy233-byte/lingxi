@@ -39,8 +39,8 @@ class SandboxPool:
     - v2: pop + 抢 slot 即可，exec 在锁外 → 同一容器可并发 N 个 docker exec
 
     典型配置（default）：
-    - min_size=1（默认 1 个常驻）, max_size=3（峰值 3 个）, per_container_concurrency=8
-    - 基线并发 1×8=8，峰值并发 3×8=24
+    - min_size=1（默认 1 个常驻）, max_size=4（峰值 4 个）, per_container_concurrency=8
+    - 基线并发 1×8=8，峰值并发 4×8=32
     - 触发扩容：所有现有容器 slot 都满且总容器数 < max_size → 新建一个
     - 触发 GC：temp 容器闲置 > 5min → 自动销毁（不低于 min_size）
 
@@ -83,9 +83,9 @@ class SandboxPool:
         self._generate_sandbox_config()
 
         # env 覆盖：min_size（兼容 size 参数）+ max_size + per_container_concurrency
-        # 默认 max_size = 3（峰值 3 个容器），需要固定不扩可显式传 max_size=size
+        # 默认 max_size = 4（峰值 4 个容器），需要固定不扩可显式传 max_size=size
         self.min_size = int(os.getenv("SANDBOX_MIN_SIZE", str(size)))
-        default_max = max_size if max_size is not None else 3
+        default_max = max_size if max_size is not None else 4
         self.max_size = int(os.getenv("SANDBOX_MAX_SIZE", str(default_max)))
         self.per_container_concurrency = int(
             os.getenv("SANDBOX_PER_CONTAINER_CONCURRENCY", str(per_container_concurrency or 8))
@@ -179,9 +179,11 @@ class SandboxPool:
             # 短 id 用 hashlib.sha1(pid + time + counter) 前 8 位 hex —— Docker name 限制 64 chars，
             # 拼接后 31 chars 富余。同名冲突极低（同进程同一秒内不可能多次创建），
             # 真撞名让 Docker 报 "name already in use" → _create_container 返 None → GC 重建。
+            # ⚠️ v0.2.1 偏好 35 加这段时把 `time.time()` 错写成 `os.time()`（os 模块没 time 属性），
+            # 每次 _create_container 都抛 AttributeError → return None → __init__ 启动的 min_size 个
+            # 容器全失败 → 池带空 all_containers 启动 → 任何 cmd/code 工具调用必超时。
             import hashlib
-            import os as _os
-            _seed = f"{_os.getpid()}-{_os.time()}-{self._container_counter}".encode()
+            _seed = f"{os.getpid()}-{time.time()}-{self._container_counter}".encode()
             short_id = hashlib.sha1(_seed).hexdigest()[:8]
             self._container_counter += 1
             container_name = f"chatme-python-sandbox-{short_id}"
@@ -252,54 +254,60 @@ class SandboxPool:
         4. timeout 内拿到 cid + slot → 返回
         5. 超时 → raise SandboxPoolTimeoutError
 
-        注意：必须在 _pool_lock 内调用整个循环。Semaphore.acquire(blocking=False)
-        拿到 slot 后立即在锁内返回，避免后续线程看到已分配 cid 又抢。
+        ⚠️ 整个 while 循环必须在 `with self._pool_lock:` 内：
+          `threading.Condition.wait()` 强制要求持锁调用，否则直接 raise
+          `RuntimeError: cannot wait on un-acquired lock`（实测 v0.2.1 之后所有 cmd/code
+          工具调用在高并发路径上抛 ToolException，根因是 execute_command / execute
+          直接调 _acquire 不持锁，第一次抢到 slot 不走 wait 不暴露 bug，但 N+1 并发
+          第 N+1 个走 cond.wait 时必炸）。Semaphore.acquire(blocking=False) 拿到 slot 后
+          立即在锁内返回，避免后续线程看到已分配 cid 又抢。
         """
         deadline = time.monotonic() + timeout
         seen: Set[str] = set()  # 本轮已尝试的 cid，避免在同一轮里重复扫同一个
 
-        while True:
-            # 扫一遍 idle 队列，找有空闲 slot 的容器
-            scanned = 0
-            while self.idle_containers and scanned < len(self.idle_containers) + len(seen):
-                cid = self.idle_containers.popleft()
-                scanned += 1
-                if cid in seen:
-                    # 本轮已扫过，放回队尾
+        with self._pool_lock:
+            while True:
+                # 扫一遍 idle 队列，找有空闲 slot 的容器
+                scanned = 0
+                while self.idle_containers and scanned < len(self.idle_containers) + len(seen):
+                    cid = self.idle_containers.popleft()
+                    scanned += 1
+                    if cid in seen:
+                        # 本轮已扫过，放回队尾
+                        self.idle_containers.append(cid)
+                        continue
+                    seen.add(cid)
+
+                    sem = self.container_sems.get(cid)
+                    if sem is None:
+                        # cid 已被 GC 销毁，丢弃
+                        continue
+
+                    # 抢一个 slot（非阻塞；满了就放回队尾，本轮不再试它）
+                    if sem.acquire(blocking=False):
+                        return cid
+                    # slot 满，把 cid 放回 idle 队列末尾（其他容器可能还有空）
                     self.idle_containers.append(cid)
-                    continue
-                seen.add(cid)
 
-                sem = self.container_sems.get(cid)
-                if sem is None:
-                    # cid 已被 GC 销毁，丢弃
-                    continue
+                # idle 队列里没有可用 slot；尝试临时扩容
+                if len(self.all_containers) < self.max_size:
+                    new_cid = self._create_container()
+                    if new_cid:
+                        self._register_container(new_cid, is_temp=True)
+                        # 刚注册就在 idle 队尾；下一轮扫描会处理它
+                        continue  # 不 wait，立即重试
 
-                # 抢一个 slot（非阻塞；满了就放回队尾，本轮不再试它）
-                if sem.acquire(blocking=False):
-                    return cid
-                # slot 满，把 cid 放回 idle 队列末尾（其他容器可能还有空）
-                self.idle_containers.append(cid)
-
-            # idle 队列里没有可用 slot；尝试临时扩容
-            if len(self.all_containers) < self.max_size:
-                new_cid = self._create_container()
-                if new_cid:
-                    self._register_container(new_cid, is_temp=True)
-                    # 刚注册就在 idle 队尾；下一轮扫描会处理它
-                    continue  # 不 wait，立即重试
-
-            # 真的没资源了：等 release() notify
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise SandboxPoolTimeoutError(
-                    f"No available containers in pool "
-                    f"(min_size={self.min_size}, max_size={self.max_size}, "
-                    f"all_containers={len(self.all_containers)}, "
-                    f"per_container_concurrency={self.per_container_concurrency})"
-                )
-            seen.clear()  # 新一轮重新扫
-            self._pool_cond.wait(timeout=remaining)
+                # 真的没资源了：等 release() notify
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise SandboxPoolTimeoutError(
+                        f"No available containers in pool "
+                        f"(min_size={self.min_size}, max_size={self.max_size}, "
+                        f"all_containers={len(self.all_containers)}, "
+                        f"per_container_concurrency={self.per_container_concurrency})"
+                    )
+                seen.clear()  # 新一轮重新扫
+                self._pool_cond.wait(timeout=remaining)
 
     def _release(self, cid: str) -> None:
         """

@@ -8,6 +8,7 @@ import requests
 from typing import List, Dict, Any, Literal
 
 from ChatMe.ChatMeConfig import get_skills_config
+from skills._search_health import format_others_available
 
 class ExaSearch:
     """Exa 搜索引擎客户端"""
@@ -73,7 +74,7 @@ class ExaSearch:
             return formatted_results
 
         except requests.RequestException as e:
-            raise Exception(f"Exa 搜索失败：{str(e)}")
+            raise Exception(f"Exa 搜索失败：{str(e)}{format_others_available('Exa')}")
 
     def find_similar(self, ids: List[str], maxCharacters:int =2000, maxAgeHours:int = 168, livercrawlTimeout: int =5000, **metadata) -> List[Dict[str, Any]]:
         """
@@ -127,7 +128,7 @@ class ExaSearch:
                 return formatted_results
 
         except requests.RequestException as e:
-            raise Exception(f"Exa 相似内容查找失败：{str(e)}")
+            raise Exception(f"Exa 相似内容查找失败：{str(e)}{format_others_available('Exa')}")
 
 
 def exa_search(query: str, num_results: int = 5, type: Literal["instant","fast","auto","deep"] = "auto", maxCharacters:int =2000, **kwargs) -> List[dict]:

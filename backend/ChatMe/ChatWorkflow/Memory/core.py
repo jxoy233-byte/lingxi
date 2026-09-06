@@ -12,55 +12,18 @@ from langchain_openai import ChatOpenAI
 
 from ChatMe.LoggingManager.logging_config import get_logger
 from ChatMe.ChatWorkflow.config.models import MemoryUpdateFormat
+from ChatMe.ChatWorkflow.helpers import filter_thinking_content
 from ChatMe.paths import get_chatme_dir
 
+# ⚠️ _filter_thinking_content 已合并到 ChatMe.ChatWorkflow.helpers.filter_thinking_content
+# （CLAUDE.md 第 7.1 条要求两处 filter 保持一致）。Memory 这里只保留 async 包装 + tool_calls
+# 字段透传（helpers 的版本会从 getattr 取 tool_calls，但 M3 在 memory update LLM 响应里通常不
+# 带 tool_calls，所以这里显式传 None 即可，行为不变）。
 async def _filter_thinking_content(ai_response: AIMessage) -> AIMessage:
+    """过滤 AI 回复中的思考标签 + M3 伪 tool_call 块。
+    委托 helpers.filter_thinking_content，详见该函数的 docstring 与 _FILTER_PATTERNS 注释。
     """
-    过滤掉 AI 回复中的思考过程内容
-    支持格式:
-    - <thinking>...</thinking>
-    - <thought>...</thought>
-    - 等等
-    """
-    content = ai_response.content
-    if not content:
-        return ai_response
-
-    # 过滤标签内的思考内容（通用格式）
-    patterns = [
-        r'<thinking>.*?</thinking>',
-        r'<thought>.*?</thought>',
-        r'<reasoning>.*?</reasoning>',
-        r'<think>.*?</think>',
-        # ⚠️ MiniMax-M3 工具调用方括号包装：[</tool_call>] / [/tool_calls] / [<]tool_call[>] / [<]tool_calls[>]
-        # 两种位置会出现：① 作为孤立标记（下面的 wrapper pattern 直接清掉）；
-        # ② 跟在裸的 <tool_call> 开头后面当闭合（这种情况下 wrapper 必须被允许作为 </tool_call>
-        # 的可选外壳，否则会留下半截 tool_call 块）。
-        # 关键顺序：先跑 tool_call 块整匹配（含 wrapper 闭合），wrapper 正则放后面做兜底。
-        r'<tool_call>.*?\[?</?tool_calls?>\]?',
-        r'\[</?tool_calls?>\]',
-        r'\[<\]tool_calls?\[>\]',
-        r'\]<]minimax\[[>]',
-        r'\[<invoke \w+>\]\[<(\w+)>(.*?)</\1>\]',
-        # M3 在 </tool_calls> 之后多余的左括号，不破坏合法的 <tool_calls> 块本身
-        r'(?<=</tool_calls>)\s*\[+',
-        # 孤立开标签（无闭合）—— M3 第一次调用工具时 content 里只剩开标签的场景。
-        # 整块 pattern 因为找不到 `</tool_calls?>` 的 `<` 会整体匹配失败；这条兜底。
-        # 放在最后跑：整块 pattern 先吃掉完整块，剩下的孤立开标签由这条兜底。
-        r'<tool_calls?>\s*\n?',
-    ]
-
-    if isinstance(content, str):
-        for pattern in patterns:
-            content = re.sub(pattern, '', content, flags=re.DOTALL)
-
-    return AIMessage(
-        content=content,
-        additional_kwargs=ai_response.additional_kwargs,
-        response_metadata=ai_response.response_metadata,
-        id=ai_response.id,
-        usage_metadata=getattr(ai_response, "usage_metadata", None)
-    )
+    return filter_thinking_content(ai_response)
 
 class MemoryManager:
     """

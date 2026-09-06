@@ -9,7 +9,7 @@
   步骤：
     0  欢迎页            — 4 类配置简介 + 「开始 / 跳过」
     1  API Key           — llm_providers.model1/2 (model_name/base_url/api_key)
-    2  搜索类 Key        — Exa / Tavily（checkbox 启用 + input）
+    2  搜索类 Key        — BochaSearch / Exa / Tavily（checkbox 启用 + input）
     3  审批 Policy       — approval_policy default/yolo + approved list 折叠
     4  旧版文件解析      — LibreOffice 已装 / 未装（probe-libreoffice IPC）+ 下载链接
     5  完成页            — summary + 「完成 / 仍然跳过」
@@ -75,7 +75,7 @@
               </div>
               <ul class="welcome-list">
                 <li><strong>① API Key</strong> — 至少填一个 LLM provider；支持主用 + 备用</li>
-                <li><strong>② 搜索 Key</strong> — Exa / Tavily；让 AI 可以联网检索（可选）</li>
+                <li><strong>② 搜索 Key</strong> — BochaSearch / Exa / Tavily；让 AI 可以联网检索（可选）</li>
                 <li><strong>③ 审批策略</strong> — 选择 default（敏感命令每次询问）或 yolo（放行）</li>
                 <li><strong>④ Skills</strong> — 已启用 5 个默认预批准；高级里可微调</li>
               </ul>
@@ -365,8 +365,8 @@ export default {
       // 为什么不直接绑到 formConfig.skills.*_api_key：
       //   ① 用户没勾某项时就不应当发空串出去覆盖原值
       //   ② 用户勾 + 输入空字符串 = 等价于「不修改」，与勾选的语义保持一致
-      skillEnabled: { exa: false, tavily: false },
-      skillInputs:  { exa: '',    tavily: ''    },
+      skillEnabled: { bocha: false, exa: false, tavily: false },
+      skillInputs:  { bocha: '',    exa: '',    tavily: ''    },
 
       // provider 显隐 key（password / text）
       showKey: {},
@@ -384,8 +384,9 @@ export default {
       ],
 
       searchSkills: [
-        { key: 'exa',    label: 'Exa',    placeholder: '留空表示不修改' },
-        { key: 'tavily', label: 'Tavily', placeholder: '留空表示不修改' }
+        { key: 'bocha',  label: 'BochaSearch', placeholder: '留空表示不修改' },
+        { key: 'exa',    label: 'Exa',         placeholder: '留空表示不修改' },
+        { key: 'tavily', label: 'Tavily',      placeholder: '留空表示不修改' }
       ]
     }
   },

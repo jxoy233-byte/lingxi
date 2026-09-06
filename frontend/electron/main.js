@@ -115,10 +115,17 @@ let lastBackendHealth = null   // null = 还没探过
 let consecutiveHealthFailures = 0  // /health 探测连续失败计数
 let apiFailureCount = 0             // API 调用失败计数（5s 窗口内）
 let apiFailureWindowStart = Date.now()
+// 切回/恢复后宽限期：节流反弹的 fetch 失败不计入（避免 banner 误弹）。
+// Windows + Chromium 后台节流：窗口 blur 后渲染层 setInterval / SSE 被节流到 1Hz，
+// 切回瞬间多个 fetch（SSE reconnect / refreshConversation / getConversations / queue drain）
+// 集体 retry 撞后端慢响应（timeout 3s 边界）→ 5s 内累积 3 次失败 → banner 误弹。
+// focus 后给 500ms 缓冲让反弹 timer 自然收敛，500ms 后正常阈值接管。
+let focusGraceUntil = 0
 
 const HEALTH_FAILURE_THRESHOLD = 2   // /health 探测：2 次连续失败 = 真挂（约 10s）
 const API_FAILURE_THRESHOLD = 3      // API 调用：5s 窗口内 3 次失败 = 真挂
 const API_FAILURE_WINDOW = 5000
+const FOCUS_GRACE_MS = 500
 
 function startHealthMonitor() {
   if (healthMonitorInterval) return
@@ -184,6 +191,13 @@ function recordApiCall(success) {
     pushBackendHealth(true, 'api-call')
     return
   }
+  // 切回瞬间的宽限期：节流反弹的 fetch 失败大概率是因为 timer 反弹 + 后端还没醒，
+  // 不是真挂。失败不计入，让反弹自然收敛；500ms 后正常阈值接管。
+  // 成功不受影响（success 路径早返，不走到这里）。
+  if (Date.now() < focusGraceUntil) {
+    console.log('[health] api-call failed during focus grace (ignored)')
+    return
+  }
   const now = Date.now()
   if (now - apiFailureWindowStart > API_FAILURE_WINDOW) {
     // 窗口过期，重置（5s 内的失败是相关信号；更早的失败可能跟当前状态无关）
@@ -195,6 +209,28 @@ function recordApiCall(success) {
   if (apiFailureCount >= API_FAILURE_THRESHOLD) {
     pushBackendHealth(false, 'api-call')
   }
+}
+
+/**
+ * 窗口切回 / 从最小化恢复时立即重置健康状态机：
+ *   1. 清空节流期间累积的失败计数（不应污染切回后的判定）
+ *   2. 立即跑一次 /health 探测（不等下一个 5s 间隔，最快感知后端真状态）
+ *   3. 设 500ms 宽限期，期间 API 失败不计（让反弹 fetch 自然收敛）
+ *
+ * 触发时机：
+ *   - focus：用户从别的 app 切回来（Win 最常见的误弹场景）
+ *   - show：从最小化恢复 / 从 dock 唤起
+ *
+ * macOS 不受 Chromium 节流影响，理论上不需要这套；但加了对 mac 无副作用，
+ * focus event 触发也安全（reset 是幂等无破坏的）。
+ */
+function onWindowActivated() {
+  consecutiveHealthFailures = 0
+  apiFailureCount = 0
+  apiFailureWindowStart = Date.now()
+  focusGraceUntil = Date.now() + FOCUS_GRACE_MS
+  console.log('[health] window activated → reset failures + grace 500ms + immediate probe')
+  runHealthCheck()
 }
 
 // 判断是否为开发环境：严格按 NODE_ENV 判定（去掉 || !app.isPackaged，
@@ -644,6 +680,14 @@ async function createWindow() {
   win.on('closed', () => {
     if (mainWindow === win) mainWindow = null
   })
+
+  // 切回 / 从最小化恢复时重置健康状态机 + 立即探一次 + 设 500ms 宽限期。
+  // 解决 Windows + Chromium 后台节流导致的 banner 误弹：
+  //   窗口 blur 期间渲染层 setInterval/SSE 被节流到 1Hz，切回瞬间多个 fetch
+  //   集体 retry 撞后端慢响应 → 5s 内 3 次 API 失败 → banner 误弹 1-2 秒后收回。
+  //   focus/show 时清空累积失败 + 立即探一次 + 500ms 宽限期吃掉反弹失败。
+  win.on('focus', onWindowActivated)
+  win.on('show', onWindowActivated)
 
   // 兜底：主窗口加载完成后若 renderer 崩溃（GPU process 撤离 / OOM 等），
   // 自动 reload 一次恢复；用过 3 次还崩就放弃，避免无限循环。

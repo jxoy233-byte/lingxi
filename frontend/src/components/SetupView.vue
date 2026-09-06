@@ -753,12 +753,18 @@ export default {
     },
     /** 完成 → 持久化 + 按需重启 */
     async onFinish() {
+      // 防重入：onFinish 跑过一次后，leave 动画期间按钮在 <transition> 里还会显示几百 ms，
+      // saving 在 finally 被设回 false，按钮 disabled 解除 → 用户再点 → 第二次 putConfig
+      // 撞上 restartBackend 杀进程窗口期 → net.fetch ECONNREFUSED → 502 alert "保存失败"。
+      // 用 _finishing flag 守住整个生命周期，failed 路径才允许重试。
+      if (this._finishing) return
       const payload = this.buildPayload()
       if (Object.keys(payload).length === 0) {
         // 没改动 → 关弹窗即结束（不调后端，避免空 PUT 触发差异判断）
         this.close()
         return
       }
+      this._finishing = true
       this.saving = true
       try {
         const result = await putConfig(payload)
@@ -773,6 +779,7 @@ export default {
         }
       } catch (e) {
         alert('保存失败：' + (e.message || e))
+        this._finishing = false  // 失败时允许重试（saving 已在 finally 释放）
       } finally {
         this.saving = false
       }

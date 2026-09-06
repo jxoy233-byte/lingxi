@@ -18,7 +18,7 @@ export default {
   // 应用基本信息
   app: {
     name: '灵析',
-    title: '灵析——数据分析智能助手',
+    title: '灵析',
     identifier: 'com.chatme.app',
     version: '0.2.1'
   },

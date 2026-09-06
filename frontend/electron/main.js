@@ -30,6 +30,53 @@ const config = configModule.default
 let mainWindow
 let previewWindow = null
 
+// ==================== 主进程文件日志 ====================
+// packaged 模式下 DevTools 被禁 + 用户从终端看不到主进程 stdout → 关键 trace 没法捕获。
+// 把 main.js 关键日志写到**多个位置**（userData 优先 + home 目录兜底），任何一个能写成功
+// 用户都能找到日志排查 403 / 路径解析 / 后端不可达，不用打开 DevTools 也不用重 build。
+//
+// 多位置设计：单写 userData 在某些 packaged 环境（ / home 限 / sandbox 拦截）会静默失败，
+// 用户找不到日志比日志本身更糟。home 目录永远可写（除非 OS 损坏），作为最后兜底。
+// 写文件用 appendFileSync 同步写：<1KB/次，IO 开销忽略；同步避免 async queue 在进程
+// 退出时丢日志。所有写失败一律静默 + console.error（dev 模式能看到 console），
+// packaged 模式 console 输出到系统日志，捕获兜底。
+const MAIN_LOG_CANDIDATES = (() => {
+  const list = []
+  try { list.push(path.join(app.getPath('userData'), 'main.log')) } catch { /* app 未 ready 时 getPath 可能抛 */ }
+  try { list.push(path.join(app.getPath('home'), 'chatme-main.log')) } catch {}
+  try { list.push(path.join(os.tmpdir(), 'chatme-main.log')) } catch {}
+  // hardcoded home fallback（os.homedir() 是最稳的 API，不依赖 app.ready）
+  try { list.push(path.join(os.homedir(), 'chatme-main.log')) } catch {}
+  return list
+})()
+const MAIN_LOG_PATH = MAIN_LOG_CANDIDATES[0] || path.join(os.homedir(), 'chatme-main.log')
+
+function writeMainLog(...args) {
+  const ts = new Date().toISOString()
+  const msg = args.map(a => {
+    if (typeof a === 'string') return a
+    try { return JSON.stringify(a) } catch { return String(a) }
+  }).join(' ')
+  const line = `[${ts}] ${msg}\n`
+  // 多位置写：第一个成功的就够；都失败时 console.error 兜底
+  let wrote = false
+  for (const p of MAIN_LOG_CANDIDATES) {
+    try {
+      fsSync.mkdirSync(path.dirname(p), { recursive: true })
+      fsSync.appendFileSync(p, line)
+      wrote = true
+      break  // 写到第一个成功位置就停，避免多个文件重复
+    } catch { /* 继续试下一个位置 */ }
+  }
+  if (!wrote) {
+    // 最后兜底：dev 模式 console 能看到；packaged 模式 console 会进系统日志。
+    console.error('[main.log write fail] all candidates:', MAIN_LOG_CANDIDATES, msg)
+  }
+}
+
+// 立即写一条 STARTUP，证明 main.js 走完了顶层（也帮助确认 build 是否生效）
+writeMainLog('STARTUP', 'pid=' + process.pid, 'userData=' + (MAIN_LOG_CANDIDATES[0] || '?'), 'candidates=' + MAIN_LOG_CANDIDATES.join('|'))
+
 // 项目根（app.whenReady 时算，因为 app.isPackaged 需要 ready）
 let PROJECT_ROOT = null
 let startupPreferences = { autoEnterFrontend: false }
@@ -44,25 +91,38 @@ let servicesReady = false
 
 // ==================== 后端健康监测 ====================
 //
-// 主窗口起来后每 10s 探一次后端 /health：
-// - 仅在状态变化时推 IPC 给 renderer（10s → 6 次/分钟，对 localhost
-//   几乎零开销，rAF 渲染 + SSE 才是真正大头）
-// - renderer 收到 backend=false 时顶部出 banner + 「重新连接」按钮
-// - 「重新连接」调 IPC 主动 kill + restart backend（不重启 app）
+// 双信号合并健康状态机，避免 banner 在「后端还在」时闪烁：
+//   1. /health 探测（runHealthCheck）：5s 间隔，连续失败 ≥ HEALTH_FAILURE_THRESHOLD=2 → 失败信号
+//   2. API 调用结果（recordApiCall）：protocol.handle API 分支调用，
+//      5s 窗口内 ≥ API_FAILURE_THRESHOLD=3 次失败 → 失败信号
+// 任一成功信号（/health 探测成功 / API 调用 2xx-4xx）→ 立即推 true + 重置所有失败计数
+// 任一失败信号达阈值 → 推 false
+//
+// 为什么不用单信号：
+//   - 单用 /health 探测：5s 间隔下阈值 2 = 10s 才推 false，user 操作撞窗口期（重启 / 端口抖动）
+//     时 banner 要等 10s 才显示；更糟的是 /health 在 kill 间隙偶发 ECONNRESET（OS 释放 socket）会
+//     推 false 然后下一轮成功又推 true → banner 闪
+//   - 单用 API 调用：流式响应 / 静默期没 API 调用，banner 状态无信号源
+//   - 双信号：API 调用成功立即推 true（/health 探测抖了也不怕，user 实际操作通过就是真在）；
+//     两个信号都失败 → 真挂了；任一信号成功 → 后端在
+//
+// 静态资源 /static/* 不计 API 调用（hash 资源失败可能是路径错，不一定后端挂）。
+// 只对 /chat/* + /admin/* 计数（user 原话：「包含左侧的会话列表也都显示了403问题
+// 或者admin/config 403 才闪烁啊」——即业务端点失败才触发）。
 
 let healthMonitorInterval = null
 let lastBackendHealth = null   // null = 还没探过
-let consecutiveHealthFailures = 0  // 连续失败计数；任一次成功立即清零
-// 阈值 = 2 → 至少 2 × 5s = 10s 持续失败才推 banner false。
-// 单次 / 偶发抖动（kill 间隙 / OS 回收 socket / 后端短暂 GC）不触发 banner；
-// 阈值 = 1 会被抖动误判 → 闪烁；阈值 = 3 太长（15s）后端真挂了用户感知慢。
-// 2 是单次抖动容忍 + 后端真挂快速反馈的折中点。
-const HEALTH_FAILURE_THRESHOLD = 2
+let consecutiveHealthFailures = 0  // /health 探测连续失败计数
+let apiFailureCount = 0             // API 调用失败计数（5s 窗口内）
+let apiFailureWindowStart = Date.now()
+
+const HEALTH_FAILURE_THRESHOLD = 2   // /health 探测：2 次连续失败 = 真挂（约 10s）
+const API_FAILURE_THRESHOLD = 3      // API 调用：5s 窗口内 3 次失败 = 真挂
+const API_FAILURE_WINDOW = 5000
 
 function startHealthMonitor() {
   if (healthMonitorInterval) return
   console.log('[health] monitor started (5s interval)')
-  // 立即跑一次（不等 5s），首屏状态更快落到 UI
   runHealthCheck()
   healthMonitorInterval = setInterval(runHealthCheck, 5_000)
 }
@@ -75,39 +135,65 @@ function stopHealthMonitor() {
 }
 
 /**
- * 单次健康检查：探 backend；只有状态变了才推 IPC，避免
- * 每 5s 一次无意义的事件风暴（main → renderer）。
- *
- * 关键：单次探测失败可能是网络抖动（端口刚 kill 完 / OS 回收 socket / 后端处理慢），
- * 不能立刻推 false → renderer 会闪 banner。只有连续 N 次探测都失败才算真挂。
- * 连续失败计数到阈值 → 推 backendHealth=false（banner 显示）；
- * 任何一次成功 → 立即推 backendHealth=true（banner 消失，不等下一帧）。
+ * 共享 IPC 推送入口：只在状态翻转时推，避免事件风暴。
+ * 任一信号（health-probe / api-call）触发都共用同一套状态机。
+ * 推 true 时清空所有失败计数；推 false 不动计数（让 caller 自己决定阈值）。
+ */
+function pushBackendHealth(healthy, source) {
+  if (lastBackendHealth === healthy) return
+  lastBackendHealth = healthy
+  if (healthy) {
+    // 重置所有失败信号：状态翻 true → 后端肯定能响应，之前的计数都过期
+    consecutiveHealthFailures = 0
+    apiFailureCount = 0
+    apiFailureWindowStart = Date.now()
+  }
+  console.log(`[health] changed: backend=${healthy} (source=${source})`)
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('backend-health-changed', { backend: healthy })
+  }
+}
+
+/**
+ * /health 探测：单次成功 → 推 true；失败累加计数，达阈值推 false。
+ * 单次抖动（端口刚 kill / OS 回收 socket / 后端短暂 GC）不触发 banner。
  */
 async function runHealthCheck() {
-  const backendOk = await checkBackendHealth()
-  if (backendOk) {
-    // 健康：立即推 true（不论之前几次失败，banner 必须立刻消失）
-    if (lastBackendHealth !== true) {
-      lastBackendHealth = true
-      consecutiveHealthFailures = 0
-      console.log('[health] changed: backend=true (recovered)')
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('backend-health-changed', { backend: true })
-      }
-    }
+  if (await checkBackendHealth()) {
+    pushBackendHealth(true, 'health-probe')
     return
   }
-  // 探测失败：累加计数，达到阈值才推 IPC
   consecutiveHealthFailures = (consecutiveHealthFailures || 0) + 1
   console.log(`[health] probe failed (${consecutiveHealthFailures}/${HEALTH_FAILURE_THRESHOLD})`)
-  if (consecutiveHealthFailures < HEALTH_FAILURE_THRESHOLD) return
-  // 达到阈值：判定为真失联，推 IPC
-  if (lastBackendHealth !== false) {
-    lastBackendHealth = false
-    console.log('[health] changed: backend=false (consecutive failures)')
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('backend-health-changed', { backend: false })
-    }
+  if (consecutiveHealthFailures >= HEALTH_FAILURE_THRESHOLD) {
+    pushBackendHealth(false, 'health-probe')
+  }
+}
+
+/**
+ * API 调用结果记录：成功立即推 true；失败累加窗口计数，达阈值推 false。
+ * 5s 窗口外重置计数（避免一次重启后累积的旧失败污染下一次判定）。
+ *
+ * 判定语义：
+ *   - net.fetch reject（ECONNREFUSED / ENOTFOUND / 超时）→ 失败
+ *   - upstream.status 2xx-4xx → 成功（4xx 是业务错误如 404 / 422，后端在响应）
+ *   - upstream.status 5xx → 失败（后端崩了 / 抛异常）
+ */
+function recordApiCall(success) {
+  if (success) {
+    pushBackendHealth(true, 'api-call')
+    return
+  }
+  const now = Date.now()
+  if (now - apiFailureWindowStart > API_FAILURE_WINDOW) {
+    // 窗口过期，重置（5s 内的失败是相关信号；更早的失败可能跟当前状态无关）
+    apiFailureCount = 0
+    apiFailureWindowStart = now
+  }
+  apiFailureCount++
+  console.log(`[health] api-call failed (${apiFailureCount}/${API_FAILURE_THRESHOLD} in ${API_FAILURE_WINDOW}ms)`)
+  if (apiFailureCount >= API_FAILURE_THRESHOLD) {
+    pushBackendHealth(false, 'api-call')
   }
 }
 
@@ -280,143 +366,181 @@ function registerFileProtocolInterceptor() {
   // (旧 ensureAsarPath 函数已删除，由 tryReadCandidates 取代)
 
   protocol.handle('file', async (request) => {
-    const url = new URL(request.url)
-    const pathname = url.pathname
+    // 给每次请求分配短 id，让 file log 里 API/静态/异常分支能用同一 id 串起来。
+    // 用户报告"前端 403 但后端没看到请求日志"——之前唯一返 403 的路径是静态资源白名单未通过，
+    // 但前端发的 /chat/ /admin/ 都该命中 API 分支。如果走完一圈日志都看不到 [proxy]，
+    // 必然是 unhandled 异常被 Electron 默认 403 吞掉了；现在外层 try/catch
+    // 把异常写进 main.log + 返 500，下次跑用户从文件里就能看到真实原因。
+    const reqId = Math.random().toString(36).slice(2, 8)
+    writeMainLog(`[req ${reqId}] IN`, request.method, request.url)
 
-    // 🔧 Win 上 file:///C:/.../dist/index.html 协议下，renderer `fetch('/chat/xxx')`
-    // 会解析成 file:///C:/chat/xxx —— `new URL(...).pathname` = `/C:/chat/xxx`（带盘符）。
-    // 直接 startsWith('/chat/') 命中失败 → 落到下面静态资源分支 → distDir 白名单校验 403。
-    // 解法：API 转发判定前先剥掉 `/<盘符>:` 前缀，恢复 Unix 形态 `/chat/xxx`。
-    // macOS / Linux 没有盘符，/foo 是真绝对路径，不能剥（保留 pathname 即可）。
-    const apiPathname = IS_WIN ? pathname.replace(/^\/[A-Za-z]:/, '') : pathname
-
-    // API 路径转发到后端
-    // 必须转发 method / headers / body —— 否则 POST /chat/ 会变成 GET，
-    // 流式响应（SSE）的请求体也会被丢。
-    // SSE 响应（text/event-stream）需要 duplex: 'half' 才能正确转发流式请求体；
-    // 同时显式重建 Response 把 body stream 透传，避免 protocol.handle buffer。
-    if (apiPathname.startsWith('/chat/') || apiPathname.startsWith('/static/') || apiPathname.startsWith('/admin/')) {
-      const backendUrl = `${config.backend.apiUrl}${apiPathname}${url.search}`
-      console.log('[proxy]', request.method, request.url, '→', backendUrl)
-
-      const init = {
-        method: request.method,
-        headers: request.headers,
-        ...(request.body && { body: request.body, duplex: 'half' })
-      }
-
-      // 兜底：net.fetch reject（ECONNREFUSED / ENOTFOUND / 监听中但未响应）时，
-      // Electron protocol.handle 默认行为是返回 403 Forbidden，跟我们想表达的
-      // 「后端不可达」语义不符，前端 banner 会显示"加载对话列表失败 HTTP 403"误导用户。
-      // 改成显式 502 Bad Gateway + JSON body，让前端能按 status 区分文案。
-      let upstream
-      try {
-        upstream = await net.fetch(backendUrl, init)
-      } catch (e) {
-        const errMsg = (e?.message || String(e)).slice(0, 200)
-        console.error('[proxy] backend fetch failed:', backendUrl, errMsg)
-        return new Response(
-          JSON.stringify({
-            detail: `后端不可达 (${backendUrl}): ${errMsg}`,
-            proxy_error: 'backend_unreachable',
-          }),
-          {
-            status: 502,
-            statusText: 'Bad Gateway',
-            headers: { 'Content-Type': 'application/json; charset=utf-8' },
-          }
-        )
-      }
-
-      // 显式重建 Response：确保 body 是 ReadableStream（不是 buffer）+ headers 全透传。
-      // SSE 场景必须这样，否则 Electron 会等全部响应收完才一次性吐给 renderer，
-      // 流式"打字机效果"就退化成"一次性出现"。
-      return new Response(upstream.body, {
-        status: upstream.status,
-        statusText: upstream.statusText,
-        headers: upstream.headers
-      })
-    }
-
-    // 静态资源：先做白名单校验，再读盘
     try {
-      // decodeURIComponent 在 URL 含非法 %xx 编码时会抛 URIError，加 try/catch
-      // 兜底走原始 pathname，避免一个非法 URL 把整个静态资源链路炸了
-      let filePath
+      const url = new URL(request.url)
+      const pathname = url.pathname
+
+      // 🔧 Win 上 file:///C:/.../dist/index.html 协议下，renderer `fetch('/chat/xxx')`
+      // 会解析成 file:///C:/chat/xxx —— `new URL(...).pathname` = `/C:/chat/xxx`（带盘符）。
+      // 直接 startsWith('/chat/') 命中失败 → 落到下面静态资源分支 → distDir 白名单校验 403。
+      // 解法：API 转发判定前先剥掉 `/<盘符>:` 前缀，恢复 Unix 形态 `/chat/xxx`。
+      // macOS / Linux 没有盘符，/foo 是真绝对路径，不能剥（保留 pathname 即可）。
+      const apiPathname = IS_WIN ? pathname.replace(/^\/[A-Za-z]:/, '') : pathname
+      writeMainLog(`[req ${reqId}] pathname=${JSON.stringify(pathname)} apiPathname=${JSON.stringify(apiPathname)}`)
+
+      // API 路径转发到后端
+      // 必须转发 method / headers / body —— 否则 POST /chat/ 会变成 GET，
+      // 流式响应（SSE）的请求体也会被丢。
+      // SSE 响应（text/event-stream）需要 duplex: 'half' 才能正确转发流式请求体；
+      // 同时显式重建 Response 把 body stream 透传，避免 protocol.handle buffer。
+      if (apiPathname.startsWith('/chat/') || apiPathname.startsWith('/static/') || apiPathname.startsWith('/admin/')) {
+        const backendUrl = `${config.backend.apiUrl}${apiPathname}${url.search}`
+        writeMainLog(`[req ${reqId}] BRANCH=api ${request.method} → ${backendUrl}`)
+
+        const init = {
+          method: request.method,
+          headers: request.headers,
+          ...(request.body && { body: request.body, duplex: 'half' })
+        }
+
+        // 是否业务 API 调用（影响 banner 健康状态判定）
+        // /chat/* + /admin/* 计入；/static/* 不计（静态资源 hash 路径错可能是业务问题不是后端挂）
+        const isBusinessApi = apiPathname.startsWith('/chat/') || apiPathname.startsWith('/admin/')
+
+        // 兜底：net.fetch reject（ECONNREFUSED / ENOTFOUND / 监听中但未响应）时，
+        // Electron protocol.handle 默认行为是返回 403 Forbidden，跟我们想表达的
+        // 「后端不可达」语义不符，前端 banner 会显示"加载对话列表失败 HTTP 403"误导用户。
+        // 改成显式 502 Bad Gateway + JSON body，让前端能按 status 区分文案。
+        let upstream
+        try {
+          upstream = await net.fetch(backendUrl, init)
+        } catch (e) {
+          const errMsg = (e?.message || String(e)).slice(0, 200)
+          writeMainLog(`[req ${reqId}] NET_FETCH_FAIL ${backendUrl} err=${errMsg}`)
+          // 网络层失败 → 计入健康信号（双信号合并：/health 探测 + API 调用失败）
+          if (isBusinessApi) recordApiCall(false)
+          return new Response(
+            JSON.stringify({
+              detail: `后端不可达 (${backendUrl}): ${errMsg}`,
+              proxy_error: 'backend_unreachable',
+            }),
+            {
+              status: 502,
+              statusText: 'Bad Gateway',
+              headers: { 'Content-Type': 'application/json; charset=utf-8' },
+            }
+          )
+        }
+
+        // upstream 拿到了：2xx-4xx 算成功（4xx 是业务错误，后端在响应），5xx 算失败
+        // SSE 流（200 + text/event-stream）也走这里，upstream.status=200 算成功
+        if (isBusinessApi) {
+          recordApiCall(upstream.status < 500)
+        }
+
+        writeMainLog(`[req ${reqId}] API_RESP status=${upstream.status} ${backendUrl}`)
+        // 显式重建 Response：确保 body 是 ReadableStream（不是 buffer）+ headers 全透传。
+        // SSE 场景必须这样，否则 Electron 会等全部响应收完才一次性吐给 renderer，
+        // 流式"打字机效果"就退化成"一次性出现"。
+        return new Response(upstream.body, {
+          status: upstream.status,
+          statusText: upstream.statusText,
+          headers: upstream.headers
+        })
+      }
+
+      // 静态资源：先做白名单校验，再读盘
       try {
-        filePath = decodeURIComponent(pathname)
-      } catch (decodeErr) {
-        console.warn('[file] decodeURIComponent failed, using raw pathname:', decodeErr.message)
-        filePath = pathname
-      }
+        // decodeURIComponent 在 URL 含非法 %xx 编码时会抛 URIError，加 try/catch
+        // 兜底走原始 pathname，避免一个非法 URL 把整个静态资源链路炸了
+        let filePath
+        try {
+          filePath = decodeURIComponent(pathname)
+        } catch (decodeErr) {
+          console.warn('[file] decodeURIComponent failed, using raw pathname:', decodeErr.message)
+          filePath = pathname
+        }
 
-      // 🔧 Win 上 file:// URL 的 pathname 是 `/D:/foo/bar`（带前导 `/`），
-      // 但 Node.js path.resolve('/D:/foo') 在 Win 上返回 `\D:\foo`（盘符相对路径，
-      // 前导反斜杠）而不是 `D:\foo`，fs.readFile 找不到 → 404 NotFound。
-      // 测试：mac 上跑 path.win32.resolve('/D:/foo') → '\D:\foo'（错的）。
-      // 解法：URL pathname 头部的 `/盘符:/` 剥成 `盘符:/`，resolve 才返回正确盘符绝对路径。
-      // Mac / Linux 上 `/foo` 是真 Unix 绝对路径，不能剥。
-      if (IS_WIN && /^\/[A-Za-z]:\//.test(filePath)) {
-        filePath = filePath.substring(1)  // `/D:/foo` → `D:/foo`
-      }
-      const resolvedPath = path.resolve(filePath)
-      const resolvedCompare = normalizeForCompare(resolvedPath)
+        // 🔧 Win 上 file:// URL 的 pathname 是 `/D:/foo/bar`（带前导 `/`），
+        // 但 Node.js path.resolve('/D:/foo') 在 Win 上返回 `\D:\foo`（盘符相对路径，
+        // 前导反斜杠）而不是 `D:\foo`，fs.readFile 找不到 → 404 NotFound。
+        // 测试：mac 上跑 path.win32.resolve('/D:/foo') → '\D:\foo'（错的）。
+        // 解法：URL pathname 头部的 `/盘符:/` 剥成 `盘符:/`，resolve 才返回正确盘符绝对路径。
+        // Mac / Linux 上 `/foo` 是真 Unix 绝对路径，不能剥。
+        if (IS_WIN && /^\/[A-Za-z]:\//.test(filePath)) {
+          filePath = filePath.substring(1)  // `/D:/foo` → `D:/foo`
+        }
+        const resolvedPath = path.resolve(filePath)
+        const resolvedCompare = normalizeForCompare(resolvedPath)
 
-      // 第一道白名单：必须在 distDir 之下（用 + path.sep 防止 /dist-evil/ 这种前缀撞库）。
-      // 比较用 stripped 版本（见上方 helper 注释），读盘用原 resolvedPath。
-      // 标准路径（dev + 打包后正常 asar 路径）都走这条。
-      const strictPass =
-        resolvedCompare.startsWith(distDirCompare + path.sep) ||
-        resolvedCompare === distDirCompare
+        // 第一道白名单：必须在 distDir 之下（用 + path.sep 防止 /dist-evil/ 这种前缀撞库）。
+        // 比较用 stripped 版本（见上方 helper 注释），读盘用原 resolvedPath。
+        // 标准路径（dev + 打包后正常 asar 路径）都走这条。
+        const strictPass =
+          resolvedCompare.startsWith(distDirCompare + path.sep) ||
+          resolvedCompare === distDirCompare
 
-      // 第二道白名单：严格比较失败时，路径只要包含
-      // `resources\dist\` 或 `resources\app.asar(.unpacked)?\dist\` 段也放行。
-      // 兜底 Win 上 asar FUSE / 长路径（\\?\）/ 短名 / 大小写等 startsWith 失效的边缘场景。
-      const fallbackPass = !strictPass && isInAppDistFallback(resolvedCompare)
+        // 第二道白名单：严格比较失败时，路径只要包含
+        // `resources\dist\` 或 `resources\app.asar(.unpacked)?\dist\` 段也放行。
+        // 兜底 Win 上 asar FUSE / 长路径（\\?\）/ 短名 / 大小写等 startsWith 失效的边缘场景。
+        const fallbackPass = !strictPass && isInAppDistFallback(resolvedCompare)
 
-      if (!strictPass && !fallbackPass) {
-        console.warn('[file] blocked non-dist read:', JSON.stringify({
-          rawUrl: request.url,
-          pathname,
-          filePath,
-          resolvedPath,
-          resolvedCompare,
-          distDir,
-          distDirCompare,
-          startsWithCheck: resolvedCompare.startsWith(distDirCompare + path.sep),
-          equalsCheck: resolvedCompare === distDirCompare,
-          fallbackCheck: fallbackPass,
-        }, null, 2))
-        return new Response('Forbidden', { status: 403 })
-      }
+        if (!strictPass && !fallbackPass) {
+          writeMainLog(`[req ${reqId}] BRANCH=static_403 rawUrl=${request.url} pathname=${JSON.stringify(pathname)} filePath=${filePath} resolvedPath=${resolvedPath}`)
+          console.warn('[file] blocked non-dist read:', JSON.stringify({
+            rawUrl: request.url,
+            pathname,
+            filePath,
+            resolvedPath,
+            resolvedCompare,
+            distDir,
+            distDirCompare,
+            startsWithCheck: resolvedCompare.startsWith(distDirCompare + path.sep),
+            equalsCheck: resolvedCompare === distDirCompare,
+            fallbackCheck: fallbackPass,
+          }, null, 2))
+          return new Response('Forbidden', { status: 403 })
+        }
 
-      if (fallbackPass) {
-        // 兜底命中时打日志，未来想回收成 strictPass 时知道哪些路径走 fallback
-        console.warn('[file] used fallback dist match:', resolvedPath)
-      }
+        if (fallbackPass) {
+          // 兜底命中时打日志，未来想回收成 strictPass 时知道哪些路径走 fallback
+          console.warn('[file] used fallback dist match:', resolvedPath)
+        }
 
-      // Win 上 Electron asar FUSE 行为不稳定（不同版本 URL 里 app.asar 段可能被剥掉），
-      // 启发式猜不准 → 穷举 3 种候选（原 / 插入 / 剥掉），第一个能读的就用。
-      const result = await tryReadCandidates(resolvedPath)
-      if (!result.ok) {
-        console.error('[file] all candidates failed:', resolvedPath)
+        // Win 上 Electron asar FUSE 行为不稳定（不同版本 URL 里 app.asar 段可能被剥掉），
+        // 启发式猜不准 → 穷举 3 种候选（原 / 插入 / 剥掉），第一个能读的就用。
+        const result = await tryReadCandidates(resolvedPath)
+        if (!result.ok) {
+          console.error('[file] all candidates failed:', resolvedPath)
+          return new Response(`Not found: ${pathname}`, { status: 404 })
+        }
+        const data = result.data
+        const readPath = result.usedPath
+        const ext = path.extname(readPath).toLowerCase()
+        const mime = MIME_TYPES[ext] || 'application/octet-stream'
+        return new Response(data, {
+          headers: {
+            'Content-Type': mime,
+            'Content-Length': String(data.length),
+            // index.html 不缓存，hashed assets 永久缓存
+            'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=31536000, immutable'
+          }
+        })
+      } catch (e) {
+        writeMainLog(`[req ${reqId}] STATIC_EXC ${(e?.message || '').slice(0, 300)}`)
+        console.error('[file] read fail:', pathname, e.message)
         return new Response(`Not found: ${pathname}`, { status: 404 })
       }
-      const data = result.data
-      const readPath = result.usedPath
-      const ext = path.extname(readPath).toLowerCase()
-      const mime = MIME_TYPES[ext] || 'application/octet-stream'
-      return new Response(data, {
-        headers: {
-          'Content-Type': mime,
-          'Content-Length': String(data.length),
-          // index.html 不缓存，hashed assets 永久缓存
-          'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=31536000, immutable'
-        }
-      })
     } catch (e) {
-      console.error('[file] read fail:', pathname, e.message)
-      return new Response(`Not found: ${pathname}`, { status: 404 })
+      // 外层兜底：之前 unhandled 异常会让 Electron 默认返 403 把真实原因吞掉，
+      // 用户看到"加载对话列表失败 403"一头雾水但看不到任何 main 日志。
+      // 现在 catch 后写 file log + 返 500 + 详细 detail，前端 hint 能区分"主进程异常"和"路径白名单"。
+      const errMsg = (e?.message || String(e)).slice(0, 400)
+      const errStack = (e?.stack || '').slice(0, 600)
+      writeMainLog(`[req ${reqId}] EXCEPTION ${errMsg}\n${errStack}`)
+      console.error(`[req ${reqId}] protocol.handle exception:`, errMsg)
+      return new Response(
+        JSON.stringify({ detail: `proxy exception: ${errMsg}` }),
+        { status: 500, headers: { 'Content-Type': 'application/json; charset=utf-8' } }
+      )
     }
   })
 }
@@ -1571,7 +1695,10 @@ async function startBackend(onLog) {
     // 之前 5s 间隔发现 → 用户看到 403 一脸懵；现在提前到 next tick 推 + 连失败阈值兜底。
     if (code !== 0 && code !== null && backendProcRef.value === proc) {
       backendProcRef.value = null
-      consecutiveHealthFailures = 0  // 重置计数，让这次 50ms 后的探测开始新一轮累计
+      // 双信号合并后立即推 false（proc 死了 → 后端不可达），不等 5s 间隔 / 阈值。
+      // 比 runHealthCheck 50ms 后跑更激进，但用户场景是「真挂了」，早推早显示 banner。
+      // 50ms 后的 runHealthCheck 还会再确认（如果 backend 起了新实例，runHealthCheck 推 true 清 false）。
+      pushBackendHealth(false, 'proc-exit')
       setTimeout(runHealthCheck, 50)
     } else if (backendProcRef.value === proc) {
       backendProcRef.value = null
@@ -1642,17 +1769,13 @@ function setServicesReady(ready, payload = {}) {
   // 但 backendHealth banner 状态不一致的闪烁）。
   if (ready) {
     // 启动 / 重启完成：让 health probe 立即跑一次推当前状态（让 banner 同步消失）。
-    // 重置失败计数（重启期间可能累加了计数）。
-    consecutiveHealthFailures = 0
+    // pushBackendHealth(true) 内部清掉所有失败计数（重启期间累加的）。
+    pushBackendHealth(true, 'services-ready')
     runHealthCheck()
   } else if (payload?.source === 'restart') {
     // 重启窗口期：立即推 backendHealth=false，让 banner 立刻出现，不等 5s 间隔。
     // 这是权威信号（用户主动点重启），不走连续失败计数阈值。
-    lastBackendHealth = null
-    consecutiveHealthFailures = 0  // 重置计数，避免 kill 间隙的探测失败累加干扰
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('backend-health-changed', { backend: false })
-    }
+    pushBackendHealth(false, 'restart-kill')
   }
 }
 
@@ -1672,9 +1795,21 @@ async function restartBackend() {
   // 否则 renderer 一帧内还在用旧 backend，banner / disabled 状态延后翻转。
   // source='restart' 让 App.vue 不踢回 BootstrapView 浮窗。
   setServicesReady(false, { source: 'restart' })
-  // 重置 health cache，让 runHealthCheck 把新一轮 false → true 都推给 renderer
-  // （kill 后 health probe 必然 false，起来后 true；两次状态变化都要通知）。
-  lastBackendHealth = null
+  // setServicesReady 内部已经 pushBackendHealth(false, 'restart-kill')：
+  // lastBackendHealth=true → false 推 IPC，banner 立即出现；lastBackendHealth 已经是 false → return。
+  // 之前直接 `lastBackendHealth = null` 会破坏状态机（导致后续 runHealthCheck 探测到 true
+  // 推 IPC 时从 null → true 多推一次），现在用 pushBackendHealth 统一入口。
+
+  // 等 in-flight HTTP request 处理完：PUT /admin/config 写文件 + FastAPI 序列化 +
+  // send response + frontend fetch 收完 ≈ 200-500ms。1s 留 buffer。
+  // 否则 killChild 同步 taskkill /F backend → TCP RST → renderer fetch reject →
+  // main.js protocol.handle catch 返 502（详见 main.js:372-385 的 502 兜底）。
+  // 之前 SetupView 改 api key 后点完成 → putConfig 200 → restartAndReload → close
+  // → restartBackend → kill backend，但 user 在 leave 动画期间再点完成（按钮 disabled
+  // 被 finally 解除）→ 第二次 putConfig 撞上重启窗口期 → 502 → alert "保存失败"。
+  // 这里 sleep 让所有 in-flight request 干净收尾，user 后续新发请求撞的也是 spawn 完的
+  // 新 backend（不是被强杀中的旧 backend）。
+  await new Promise(r => setTimeout(r, 1000))
 
   killChild(backendProcRef, 'backend')
   // 给 OS 回收旧 socket / 释放端口的时间（FastAPI 软关闭可能 1-2s 没收完）
@@ -1894,22 +2029,18 @@ function registerStartupIpc() {
    * 状态变化走 mainWindow.webContents.send('backend-health-changed', ...) push，无需 renderer 轮询
    */
   ipcMain.handle('startup:get-health', async () => {
-    // 与 runHealthCheck 同语义：连续失败阈值才判 false；成功立即判 true。
-    // 注意：返回结果**不**写 lastBackendHealth —— 这是 renderer 首次 mount 的快照，
-    // 真实状态由 runHealthCheck 的 5s 间隔维护，避免 get-health 调用和 runHealthCheck
-    // 互相干扰 lastBackendHealth 状态机。
+    // renderer 首次 mount 的快照：**完全不动状态机**（不改 consecutiveHealthFailures
+    // / lastBackendHealth / apiFailureCount），只读。
+    // 真实状态由 runHealthCheck 的 5s 间隔维护 + API 调用结果维护，避免 get-health 快照
+    // 和 runHealthCheck 互相干扰导致 banner 抖动。
     const probe = await checkBackendHealth()
     if (probe) {
-      consecutiveHealthFailures = 0
+      // 单次成功：保守返回 true（不写 lastBackendHealth，避免后续 runHealthCheck 探测失败
+      // 时被对比成"翻转"，多推一次 false IPC）。
       return { backend: true }
     }
-    // 单次失败不直接返回 false —— 累加计数到阈值才返回 false
-    consecutiveHealthFailures = (consecutiveHealthFailures || 0) + 1
-    if (consecutiveHealthFailures >= HEALTH_FAILURE_THRESHOLD) {
-      return { backend: false }
-    }
-    // 还在累计中：返回当前 lastBackendHealth（可能还是 null / true）
-    // renderer 端 App.vue 拿非 false 不会显示 banner
+    // 探测失败：返回当前 lastBackendHealth（null 视为非 false → 返回 true）
+    // runHealthCheck 5s 间隔会自己推 false → 推 IPC，banner 由真正的状态翻转驱动。
     return { backend: lastBackendHealth === false ? false : true }
   })
 
@@ -2046,7 +2177,9 @@ app.whenReady().then(async () => {
   // 直接进主界面，BootstrapView 不会渲染。autoEnterFrontend 现在由 BootstrapView 消费，
   // 用来自动触发 bootstrap；这里不再分流到 setup 窗口。
   const backendOk = await checkBackendHealth()
-  lastBackendHealth = backendOk
+  // 初始化 health 状态机：用 pushBackendHealth 包装（mainWindow 还不存在，
+  // 内部 webContents.send 会被跳过；runHealthCheck 5s 间隔会补推 IPC）。
+  pushBackendHealth(backendOk, 'init')
   console.log(
     `[setup] 后端状态 backend=${backendOk}, ` +
     `autoEnter=${startupPreferences.autoEnterFrontend}`

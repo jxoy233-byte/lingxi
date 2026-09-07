@@ -19,9 +19,17 @@ export const IS_WIN = process.platform === 'win32'
 export const IS_MAC = process.platform === 'darwin'
 export const ARCH = process.arch  // 'arm64' | 'x64' | 'ia32'
 
-// lingxi 项目 GitHub 仓库地址（autoClone 唯一来源；main 进程的 silent auto-clone
-// 与 BootstrapView 用户确认卡片两条路径都引用这里，改地址只改这一行）
-export const LINGXI_REPO_URL = 'https://github.com/jxoy233-byte/lingxi.git'
+// lingxi 项目仓库地址（autoClone 唯一来源；main 进程的 silent auto-clone
+// 与 BootstrapView 用户确认卡片两条路径都引用这里，改地址只改这一组常量）
+//
+// v0.2.2 起双源策略：默认 Gitee（国内快），clone 前 git ls-remote 比对两边 main HEAD SHA
+// → 一致才用 Gitee；不一致或 Gitee 取不到 → fallback GitHub（最新代码可能在 GitHub，
+// Gitee 同步存在数小时延迟）。详见 autoCloneProject → selectRepoUrl。
+export const LINGXI_REPO_URL_GITHUB = 'https://github.com/jxoy233-byte/lingxi.git'
+export const LINGXI_REPO_URL_GITEE  = 'https://gitee.com/jxoy233/lingxi.git'
+
+// 兼容旧名：外部 import 'LINGXI_REPO_URL' 的代码（main.js:21）继续可用
+export const LINGXI_REPO_URL = LINGXI_REPO_URL_GITHUB  // 默认 GitHub 仍是兜底
 
 /**
  * 跨平台 venv Python 路径
@@ -670,22 +678,105 @@ export async function startDockerDesktop() {
 }
 
 /**
+ * 选 repo 源：默认 Gitee（国内快），但要验证与 GitHub HEAD SHA 一致。
+ *
+ * v0.2.2 新增。原因：
+ * - Gitee 是 GitHub 镜像但有同步延迟（数小时级别），如果 GitHub 上刚 push
+ *   修复 commit 而 Gitee 还没同步，clone Gitee 会拿到旧代码
+ * - 所以默认 Gitee 但**每次 clone 前 ls-remote 比对**：两边一致就用 Gitee；
+ *   不一致 / Gitee 取不到 → fallback GitHub（保证拿到最新代码）
+ *
+ * 实现要点：
+ * - `git ls-remote <url> refs/heads/main` 拿 SHA，单边 3s timeout
+ * - 并发跑两边 ls-remote（Promise.all），最坏延迟 = max(单边 timeout)，不是 sum
+ * - 实测两边同时 ls-remote 总耗时 < 1s（只读 HEAD SHA），不拖慢首启
+ *
+ * @param {(msg: string) => void} [onLog]
+ * @returns {Promise<{url: string, source: 'gitee'|'github', reason: string}>}
+ */
+export async function selectRepoUrl(onLog = () => {}) {
+  const log = (m) => { try { onLog(m) } catch {} }
+
+  // 拿 SHA 的辅助函数：git ls-remote 输出格式 "<sha>\t<ref>\n..."
+  const fetchSha = (url) => new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(null), 3_000)
+    exec(`git ls-remote "${url}" refs/heads/main`, { timeout: 3_500 }, (err, stdout) => {
+      clearTimeout(timer)
+      if (err) return resolve(null)
+      const sha = (stdout || '').split(/\s+/)[0]?.trim()
+      resolve(sha || null)
+    })
+  })
+
+  // 并发跑两边
+  const [giteeSha, githubSha] = await Promise.all([
+    fetchSha(LINGXI_REPO_URL_GITEE),
+    fetchSha(LINGXI_REPO_URL_GITHUB),
+  ])
+
+  // 决策树：
+  // 1) Gitee 通了 + SHA 一致 → 用 Gitee（国内快）
+  // 2) Gitee 通了 + SHA 不一致 → fallback GitHub（拿到最新代码）
+  // 3) Gitee 不通 + GitHub 通 → fallback GitHub
+  // 4) GitHub 不通 + Gitee 通 → 仍用 Gitee（用户能访问到的就是好源）
+  // 5) 两边都不通 → 抛错（让上层给用户看"网络问题"）
+  if (giteeSha && githubSha && giteeSha === githubSha) {
+    log(`[clone] Gitee 与 GitHub HEAD 一致 (${giteeSha.slice(0, 8)})，使用 Gitee\n`)
+    return { url: LINGXI_REPO_URL_GITEE, source: 'gitee', reason: 'sha_match' }
+  }
+  if (giteeSha && githubSha && giteeSha !== githubSha) {
+    log(`[clone] ⚠️ Gitee HEAD ${giteeSha.slice(0, 8)} 与 GitHub HEAD ${githubSha.slice(0, 8)} 不一致（镜像同步延迟），fallback 到 GitHub\n`)
+    return { url: LINGXI_REPO_URL_GITHUB, source: 'github', reason: 'sha_mismatch' }
+  }
+  if (!giteeSha && githubSha) {
+    log(`[clone] ⚠️ Gitee ls-remote 失败，fallback 到 GitHub\n`)
+    return { url: LINGXI_REPO_URL_GITHUB, source: 'github', reason: 'gitee_unreachable' }
+  }
+  if (giteeSha && !githubSha) {
+    log(`[clone] ⚠️ GitHub ls-remote 失败，使用 Gitee\n`)
+    return { url: LINGXI_REPO_URL_GITEE, source: 'gitee', reason: 'github_unreachable' }
+  }
+  // 两边都不通
+  const err = new Error('Gitee 和 GitHub 都不可达，请检查网络')
+  err.code = 'BOTH_REACH_FAILED'
+  throw err
+}
+
+/**
  * 自动 git clone 项目到 targetDir/lingxi/。已存在且合法 → 复用；已存在但不合法 → 拒绝。
  *
  * 注意 targetDir 是「父目录」（git 会按仓库名自动建 lingxi/ 子目录），
  * caller 必须传父目录，不能传 ~/lingxi/ 本身——否则 git 会在 ~/lingxi/lingxi/ 嵌套。
  * 仓库名从 opts.repoUrl 末段提取（去掉 .git 后缀）。
  *
+ * v0.2.2 起：clone 源默认走 selectRepoUrl（Gitee 优先 + GitHub fallback），
+ *            显式传 opts.repoUrl 时跳过选源（测试 / 私有部署场景）。
+ *
  * @param {Electron.App} app — 用于 saveProjectRoot 持久化
  * @param {object} opts
  * @param {string} [opts.targetDir] — 默认 ~/(git 会建 ~/lingxi/)
- * @param {string} [opts.repoUrl]  — 默认 LINGXI_REPO_URL（platform.js 顶部常量）
+ * @param {string} [opts.repoUrl]  — 显式指定 repo URL；不传则走 selectRepoUrl
  * @param {(msg: string) => void} [opts.onLog] — 实时日志回调（main 进程 silent 时传 () => {}）
  * @returns {Promise<{ok: boolean, projectRoot?: string, source?: 'existing'|'cloned', error?: string}>}
  */
 export async function autoCloneProject(app, opts = {}) {
   const targetDir = opts.targetDir || os.homedir()
-  const repoUrl = opts.repoUrl || LINGXI_REPO_URL
+  // v0.2.2：clone 前 selectRepoUrl 决定用 Gitee 还是 GitHub
+  // - opts.repoUrl 显式传：跳过选源（手动指定优先级最高，方便测试 / 私有部署）
+  // - 默认走 selectRepoUrl：默认 Gitee，SHA 不一致时 fallback GitHub
+  let repoUrl
+  if (opts.repoUrl) {
+    repoUrl = opts.repoUrl
+  } else {
+    try {
+      const selected = await selectRepoUrl(opts.onLog)
+      repoUrl = selected.url
+    } catch (err) {
+      // 两边都不可达 → fallback 到 GitHub（用户最后一道机会），失败让 git clone自己报错
+      repoUrl = LINGXI_REPO_URL_GITHUB
+      try { opts.onLog?.(`[clone] ⚠️ 选源失败 (${err.message})，使用 GitHub\n`) } catch {}
+    }
+  }
   const onLog = opts.onLog || (() => {})
 
   // 从 URL 末段提取仓库名作为 git clone 自动创建的子目录名

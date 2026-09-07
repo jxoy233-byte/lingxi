@@ -51,6 +51,38 @@
               @click="pickProjectRoot"
             >{{ picking ? '选择中...' : '选择已有的 lingxi/ 目录' }}</button>
           </div>
+          <!--
+            项目目录已检测通过时：轻量「切换」入口，让用户能切到其他 lingxi/ checkout
+            或重新克隆到别的目录。复用 pickProjectRoot / customizeClonePath：
+            - pickProjectRoot → 走 IPC startup:pick-project-root（指向现有 checkout，不写盘）
+            - customizeClonePath → 走 IPC startup:pick-clone-target + autoClone（克隆到新父目录）
+            点「切换」展开内联菜单，二选一；不展开时仅一个小按钮，避免视觉噪
+          -->
+          <div v-else class="action-switch">
+            <button
+              v-if="!showSwitchMenu"
+              class="btn-fix btn-fix-outline btn-switch"
+              :disabled="cloning || pickingCloneTarget || picking"
+              @click="showSwitchMenu = true"
+            >切换...</button>
+            <div v-else class="action-stack action-stack-inline">
+              <button
+                class="btn-fix btn-fix-existing"
+                :disabled="cloning || pickingCloneTarget || picking"
+                @click="handleSwitchToExisting"
+              >{{ picking ? '选择中...' : '选择其他 lingxi/ 目录' }}</button>
+              <button
+                class="btn-fix btn-fix-outline"
+                :disabled="cloning || pickingCloneTarget || picking"
+                @click="handleSwitchByClone"
+              >{{ pickingCloneTarget || cloning ? '处理中...' : '克隆到其他目录...' }}</button>
+              <button
+                class="btn-fix btn-cancel"
+                :disabled="cloning || pickingCloneTarget || picking"
+                @click="showSwitchMenu = false"
+              >取消</button>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -195,6 +227,9 @@ export default {
       // 项目目录独立于 items：必须先确定 lingxi/ 根目录才能做后续
       projectRoot: { ok: false, detail: '' },
       picking: false,
+      // 切换目录菜单开关：projectRoot.ok=true 时显示「切换...」按钮；
+      // 点了展开内联菜单（选其他 lingxi / 克隆到其他目录），与现有三按钮栈互斥
+      showSwitchMenu: false,
       // UI 只展示 2 项：python 和 docker。
       // uv / redis / sandbox / venv 都是「docker + python 在」之后由 bootstrap 自动配置的，
       // 暴露成 4 个单独配置按钮只会徒增操作步骤（一键部署应该真的「一键」）。
@@ -396,6 +431,22 @@ export default {
       } finally {
         this.picking = false
       }
+    },
+    /**
+     * 切换路径 1：选择其他已有 lingxi/ checkout（不写盘，只切换 saved PROJECT_ROOT）
+     * 复用 pickProjectRoot 内部逻辑；额外清掉切换菜单状态。
+     */
+    async handleSwitchToExisting() {
+      this.showSwitchMenu = false
+      await this.pickProjectRoot()
+    },
+    /**
+     * 切换路径 2：克隆到其他父目录（写盘，走 selectRepoUrl 选 Gitee / GitHub）
+     * 复用 customizeClonePath 内部逻辑；额外清掉切换菜单状态。
+     */
+    async handleSwitchByClone() {
+      this.showSwitchMenu = false
+      await this.customizeClonePath()
     },
     /**
      * 「启动」按钮：手动启动 Docker Desktop（probeDocker 返回 hint='start-daemon' 时调用）。
@@ -694,6 +745,35 @@ export default {
   flex-direction: column;
   gap: 6px;
   align-items: flex-end;
+}
+
+/* projectRoot.ok=true 时显示的轻量切换入口：单按钮 → 展开成内联三按钮栈 */
+.action-switch {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+.action-stack-inline {
+  /* 与原 .action-stack 视觉一致 */
+  margin-top: 0;
+}
+
+/* 「切换...」轻量按钮：和已有的 .btn-fix-outline 同色但更小 padding，区分主操作与次级 */
+.btn-switch {
+  font-size: 12px;
+  padding: 4px 10px;
+}
+
+/* 「取消」按钮：中性灰，区别于主 / 次级按钮（warning / accent 色） */
+.btn-cancel {
+  border-color: var(--text-secondary, #6e6e73);
+  color: var(--text-secondary, #6e6e73);
+  font-size: 12px;
+  padding: 4px 10px;
+}
+.btn-cancel:hover {
+  background: var(--text-secondary, #6e6e73);
+  color: white;
 }
 
 /* 次级 outlined 按钮：border + text 都是 warning-color，与主按钮形成层级 */

@@ -55,6 +55,7 @@
 - Redis 端口 6024 → 48211（避免 Windows Hyper-V / ICS / WSL excludedportrange 触发的 WSAEACCES 10013 bind 失败）
 - final_node SysMsg 改写（agent 视角 directive → final_node 视角中性陈述，TOOL_CALL_TIMES 提示不污染总结语气）
 - CLAUDE.md / README.md 大幅精简（v0.2.1 470→280 行 / 501→280 行；偏好按 1 rule + 1 why + file:line 重排）
+- 首次安装双源 clone（默认 Gitee + GitHub fallback，ls-remote 比对 SHA 避免镜像延迟拿到旧代码）+ BootstrapView 检测通过后仍可切换目录
 
 ## 界面预览
 

@@ -1721,7 +1721,7 @@ class ChatWorkflow:
             thread_id = config["configurable"]["thread_id"]
             await self.check_and_trigger_interrupt(thread_id)
 
-            input_msg = state["context"]
+            input_msg = list(state["context"])
 
             if state["memory_tool_calls"]:
                 tool_calls = state["memory_tool_calls"]
@@ -1731,7 +1731,11 @@ class ChatWorkflow:
             tool_call_times = state["tool_call_times"]
 
             if tool_call_times >= TOOL_CALL_TIMES:
-                interrupt_msg = SystemMessage(content=f"已超过{TOOL_CALL_TIMES}次调用工具次数，请停止工具调用提前结束对话")
+                # 直白停止指令：agent 在达上限后最需要明确信号收敛到 done 工具
+                interrupt_msg = SystemMessage(content=(
+                    f"已超过{TOOL_CALL_TIMES}次调用工具次数，请停止工具调用，"
+                    f"立即调用 done 工具结束本轮思维链。"
+                ))
                 input_msg.append(interrupt_msg)
 
             response_chunks = []
@@ -1882,6 +1886,28 @@ class ChatWorkflow:
 
             # imp_ipt 在 system 层独占最高注意力位；{imp_ipt} 占位由 _final_system_template.format() 注入。
             context = list(state["context"])
+
+            # 清理 agent_node 注入的 directive SysMsg（对 final_node 是反向指令，会干扰总结语气）：
+            # 1. agent_node_retry warning（"did not contain a valid tool call"）→ 直接丢弃
+            # 2. TOOL_CALL_TIMES 中断提示（"已超过50次调用工具次数...调 done 结束"）→ 改写为 final_node 视角：
+            #    "思维提前结束"（流程标记，不暗示任何工具调用）
+            new_context = []
+            for msg in context:
+                if not isinstance(msg, SystemMessage):
+                    new_context.append(msg)
+                    continue
+                content = msg.content
+                if "did not contain a valid tool call" in content:
+                    # agent_node_retry warning：直接丢弃（无 final_node 等价值信息）
+                    continue
+                if "已超过" in content and "调用工具次数" in content and "done 工具结束" in content:
+                    # TOOL_CALL_TIMES 中断提示：改写为 final_node 视角的流程标记
+                    new_context.append(SystemMessage(
+                        content="本轮思维链已提前结束，请直接基于已有信息给出回复。"
+                    ))
+                    continue
+                new_context.append(msg)
+            context = new_context
 
             # 思维链日志：final_node 输入 context（imp_ipt 被 pop 之前的完整 context）
             self._write_thinking(thread_id, f"[final_node_in_context]:\n{format_thinking_chain(context)}")

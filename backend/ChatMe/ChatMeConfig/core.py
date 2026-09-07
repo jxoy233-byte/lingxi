@@ -129,7 +129,7 @@ class ChatMeConfig:
         default_config = {
             "app": {
                 "name": "ChatMe",
-                "version": "v0.2.0",
+                "version": "v0.2.2",
                 "description": "ChatMe LangGraph Workflow",
                 "host": "127.0.0.1",
                 "port": 38211,
@@ -142,8 +142,8 @@ class ChatMeConfig:
                 }
             },
             "redis": {
-                "checkpointer_url": "redis://:123456@localhost:6024/0",
-                "state_saver_url": "redis://:123456@localhost:6024/1",
+                "checkpointer_url": "redis://:123456@localhost:48211/0",
+                "state_saver_url": "redis://:123456@localhost:48211/1",
             },
             "oss": {
                 "access_key_id": os.getenv("OSS_ACCESS_KEY_ID", ""),

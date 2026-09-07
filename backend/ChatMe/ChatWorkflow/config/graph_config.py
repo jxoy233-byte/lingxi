@@ -103,7 +103,7 @@ If the user message starts with `/[<skill-folder>]` (e.g. `/[Exa] 搜索 AI 行�
 ###1 Match Skill → Read SKILL.md → Follow Contract
 User: "搜索一下今年 AI 行业的并购案例"
 - `find_skill(query="AI 并购 搜索")` → returns `Bocha Search`
-- `cmd("cat /skills/BochaSearch/SKILL.md")` → read the contract
+- `cmd("cat /skills/Bocha/SKILL.md")` → read the contract
 - call the skill per its contract (usually `code()` to invoke the wrapper, or `cmd` for CLI)
 
 ###2 No Skill Needed → Direct Tool Chain

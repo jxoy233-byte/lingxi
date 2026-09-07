@@ -1,5 +1,5 @@
 """
-三个搜索引擎（BochaSearch / Exa / Tavily）之间的可用性探测。
+三个搜索引擎（Bocha / Exa / Tavily）之间的可用性探测。
 
 设计意图：当一个 skill 的搜索调用抛异常（网络层 SSL EOF / Connection refused /
 timeout / 5xx 等），调用其他两个的 GET ping 快速判断「网络层是否可达」，
@@ -31,7 +31,7 @@ _PING_TIMEOUT = 3  # 秒
 
 # 显示名映射：error 信息里给用户/agent 看的是这个，不是内部 skill 路径
 _DISPLAY_NAMES = {
-    "BochaSearch": "BochaSearch（博查，国内中文）",
+    "Bocha": "Bocha（博查，国内中文）",
     "Exa":         "Exa",
     "Tavily":      "Tavily",
 }
@@ -87,7 +87,7 @@ def _ping_tavily() -> bool:
 
 # 三个 skill 的 ping 注册表。新加 skill 沿用同一注册格式即可。
 _PINGERS = {
-    "BochaSearch": _ping_bocha,
+    "Bocha": _ping_bocha,
     "Exa":         _ping_exa,
     "Tavily":      _ping_tavily,
 }

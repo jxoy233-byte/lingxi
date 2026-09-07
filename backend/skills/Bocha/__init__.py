@@ -80,7 +80,7 @@ def search_web(
         # 避免把整个 urllib3 traceback 灌给 LLM，让 agent 能直接读懂。
         # 末尾追加「其他搜索源可用情况」—— agent 能立刻看到还有什么备选。
         err_msg = str(e)
-        others = format_others_available("BochaSearch")
+        others = format_others_available("Bocha")
         if "SSLError" in err_msg or "Connection" in err_msg or "timeout" in err_msg.lower():
             return f"Bocha 搜索失败（网络层不可达）：{err_msg}\n提示：请检查网络 / 代理设置，或确认 api.bochaai.com 可访问。{others}"
         return f"Bocha 搜索API请求失败：{err_msg}{others}"

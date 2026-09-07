@@ -1,14 +1,14 @@
 {
   "app": {
     "name": "Lingxi",
-    "version": "v0.2.1",
+    "version": "v0.2.2",
     "description": "AI data-analysis chat assistant with tool use, command approval, code execution, and persistent memory across conversations",
     "host": "127.0.0.1",
     "port": 38211
   },
   "redis": {
-    "checkpointer_url": "redis://:123456@localhost:6024/0",
-    "state_saver_url": "redis://:123456@localhost:6024/1"
+    "checkpointer_url": "redis://:123456@localhost:48211/0",
+    "state_saver_url": "redis://:123456@localhost:48211/1"
   },
   "llm_providers": {
     "model1": {

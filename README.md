@@ -48,6 +48,14 @@
 - SandboxPool 容器名 + label 双标识 + sha1 seed（pid+time+counter）
 - 全局重启遮罩（统一 `handleRestartBackend()`，3 处入口共用）
 
+### v0.2.2 健壮性 + 文档精简
+
+- 搜索源健康探测（`skills/_search_health.py`）：Bocha / Exa / Tavily 三源 GET ping 探活 + 失败错误信息末尾显示其他源可用状态
+- SandboxPool 池锁修复（`cannot wait on un-acquired lock` 改为 v2 Condition.wait 整段 `with self._pool_lock:`）+ sha1 seed bug 修复（`os.time()` → `time.time()`）
+- Redis 端口 6024 → 48211（避免 Windows Hyper-V / ICS / WSL excludedportrange 触发的 WSAEACCES 10013 bind 失败）
+- final_node SysMsg 改写（agent 视角 directive → final_node 视角中性陈述，TOOL_CALL_TIMES 提示不污染总结语气）
+- CLAUDE.md / README.md 大幅精简（v0.2.1 470→280 行 / 501→280 行；偏好按 1 rule + 1 why + file:line 重排）
+
 ## 界面预览
 
 ![ChatMe 主界面](docs/img/界面.png)
@@ -70,7 +78,7 @@
 
 ```bash
 docker-compose up -d redis
-# Redis 容器端口 6379 -> 主机 6024
+# Redis 容器端口 6379 -> 主机 48211
 # RedisInsight 端口 8001 -> 主机 28001
 # 密码：123456
 ```
@@ -142,13 +150,13 @@ OPENAI_PRESENCE_PENALTY=0.0
 {
   "app": {
     "name": "ChatMe",
-    "version": "v0.2.1",
+    "version": "v0.2.2",
     "host": "127.0.0.1",
     "port": 38211
   },
   "redis": {
-    "checkpointer_url": "redis://:123456@localhost:6024/0",
-    "state_saver_url":   "redis://:123456@localhost:6024/1"
+    "checkpointer_url": "redis://:123456@localhost:48211/0",
+    "state_saver_url":   "redis://:123456@localhost:48211/1"
   },
   "llm_providers": {
     "openai":   { "model_name": "gpt-4o", "api_key": "...", "base_url": "https://api.openai.com/v1" },
@@ -188,7 +196,7 @@ ChatMe/
 ├── sandbox/Dockerfile                    # Python 3.12 + 数据分析库
 ├── frontend/                             # Vue 3 + Electron 桌面端
 ├── .test_agent/test_agent.md             # AI 多轮对话测试 Agent 指南
-├── docker-compose.yml                    # Redis 服务编排（端口 6024）
+├── docker-compose.yml                    # Redis 服务编排（端口 48211）
 ├── LICENSE                               # MIT License
 ├── NOTICE                                # 上游依赖归属
 ├── THIRD_PARTY_LICENSES.md               # 第三方许可证汇总
@@ -328,13 +336,13 @@ MCP 服务器（`mcps/server.py`，FastMCP 3.x，stdio transport）暴露以下�
 ```bash
 cd backend
 uv build --wheel
-# 输出: dist/ChatMe-0.2.1-py3-none-any.whl
+# 输出: dist/ChatMe-0.2.2-py3-none-any.whl
 ```
 
 ### 安装 wheel
 
 ```bash
-uv pip install dist/ChatMe-0.2.1-py3-none-any.whl
+uv pip install dist/ChatMe-0.2.2-py3-none-any.whl
 # 安装后 chatme_main 和 chatme_mcp 命令全局可用
 ```
 
@@ -366,17 +374,17 @@ npm run electron:build:mac      # macOS arm64 + x64（DMG + ZIP）
 npm run electron:build:win      # Windows NSIS（x64）
 ```
 
-桌面端通过 `electron-builder` 打包，应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.2.1）在 `frontend/electron/electron.config.js` 中配置。
+桌面端通过 `electron-builder` 打包，应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.2.2）在 `frontend/electron/electron.config.js` 中配置。
 
 **输出位置**：`../release/electron-builder/`（项目根，与 Vite 的 `dist/` / `frontend/` 区分开）：
 
 - `mac-arm64/灵析.app` — 直接打开
 - `mac/` — x64 .app
-- `灵析-0.2.1-arm64-mac.zip` / `灵析-0.2.1-mac.zip` — 分发包
+- `灵析-0.2.2-arm64-mac.zip` / `灵析-0.2.2-mac.zip` — 分发包
 - `linux-unpacked/` — Linux 解压目录
-- `灵析-0.2.1.AppImage` — Linux 便携版（需 FUSE，见下文）
-- `灵析-0.2.1.deb` — Debian / Ubuntu 安装包
-- `灵析-0.2.1.rpm` — Fedora / RHEL 安装包
+- `灵析-0.2.2.AppImage` — Linux 便携版（需 FUSE，见下文）
+- `灵析-0.2.2.deb` — Debian / Ubuntu 安装包
+- `灵析-0.2.2.rpm` — Fedora / RHEL 安装包
 - `win-unpacked.exe` — Windows 安装器
 
 ## 开发注意事项

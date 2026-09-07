@@ -1,9 +1,9 @@
 ---
-name: BochaSearch
+name: Bocha
 description: 博查（Bocha）实时网页搜索，针对中文互联网深度优化。适合查询最新新闻、时效性资讯、政策、自媒体内容、国内网站信息。支持按时间范围筛选（当天 / 一周 / 一月 / 一年）。少量多次，单次结果数量保持精炼。
 mount: ro
 aliases: [Bocha, 博查, news, latest, realtime, web_search, search]
-module: skills.BochaSearch
+module: skills.Bocha
 ---
 
 # Bocha Search
@@ -27,11 +27,11 @@ module: skills.BochaSearch
 ## 调用方式
 
 ```python
-from skills.BochaSearch import search_web
+from skills.Bocha import search_web
 
 result = search_web(
     query="检索主题",
-    freshness="oneWeek",     # noLimit / oneDay / oneWeek / oneMonth / oneYear
+    freshness="oneWeek",  # noLimit / oneDay / oneWeek / oneMonth / oneYear
     summary=True,
     count=3,
 )

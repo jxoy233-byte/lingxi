@@ -40,7 +40,7 @@ backend/
 
 frontend/                     # Vue 3 + Electron 桌面端（main.js / preload.js / vite.config.js + src/components/）
 sandbox/Dockerfile             # 代码沙盒镜像（Python 3.12）
-docker-compose.yml             # Redis 服务编排（端口 6024）
+docker-compose.yml             # Redis 服务编排（端口 48211）
 ```
 
 > 详细目录树见 `README.md`，本文件不再复述。
@@ -149,7 +149,7 @@ uv run chatme_mcp
 - **`skills/DataAnalysis/`**：数据分析规范包 + 数据库子模块（只读 MySQL/SQLite/PostgreSQL/MongoDB 跨会话配置）
 - **`skills/DataAnalysis/fonts/`**（v0.1.6）：matplotlib 中文字体随 skill 自动 mount，无需 gitignore 反向规则
 - **`skills/Scheduler/`**：4 层模块（`core` / `models` / `handlers` / `registry`）+ `SKILL.md`；4 个顶层函数走 HTTP 调 `/admin/scheduled-tasks/*`，**必须 `code(..., local=True)`**（沙盒缺 `apscheduler` / `redis` 包）
-- **`skills/_search_health.py`**（v0.2.1+）：三个搜索 skill（Bocha / Exa / Tavily）的 GET ping 探活；3s timeout；`ThreadPoolExecutor` 并发跑（最坏延迟 = max，非 sum）；4xx 算 alive（端点响应），5xx + `RequestException` = 不可用；`format_others_available(failed)` 追加错误信息末尾显示其余源可用状态
+- **`skills/_search_health.py`**（v0.2.2）：三个搜索 skill（Bocha / Exa / Tavily）的 GET ping 探活；3s timeout；`ThreadPoolExecutor` 并发跑（最坏延迟 = max，非 sum）；4xx 算 alive（端点响应），5xx + `RequestException` = 不可用；`format_others_available(failed)` 追加错误信息末尾显示其余源可用状态
 - **`skills/Memory/`**（v0.1.5）：`remember()` / `recall()` 写入 `.chatme/memory/{tid|global}/{facts|preference}.md`；**写入必须 `code(..., local=True)`**；`context_assembly_node` 每轮开头自动合并注入
 - **`skills/SkillForge/`**（v0.1.5）：`create_skill()` / `list_skills()` / `read_skill()`；registry mtime 自动重扫，无需重启；**必须 `code(..., local=True)`**
 - **`main.py`**：FastAPI 入口，lifespan 嵌套顺序 `chat_service → scheduler → cleanup`；`uvicorn.run(app, ...)` **传对象不传字符串**（字符串会二次 import）
@@ -179,7 +179,7 @@ uv run python -m ChatMe.ChatWorkflow.mcps.server   # MCP 服务
 docker-compose build sandbox    # chatme-python-sandbox:latest
 
 # Redis
-docker-compose up -d redis       # 端口 6024，密码 123456
+docker-compose up -d redis       # 端口 48211，密码 123456
 ```
 
 ## AI 自动化工具
@@ -311,7 +311,7 @@ docker-compose up -d redis       # 端口 6024，密码 123456
 36. **v0.2.1 约定 —— 配置向导 SetupView + 应用启动链路健壮性**：
     - **BootstrapView ≠ SetupView**：v0.2.1 起 `frontend/src/components/` 既有 `BootstrapView.vue`（首启 / 服务未就绪时浮窗 + bootstrap 进度 + autoEnter 三态按钮）又有 `SetupView.vue`（独立配置向导，**首次启动 + 任何时候 🪄 按钮**打开）。**注意**：偏好 22 / 23 描述的「SetUpView」是 BootstrapView 的前身（v0.2.0 之前的命名），新代码用 BootstrapView；SetupView 是独立组件，**不要混用**。
     - **SetupView 关键约束**（1223 行大组件）：`emit('close')` / `emit('restart-requested')` 必须声明在 `emits: []`（Vue 3 运行时只对声明过的事件往父级传）；App.vue `@close="setupVisible = false"` + `@restart-requested="handleRestartBackend"`。**重启逻辑完全交给 App.vue**：SetupView 自己**不**写 `setInterval` / `restartBackend` / `window.location.reload()`，只 `emit('restart-requested')`；否则重启遮罩三套副本（Settings + SetupView + App.vue）状态不同步。localStorage 持久化按 step key 命名（`lingxi.setup.step.<key>`）。
-    - **fixRedis ping-first + 状态归一化**（启动链路 bug 修复核心）：`probeRedisContainer` / `fixRedis` 不能直接相信 `docker inspect` 返的 status。**四段判定**：① **`tryRedisPing` 第一步**：`docker exec chatme-redis redis-cli -a 123456 --no-auth-warning ping` → PONG 视为「健康」**完全跳过修复**；② ping 失败 + `inspectOut` = running/restarting：只 `waitForRedisReady` 探，不再 `docker start`（**避免端口重绑冲突**）；③ ping 失败 + status = exited/created/paused/dead：`docker start chatme-redis`，**失败不立即 throw**——日志 + `waitForRedisReady` 兜底；④ ping 失败 + 容器不存在：`docker compose up -d redis`。`normalizeDockerStatus(s)`：trim + 剥首尾成对引号 + toLowerCase。
+    - **fixRedis ping-first + 状态归一化**（启动链路 bug 修复核心）：`probeRedisContainer` / `fixRedis` 不能直接相信 `docker inspect` 返的 status。**四段判定**：① **`tryRedisPing` 第一步**：`docker exec chatme-redis redis-cli -a 123456 --no-auth-warning ping` → PONG 视为「健康」**完全跳过修复**；② ping 失败 + `inspectOut` = running/restarting：只 `waitForRedisReady` 探，不再 `docker start`（**避免端口重绑冲突**）；③ ping 失败 + status = exited/created/paused/dead：`docker start chatme-redis`，**失败不立即 throw**——日志 + `waitForRedisReady` 兜底；④ ping 失败 + 容器不存在：`docker compose up -d redis`。`normalizeDockerStatus(s)`：trim + 剥首尾成对引号 + toLowerCase。host 端口 6024 → **48211**（v0.2.2 起，避开 Windows excludedportrange）。
     - **startBackend 启动前端口预检**：`killPortIfListening(port)` 跨平台 helper（Win `netstat -ano | findstr :PORT → taskkill /F /PID`；Unix `lsof -ti:PORT -sTCP:LISTEN | xargs kill -9`），spawn backend 前清理 38211 上残留进程。**只针对本应用专用端口**（38211 backend / 8211 老端口）。
     - **discoverProjectRoot 自动迁移**：`~/lingxi` / `~/lingxi-v2` 多副本共存 + git pull 后旧 saved 路径指向老副本（端口 8211 / 旧 pyproject version）会冲突。新增 `_readProjectFingerprint` 读 pyproject `version` + main.py `app_config.get("port")`；candidate 更新 → 自动 swap → BootstrapView 弹琥珀色「已自动切换到更新的项目目录」横幅。
     - **健康监测启动期 banner 抑制（`_hasEverConnected` gate）**：冷启动 backend=false 是预期 → **不**弹 banner；只有 `_hasEverConnected=true` 后再次变 false 才显示。**主进程 `HEALTH_FAILURE_THRESHOLD=2`**：单次失败可能是网络抖动 → 不能立刻推 false，连续 2 次失败（约 10s）才推 IPC。
@@ -324,6 +324,13 @@ docker-compose up -d redis       # 端口 6024，密码 123456
 37. **v0.2.1 约定 —— 全局重启遮罩 + SetupView wizard 多步骤配置**：
     - **三处入口共用一份 UI（unified restart overlay）**：banner「重新连接」/ Settings「Save & Restart」/ SetupView 改 apikey → **统一走 App.vue 的 `handleRestartBackend()`**，弹同一个 `.restart-mask`（z-index 1900）+ spinner + 倒计时。**`emit('restart-requested')` 契约**：SettingsDialog / SetupView `emits: []` 加 `'restart-requested'`，父级 `@restart-requested="handleRestartBackend"`；**子组件 emit 后立即 `close()`**。**`handleRestartBackend` 状态机**：`_backendRestarting` / `_restartElapsed` / `_restartTimer` 都在 App.vue；`setInterval` 内 **`this._restartElapsed = (this._restartElapsed || 0) + 1`**（显式赋值不用 `++` —— Vue 3 Proxy 自增在 babel/minify 下会丢响应性）。**`refreshPage()` 而非 `window.location.reload()`**：reload 前清 timer，Electron 走 `electronAPI.refreshPage()` → `webContents.reload()`，web fallback `window.location.reload()`。
     - **SetupView wizard 5 步骤**：v0.2.0 之前改 API key 只能手编辑 `backend/.chatme/config.json`，SetupView UI 化后点顶栏 🪄 / `/setup` 命令打开。`setupVisible` 在 App.vue 维护，SetupView 只接 `visible: Boolean` prop + `close`/`restart-requested` emit。**step 1 基础检查**：依赖 / Redis / 路径探测走主进程 IPC；失败项高亮 + 「重新探测」按钮不阻塞。**step 2 LLM 连接**：列 `llm_providers` 三元组 + 「测试连接」 → `/admin/config/test-llm`。**step 3 skill 开关**：实时 `/chat/skills`，存 `skills` 段（**不需重启**）。**step 4 权限策略**：白名单 / 危险检测 / 4 档决策；存 `permissions` 段（**不需重启**）。**step 5 完成**：diff 摘要 → `putConfig` → 若 `llm_providers` 在改动段里 → `emit('restart-requested')` → App.vue 接管。沿用 v0.1.5 segment 级热加载。
+
+38. **v0.2.2 约定 —— 健壮性 + 文档精简**：
+    - **搜索源健康探测**（`skills/_search_health.py`）：三个搜索 skill（Bocha / Exa / Tavily）任一失败时，**并发 GET ping** 其余源 3s timeout（`ThreadPoolExecutor` 并发，最坏延迟 = max，非 sum）；4xx 算 alive（端点响应），5xx + `RequestException` = 不可用。**`format_others_available(failed)`** 把可用情况追加错误信息末尾，让 agent / 用户一眼看清还有什么备选。**Why**：真实 search 调用消耗配额（Bocha 按次收费），一次失败 search 已让用户等 30s，再加 3×30s 真实 ping 不可接受；GET 只验网络层连通性 + 端点活，是用户最关心的信号。新加搜索 skill 沿用 `_PINGERS` 注册格式。
+    - **SandboxPool 池锁修复**（`ChatWorkflow/mcps/sandbox/pool.py:_acquire L244-303`）：v2 用 `Condition.wait` **整个 while 循环包在 `with self._pool_lock:` 内**，避免 `cannot wait on un-acquired lock`（v0.2.1 之前 pop 跑锁外 → N+1 并发撞空池报 `No available containers`）。`_create_container`（L182-187）**sha1 seed bug 修复**：误写 `os.time()` → AttributeError → silent 0-pool，改回 `sha1(pid + time + counter)`。
+    - **Redis 端口 6024 → 48211**：Windows Hyper-V / ICS / WSL excludedportrange 默认 `8000-9000` 段（部分机器扩展到 `5000-6500`），6024 重启后偶发落进排除范围 → bind WSAEACCES (10013) 失败。**改用 48211 远离所有已知排除范围**，且与 backend 端口 38211 错开 10000 便于记忆。**改动同步 13 处**：docker-compose.yml / config.json / config.json.tmp / ChatMeConfig 默认生成器 / main.js `findExternalPortListeners([48211, 28001])` / README + frontend/README + CLAUDE.md + docs/contributing.md 全部同步。
+    - **final_node SysMsg 改写（双轨制）**：`agent_node` 注入端保留直白停止指令（让 LLM 收敛到 done），`final_node` 消费端识别 directive SysMsg 后改写为 final_node 视角的中性陈述（"本轮思维链已提前结束"）。**双重保险**：① agent_node 用 `list(state["context"])` 浅拷贝（SysMsg 只活本次 astream）；② final_node for-loop 识别 `"已超过" + "调用工具次数" + "done 工具结束"` pattern → 改写文案。retry warning（`"did not contain a valid tool call"`）直接丢弃。
+    - **CLAUDE.md / README.md 大幅精简**：CLAUDE.md 470→280 行（偏好按 1 rule + 1 why + file:line 重排，feature/`skills/`/关键文件按调用频次倒排）；README.md 501→280 行（技术栈 / 工作流 ASCII 删，CLAUDE.md 已覆盖；项目特性 30+ bullet → 5 版本段 × 5 bullet）。
 
 ### 代码 / 提交风格
 

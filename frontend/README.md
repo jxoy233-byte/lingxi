@@ -82,7 +82,7 @@ Web 端走 Vite dev server，Electron 端在窗口内嵌同一个 URL 或 `file:
 ### 1. 准备后端
 
 ```bash
-# 启动 Redis（端口 6024，密码 123456）
+# 启动 Redis（端口 48211，密码 123456）
 docker-compose up -d redis
 
 # 启动主服务（默认端口 38211，stdio 模式下自动 fork MCP 子进程）
@@ -368,7 +368,7 @@ const isTest = process.env.NODE_ENV === 'test'
 | `app.name` | `灵析` | 应用名（菜单栏第一项、`app.getName()`） |
 | `app.title` | `灵析——数据分析智能助手` | 窗口标题 / 关于弹窗 |
 | `app.identifier` | `com.chatme.app` | bundle identifier |
-| `app.version` | `0.2.1` | 同步后端版本号 |
+| `app.version` | `0.2.2` | 同步后端版本号 |
 | `window.width × height` | `1100 × 720` | 主窗口尺寸 |
 | `window.minWidth × minHeight` | `650 × 480` | 最小尺寸 |
 | `devServer.url` | 从 Vite 导入的 `http://localhost:18211` | Electron 开发时加载的 URL |
@@ -502,8 +502,8 @@ DMG 阶段需要 `dmgbuild-bundle-arm64-*.tar.gz` 包，npmmirror 当前缺这�
 release/electron-builder/
 ├── mac-arm64/
 │   └── 灵析.app          ← 直接打开
-├── 灵析-0.2.1-arm64-mac.zip
-└── 灵析-0.2.1-mac.zip
+├── 灵析-0.2.2-arm64-mac.zip
+└── 灵析-0.2.2-mac.zip
 ```
 
 打开方式：
@@ -515,7 +515,7 @@ open ~/coding/projects/ChatMe/release/electron-builder/mac-arm64/灵析.app
 "~/coding/projects/ChatMe/release/electron-builder/mac-arm64/灵析.app/Contents/MacOS/灵析"
 
 # 解压 zip 后再打开
-unzip 灵析-0.2.1-arm64-mac.zip -d ~/Downloads
+unzip 灵析-0.2.2-arm64-mac.zip -d ~/Downloads
 open ~/Downloads/灵析.app
 ```
 
@@ -525,7 +525,7 @@ open ~/Downloads/灵析.app
 
 ### 1. Electron 启动后窗口是空白的
 
-- 检查后端 Redis 是否启动（端口 6024）
+- 检查后端 Redis 是否启动（端口 48211）
 - 检查 MCP 子进程是否随主服务拉起（stdio 模式：MCP 由 chatme_main 自动 fork，`ps -ef | grep chatme` 应见父子两进程）
 - 检查主服务是否启动（默认端口 38211）
 - Vite 代理 `/chat` 和 `/static` 到 38211；如改了后端端口，需同步 `vite.config.js` 的 `proxy`

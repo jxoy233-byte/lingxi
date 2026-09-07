@@ -1332,12 +1332,12 @@ async function fixRedis(onLog) {
   }
 
   // 4. host 端口预杀（仅当容器没在用这些端口时）
-  //    docker-compose.yml 把 6024 (Redis) / 28001 (RedisInsight UI) 暴露到 host，
+  //    docker-compose.yml 把 48211 (Redis) / 28001 (RedisInsight UI) 暴露到 host，
   //    如果有外部进程监听 → compose up 的端口绑定会 WSAEACCES (Windows) / EACCES (Unix) 失败。
   //    这两个端口是 Redis 专用，没有合法第三方用途，直接杀。**不动 Docker 自身的 NAT
   //    进程**——只在容器没跑时扫，避开 `com.docker.backend.exe` 这种 Docker 自己绑的 PID。
   if (status !== 'running' && status !== 'restarting') {
-    const externalListeners = await findExternalPortListeners([6024, 28001], root)
+    const externalListeners = await findExternalPortListeners([48211, 28001], root)
     if (externalListeners.size > 0) {
       const desc = [...externalListeners].map(([port, pid]) => `${port}(pid=${pid})`).join(', ')
       onLog?.(`[redis] ⚠️ host 端口被外部进程占用：${desc}，强制清理...\n`)

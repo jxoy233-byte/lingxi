@@ -693,12 +693,19 @@ export async function startDockerDesktop() {
  * 都返回 { ok: false }，由调用方 fallback 到 git clone，**用户无感**。
  *
  * 关键设计：
- * 1. tarball 永远下到 os.tmpdir()（不污染 targetDir）；解压成功才 mv 整体到 projectRoot
- *    → 失败回滚时不用扫描删一堆子文件
+ * 1. tarball 永远下到 os.tmpdir()（不污染 targetDir）；解压成功才留在 projectRoot/
+ *    → 失败回滚只删 projectRoot 自身，不影响其他目录
  * 2. cwd 用 os.tmpdir() 避开「cwd == targetDir 触发 git/curl Win bug」的边界场景
- * 3. curl 失败时显式 fs.rmSync 删 projectRoot（防半残解压影响后续 git clone）
+ * 3. **catch 兜底清理**：share 任意环节（curl spawn / curl 退码非 0 / tar 退码非 0 /
+ *    fs 异常等）失败时都删 tarball + projectRoot（= ~/lingxi），避免半残目录残留
+ *    给后续 git clone fallback 时嵌套出 ~/lingxi/lingxi/
  * 4. 解压完调 isValidProjectRoot 校验（防御恶意服务端 / 同步中间态）
- * 5. 不传 -C 路径，让 tar 用 child cwd；这里 cwd = projectRoot 父目录
+ * 5. **v0.2.4 关键差异 vs git clone**：tar 包内顶层 entry 直接是 backend/、docker-compose.yml
+ *    等（**没有** lingxi/ wrapper 层），所以解压前**先 mkdirSync(projectRoot=~/lingxi)**，
+ *    整个下载+解压链路都在这个已建好的 lingxi/ 子目录里进行；产物天然形成 ~/lingxi/backend/
+ *    路径，跟 git clone 后 ~/lingxi/backend/ 路径形态完全一致。
+ *    跟 git clone 的拉取机制**必须**区分：git clone 由 git 自己建仓库名子目录（lingxi/），
+ *    而 share 拉取由 platform.js 自己负责建 lingxi/ 子目录（因为 tar 包不带 wrapper）。
  *
  * @param {string} projectRoot — 完整目标路径（含仓库名后缀，如 ~/lingxi）
  * @param {(msg: string) => void} onLog
@@ -708,15 +715,48 @@ async function _tryDownloadFromShare(projectRoot, onLog = () => {}) {
   if (!LINGXI_SHARE_URL) {
     return { ok: false, error: 'LINGXI_SHARE_URL 未设置' }
   }
-  const shareUrl = LINGXI_SHARE_URL.replace(/\/$/, '')
-  const targzUrl = `${shareUrl}/lingxi.tar.gz`
+  // ⚠️ v0.2.4：targzUrl 仍然要算（curl 实际请求的 URL），但**不再打印到日志**。
+  //   日志只显示「正在拉取」这种模糊描述，具体端点属于服务端内部基础设施。
+  const targzUrl = `${LINGXI_SHARE_URL.replace(/\/$/, '')}/lingxi.tar.gz`
 
   // tarball 暂存到 tmpdir（不污染 targetDir）
   const targzPath = path.join(os.tmpdir(), `lingxi-${Date.now()}-${process.pid}.tar.gz`)
 
   try {
+    // 0) 先建 projectRoot（= ~/lingxi）子目录
+    // ⚠️ v0.2.4 关键步骤：share tar 包内**没有** lingxi/ wrapper 层（sync 脚本
+    //   `tar -C $TARGET_DIR ... .` 顶层 entry 直接是 backend/ 等），由 platform.js
+    //   自己负责建 lingxi/ 子目录，让产物天然落在 ~/lingxi/backend/ 这种路径下，
+    //   跟 git clone 形态一致。**必须在 curl 之前建好**——失败回滚删 projectRoot
+    //   就够了，不污染父目录。
+    //
+    // ⚠️ 防御性检查：调用方 autoCloneProject line 947 已经确保 projectRoot 不存在
+    //   或不合法才走 share；如果走到这里时 projectRoot 突然有了内容（比如并发进程
+    //   抢着部署、或外部脚本刚 touch），拒绝避免污染。
+    if (fs.existsSync(projectRoot)) {
+      const stat = fs.statSync(projectRoot)
+      if (stat.isDirectory()) {
+        const entries = fs.readdirSync(projectRoot)
+        if (entries.length > 0) {
+          return {
+            ok: false,
+            error: `share 拉取预检失败：${projectRoot} 已被占用（${entries.length} 个条目），拒绝覆盖`,
+          }
+        }
+      } else {
+        return {
+          ok: false,
+          error: `share 拉取预检失败：${projectRoot} 存在但不是目录`,
+        }
+      }
+    }
+    fs.mkdirSync(projectRoot, { recursive: true })
+    onLog(`[clone] 📁 已创建项目目录: ${projectRoot}\n`)
+
     // 1) curl 下载
-    onLog(`[clone] 🌐 尝试从 share URL 拉取: ${targzUrl}\n`)
+    // ⚠️ v0.2.4：日志不暴露具体 share URL（端点属于服务端内部基础设施，
+    //   暴露给用户没意义反而徒增 debug 干扰）。只说「正在拉取」。
+    onLog(`[clone] 🌐 正在从 share URL 拉取...\n`)
     const { spawn: childSpawn } = await import('child_process')
     const curlChild = childSpawn('curl', [
       '-fSL',                    // -f 失败返非 0；-S 显示错误；-L 跟 redirect
@@ -743,15 +783,10 @@ async function _tryDownloadFromShare(projectRoot, onLog = () => {}) {
     })
     onLog(`[clone] ✅ 下载完成 (${(fs.statSync(targzPath).size / 1024 / 1024).toFixed(2)} MB)\n`)
 
-    // 2) tar 解压到 projectRoot 父目录，让 tar 自动建 projectRoot/ 子目录
-    const projectParent = path.dirname(projectRoot)
-    fs.mkdirSync(projectParent, { recursive: true })
-    if (fs.existsSync(projectRoot)) {
-      // 防御：理论上已存在分支在调用方已 check 过；这里兜底半残文件
-      fs.rmSync(projectRoot, { recursive: true, force: true })
-    }
-
-    const tarChild = childSpawn('tar', ['-xzf', targzPath, '-C', projectParent], {
+    // 2) tar 解压到 projectRoot（= ~/lingxi）
+    //    tar 包内顶层 entry 是 backend/、docker-compose.yml 等 → 解压后产物天然在
+    //    ~/lingxi/backend/、~/lingxi/docker-compose.yml，跟 git clone 形态一致。
+    const tarChild = childSpawn('tar', ['-xzf', targzPath, '-C', projectRoot], {
       env: process.env,
       cwd: os.tmpdir(),
       timeout: 120_000,
@@ -784,11 +819,28 @@ async function _tryDownloadFromShare(projectRoot, onLog = () => {}) {
     onLog(`[clone] ✅ 解压并校验通过: ${projectRoot}\n`)
     return { ok: true }
   } catch (err) {
+    // ⚠️ v0.2.4 兜底清理：share 任意环节（curl spawn / curl 退码非 0 / tar 退码非 0
+    //   / fs 操作异常等）失败时，必须把 projectRoot（= ~/lingxi/）整个删掉再返 false。
+    //   调用方 autoCloneProject 会看到 { ok: false } → fallback 到 git clone，
+    //   git clone 期望 projectRoot 不存在或为空，否则会嵌套建 ~/lingxi/lingxi/。
+    //   **绝对不能**让半残的 ~/lingxi/backend/ 之类残留给 git clone —— 那会嵌套。
     onLog(`[clone] ⚠️ share URL 拉取失败：${err.message}\n`)
-    // 兜底清理：半残 tarball / 半残 projectRoot 都不能留给 git clone
-    try { fs.rmSync(targzPath, { force: true }) } catch {}
-    if (fs.existsSync(projectRoot)) {
-      try { fs.rmSync(projectRoot, { recursive: true, force: true }) } catch {}
+    onLog(`[clone] 🧹 清理 share 半残产物（lingxi/ 目录 + tarball）\n`)
+    // 1) 删 tarball（可能没下完或下了一半）
+    try {
+      if (fs.existsSync(targzPath)) {
+        fs.rmSync(targzPath, { force: true })
+      }
+    } catch (cleanupErr) {
+      onLog(`[clone] ⚠️ 清理 tarball 失败（不影响 fallback）：${cleanupErr.message}\n`)
+    }
+    // 2) 删 ~/lingxi/（可能为空目录、也可能半残解压了几个文件）
+    try {
+      if (fs.existsSync(projectRoot)) {
+        fs.rmSync(projectRoot, { recursive: true, force: true })
+      }
+    } catch (cleanupErr) {
+      onLog(`[clone] ⚠️ 清理 ${projectRoot} 失败（可能影响 fallback，git clone 会撞嵌套）：${cleanupErr.message}\n`)
     }
     return { ok: false, error: err.message }
   }
@@ -972,7 +1024,8 @@ export async function autoCloneProject(app, opts = {}) {
         console.error('[clone] userData 持久化失败：', e.message)
       }
       persistProjectRootToShell(projectRoot).catch(() => {})  // best-effort
-      onLog(`[clone] ✅ 已从 share URL 部署，源: ${LINGXI_SHARE_URL}\n`)
+      // ⚠️ v0.2.4：不在成功日志里打印具体 share URL（端点属于服务端内部基础设施）
+      onLog(`[clone] ✅ 已从 share URL 部署完成\n`)
       return { ok: true, projectRoot, source: 'downloaded' }
     }
     // 失败 → 已内部清理 projectRoot 半残文件；继续走 git clone

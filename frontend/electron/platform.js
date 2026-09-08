@@ -32,10 +32,12 @@ export const LINGXI_REPO_URL_GITEE  = 'https://gitee.com/jxoy233/lingxi.git'
 export const LINGXI_REPO_URL = LINGXI_REPO_URL_GITHUB  // 默认 GitHub 仍是兜底
 
 // v0.2.2+：服务端 lingxi-share 优先路径
-// 设置后 autoCloneProject 优先 curl 这个 URL 下的 /lingxi.tar.gz，省 git 协议开销
-// 不设置 / 拉取失败 → 自动 fallback 到上方 git clone 流程（用户无感）
-// 用法：export LINGXI_SHARE_URL=http://47.103.144.196:8080（在 main 进程 / .env / 启动脚本里）
-export const LINGXI_SHARE_URL = process.env.LINGXI_SHARE_URL || ''
+// autoCloneProject 优先 curl 这个 URL 下的 /lingxi.tar.gz，省 git 协议开销
+// 拉取失败 → 自动 fallback 到下方 git clone 流程（用户无感）
+//
+// 默认值硬编码 `http://47.103.144.196:8080`（生产 lingxi-share 入口），
+// 开箱即用；环境变量 LINGXI_SHARE_URL 仍可覆盖（开发 / 测试其他 share 端点）。
+export const LINGXI_SHARE_URL = process.env.LINGXI_SHARE_URL || 'http://47.103.144.196:8080'
 
 /**
  * 跨平台 venv Python 路径

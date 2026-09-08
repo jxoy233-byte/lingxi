@@ -30,6 +30,35 @@ const config = configModule.default
 let mainWindow
 let previewWindow = null
 
+// ==================== 单实例锁（v0.2.4 新增）====================
+// 防双击启动图标 / 多终端 `electron .` 同时跑两个实例撞 userData / 端口 38211 / 配置文件。
+// 第二个实例启动时 `requestSingleInstanceLock` 返 false → 立刻 quit + process.exit 退出；
+// 第一个实例会被 `second-instance` event 唤醒，把 mainWindow 拉回前台。
+//
+// ⚠️ 必须放在动态 import 之后、所有其他副作用之前。`app.quit()` 是异步的，
+// 不加 `process.exit(0)` 的话后面 2000+ 行仍会执行（注册 ipc handler /
+// app.whenReady callback），第二个实例会走完整个 bootstrap 才退出。
+const gotTheLock = app.requestSingleInstanceLock()
+
+if (!gotTheLock) {
+  // 第二个实例：正常退出（错误码 0），不做任何 UI 弹窗（可能根本没窗口）
+  console.log('[main] 已有 lingxi 实例在跑，本次启动退出')
+  app.quit()
+  process.exit(0)
+} else {
+  // 第一个实例：监听 second-instance event，用户试图开第二个时被唤醒
+  // v0.2.4+：加 isDestroyed 守卫。macOS 用户 Cmd+W 关窗后，窗口对象仍存在但被销毁；
+  //   此时调 isMinimized/show 会抛。activate event 兜底会重建窗口（getAllWindows().length === 0），
+  //   所以这里直接 return 让 activate 接管。
+  app.on('second-instance', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      if (!mainWindow.isVisible()) mainWindow.show()
+      mainWindow.focus()
+    }
+  })
+}
+
 // ==================== 主进程文件日志 ====================
 // packaged 模式下 DevTools 被禁 + 用户从终端看不到主进程 stdout → 关键 trace 没法捕获。
 // 把 main.js 关键日志写到**多个位置**（userData 优先 + home 目录兜底），任何一个能写成功
@@ -708,8 +737,13 @@ async function createWindow() {
   if (!isDev && !isTest) disableDeveloperFeatures(win)
   // 生产模式去掉整个菜单栏（窗口顶部不再显示「灵析 / 编辑 / 视图」），
   // dev / test 保留菜单（开发者需要 reload / 开发者工具等入口）。
+  // 唯一例外：macOS 生产模式保留一个最小菜单（最小化 + 关闭窗口 + 隐藏其它 + 退出）。
+  //   Why：v0.2.4 起 macOS 改了 window-all-closed 不再调 app.quit()（Cmd+W = 关闭窗口 ≠ 退出）；
+  //   真正退出只能走菜单 Cmd+Q 或 dock 右键退出。生产模式把菜单全删掉会让 Cmd+Q / Cmd+M / Cmd+W 都失效。
   if (isDev || isTest) {
     createMenu(envConfig)
+  } else if (IS_MAC) {
+    createMacosProductionMenu()
   } else {
     Menu.setApplicationMenu(null)
   }
@@ -843,6 +877,71 @@ function createMenu(envConfig) {
     })
   }
 
+  const menu = Menu.buildFromTemplate(template)
+  Menu.setApplicationMenu(menu)
+}
+
+/**
+ * macOS 生产模式最小菜单（v0.2.4+）
+ *
+ * Why：macOS HIG 要求 Cmd+Q 才能退出 app，Cmd+W 关窗（单窗口 app = 隐藏 app），
+ *      Cmd+M 最小化到 dock 缩略图，Cmd+Q 才是真退出。
+ *   - window-all-closed 在 macOS 上不调 app.quit()（避免误关杀掉 backend）
+ *   - 真正退出门户：菜单「退出 灵析」（Cmd+Q）+ dock 右键「退出」
+ *   - 菜单全删（Menu.setApplicationMenu(null)）会让 Cmd+Q 失效
+ *
+ * 这里手动装 app menu（最小化 + 关闭窗口 + 隐藏其它 + 退出）。
+ *   - 「最小化」用 `role: 'minimize'`（默认 Cmd+M）：窗口缩到 dock 缩略图，点 dock 拉回
+ *   - 「关闭窗口」用 `role: 'hide'` + `accelerator: 'Command+W'`：单窗口 app 关窗 = 隐藏 app；
+ *     dock 图标还在，点 dock 自动拉回。比 `role: 'close'`（销毁窗口）更适合 macOS 三方 app 习惯
+ *     —— Cmd+W 不应该销毁 app 上下文，只是不想看到窗口而已。
+ *   - 「隐藏其它」用 `role: 'hideOthers'`（默认 Cmd+Alt+H）：标准 macOS 行为
+ *   - **为什么不保留 Cmd+H**：单窗口 app 下 Cmd+W 已经等于 Cmd+H 的效果（都是隐藏 app），
+ *     留 Cmd+H 会和 Cmd+W 功能重复让用户困惑。三方 app（Slack / VSCode / Chrome）都是这个组合。
+ * 「关于」/「服务」等系统项由 electron 默认 first item 自动补
+ * （Label = app.name 时 electron 会把它当 macOS 标准 app menu 处理）。
+ */
+function createMacosProductionMenu() {
+  const template = [
+    {
+      label: config.app.name,
+      submenu: [
+        { type: 'separator' },
+        {
+          label: '最小化',
+          role: 'minimize'
+        },
+        {
+          label: '关闭窗口',
+          accelerator: 'Command+W',
+          role: 'hide'
+        },
+        {
+          label: '隐藏其它',
+          accelerator: 'Command+Alt+H',
+          role: 'hideOthers'
+        },
+        { type: 'separator' },
+        {
+          label: '退出 ' + config.app.name,
+          accelerator: config.shortcuts.quit,
+          click: () => app.quit()
+        }
+      ]
+    },
+    {
+      label: '编辑',
+      submenu: [
+        { role: 'undo', label: '撤销' },
+        { role: 'redo', label: '重做' },
+        { type: 'separator' },
+        { role: 'cut', label: '剪切' },
+        { role: 'copy', label: '复制' },
+        { role: 'paste', label: '粘贴' },
+        { role: 'selectAll', label: '全选' }
+      ]
+    }
+  ]
   const menu = Menu.buildFromTemplate(template)
   Menu.setApplicationMenu(menu)
 }
@@ -1557,6 +1656,31 @@ const BACKEND_PORT_FALLBACK = [38211, 38212, 38213, 38214, 38215, 38216, 38217, 
  */
 let currentBackendPort = 38211
 
+// ==================== Bootstrap 主动停止（v0.2.4 新增）====================
+// 冷启动链路里 `uv sync` / `docker build` / Python 首次加载慢，用户配错 LLM key 想中止时
+// 只能干等到底。bootstrapSession 是模块级取消令牌——Renderer 点「停止启动」时
+// `startup:cancel-bootstrap` handler 翻 cancelled=true，每个 await 检查到立刻抛
+// BOOTSTRAP_CANCELLED 跳出循环，背景子进程走 killChild / killTrackedChildren 清理。
+//
+// 不复用 AbortController：项目没有 signal 透传链（probeXxx / fixXxx 内部都是 fire-and-forget
+// spawn），AbortController 也只是抛 abort 错误；模块级单例状态更直观，handler 间共享零成本。
+let bootstrapSession = null  // null | { cancelled: false, startedAt: number }
+
+/**
+ * 抛错辅助函数：若 bootstrapSession.cancelled 为 true 抛 BOOTSTRAP_CANCELLED。
+ * 调用前先 await bootstrap() 大步骤前调一次即可（细粒度检查在 startBackend poll 循环里）。
+ *
+ * 为什么用 err.code 而非直接比较 message：catch 块分支判 `err.code === 'BOOTSTRAP_CANCELLED'`
+ * 比字符串匹配稳（i18n / log 重写不会误判），也不依赖错误码数值。
+ */
+function checkBootstrapCancelled() {
+  if (bootstrapSession?.cancelled) {
+    const err = new Error('BOOTSTRAP_CANCELLED')
+    err.code = 'BOOTSTRAP_CANCELLED'
+    throw err
+  }
+}
+
 /**
  * 探测端口是否「空闲」（没人 LISTEN）。
  * 用 net.createServer().listen(port) 试 bind：成功 → 空闲；EADDRINUSE → 被占用。
@@ -1753,6 +1877,9 @@ async function startBackend(onLog) {
   const deadline = Date.now() + 120_000
   try {
     while (Date.now() < deadline) {
+      // 用户主动取消 → 立刻跳出（不等到 120s）。checkBootstrapCancelled 抛错后
+      // 外层 catch 会走 killChild 兜底杀 backend，跟取消按钮「干净退出」语义一致。
+      checkBootstrapCancelled()
       try {
         await new Promise((resolve, reject) => {
           const req = http.get(`http://127.0.0.1:${port}/health`, res => {
@@ -1764,7 +1891,9 @@ async function startBackend(onLog) {
         })
         console.log('[backend] /health OK')
         return
-      } catch {
+      } catch (err) {
+        // BOOTSTRAP_CANCELLED 透传上去（不当作"探测失败"继续 sleep 1s）
+        if (err?.code === 'BOOTSTRAP_CANCELLED') throw err
         if (backendProcRef.value === null) {
           throw new Error('后端进程已退出，未通过 /health 检查（看上方日志获取 traceback）')
         }
@@ -2002,8 +2131,14 @@ function registerStartupIpc() {
       console.error('[setup] 启动偏好保存失败:', err.message)
     }
     const onLog = (item, msg) => e.sender.send('startup:log', { item, msg })
+    // 启动 bootstrapSession 取消令牌：cancelled 在「停止启动」按钮触发 startup:cancel-bootstrap
+    // 时被翻 true；每个 await 前调 checkBootstrapCancelled() 检测到立刻抛错跳出。
+    // 翻 cancelled 后不会真抛给用户「启动失败」——catch 块识别 err.code === 'BOOTSTRAP_CANCELLED'
+    // 后返 { ok: false, cancelled: true }，UI 把它当成「正常取消」处理（按钮回到「启动应用」可点）。
+    bootstrapSession = { cancelled: false, startedAt: Date.now() }
     try {
       // 1. uv
+      checkBootstrapCancelled()
       if (!(await probeUv()).ok) {
         onLog('uv', '正在安装 uv 包管理器...\n')
         await fixUv((m) => onLog('uv', m))
@@ -2011,6 +2146,7 @@ function registerStartupIpc() {
       onLog('uv', '✅ uv 就绪\n')
 
       // 2. redis
+      checkBootstrapCancelled()
       if (!(await probeRedisContainer()).ok) {
         onLog('redis', '正在启动 Redis 容器...\n')
         await fixRedis((m) => onLog('redis', m))
@@ -2018,6 +2154,7 @@ function registerStartupIpc() {
       onLog('redis', '✅ Redis 就绪\n')
 
       // 3. sandbox image
+      checkBootstrapCancelled()
       if (!(await probeSandboxImage()).ok) {
         onLog('sandbox', '正在构建沙盒镜像（首次较慢，可能数分钟）...\n')
         await fixSandbox((m) => onLog('sandbox', m))
@@ -2025,6 +2162,7 @@ function registerStartupIpc() {
       onLog('sandbox', '✅ 沙盒镜像就绪\n')
 
       // 4. python venv
+      checkBootstrapCancelled()
       if (!(await probeVenv()).ok) {
         onLog('venv', '正在同步 Python 依赖（首次较慢）...\n')
         await fixVenv((m) => onLog('venv', m))
@@ -2032,6 +2170,7 @@ function registerStartupIpc() {
       onLog('venv', '✅ Python 依赖就绪\n')
 
       // 5. backend
+      checkBootstrapCancelled()
       await startBackend((m) => onLog('backend', m))
       onLog('backend', '✅ 后端就绪\n')
 
@@ -2042,6 +2181,13 @@ function registerStartupIpc() {
       setServicesReady(true, { autoEnterFrontend })
       return { ok: true }
     } catch (err) {
+      // 用户主动取消：不算 error，不杀 background 子进程（startup:cancel-bootstrap handler
+      // 已经清了），只返 { ok: false, cancelled: true } 让 UI 走「未启动」分支展示启动按钮。
+      if (err?.code === 'BOOTSTRAP_CANCELLED') {
+        console.log('[启动] 用户主动停止启动流程')
+        onLog('startup', '⏹ 用户已停止启动\n')
+        return { ok: false, cancelled: true, error: '用户取消' }
+      }
       // 失败兜底：杀掉所有已起的子进程，避免 backend 泄漏
       killChild(backendProcRef, 'backend')
       // 兜底：杀掉 tracked shell 子进程（理论上 fixXxx 失败时子进程已 close，
@@ -2049,7 +2195,37 @@ function registerStartupIpc() {
       killTrackedChildren('bootstrap-failed')
       setServicesReady(false)
       return { ok: false, error: err.message }
+    } finally {
+      // 任何路径退出（成功 / 失败 / 取消）都清掉 bootstrapSession，避免下次启动
+      // 撞上 cancel 时 cancelled 残留 → 立刻抛错崩掉。
+      bootstrapSession = null
     }
+  })
+
+  /**
+   * 主动停止当前 bootstrap（Renderer 在 BootstrapView 点「停止启动」按钮时调）。
+   * - 翻 bootstrapSession.cancelled=true → startup:bootstrap handler 每个 await 前
+   *   checkBootstrapCancelled() 会抛 BOOTSTRAP_CANCELLED，1-2s 内跳出整个启动链
+   * - 主动 kill backend 子进程（已经 spawn 出来但 /health 还没 200 的）+ tracked shell 子进程
+   * - 翻 servicesReady=false 让 banner 状态同步
+   *
+   * 没有 bootstrapSession 时返 ok=false（用户手抖按到 / race）；不报错避免 UI 弹窗。
+   */
+  ipcMain.handle('startup:cancel-bootstrap', async () => {
+    if (!bootstrapSession) {
+      // 当前没在 bootstrap；可能是上次已结束 + 用户连点。静默忽略。
+      return { ok: false, error: '当前没有启动中的会话' }
+    }
+    bootstrapSession.cancelled = true
+    console.log('[启动] 用户主动停止启动...')
+    // 已经 spawn 但 /health 还没 200 的 backend：现在杀掉。
+    // killChild 内部有 `procRef.value === null` 守卫，重复调幂等。
+    if (backendProcRef.value) killChild(backendProcRef, 'backend-cancelled')
+    // tracked shell 子进程（uv sync / docker build 等）：startBackend 还没跑完时也可能还活着
+    killTrackedChildren('user-cancel')
+    // 同步 servicesReady 状态机：避免 renderer 侧还看到「启动中」状态
+    setServicesReady(false)
+    return { ok: true }
   })
 
   ipcMain.handle('startup:get-preferences', async () => startupPreferences)
@@ -2251,8 +2427,14 @@ app.whenReady().then(async () => {
 })
 
 app.on('window-all-closed', () => {
-  // 本应用后端会常驻 VL 模型并占用大量内存；关闭所有窗口即视为退出，
-  // macOS 也不保留无窗口的后台主进程，确保 before-quit 清理我们启动的服务。
+  // macOS 标准行为：关闭最后一个窗口 ≠ 退出 app。
+  //   - 用户点 dock 图标或用 Cmd+Q 才能真正退出（菜单栏"退出"项绑 Cmd+Q）
+  //   - 单实例锁：dock 点击触发 second-instance 事件 → mainWindow 拉回前台
+  //   - 真正销毁窗口后：`activate` event handler 会检测 `getAllWindows().length === 0` 重建窗口
+  // 不调 app.quit() —— 否则 backend / VL 模型被杀，用户以为「还在跑」（看 dock 图标）
+  // 但主进程已退，行为不符预期。
+  if (IS_MAC) return
+  // Windows / Linux: 关闭窗口 = 退出（无 dock 概念，节省内存）
   app.quit()
 })
 
@@ -2392,8 +2574,15 @@ process.on('exit', (code) => {
 })
 
 app.on('activate', () => {
+  // v0.2.4+：macOS 用户 Cmd+W / Cmd+M 关窗或最小化后，点 dock 图标恢复窗口。
+  //   - 窗口被销毁（getAllWindows().length === 0）→ 重建
+  //   - 窗口还在但被 hide（Cmd+W 隐藏 / Cmd+M 最小化后取消最小化）→ show 拉回前台
+  // Why 不能只靠 OS 自动恢复：app.hide() 后 macOS 会自动 unHide，但 mainWindow.minimize()
+  //   不会；显式 if-not-visible → show 两条路径都覆盖。
   if (BrowserWindow.getAllWindows().length === 0) {
     createWindow()
+  } else if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
+    mainWindow.show()
   }
 })
 

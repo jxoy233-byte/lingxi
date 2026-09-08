@@ -51,6 +51,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 完成后主进程 broadcast servicesReady=true，App.vue 翻 appReady=true → BootstrapView 自动消失。
   bootstrap: (options = {}) => ipcRenderer.invoke('startup:bootstrap', options),
 
+  // 主动停止当前 bootstrap 流程（BootstrapView「停止启动」按钮触发）。
+  // 主进程翻 cancelled=true + 杀已 spawn 的 backend 子进程，下次 await 检查到立刻跳出。
+  // 当前没有 bootstrap 在跑时返 ok=false（race），不报错避免 UI 弹窗。
+  cancelBootstrap: () => ipcRenderer.invoke('startup:cancel-bootstrap'),
+
   getStartupPreferences: () => ipcRenderer.invoke('startup:get-preferences'),
   setAutoEnterFrontend: (value) => ipcRenderer.invoke('startup:set-auto-enter', value === true),
 

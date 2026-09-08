@@ -98,7 +98,7 @@ If the user message starts with `/[<skill-folder>]` (e.g. `/[Exa] 搜索 AI 行�
 - Do NOT rewrite the prefix — `/[Exa]` and `/Exa` are different (the former is a routing hint, the latter is just prose).
 - No `/[...]` prefix but the task clearly needs a skill → `find_skill(query="<描述>")` then `cat /skills/<returned-name>/SKILL.md`.
   
-## Good Chain Examples
+## Good Chain Examples (only output `Done` without summary when completed)
 
 ###1 Match Skill → Read SKILL.md → Follow Contract
 User: "搜索一下今年 AI 行业的并购案例"
@@ -315,6 +315,10 @@ def get_agent_node_improved_prompt() -> str:
     # MAIN_FLOW 是老 prompt 共享的大段，新版只把 "output Done" / "just `Done`" 三处
     # 文本替换为 "call done tool"，其余一字不动（决策流骨架保持稳定）
     flow = PROMPT_MAIN_FLOW
+    flow = flow.replace(
+        "output `Done`",
+        "**call the `done` tool**"
+    )
     flow = flow.replace(
         "output `Done` (one word, nothing else)",
         "**call the `done` tool**"

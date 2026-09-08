@@ -57,6 +57,12 @@
 - CLAUDE.md / README.md 大幅精简（v0.2.1 470→280 行 / 501→280 行；偏好按 1 rule + 1 why + file:line 重排）
 - 首次安装双源 clone（默认 Gitee + GitHub fallback，ls-remote 比对 SHA 避免镜像延迟拿到旧代码）+ BootstrapView 检测通过后仍可切换目录
 
+### v0.2.4 应用启动链路鲁棒性 + 重启遮罩 retry
+
+- **Bootstrap 主动停止**（`main.js:bootstrapSession` + `BootstrapView.vue`「停止启动」按钮）：冷启动卡在 `uv sync` / `docker build` / Python 首次加载慢时用户可主动中止，模块级 `bootstrapSession.cancelled` 令牌 + 每个 await 前 `checkBootstrapCancelled()` 检查，1-2s 内抛 `BOOTSTRAP_CANCELLED` 跳出整个启动链；handler 同步杀已 spawn 的 backend 子进程 + tracked shell 子进程，UI 按钮变「停止中...」防双击
+- **Restart 遮罩「再重启一次」按钮**（`App.vue:.restart-mask`）：重启失误 / 后端没修好时 mask 出现即显示按钮（无延迟），复用 `handleRestartBackend` 启动新一轮；`_restartVersion` 计数器防 race（旧 promise 完成后比对当前 version，不是最新就丢弃结果），失败信息 inline 展示不再 alert（遮罩不消失让用户保留 retry 入口）
+- **Electron 单实例锁**（`main.js:requestSingleInstanceLock`）：双击启动图标 / 多终端 `electron .` 同时跑两个实例撞 userData / 端口 38211 / 配置文件的问题，第二个实例立刻 `app.quit() + process.exit(0)` 退出；第一个实例通过 `second-instance` event 把 mainWindow 拉回前台（最小化时 restore + show + focus）
+
 ### v0.2.3 部署期产物清理 + tar 打包健壮性
 
 - **统一删除 `cloud/` + `frontend/`**（拉取后清理）：服务端部署不需要 Vue 3 桌面端代码 + 云端 sync/share 脚本，统一为列表驱动的 `_remove_deployment_artifacts`（云端 lingxi-sync.sh）/ `_removeDeploymentArtifacts`（Electron platform.js），新增产物类型只需往 `DEPLOY_ARTIFACTS` 列表里加一行
@@ -157,7 +163,7 @@ OPENAI_PRESENCE_PENALTY=0.0
 {
   "app": {
     "name": "ChatMe",
-    "version": "v0.2.3",
+    "version": "v0.2.4",
     "host": "127.0.0.1",
     "port": 38211
   },

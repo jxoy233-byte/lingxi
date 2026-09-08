@@ -165,15 +165,32 @@
       </label>
 
       <div class="actions">
-        <button class="btn-secondary" @click="recheck" :disabled="checking || launching">
+        <button class="btn-secondary" @click="recheck" :disabled="checking || launching || cancelling">
           {{ checking ? '检测中...' : '重新检测' }}
         </button>
+        <!--
+          v0.2.4+ 新增「停止启动」按钮：
+          启动中卡在 uv sync / docker build / Python 首次加载慢时，用户可主动中止，
+          杀掉已 spawn 的 backend 子进程 + tracked shell 子进程，1-2s 内回到「启动应用」可点。
+          跟「启动应用」按钮并排（同级 .actions 容器），用 secondary 风格区分非主路径。
+          取消中状态用 fixing-indicator 文字 + 「停止中...」避免按钮反复点击触发并发 IPC。
+        -->
+        <button
+          v-if="launching && !cancelling"
+          class="btn-secondary btn-cancel-bootstrap"
+          @click="cancelBootstrap"
+          title="停止启动并杀掉所有子进程"
+        >停止启动</button>
+        <span
+          v-if="launching && cancelling"
+          class="fixing-indicator"
+        >停止中...</span>
         <!--
           主按钮三态：
           - launching=true：启动中，按钮 disabled 显示「启动中...」
           - servicesReady=true && !autoEnterFrontend：bootstrap 已完成但用户没勾自动进，
             显示「进入应用」让用户主动点；emit enter-app 让 App.vue 翻 appReady
-          - 其他：未启动（cold 初始 / 后端挂掉重启），显示「启动应用」
+          - 其他：未启动（cold 初始 / 后端挂掉重启 / 用户取消），显示「启动应用」
         -->
         <button
           v-if="launching"
@@ -261,6 +278,9 @@ export default {
       logs: '',
       checking: false,
       launching: false,
+      // v0.2.4+ 取消按钮 in-flight 标记：点「停止启动」期间置 true 防止重复 IPC；
+      // launch() finally 块不重置这个（launch 走的不是取消路径），由 cancelBootstrap finally 兜底。
+      cancelling: false,
       launchError: '',
       autoEnterFrontend: false,
       // 三个互斥 in-flight 标记：UI 任意时刻只允许一种恢复路径在跑（克隆 / 选克隆目标 / 选现有目录）
@@ -631,6 +651,34 @@ export default {
         this.launching = false
       }
     },
+    /**
+     * v0.2.4+ 主动停止 bootstrap（启动卡住 / 配错 key 时中止）。
+     * 调 IPC startup:cancel-bootstrap → 主进程翻 cancelled=true + 杀已 spawn 的子进程，
+     * startup:bootstrap handler 1-2s 内抛 BOOTSTRAP_CANCELLED → finally 清 launching。
+     * 这里只管 UI 状态：cancelling 防双击 + 日志反馈 + 清理 cancelling 标记。
+     *
+     * 失败兜底：主进程没在跑 bootstrap 时返 ok=false，UI 已经显示「停止中...」，
+     * finally 清掉 cancelling 让「停止启动」按钮恢复（若 launching 还在 true）。
+     */
+    async cancelBootstrap() {
+      if (this.cancelling) return  // 防双击
+      this.cancelling = true
+      this.logs += '\n[启动] ⏹ 用户请求停止启动...\n'
+      try {
+        const result = await window.electronAPI?.cancelBootstrap?.()
+        if (!result?.ok && result?.error) {
+          // 没有启动中的会话（race：launch 走完 broadcast 后用户才点）→ 静默忽略
+          this.logs += `[启动] ⚠️ ${result.error}\n`
+        }
+      } catch (e) {
+        console.error('cancelBootstrap failed:', e)
+        this.logs += `[启动] ❌ 停止异常：${e.message || e}\n`
+      } finally {
+        this.cancelling = false
+        // 不清 launching：bootstrap handler 抛 BOOTSTRAP_CANCELLED 后会走 finally 清。
+        // 即便 IPC 卡住 launching=true 也不会影响用户重试（recheck 按钮已重新 enabled）。
+      }
+    },
     getStatusClass(item) {
       if (item.fixing) return 'fixing'
       if (item.ok) return 'ok'
@@ -968,6 +1016,17 @@ export default {
 .btn-secondary {
   background: var(--bg-tertiary, #f5f5f7);
   color: var(--text-primary, #1d1d1f);
+}
+
+/* v0.2.4+ 停止启动按钮：琥珀色（warning 色系）跟普通 secondary 区分；
+   警示用户这是一个会杀进程的非常规操作。hover 略深 + 边框兜底可访问性。 */
+.btn-cancel-bootstrap {
+  background: rgba(245, 158, 11, 0.12);
+  color: var(--warning-color, #d97706);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+}
+.btn-cancel-bootstrap:hover {
+  background: rgba(245, 158, 11, 0.2);
 }
 
 .btn-primary {

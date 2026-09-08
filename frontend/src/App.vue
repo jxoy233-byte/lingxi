@@ -311,6 +311,28 @@
         <h4>Restarting backend</h4>
         <p>This will take a few seconds.</p>
         <p class="restart-progress">{{ _restartElapsed }}s</p>
+        <!--
+          v0.2.4+ 「再重启一次」按钮：mask 出现即显示（无延迟），
+          让用户在 restart 失误 / 后端没修好时能立刻再触发一次。
+          跟旧版「完成后遮罩消失 + alert 失败」的区别：失败信息 inline 展示，
+          按钮仍可点，不会丢 retry 入口。
+          cancelling：retriggerRestart 期间隐藏按钮，用 fixing-indicator 占位防止连点。
+        -->
+        <button
+          v-if="!_restartRetriggering"
+          class="btn-secondary restart-retry"
+          @click="retriggerRestart"
+          title="杀掉当前重启进程，立刻再触发一次"
+        >再重启一次</button>
+        <span
+          v-else
+          class="fixing-indicator restart-retry-indicator"
+        >触发中...</span>
+        <!--
+          失败信息：紧跟按钮下方一行展示。重启失败时遮罩不消失，
+          用户能直接看到原因 + 再点按钮重试，不再依赖 alert（避免点掉遮罩后丢 retry 入口）。
+        -->
+        <p v-if="_restartError" class="restart-error">{{ _restartError }}</p>
       </div>
     </div>
   </transition>
@@ -514,6 +536,14 @@ export default {
       _backendRestarting: false,
       _restartElapsed: 0,
       _restartTimer: null,
+      // v0.2.4+ 重启遮罩新状态：
+      // - _restartRetriggering：「再重启一次」按钮 in-flight 标记，防连点
+      // - _restartVersion：每次 handleRestartBackend 自增；await 完成后比对当前 version，
+      //   不是最新就丢弃结果（防 race：旧 promise 比新 promise 后到 → 旧结果覆盖新状态）
+      // - _restartError：失败信息 inline 展示，避免 alert 点掉遮罩后丢 retry 入口
+      _restartRetriggering: false,
+      _restartVersion: 0,
+      _restartError: '',
       // appReady 从 false→true 触发的 initConversationState 只跑一次，避免 servicesReady
       // 反复变化时（比如重启后端）重复初始化会话
       _conversationInited: false,
@@ -853,12 +883,24 @@ export default {
      * 用户点 banner 上的「重新连接」：调 IPC 让主进程 kill mcp/backend 后串行重启。
      * 走统一的全局重启遮罩（_backendRestarting）—— 与 Settings 的「Save & Restart」共用，
      * 用户能看到 spinner + 倒计时。IPC 完成 = 主进程确认 backend 健康 → reload 清 stale。
-     * 失败用 alert 提示（重启通常意味着后端进程死掉，原因多样，没必要做精细错误分类）。
+     *
+     * v0.2.4+ 改造：
+     * - 去掉 `if (this._backendRestarting) return` 早返回 → 改为「已经在重启就重新启动」，
+     *   清理 timer + 重置 elapsed + 启动新一轮 IPC。这是为了让用户在 restart 失误时能立刻
+     *   点遮罩上的「再重启一次」按钮（retriggerRestart 复用本方法）。
+     * - 失败用 inline `_restartError` 展示（不再 alert）→ 遮罩不消失 + 按钮仍可点，
+     *   用户不会因为 alert 点掉遮罩而失去 retry 入口。
+     * - _restartVersion 计数器防 race：每次调用 ++this._restartVersion，
+     *   await 完成后比对当前 version，不是最新就丢弃结果（避免旧 promise 覆盖新状态）。
      */
     async handleRestartBackend() {
-      if (this._backendRestarting) return  // 防双触发
+      // v0.2.4+ 去掉「已经在重启就早返回」——支持遮罩上「再重启一次」按钮复用本方法。
+      // 防双触发的责任下移到 retriggerRestart 的 _restartRetriggering 标记。
+      this._cleanupRestartTimer()
+      this._restartError = ''
       this._backendRestarting = true
       this._restartElapsed = 0
+      const myVersion = ++this._restartVersion
       // 显式赋值（不用 `_restartElapsed++`）:Vue 3 Proxy 对 ++ 自增行为在某些 babel / minify 路径
       // 下会丢失响应性追踪（旧 issue）。set + get 两段式最稳,保证 0s → 1s → 2s... 都能渲染。
       this._restartTimer = setInterval(() => {
@@ -866,17 +908,20 @@ export default {
       }, 1000)
       try {
         const r = await window.electronAPI.restartBackend()
+        // race 防护：如果用户在 await 期间点了「再重启一次」触发了新一轮 handleRestartBackend，
+        // myVersion 已经不再是最新 → 旧 promise 的结果丢弃，避免旧版本覆盖新重启状态。
+        if (myVersion !== this._restartVersion) return
         if (!r?.ok) {
-          alert('重新连接失败：' + (r?.error || '未知错误'))
+          this._restartError = '重新连接失败：' + (r?.error || '未知错误')
           this._cleanupRestartTimer()
-          this._backendRestarting = false
+          // 不翻 _backendRestarting=false（遮罩保留让用户能 retry）
           return
         }
       } catch (e) {
         console.error('[App] IPC restart failed:', e)
-        alert('重新连接失败：' + (e.message || e))
+        if (myVersion !== this._restartVersion) return
+        this._restartError = '重新连接失败：' + (e.message || e)
         this._cleanupRestartTimer()
-        this._backendRestarting = false
         return
       }
       // IPC 完成 = backend 健康,清 stale SSE / 长生命周期 client。
@@ -886,6 +931,19 @@ export default {
       // reload 前清 timer,避免 setInterval 持有 component 引用影响 GC。
       this._cleanupRestartTimer()
       this.refreshPage()
+    },
+    /**
+     * v0.2.4+ 「再重启一次」按钮：复用 handleRestartBackend 启动新一轮重启。
+     * _restartRetriggering 防双击；用户连点第二次直接 return。
+     */
+    async retriggerRestart() {
+      if (this._restartRetriggering) return
+      this._restartRetriggering = true
+      try {
+        await this.handleRestartBackend()
+      } finally {
+        this._restartRetriggering = false
+      }
     },
     _cleanupRestartTimer() {
       if (this._restartTimer) {
@@ -5850,6 +5908,38 @@ body {
   font-size: 12px !important;
   color: var(--text-primary) !important;
   font-weight: 500;
+}
+/* v0.2.4+ 「再重启一次」按钮：琥珀色 secondary 风格，跟 spinner 视觉分层。 */
+.restart-retry {
+  margin-top: 14px;
+  padding: 6px 16px;
+  font-size: 13px;
+  border-radius: 6px;
+  cursor: pointer;
+  background: rgba(245, 158, 11, 0.12);
+  color: var(--warning-color, #d97706);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  transition: background 0.15s;
+}
+.restart-retry:hover {
+  background: rgba(245, 158, 11, 0.2);
+}
+/* v0.2.4+ 失败信息 inline 展示：红色 12px，遮罩不消失让用户保留 retry 入口。 */
+.restart-error {
+  margin-top: 10px !important;
+  font-size: 12px !important;
+  color: var(--danger-color, #ef4444) !important;
+  word-break: break-all;
+  max-width: 280px;
+  margin-left: auto;
+  margin-right: auto;
+}
+/* v0.2.4+ retriggerRestart in-flight 占位文字（替换按钮位置）。 */
+.restart-retry-indicator {
+  display: inline-block;
+  margin-top: 14px;
+  font-size: 13px;
+  color: var(--warning-color, #d97706);
 }
 .spinner {
   width: 28px;

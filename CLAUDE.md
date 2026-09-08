@@ -333,6 +333,11 @@ docker-compose up -d redis       # 端口 48211，密码 123456
     - **CLAUDE.md / README.md 大幅精简**：CLAUDE.md 470→280 行（偏好按 1 rule + 1 why + file:line 重排，feature/`skills/`/关键文件按调用频次倒排）；README.md 501→280 行（技术栈 / 工作流 ASCII 删，CLAUDE.md 已覆盖；项目特性 30+ bullet → 5 版本段 × 5 bullet）。
     - **首次安装双源 clone + 切换目录入口**（`platform.js:680 selectRepoUrl` + `BootstrapView.vue`）：默认 Gitee（国内快），clone 前 `git ls-remote` 并发比对两边 main HEAD SHA，一致用 Gitee / 不一致 fallback GitHub / 任一不可达选另一边（并发 3s timeout，Promise.all）。`autoCloneProject` L797 `fs.existsSync` 命中走复用分支 → **只首次安装触发**。`LINGXI_REPO_URL` 保留为 `_GITHUB` 别名兼容 main.js:21。BootstrapView `projectRoot.ok=true` 时**新增轻量「切换...」按钮**展开内联菜单（选其他 lingxi/ / 克隆到其他目录 / 取消），复用现有 `pickProjectRoot` + `customizeClonePath` handler 不引新 IPC。**Why**：避免 Gitee 镜像延迟拿到旧代码；多副本 / 工作树切换给用户主动入口，不用改 `userData/project-root.json`。
 
+39. **v0.2.3 约定 —— 部署期产物清理 + tar 打包健壮性**：
+    - **统一删除 `frontend/` + `cloud/`**（拉取后清理）：`lingxi-sync.sh`（云端）+ `platform.js:autoCloneProject`（应用端）的两条 clone 路径（curl / git）成功后都调一次；`DEPLOY_ARTIFACTS="frontend cloud"` 列表驱动，新增产物类型只需往里加一行。**Why**：服务端不需要 Vue 3 桌面端代码（省 ~100MB 磁盘 + 加速 .git），也不需要二次分发自己的 sync/share 部署脚本。
+    - **tar 打包 race 修复**（`lingxi-sync.sh:_package_targz L133-183`）：`pkg_tmp` 从 `$TARGET_DIR/lingxi.tar.gz.tmp.$$` 改 `/tmp/lingxi-$$.tar.gz`，**消除 tar 自身 `open(O_CREAT)` 改 input 目录 entry list + mtime** 触发的 `file changed as we read it` 假阳性。**Why**：tar output 落在 input 目录下 → output create 与 input readdir 撞 race；output 挪 `/tmp` 后完全解耦（跨 fs 的 mv 是 copy+delete，50MB 量级 < 200ms，可接受）。
+    - **`_remove_deployment_artifacts` 末尾 `sync` 刷盘**：bash 同步执行 ≠ 内核 metadata 同步提交；`rm -rf` 命令返回后 write-back cache 可能让 `tar` `readdir` 撞未提交旧 stat。`sync` 强制刷盘，tar 看到的状态是 rm 真正完成后的状态。**Why**：这是双层异步的最后一层（bash → kernel page cache → disk），三层都同步才彻底无 race。
+
 ### 代码 / 提交风格
 
 - 提交信息遵循仓库现有风格：`v0.X.Y <说明>`（参考 `git log`）

@@ -129,7 +129,7 @@ class ChatMeConfig:
         default_config = {
             "app": {
                 "name": "ChatMe",
-                "version": "v0.2.2",
+                "version": "v0.2.3",
                 "description": "ChatMe LangGraph Workflow",
                 "host": "127.0.0.1",
                 "port": 38211,

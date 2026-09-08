@@ -9,7 +9,7 @@
     <div class="bootstrap-card">
       <div class="bootstrap-header">
         <h2>灵析 启动配置</h2>
-        <p class="subtitle">首次启动需要检测并配置以下依赖项</p>
+        <p class="subtitle">启动需要检测并配置以下依赖项</p>
       </div>
 
       <!--

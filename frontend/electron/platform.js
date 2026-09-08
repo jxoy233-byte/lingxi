@@ -31,6 +31,12 @@ export const LINGXI_REPO_URL_GITEE  = 'https://gitee.com/jxoy233/lingxi.git'
 // 兼容旧名：外部 import 'LINGXI_REPO_URL' 的代码（main.js:21）继续可用
 export const LINGXI_REPO_URL = LINGXI_REPO_URL_GITHUB  // 默认 GitHub 仍是兜底
 
+// v0.2.2+：服务端 lingxi-share 优先路径
+// 设置后 autoCloneProject 优先 curl 这个 URL 下的 /lingxi.tar.gz，省 git 协议开销
+// 不设置 / 拉取失败 → 自动 fallback 到上方 git clone 流程（用户无感）
+// 用法：export LINGXI_SHARE_URL=http://47.103.144.196:8080（在 main 进程 / .env / 启动脚本里）
+export const LINGXI_SHARE_URL = process.env.LINGXI_SHARE_URL || ''
+
 /**
  * 跨平台 venv Python 路径
  * - macOS / Linux:  .venv/bin/python
@@ -678,6 +684,143 @@ export async function startDockerDesktop() {
 }
 
 /**
+ * 从 share URL（lingxi-share nginx 暴露的端点）拉 lingxi.tar.gz 并解压到 projectRoot。
+ *
+ * v0.2.2+ 新增：作为 autoCloneProject 的**首选**路径（比 git clone 快 10x+）。
+ * 任何一步失败（URL 未配 / curl 不存在 / 5xx / tar 失败 / 解压产物不是合法 lingxi 根）
+ * 都返回 { ok: false }，由调用方 fallback 到 git clone，**用户无感**。
+ *
+ * 关键设计：
+ * 1. tarball 永远下到 os.tmpdir()（不污染 targetDir）；解压成功才 mv 整体到 projectRoot
+ *    → 失败回滚时不用扫描删一堆子文件
+ * 2. cwd 用 os.tmpdir() 避开「cwd == targetDir 触发 git/curl Win bug」的边界场景
+ * 3. curl 失败时显式 fs.rmSync 删 projectRoot（防半残解压影响后续 git clone）
+ * 4. 解压完调 isValidProjectRoot 校验（防御恶意服务端 / 同步中间态）
+ * 5. 不传 -C 路径，让 tar 用 child cwd；这里 cwd = projectRoot 父目录
+ *
+ * @param {string} projectRoot — 完整目标路径（含仓库名后缀，如 ~/lingxi）
+ * @param {(msg: string) => void} onLog
+ * @returns {Promise<{ok: boolean, error?: string}>}
+ */
+async function _tryDownloadFromShare(projectRoot, onLog = () => {}) {
+  if (!LINGXI_SHARE_URL) {
+    return { ok: false, error: 'LINGXI_SHARE_URL 未设置' }
+  }
+  const shareUrl = LINGXI_SHARE_URL.replace(/\/$/, '')
+  const targzUrl = `${shareUrl}/lingxi.tar.gz`
+
+  // tarball 暂存到 tmpdir（不污染 targetDir）
+  const targzPath = path.join(os.tmpdir(), `lingxi-${Date.now()}-${process.pid}.tar.gz`)
+
+  try {
+    // 1) curl 下载
+    onLog(`[clone] 🌐 尝试从 share URL 拉取: ${targzUrl}\n`)
+    const { spawn: childSpawn } = await import('child_process')
+    const curlChild = childSpawn('curl', [
+      '-fSL',                    // -f 失败返非 0；-S 显示错误；-L 跟 redirect
+      '--connect-timeout', '10', // TCP 握手 10s
+      '--max-time', '300',       // 总耗时 5min 上限（和 git clone 持平）
+      '-o', targzPath,
+      targzUrl,
+    ], {
+      env: process.env,
+      cwd: os.tmpdir(),
+      timeout: 320_000,
+      windowsHide: true,
+    })
+    let curlStderr = ''
+    curlChild.stdout?.on('data', d => onLog(d.toString()))
+    curlChild.stderr?.on('data', d => { curlStderr += d.toString(); onLog(d.toString()) })
+
+    await new Promise((resolve, reject) => {
+      curlChild.on('error', reject)
+      curlChild.on('close', code => {
+        if (code === 0) resolve()
+        else reject(new Error(`curl exit ${code}: ${curlStderr.trim().slice(0, 300)}`))
+      })
+    })
+    onLog(`[clone] ✅ 下载完成 (${(fs.statSync(targzPath).size / 1024 / 1024).toFixed(2)} MB)\n`)
+
+    // 2) tar 解压到 projectRoot 父目录，让 tar 自动建 projectRoot/ 子目录
+    const projectParent = path.dirname(projectRoot)
+    fs.mkdirSync(projectParent, { recursive: true })
+    if (fs.existsSync(projectRoot)) {
+      // 防御：理论上已存在分支在调用方已 check 过；这里兜底半残文件
+      fs.rmSync(projectRoot, { recursive: true, force: true })
+    }
+
+    const tarChild = childSpawn('tar', ['-xzf', targzPath, '-C', projectParent], {
+      env: process.env,
+      cwd: os.tmpdir(),
+      timeout: 120_000,
+      windowsHide: true,
+    })
+    let tarStderr = ''
+    tarChild.stdout?.on('data', d => onLog(d.toString()))
+    tarChild.stderr?.on('data', d => { tarStderr += d.toString(); onLog(d.toString()) })
+
+    await new Promise((resolve, reject) => {
+      tarChild.on('error', reject)
+      tarChild.on('close', code => {
+        if (code === 0) resolve()
+        else reject(new Error(`tar exit ${code}: ${tarStderr.trim().slice(0, 300)}`))
+      })
+    })
+
+    // 3) 清理 tarball
+    fs.rmSync(targzPath, { force: true })
+
+    // 4) 校验解压产物是合法 lingxi 根（防恶意 / 半截 tar）
+    if (!fs.existsSync(projectRoot) || !isValidProjectRoot(projectRoot)) {
+      // 解压完发现不是合法 lingxi 根 → 删了让 git clone 接手
+      if (fs.existsSync(projectRoot)) {
+        fs.rmSync(projectRoot, { recursive: true, force: true })
+      }
+      return { ok: false, error: '解压产物不是合法 lingxi 根（缺 backend/pyproject.toml 或 docker-compose.yml）' }
+    }
+
+    onLog(`[clone] ✅ 解压并校验通过: ${projectRoot}\n`)
+    return { ok: true }
+  } catch (err) {
+    onLog(`[clone] ⚠️ share URL 拉取失败：${err.message}\n`)
+    // 兜底清理：半残 tarball / 半残 projectRoot 都不能留给 git clone
+    try { fs.rmSync(targzPath, { force: true }) } catch {}
+    if (fs.existsSync(projectRoot)) {
+      try { fs.rmSync(projectRoot, { recursive: true, force: true }) } catch {}
+    }
+    return { ok: false, error: err.message }
+  }
+}
+
+/**
+ * 删除 projectRoot/ 下的部署期产物（服务端不需要的目录）。
+ *
+ * v0.2.3+ 新增：所有 clone 路径（curl / git）成功后都调一次。
+ *   - frontend/：Vue 3 + Electron 桌面端代码（服务端用不到）
+ *   - cloud/：sync + share + logs 部署脚本（服务端不需要二次分发自己的脚本）
+ *
+ * 失败仅 warn 不抛（缺失不影响服务运行；少数 dev 场景会手动恢复）。
+ *
+ * @param {string} projectRoot
+ * @param {(msg: string) => void} onLog
+ */
+function _removeDeploymentArtifacts(projectRoot, onLog = () => {}) {
+  const DEPLOY_ARTIFACTS = ['frontend', 'cloud']
+  for (const dir of DEPLOY_ARTIFACTS) {
+    const fullPath = path.join(projectRoot, dir)
+    if (!fs.existsSync(fullPath)) {
+      continue  // 已经是干净状态，跳过
+    }
+    try {
+      fs.rmSync(fullPath, { recursive: true, force: true })
+      onLog(`[clone] 🗑️ 已删除 ${dir}/（部署期产物，服务端不需要）\n`)
+    } catch (err) {
+      onLog(`[clone] ⚠️ 删除 ${dir}/ 失败：${err.message}\n`)
+    }
+  }
+}
+
+/**
  * 选 repo 源：默认 Gitee（国内快），但要验证与 GitHub HEAD SHA 一致。
  *
  * v0.2.2 新增。原因：
@@ -743,21 +886,26 @@ export async function selectRepoUrl(onLog = () => {}) {
 }
 
 /**
- * 自动 git clone 项目到 targetDir/lingxi/。已存在且合法 → 复用；已存在但不合法 → 拒绝。
+ * 自动部署 lingxi 项目到 targetDir/lingxi/。已存在且合法 → 复用；已存在但不合法 → 拒绝。
  *
- * 注意 targetDir 是「父目录」（git 会按仓库名自动建 lingxi/ 子目录），
- * caller 必须传父目录，不能传 ~/lingxi/ 本身——否则 git 会在 ~/lingxi/lingxi/ 嵌套。
- * 仓库名从 opts.repoUrl 末段提取（去掉 .git 后缀）。
+ * 注意 targetDir 是「父目录」（git/tar 会按仓库名自动建 lingxi/ 子目录），
+ * caller 必须传父目录，不能传 ~/lingxi/ 本身——否则会在 ~/lingxi/lingxi/ 嵌套。
+ * 仓库名从 opts.repoUrl 末段提取（去掉 .git 后缀）；无 repoUrl 时默认 'lingxi'。
  *
- * v0.2.2 起：clone 源默认走 selectRepoUrl（Gitee 优先 + GitHub fallback），
- *            显式传 opts.repoUrl 时跳过选源（测试 / 私有部署场景）。
+ * v0.2.2 起：部署源**优先走 share URL**（curl lingxi.tar.gz，10x 速度优势），
+ *            失败才 fallback 到 selectRepoUrl（Gitee 优先 + GitHub fallback）。
+ *            显式传 opts.repoUrl 时跳过 share + selectRepoUrl（测试 / 私有部署场景）。
+ *
+ * 部署成功后自动删除 projectRoot/{frontend,cloud}/（v0.2.3+ 新增）：
+ *            服务端部署不需要 Vue 3 桌面端代码 + 云端 sync/share 脚本，
+ *            省 ~100MB 磁盘 + 加速 .git 操作。
  *
  * @param {Electron.App} app — 用于 saveProjectRoot 持久化
  * @param {object} opts
- * @param {string} [opts.targetDir] — 默认 ~/(git 会建 ~/lingxi/)
- * @param {string} [opts.repoUrl]  — 显式指定 repo URL；不传则走 selectRepoUrl
+ * @param {string} [opts.targetDir] — 默认 ~/(建 ~/lingxi/)
+ * @param {string} [opts.repoUrl]  — 显式指定 git repo URL；不传则优先 share URL
  * @param {(msg: string) => void} [opts.onLog] — 实时日志回调（main 进程 silent 时传 () => {}）
- * @returns {Promise<{ok: boolean, projectRoot?: string, source?: 'existing'|'cloned', error?: string}>}
+ * @returns {Promise<{ok: boolean, projectRoot?: string, source?: 'existing'|'downloaded'|'cloned', error?: string}>}
  */
 export async function autoCloneProject(app, opts = {}) {
   const targetDir = opts.targetDir || os.homedir()
@@ -802,7 +950,34 @@ export async function autoCloneProject(app, opts = {}) {
     }
   }
 
-  // 3) clone
+  // 3) 优先尝试从 share URL 拉取（v0.2.2+ 新增）
+  //    - LINGXI_SHARE_URL 未设置 / 拉取失败 → 落到下方 git clone 流程
+  //    - 拉取成功 → 跳过 git clone，直接走「校验 + 删 frontend + 持久化」
+  //    - 显式传 opts.repoUrl 时跳过 curl（用户明确指定 git 源时不绕）
+  if (!opts.repoUrl && LINGXI_SHARE_URL) {
+    const shareResult = await _tryDownloadFromShare(projectRoot, onLog)
+    if (shareResult.ok) {
+      // 4) 校验（_tryDownloadFromShare 内部已校验，这里再兜一次防 race）
+      if (!isValidProjectRoot(projectRoot)) {
+        try { fs.rmSync(projectRoot, { recursive: true, force: true }) } catch {}
+        return { ok: false, error: `share 拉取完成但目录结构校验失败：${projectRoot}` }
+      }
+      // 4.5) 删部署期产物（frontend/ + cloud/，服务端不需要）
+      _removeDeploymentArtifacts(projectRoot, onLog)
+      // 5) 持久化（让下次启动 discoverProjectRoot 第 2 级 saved 直接命中）
+      setLastCloneTarget(projectRoot)
+      try { saveProjectRoot(app, projectRoot) } catch (e) {
+        console.error('[clone] userData 持久化失败：', e.message)
+      }
+      persistProjectRootToShell(projectRoot).catch(() => {})  // best-effort
+      onLog(`[clone] ✅ 已从 share URL 部署，源: ${LINGXI_SHARE_URL}\n`)
+      return { ok: true, projectRoot, source: 'downloaded' }
+    }
+    // 失败 → 已内部清理 projectRoot 半残文件；继续走 git clone
+    onLog(`[clone] ⚠️ share URL 拉取失败 (${shareResult.error})，fallback 到 git clone\n`)
+  }
+
+  // 4) git clone（fallback 或用户显式 opts.repoUrl 走这条）
   // ⚠️ Win 上 `git clone "<url>" "<path>"` 走 cmd.exe /c 字符串拼装经常翻车：
   //   - 中文用户名 / 路径含空格 → cmd.exe 引号转义把路径搞坏
   //   - git for Windows 2.40+ 在某些 home 子目录路径上报
@@ -865,6 +1040,9 @@ export async function autoCloneProject(app, opts = {}) {
   if (!isValidProjectRoot(projectRoot)) {
     return { ok: false, error: `clone 完成但目录结构校验失败：${projectRoot}` }
   }
+
+  // 4.5) 删部署期产物（frontend/ + cloud/，和 share 拉取路径保持一致）
+  _removeDeploymentArtifacts(projectRoot, onLog)
 
   // 5) 持久化（让下次启动 discoverProjectRoot 第 2 级 saved 直接命中）
   setLastCloneTarget(projectRoot)  // 进程内优先用这个（discoverProjectRoot 第 1.5 级）

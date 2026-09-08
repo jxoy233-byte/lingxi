@@ -57,6 +57,12 @@
 - CLAUDE.md / README.md 大幅精简（v0.2.1 470→280 行 / 501→280 行；偏好按 1 rule + 1 why + file:line 重排）
 - 首次安装双源 clone（默认 Gitee + GitHub fallback，ls-remote 比对 SHA 避免镜像延迟拿到旧代码）+ BootstrapView 检测通过后仍可切换目录
 
+### v0.2.3 部署期产物清理 + tar 打包健壮性
+
+- **统一删除 `cloud/` + `frontend/`**（拉取后清理）：服务端部署不需要 Vue 3 桌面端代码 + 云端 sync/share 脚本，统一为列表驱动的 `_remove_deployment_artifacts`（云端 lingxi-sync.sh）/ `_removeDeploymentArtifacts`（Electron platform.js），新增产物类型只需往 `DEPLOY_ARTIFACTS` 列表里加一行
+- **tar 打包 race 修复**（`lingxi-sync.sh:_package_targz`）：`pkg_tmp` 从 `$TARGET_DIR/lingxi.tar.gz.tmp.$$` 改到 `/tmp/lingxi-$$.tar.gz`，避免 tar `open(O_CREAT)` 改 input 目录的 entry list + mtime 触发的 `file changed as we read it` 假阳性
+- **`_remove_deployment_artifacts` 末尾加 `sync`**：内核 write-back cache 让 `rm -rf` 返回 ≠ metadata 真落盘，紧接 tar `readdir` 撞未提交的旧 stat 会报 race；`sync` 强制刷盘让 tar 看到的状态是 rm 真正完成后的状态
+
 ## 界面预览
 
 ![ChatMe 主界面](docs/img/界面.png)
@@ -151,7 +157,7 @@ OPENAI_PRESENCE_PENALTY=0.0
 {
   "app": {
     "name": "ChatMe",
-    "version": "v0.2.2",
+    "version": "v0.2.3",
     "host": "127.0.0.1",
     "port": 38211
   },
@@ -401,3 +407,21 @@ npm run electron:build:win      # Windows NSIS（x64）
 ## 商标
 
 「**灵析™**」与「**Lingxi™**」为本项目产品名商标。MIT 许可证不授予商标使用权，使用商标须经项目维护者书面授权。本项目内部代号 "ChatMe"（包名、配置目录 `~/.chatme/`、Redis key 前缀等）仅为技术标识符，不作为商标声明。
+
+## 软件著作权
+
+本项目（含但不限于源代码、文档、配置文件、UI 设计、图标、工作流定义、提示词模板、数据集及一切衍生作品）的著作权（含软件著作权）受《中华人民共和国著作权法》及《计算机软件保护条例》保护，**归灵析所有**。
+
+软件著作权包含但不限于复制权、修改权、发行权、信息网络传播权、翻译权等专有权利。
+
+**与 MIT 许可证的关系**：本项目同时以 [MIT License](LICENSE) 发布，授予使用者使用、复制、修改、合并、发布、分发、再许可和/或销售本软件副本的权利 —— 但 MIT 授权**不转让**软件著作权本身；著作权（含软件著作权）仍归灵析所有，不随 MIT 授权而转移。
+
+**著作权归属说明**：根据《中华人民共和国著作权法》，软件自完成之日起即自动产生著作权，软件著作权登记证书仅为著作权归属的初步证据，并非著作权产生的必要条件。
+
+未经著作权人书面授权，不得：
+
+- 主张本软件的著作权归属
+- 以著作权人名义对外许可、转让、质押本软件著作权
+- 移除、修改或遮蔽本软件中的著作权声明、登记信息或 [NOTICE](NOTICE) 文件
+
+完整声明见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)。

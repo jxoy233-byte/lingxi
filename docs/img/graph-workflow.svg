@@ -1,0 +1,476 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1840 1240" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <!-- ============================================================
+       灵析 Graph 主图运行全流程 — 一张图贯穿
+       ============================================================ -->
+
+  <defs>
+    <!-- 箭头 marker -->
+    <marker id="arrow-data" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/>
+    </marker>
+    <marker id="arrow-control" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/>
+    </marker>
+    <marker id="arrow-final" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#dc2626"/>
+    </marker>
+
+    <!-- 节点阴影 -->
+    <filter id="shadow" x="-5%" y="-5%" width="110%" height="110%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-opacity="0.15"/>
+    </filter>
+  </defs>
+
+  <!-- 背景 -->
+  <rect width="1840" height="1240" fill="#ffffff"/>
+
+  <!-- ==================== 顶部标题 ==================== -->
+  <text x="920" y="38" text-anchor="middle" font-size="26" font-weight="bold" fill="#0f172a">灵析 Graph 主图运行全流程</text>
+  <text x="920" y="62" text-anchor="middle" font-size="13" fill="#64748b">一张图贯穿 5 节点 + 路由 + 关键算法 + State 字段贯穿 + fail-safe 设计</text>
+  <line x1="40" y1="80" x2="1800" y2="80" stroke="#e2e8f0" stroke-width="1"/>
+
+  <!-- ==================== 图例 ==================== -->
+  <g transform="translate(40, 95)">
+    <rect width="380" height="32" fill="#f8fafc" stroke="#cbd5e1" rx="4"/>
+    <line x1="15" y1="16" x2="40" y2="16" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow-data)"/>
+    <text x="48" y="20" font-size="11" fill="#334155">数据流</text>
+    <line x1="115" y1="16" x2="140" y2="16" stroke="#94a3b8" stroke-width="2" stroke-dasharray="4,3" marker-end="url(#arrow-control)"/>
+    <text x="148" y="20" font-size="11" fill="#334155">控制流(回到调度台)</text>
+    <rect x="260" y="9" width="14" height="14" fill="#fef3c7" stroke="#f59e0b" rx="2"/>
+    <text x="280" y="20" font-size="11" fill="#334155">关键算法子框</text>
+  </g>
+
+  <!-- ==================== [0] 用户输入 ==================== -->
+  <g transform="translate(40, 480)" filter="url(#shadow)">
+    <rect width="140" height="120" fill="#f1f5f9" stroke="#475569" stroke-width="2" rx="8"/>
+    <text x="70" y="28" text-anchor="middle" font-size="14" font-weight="bold" fill="#0f172a">[0] 用户输入</text>
+    <line x1="10" y1="40" x2="130" y2="40" stroke="#cbd5e1"/>
+    <text x="70" y="62" text-anchor="middle" font-size="11" fill="#334155">· raw user message</text>
+    <text x="70" y="82" text-anchor="middle" font-size="11" fill="#334155">· files (PDF/CSV/...)</text>
+    <text x="70" y="105" text-anchor="middle" font-size="10" fill="#64748b">→ LangGraph run()</text>
+  </g>
+
+  <!-- 箭头 0 → 1 -->
+  <path d="M 180,540 L 218,540" stroke="#2563eb" stroke-width="2.5" fill="none" marker-end="url(#arrow-data)"/>
+
+  <!-- ==================== [1] input_parse_node ==================== -->
+  <g transform="translate(220, 260)" filter="url(#shadow)">
+    <rect width="320" height="500" fill="#f8fafc" stroke="#475569" stroke-width="2" rx="8"/>
+    <!-- 标题栏 -->
+    <rect width="320" height="46" fill="#3b82f6" rx="8"/>
+    <rect y="38" width="320" height="8" fill="#3b82f6"/>
+    <text x="160" y="30" text-anchor="middle" font-size="15" font-weight="bold" fill="#ffffff">[1] input_parse_node</text>
+    <text x="160" y="64" text-anchor="middle" font-size="10" fill="#94a3b8">core.py:1416-1491</text>
+
+    <!-- ① 文件解析子图 -->
+    <g transform="translate(15, 80)">
+      <rect width="290" height="80" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5" rx="4"/>
+      <text x="10" y="20" font-size="12" font-weight="bold" fill="#92400e">① 文件解析子图</text>
+      <text x="10" y="42" font-size="11" fill="#78350f">· docling / qwen-vl-utils / unstructured</text>
+      <text x="10" y="60" font-size="11" fill="#78350f">· VL 只处理图片(其他跳过)</text>
+    </g>
+
+    <!-- ② llm_imp_ipt -->
+    <g transform="translate(15, 175)">
+      <rect width="290" height="60" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5" rx="4"/>
+      <text x="10" y="20" font-size="12" font-weight="bold" fill="#92400e">② llm_imp_ipt 优化输入</text>
+      <text x="10" y="42" font-size="11" fill="#78350f">· 口语化问题 → 结构化指令</text>
+    </g>
+
+    <!-- ③ imp_ipt 锚点 -->
+    <g transform="translate(15, 250)">
+      <rect width="290" height="92" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5" rx="4"/>
+      <text x="10" y="20" font-size="12" font-weight="bold" fill="#92400e">③ 写 imp_ipt 锚点</text>
+      <text x="10" y="42" font-size="10" font-family="monospace" fill="#78350f">state["imp_ipt"] = AIMessage(</text>
+      <text x="10" y="58" font-size="10" font-family="monospace" fill="#78350f">  content,</text>
+      <text x="10" y="74" font-size="10" font-family="monospace" fill="#dc2626">  additional_kwargs={"imp_ipt": True}</text>
+      <text x="10" y="86" font-size="10" font-family="monospace" fill="#78350f">)</text>
+    </g>
+
+    <!-- ④ 重置 -->
+    <g transform="translate(15, 357)">
+      <rect width="290" height="55" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5" rx="4"/>
+      <text x="10" y="20" font-size="12" font-weight="bold" fill="#92400e">④ 跨轮状态重置</text>
+      <text x="10" y="42" font-size="10" font-family="monospace" fill="#78350f">agent_no_tool_call_retries = 0</text>
+    </g>
+
+    <!-- 输出 -->
+    <rect x="15" y="427" width="290" height="30" fill="#dbeafe" stroke="#3b82f6" rx="4"/>
+    <text x="160" y="446" text-anchor="middle" font-size="11" font-weight="bold" fill="#1e40af">↓ 输出:state.imp_ipt (唯一锚点)</text>
+
+    <!-- 装饰 -->
+    <rect x="15" y="467" width="290" height="22" fill="#1e293b" rx="3"/>
+    <text x="160" y="482" text-anchor="middle" font-size="10" fill="#fbbf24">@node_guard("input_parse")</text>
+  </g>
+
+  <!-- 箭头 1 → 2 -->
+  <path d="M 540,510 L 598,510" stroke="#2563eb" stroke-width="2.5" fill="none" marker-end="url(#arrow-data)"/>
+  <text x="569" y="500" text-anchor="middle" font-size="10" fill="#64748b">add_edge</text>
+
+  <!-- ==================== [2] context_assembly_node ==================== -->
+  <g transform="translate(600, 130)" filter="url(#shadow)">
+    <rect width="380" height="780" fill="#f8fafc" stroke="#475569" stroke-width="2" rx="8"/>
+    <!-- 标题栏 -->
+    <rect width="380" height="46" fill="#0ea5e9" rx="8"/>
+    <rect y="38" width="380" height="8" fill="#0ea5e9"/>
+    <text x="190" y="30" text-anchor="middle" font-size="15" font-weight="bold" fill="#ffffff">[2] context_assembly_node</text>
+    <text x="190" y="64" text-anchor="middle" font-size="10" fill="#94a3b8">core.py:1493-1716  · 调度台 · 主循环最忙</text>
+
+    <!-- ① 拼 context -->
+    <g transform="translate(15, 80)">
+      <rect width="350" height="80" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5" rx="4"/>
+      <text x="10" y="20" font-size="12" font-weight="bold" fill="#92400e">① 拼 context</text>
+      <text x="10" y="42" font-size="11" fill="#78350f">新会话: [memory_sysmsg] + [imp_ipt]</text>
+      <text x="10" y="60" font-size="11" fill="#78350f">续接  : 上面 + [cycle_msg: HumanMessage("continue")]</text>
+    </g>
+
+    <!-- ② done cycle 检测 -->
+    <g transform="translate(15, 175)">
+      <rect width="350" height="110" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5" rx="4"/>
+      <text x="10" y="20" font-size="12" font-weight="bold" fill="#92400e">② done cycle 检测(看最后 AIMessage.tool_calls)</text>
+      <text x="10" y="42" font-size="11" fill="#78350f">单 done: tool_calls=[done] → 整轮 RemoveMessage</text>
+      <text x="10" y="60" font-size="11" fill="#78350f">并发  : tool_calls=[search, done] → 只删 done 对应 TM</text>
+      <text x="10" y="80" font-size="11" fill="#dc2626">Why:用户「搜完资料又调 done」F5 还能看到搜到的结果</text>
+      <text x="10" y="96" font-size="11" fill="#78350f">设 done_cycle_detected = True</text>
+    </g>
+
+    <!-- ③ ReAct 4 阶段压缩 -->
+    <g transform="translate(15, 300)">
+      <rect width="350" height="220" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5" rx="4"/>
+      <text x="10" y="20" font-size="12" font-weight="bold" fill="#92400e">③ ReAct 4 阶段压缩(not is_done_cycle 时跑)</text>
+      <line x1="10" y1="28" x2="340" y2="28" stroke="#fcd34d" stroke-width="1"/>
+
+      <!-- 时序 -->
+      <text x="10" y="48" font-size="10" font-weight="bold" fill="#92400e">round N    : 阶段 1+2</text>
+      <text x="120" y="48" font-size="10" fill="#78350f">cool-down ✓ → asyncio.create_task(后台, 不 await)</text>
+      <text x="10" y="68" font-size="10" font-weight="bold" fill="#92400e">round N+1  : 阶段 3</text>
+      <text x="120" y="68" font-size="10" fill="#78350f">agent 用旧 context 推进 2 个完整 loop</text>
+      <text x="10" y="88" font-size="10" font-weight="bold" fill="#92400e">round N+2  : 阶段 4</text>
+      <text x="120" y="88" font-size="10" fill="#78350f">推进到 replace_at → 重组 context</text>
+
+      <!-- 重组结构 -->
+      <line x1="10" y1="100" x2="340" y2="100" stroke="#fcd34d" stroke-width="1"/>
+      <text x="10" y="118" font-size="10" font-weight="bold" fill="#92400e">重组产物:</text>
+      <rect x="10" y="124" width="100" height="20" fill="#dcfce7" stroke="#22c55e" rx="2"/>
+      <text x="60" y="138" text-anchor="middle" font-size="9" fill="#166534">imp_ipt 前</text>
+      <text x="115" y="138" text-anchor="middle" font-size="10" fill="#78350f">+</text>
+      <rect x="125" y="124" width="105" height="20" fill="#fef3c7" stroke="#f59e0b" rx="2"/>
+      <text x="177" y="138" text-anchor="middle" font-size="9" fill="#92400e">SysMsg 摘要</text>
+      <text x="235" y="138" text-anchor="middle" font-size="10" fill="#78350f">+</text>
+      <rect x="245" y="124" width="90" height="20" fill="#dbeafe" stroke="#3b82f6" rx="2"/>
+      <text x="290" y="138" text-anchor="middle" font-size="9" fill="#1e40af">最近 2 loop</text>
+
+      <!-- 防坑点 -->
+      <line x1="10" y1="154" x2="340" y2="154" stroke="#fcd34d" stroke-width="1"/>
+      <text x="10" y="172" font-size="10" fill="#dc2626">⚠ AIMessage 清 content 但保 tool_calls(API 强校验)</text>
+      <text x="10" y="190" font-size="10" fill="#dc2626">⚠ 失败一律 return None,不 raise(锦上添花不能炸主循环)</text>
+      <text x="10" y="208" font-size="10" fill="#dc2626">⚠ compression_handled_this_round 防重复 + done_cycle 跳过</text>
+    </g>
+
+    <!-- 触发条件 -->
+    <g transform="translate(15, 535)">
+      <rect width="350" height="65" fill="#e0e7ff" stroke="#6366f1" stroke-width="1.5" rx="4"/>
+      <text x="10" y="20" font-size="11" font-weight="bold" fill="#3730a3">触发条件 _should_detect_compact</text>
+      <text x="10" y="40" font-size="10" fill="#3730a3">· cool-down ≥ 5 轮 + chars ≥ 10000</text>
+      <text x="10" y="58" font-size="10" fill="#3730a3">· ≥ 1 完整 loop + 无 pending 压缩周期</text>
+    </g>
+
+    <!-- ④ 路由决策 -->
+    <g transform="translate(15, 615)">
+      <rect width="350" height="125" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5" rx="4"/>
+      <text x="10" y="20" font-size="12" font-weight="bold" fill="#92400e">④ 路由决策(纯结构化)</text>
+      <rect x="10" y="30" width="160" height="30" fill="#fee2e2" stroke="#dc2626" rx="3"/>
+      <text x="90" y="50" text-anchor="middle" font-size="10" fill="#991b1b">done_cycle=True → final</text>
+      <rect x="180" y="30" width="160" height="30" fill="#dcfce7" stroke="#22c55e" rx="3"/>
+      <text x="260" y="50" text-anchor="middle" font-size="10" fill="#166534">done_cycle=False → agent</text>
+      <text x="10" y="80" font-size="10" fill="#dc2626">⚠ route_after_context_assembly 看 flag 不看消息</text>
+      <text x="10" y="98" font-size="10" fill="#78350f">  (因 RemoveMessage 后 AIMessage(done) 已在 messages 外)</text>
+      <text x="10" y="116" font-size="10" fill="#64748b">add_conditional_edges(routes_after_context_assembly)</text>
+    </g>
+
+    <!-- 装饰 -->
+    <rect x="15" y="750" width="350" height="22" fill="#1e293b" rx="3"/>
+    <text x="190" y="765" text-anchor="middle" font-size="10" fill="#fbbf24">@node_guard("context_assembly")</text>
+  </g>
+
+  <!-- 箭头 2 → 5(done) 弯曲 -->
+  <path d="M 600,650 C 580,650 560,800 600,830 L 1050,830" stroke="#2563eb" stroke-width="2.5" fill="none" marker-end="url(#arrow-data)"/>
+  <text x="580" y="760" text-anchor="middle" font-size="10" fill="#dc2626" font-weight="bold">done_cycle=True</text>
+
+  <!-- 箭头 2 → 3 -->
+  <path d="M 980,440 L 1068,440" stroke="#2563eb" stroke-width="2.5" fill="none" marker-end="url(#arrow-data)"/>
+  <text x="1024" y="430" text-anchor="middle" font-size="10" fill="#1e40af">done_cycle=False</text>
+
+  <!-- ==================== [3] agent_node ==================== -->
+  <g transform="translate(1070, 200)" filter="url(#shadow)">
+    <rect width="320" height="480" fill="#f8fafc" stroke="#475569" stroke-width="2" rx="8"/>
+    <rect width="320" height="46" fill="#8b5cf6" rx="8"/>
+    <rect y="38" width="320" height="8" fill="#8b5cf6"/>
+    <text x="160" y="30" text-anchor="middle" font-size="15" font-weight="bold" fill="#ffffff">[3] agent_node</text>
+    <text x="160" y="64" text-anchor="middle" font-size="10" fill="#94a3b8">core.py:1718-1877</text>
+
+    <!-- ① agent_llm_with_done -->
+    <g transform="translate(15, 80)">
+      <rect width="290" height="60" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5" rx="4"/>
+      <text x="10" y="20" font-size="12" font-weight="bold" fill="#92400e">① agent_llm_with_done</text>
+      <text x="10" y="42" font-size="10" font-family="monospace" fill="#78350f">await agent_llm_with_done.ainvoke(context)</text>
+    </g>
+
+    <!-- ② _filter_thinking_content -->
+    <g transform="translate(15, 155)">
+      <rect width="290" height="80" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5" rx="4"/>
+      <text x="10" y="20" font-size="12" font-weight="bold" fill="#92400e">② _filter_thinking_content 兜底</text>
+      <text x="10" y="40" font-size="10" fill="#dc2626">⚠ 顺序:combined regex 先跑,方括号 invoke 后跑</text>
+      <text x="10" y="58" font-size="10" fill="#78350f">  (反了会留 78 字符半截垃圾)</text>
+      <text x="10" y="74" font-size="10" fill="#78350f">  覆盖 MiniMax-M3 7 种伪 tool_call 格式</text>
+    </g>
+
+    <!-- ③ 解析 tool_calls -->
+    <g transform="translate(15, 250)">
+      <rect width="290" height="50" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5" rx="4"/>
+      <text x="10" y="20" font-size="12" font-weight="bold" fill="#92400e">③ 解析 AIMessage.tool_calls</text>
+      <text x="10" y="38" font-size="11" fill="#78350f">· 结构化字段,不再让 LLM 决策</text>
+    </g>
+
+    <!-- ④ retry 状态机 -->
+    <g transform="translate(15, 315)">
+      <rect width="290" height="155" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5" rx="4"/>
+      <text x="10" y="20" font-size="12" font-weight="bold" fill="#92400e">④ no-tool-call retry 状态机</text>
+      <rect x="10" y="30" width="270" height="22" fill="#dcfce7" stroke="#22c55e" rx="3"/>
+      <text x="145" y="46" text-anchor="middle" font-size="10" fill="#166534">tool_calls 存在 → retry=0 → 走 tool_execution</text>
+      <line x1="145" y1="52" x2="145" y2="62" stroke="#94a3b8"/>
+      <text x="145" y="58" text-anchor="middle" font-size="8" fill="#64748b">↓</text>
+      <rect x="10" y="62" width="270" height="22" fill="#fee2e2" stroke="#dc2626" rx="3"/>
+      <text x="145" y="78" text-anchor="middle" font-size="10" fill="#991b1b">tool_calls 不存在 → retry += 1</text>
+      <line x1="145" y1="84" x2="145" y2="94" stroke="#94a3b8"/>
+      <text x="145" y="90" text-anchor="middle" font-size="8" fill="#64748b">↓</text>
+      <rect x="10" y="94" width="125" height="22" fill="#fef3c7" stroke="#f59e0b" rx="3"/>
+      <text x="72" y="110" text-anchor="middle" font-size="9" fill="#92400e">retry &lt; 3</text>
+      <text x="72" y="124" text-anchor="middle" font-size="9" fill="#92400e">注入英文 SysMsg</text>
+      <text x="72" y="136" text-anchor="middle" font-size="9" fill="#92400e">→ 回到 [2]</text>
+      <rect x="155" y="94" width="125" height="22" fill="#fee2e2" stroke="#dc2626" rx="3"/>
+      <text x="217" y="110" text-anchor="middle" font-size="9" fill="#991b1b">retry ≥ 3</text>
+      <text x="217" y="124" text-anchor="middle" font-size="9" fill="#991b1b">强制 final</text>
+      <text x="217" y="136" text-anchor="middle" font-size="9" fill="#991b1b">→ 走 [5]</text>
+    </g>
+
+    <!-- 装饰 -->
+    <rect x="15" y="450" width="290" height="22" fill="#1e293b" rx="3"/>
+    <text x="160" y="465" text-anchor="middle" font-size="10" fill="#fbbf24">@node_guard("agent")</text>
+  </g>
+
+  <!-- 箭头 3 → 2(retry<3 回到调度台) -->
+  <path d="M 1070,360 C 1020,360 1000,360 980,360" stroke="#94a3b8" stroke-width="2" fill="none" stroke-dasharray="5,3" marker-end="url(#arrow-control)"/>
+  <text x="1025" y="352" text-anchor="middle" font-size="9" fill="#64748b">retry &lt; 3</text>
+  <text x="1025" y="378" text-anchor="middle" font-size="9" fill="#64748b">回到调度台</text>
+
+  <!-- 箭头 3 → 4 -->
+  <path d="M 1390,440 L 1448,440" stroke="#2563eb" stroke-width="2.5" fill="none" marker-end="url(#arrow-data)"/>
+  <text x="1419" y="430" text-anchor="middle" font-size="10" fill="#1e40af">tool_calls 存在</text>
+
+  <!-- 箭头 3 → 5(retry≥3) -->
+  <path d="M 1230,680 C 1230,710 1230,750 1230,800" stroke="#dc2626" stroke-width="2" fill="none" marker-end="url(#arrow-final)"/>
+  <text x="1240" y="730" font-size="10" fill="#dc2626">retry ≥ 3</text>
+  <text x="1240" y="745" font-size="10" fill="#dc2626">强制 final</text>
+
+  <!-- ==================== [4] tool_execution_node ==================== -->
+  <g transform="translate(1450, 130)" filter="url(#shadow)">
+    <rect width="370" height="780" fill="#f8fafc" stroke="#475569" stroke-width="2" rx="8"/>
+    <rect width="370" height="46" fill="#ef4444" rx="8"/>
+    <rect y="38" width="370" height="8" fill="#ef4444"/>
+    <text x="185" y="30" text-anchor="middle" font-size="15" font-weight="bold" fill="#ffffff">[4] tool_execution_node</text>
+    <text x="185" y="64" text-anchor="middle" font-size="10" fill="#94a3b8">core.py:718-825  · PermissionedToolNode._awrap_tool_call</text>
+
+    <!-- gate 1 -->
+    <g transform="translate(15, 80)">
+      <rect width="340" height="115" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5" rx="4"/>
+      <text x="10" y="20" font-size="12" font-weight="bold" fill="#92400e">gate 1  ·  cmd 静态前置</text>
+      <text x="10" y="40" font-size="10" fill="#78350f">· dangerous 检测 / whitelist not_allowed</text>
+      <text x="10" y="58" font-size="10" fill="#dc2626">· 拦截:直接 return ToolMessage,不调 execute</text>
+      <text x="10" y="76" font-size="10" fill="#78350f">⚠ LangGraph 不发 on_tool_start/on_tool_end</text>
+      <text x="10" y="92" font-size="10" fill="#78350f">  → 前端 SSE 看不到 → 兜底在 on_chain_end 配对补事件</text>
+      <text x="10" y="106" font-size="10" fill="#64748b">  (emitted_tool_call_ids 去重)</text>
+    </g>
+
+    <!-- gate 2 -->
+    <g transform="translate(15, 210)">
+      <rect width="340" height="200" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5" rx="4"/>
+      <text x="10" y="20" font-size="12" font-weight="bold" fill="#92400e">gate 2  ·  interrupt() 弹审批</text>
+      <text x="10" y="40" font-size="10" fill="#dc2626">⚠ 必须写后必清 Redis hash,否则 astream 末尾复检误判</text>
+      <text x="10" y="58" font-size="10" fill="#78350f">  → 前端再弹一次审批 UI(灾难)</text>
+
+      <line x1="10" y1="68" x2="330" y2="68" stroke="#fcd34d" stroke-width="1"/>
+
+      <!-- 4 档决策 -->
+      <text x="10" y="86" font-size="11" font-weight="bold" fill="#92400e">4 档决策:</text>
+      <rect x="10" y="94" width="155" height="22" fill="#dcfce7" stroke="#22c55e" rx="3"/>
+      <text x="87" y="110" text-anchor="middle" font-size="10" fill="#166534">approve (永久)</text>
+      <rect x="175" y="94" width="155" height="22" fill="#fef3c7" stroke="#f59e0b" rx="3"/>
+      <text x="252" y="110" text-anchor="middle" font-size="10" fill="#92400e">this-time-only (本次)</text>
+      <rect x="10" y="122" width="155" height="22" fill="#fee2e2" stroke="#dc2626" rx="3"/>
+      <text x="87" y="138" text-anchor="middle" font-size="10" fill="#991b1b">deny (拒绝)</text>
+      <rect x="175" y="122" width="155" height="22" fill="#e0e7ff" stroke="#6366f1" rx="3"/>
+      <text x="252" y="138" text-anchor="middle" font-size="10" fill="#3730a3">feedback:&lt;text&gt;</text>
+
+      <text x="10" y="166" font-size="10" fill="#78350f">Redis hash: permission:{sid} 跨 SSE 流复用</text>
+      <text x="10" y="184" font-size="10" fill="#dc2626">⚠ _delete_pending_permission 必须调,否则 astream 末尾</text>
+      <text x="10" y="198" font-size="10" fill="#dc2626">  _judge_has_pending_permission 误判 pending</text>
+    </g>
+
+    <!-- code_fingerprint -->
+    <g transform="translate(15, 425)">
+      <rect width="340" height="50" fill="#e0e7ff" stroke="#6366f1" stroke-width="1.5" rx="4"/>
+      <text x="10" y="20" font-size="11" font-weight="bold" fill="#3730a3">code_fingerprint = SHA1(imports + calls + lang + sandbox)</text>
+      <text x="10" y="38" font-size="10" fill="#3730a3">→ 同 fingerprint 后续直接放行,不再弹审批</text>
+    </g>
+
+    <!-- gate 3 -->
+    <g transform="translate(15, 490)">
+      <rect width="340" height="120" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5" rx="4"/>
+      <text x="10" y="20" font-size="12" font-weight="bold" fill="#92400e">gate 3  ·  真执行</text>
+      <rect x="10" y="30" width="155" height="22" fill="#dcfce7" stroke="#22c55e" rx="3"/>
+      <text x="87" y="46" text-anchor="middle" font-size="10" fill="#166534">local=False → 沙盒</text>
+      <rect x="175" y="30" width="155" height="22" fill="#e0e7ff" stroke="#6366f1" rx="3"/>
+      <text x="252" y="46" text-anchor="middle" font-size="10" fill="#3730a3">local=True → 本机</text>
+      <text x="10" y="68" font-size="10" fill="#dc2626">⚠ cmd/code 默认 local=False(反向命名)</text>
+      <text x="10" y="84" font-size="10" fill="#78350f">SandboxPool: K 容器 × N slot</text>
+      <text x="10" y="100" font-size="10" fill="#dc2626">⚠ 池锁包住整个 pop→exec→append</text>
+      <text x="10" y="114" font-size="10" fill="#78350f">  否则 N+1 并发撞空池报 No available containers</text>
+    </g>
+
+    <!-- 其他工具 -->
+    <g transform="translate(15, 625)">
+      <rect width="340" height="55" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5" rx="4"/>
+      <text x="10" y="20" font-size="12" font-weight="bold" fill="#92400e">其他工具(非 cmd/code)</text>
+      <text x="10" y="40" font-size="10" fill="#78350f">· 搜索 / MCP / 文件解析 / VL / 数据分析等并行执行</text>
+    </g>
+
+    <!-- 输出 + 回到调度台 -->
+    <rect x="15" y="695" width="340" height="30" fill="#dbeafe" stroke="#3b82f6" rx="4"/>
+    <text x="185" y="714" text-anchor="middle" font-size="11" font-weight="bold" fill="#1e40af">↓ 输出:ToolMessage(s) → 回到 [2]</text>
+
+    <rect x="15" y="735" width="340" height="22" fill="#1e293b" rx="3"/>
+    <text x="185" y="750" text-anchor="middle" font-size="10" fill="#fbbf24">@node_guard("tool_execution")</text>
+  </g>
+
+  <!-- 箭头 4 → 2(回到调度台) -->
+  <path d="M 1450,470 C 1420,470 1410,520 1300,520 L 980,520" stroke="#94a3b8" stroke-width="2" fill="none" stroke-dasharray="5,3" marker-end="url(#arrow-control)"/>
+  <text x="1200" y="510" text-anchor="middle" font-size="10" fill="#64748b">add_edge → 回到 context_assembly 继续循环</text>
+
+  <!-- ==================== [5] final_node ==================== -->
+  <g transform="translate(1050, 800)" filter="url(#shadow)">
+    <rect width="340" height="380" fill="#f8fafc" stroke="#475569" stroke-width="2" rx="8"/>
+    <rect width="340" height="46" fill="#10b981" rx="8"/>
+    <rect y="38" width="340" height="8" fill="#10b981"/>
+    <text x="170" y="30" text-anchor="middle" font-size="15" font-weight="bold" fill="#ffffff">[5] final_node</text>
+    <text x="170" y="64" text-anchor="middle" font-size="10" fill="#94a3b8">core.py:1881-1960  · 翻译官</text>
+
+    <!-- ① 清 SysMsg -->
+    <g transform="translate(15, 80)">
+      <rect width="310" height="115" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5" rx="4"/>
+      <text x="10" y="20" font-size="12" font-weight="bold" fill="#92400e">① 清 agent 注入的 SysMsg(双轨制)</text>
+      <rect x="10" y="30" width="290" height="22" fill="#fee2e2" stroke="#dc2626" rx="3"/>
+      <text x="155" y="46" text-anchor="middle" font-size="9" fill="#991b1b">"did not contain a valid tool call" → 丢弃</text>
+      <rect x="10" y="58" width="290" height="42" fill="#fef3c7" stroke="#f59e0b" rx="3"/>
+      <text x="155" y="74" text-anchor="middle" font-size="9" fill="#92400e">"已超过" + "调用工具次数" + "done 工具结束"</text>
+      <text x="155" y="92" text-anchor="middle" font-size="9" fill="#92400e">→ 改写:"本轮思维链已提前结束"</text>
+    </g>
+
+    <!-- ② pop imp_ipt -->
+    <g transform="translate(15, 210)">
+      <rect width="310" height="50" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5" rx="4"/>
+      <text x="10" y="20" font-size="12" font-weight="bold" fill="#92400e">② pop imp_ipt(避免重复注入)</text>
+      <text x="10" y="38" font-size="10" font-family="monospace" fill="#78350f">context = [m for m in context</text>
+      <text x="10" y="50" font-size="10" font-family="monospace" fill="#78350f">  if not getattr(m, "additional_kwargs",</text>
+    </g>
+    <!-- (上面 box 高度只到 50,放不下 4 行;补一个内部文本) -->
+    <text x="170" y="252" text-anchor="middle" font-size="9" font-family="monospace" fill="#78350f">{}).get("imp_ipt")]</text>
+
+    <!-- ③ _final_system_template -->
+    <g transform="translate(15, 262)">
+      <rect width="310" height="60" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5" rx="4"/>
+      <text x="10" y="20" font-size="12" font-weight="bold" fill="#92400e">③ _final_system_template.format(imp_ipt=...)</text>
+      <text x="10" y="38" font-size="10" fill="#78350f">注入 system 高位(独占 LLM 注意力)</text>
+      <text x="10" y="52" font-size="10" fill="#dc2626">⚠ list(state.context) 浅拷贝 → 防 SysMsg 跨 iteration 泄漏</text>
+    </g>
+
+    <!-- ④ 输出 -->
+    <rect x="15" y="332" width="310" height="22" fill="#dbeafe" stroke="#3b82f6" rx="4"/>
+    <text x="170" y="347" text-anchor="middle" font-size="10" font-weight="bold" fill="#1e40af">④ llm_core 生成 SUMMARY 标记回复</text>
+  </g>
+
+  <!-- END 节点 -->
+  <g transform="translate(1430, 850)" filter="url(#shadow)">
+    <rect width="140" height="80" fill="#1e293b" stroke="#dc2626" stroke-width="3" rx="8"/>
+    <text x="70" y="48" text-anchor="middle" font-size="20" font-weight="bold" fill="#ffffff">END</text>
+  </g>
+
+  <!-- 箭头 5 → END -->
+  <path d="M 1390,990 L 1430,890" stroke="#2563eb" stroke-width="2.5" fill="none" marker-end="url(#arrow-data)"/>
+  <text x="1390" y="930" font-size="10" fill="#64748b">add_edge</text>
+
+
+  <!-- ==================== 底部:fail-safe 设计 ==================== -->
+  <text x="40" y="1105" font-size="14" font-weight="bold" fill="#0f172a">Fail-safe 设计哲学:LLM 不可信,框架不可信,只能信自己写的兜底</text>
+
+  <g transform="translate(40, 1115)">
+    <rect width="1760" height="105" fill="#f8fafc" stroke="#cbd5e1" rx="4"/>
+
+    <!-- 4 列布局 -->
+    <g transform="translate(15, 12)">
+      <text x="0" y="12" font-size="10" font-weight="bold" fill="#dc2626">① retry 状态机</text>
+      <text x="0" y="28" font-size="9" fill="#334155">3 次兜底,LLM 偶发空话</text>
+      <text x="0" y="42" font-size="9" fill="#334155">循环不致崩溃</text>
+    </g>
+    <g transform="translate(220, 12)">
+      <text x="0" y="12" font-size="10" font-weight="bold" fill="#dc2626">② 双轨制 SysMsg</text>
+      <text x="0" y="28" font-size="9" fill="#334155">v0.2.2 注入端直白指令</text>
+      <text x="0" y="42" font-size="9" fill="#334155">消费端改写为中性陈述</text>
+    </g>
+    <g transform="translate(425, 12)">
+      <text x="0" y="12" font-size="10" font-weight="bold" fill="#dc2626">③ @node_guard</text>
+      <text x="0" y="28" font-size="9" fill="#334155">GraphBubbleUp 原样 raise</text>
+      <text x="0" y="42" font-size="9" fill="#334155">其他包 RuntimeError</text>
+    </g>
+    <g transform="translate(630, 12)">
+      <text x="0" y="12" font-size="10" font-weight="bold" fill="#dc2626">④ 压缩失败不 raise</text>
+      <text x="0" y="28" font-size="9" fill="#334155">保持原 context,锦上添花</text>
+      <text x="0" y="42" font-size="9" fill="#334155">不能炸主循环</text>
+    </g>
+    <g transform="translate(835, 12)">
+      <text x="0" y="12" font-size="10" font-weight="bold" fill="#dc2626">⑤ filter 兜底</text>
+      <text x="0" y="28" font-size="9" fill="#334155">每个调 M3 的节点必 filter</text>
+      <text x="0" y="42" font-size="9" fill="#334155">7 种伪 tool_call 格式</text>
+    </g>
+    <g transform="translate(1040, 12)">
+      <text x="0" y="12" font-size="10" font-weight="bold" fill="#dc2626">⑥ _awrap_tool_call</text>
+      <text x="0" y="28" font-size="9" fill="#334155">ToolNode 官方扩展点</text>
+      <text x="0" y="42" font-size="9" fill="#334155">自己 try/except 被忽略</text>
+    </g>
+    <g transform="translate(1245, 12)">
+      <text x="0" y="12" font-size="10" font-weight="bold" fill="#dc2626">⑦ SandboxPool 池锁</text>
+      <text x="0" y="28" font-size="9" fill="#334155">整段 pop→exec→append</text>
+      <text x="0" y="42" font-size="9" fill="#334155">锁外撞空池</text>
+    </g>
+    <g transform="translate(1450, 12)">
+      <text x="0" y="12" font-size="10" font-weight="bold" fill="#dc2626">⑧ mtime per-file</text>
+      <text x="0" y="28" font-size="9" fill="#334155">APFS 不更新父目录</text>
+      <text x="0" y="42" font-size="9" fill="#334155">按每个 SKILL.md stat()</text>
+    </g>
+
+    <!-- 续接 -->
+    <text x="20" y="78" font-size="10" font-weight="bold" fill="#dc2626">⑨ ChatMeConfig 段级热加载</text>
+    <text x="290" y="78" font-size="10" font-weight="bold" fill="#dc2626">⑩ ChatService SSE finally</text>
+    <text x="560" y="78" font-size="10" font-weight="bold" fill="#dc2626">⑪ round_metrics 不入正式 cid</text>
+    <text x="830" y="78" font-size="10" font-weight="bold" fill="#dc2626">⑫ tmp + os.replace 原子写</text>
+    <text x="1100" y="78" font-size="10" font-weight="bold" fill="#dc2626">⑬ Redis hash 写后必清</text>
+    <text x="1370" y="78" font-size="10" font-weight="bold" fill="#dc2626">⑭ code_fingerprint 永久批准</text>
+  </g>
+
+  <!-- ==================== 一句话总结 ==================== -->
+  <rect x="40" y="1180" width="1760" height="40" fill="#1e293b" rx="4"/>
+  <text x="920" y="1196" text-anchor="middle" font-size="13" font-weight="bold" fill="#fbbf24">一句话总结</text>
+  <text x="920" y="1214" text-anchor="middle" font-size="12" fill="#f1f5f9">灵析的工作流是「结构化字段驱动」,不是「LLM 决策驱动」—— tool_calls 决定路由,imp_ipt 决定切分,Redis hash 决定跨流,后台异步决定不阻塞。LLM 只负责「怎么想」,框架负责「怎么走」。</text>
+
+</svg>

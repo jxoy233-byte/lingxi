@@ -40,6 +40,41 @@ MIT 许可证（中文译本 — 仅供参考，英文原文为准）
 
 ================================================================================
 
+软件著作权声明（Software Copyright Statement）
+
+本软件（含但不限于源代码、文档、配置文件、UI 设计、图标、工作流定义、提示词
+模板、数据集及一切衍生作品）的著作权（含软件著作权）受《中华人民共和国著作
+权法》及《计算机软件保护条例》保护，归作者所有。
+
+本软件著作权包含但不限于复制权、修改权、发行权、信息网络传播权、翻译权等专
+有权利。
+
+上述 MIT 许可证授予使用者使用、复制、修改、合并、发布、分发、再许可和/或销
+售本软件副本的权利，但**不转让**软件著作权本身；著作权（含软件著作权）仍归
+作者所有，不随 MIT 授权而转移。
+
+根据《中华人民共和国著作权法》，软件自完成之日起即产生著作权，登记证书仅作
+为著作权归属的初步证据，并非著作权产生的必要条件。
+
+================================================================================
+
+Software Copyright Statement (English Translation)
+
+This Software (including but not limited to source code, documentation,
+configuration files, UI design, icons, workflow definitions, prompt templates,
+datasets, and all derivative works) is protected by software copyright law.
+
+Software copyright (including but not limited to rights of reproduction,
+modification, distribution, and information network dissemination) is retained
+by the copyright holder. The MIT License above grants a license to use the
+Software; it does not transfer or waive the underlying software copyright.
+
+For jurisdictions that recognize software copyright registration, absence of
+registration does not affect the existence of copyright — copyright arises
+automatically upon completion of the work.
+
+================================================================================
+
 商标声明
 
 「灵析™」与「Lingxi™」是本项目的商标。本 MIT 许可证**不**授予使用上述商标的

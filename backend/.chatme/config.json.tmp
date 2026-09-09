@@ -16,7 +16,7 @@
       "api_key": "sk-placeholder-xxxxxxxx",
       "base_url": "https://api.openai.com/v1"
     },
-    "model12": {
+    "model2": {
       "model_name": "MiniMax-M3",
       "api_key": "sk-placeholder-xxxxxxxx",
       "base_url": "https://api.minimax.chat/v1"

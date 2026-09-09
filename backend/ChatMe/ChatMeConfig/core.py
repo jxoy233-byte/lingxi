@@ -279,14 +279,48 @@ class ChatMeConfig:
         return chain
 
     def get_active_llm_config(self) -> dict:
-        """获取主用 LLM 配置（llm_providers 链中的第一个有效项）；空 dict 表示未配置"""
+        """获取当前生效的 LLM 配置。
+
+        优先级：
+        1) 模块级 `_active_provider_name`（self_check_llm 探测成功后的实际可用 provider）
+        2) chain[0]（chain 里第一个有效项，传统意义上的「主用」）
+
+        为什么需要这套逻辑：用户在首次启动时配的 model1 可能是占位 key（fake key 让后端
+        能软启动），self_check_llm 探测时 model1 → 401 → 降级到 model2 成功。这之后
+        ChatWorkflow.init_llms 必须用 model2，不能用 model1 的占位 key，否则每个请求
+        都会 401 + fallback 重试浪费延迟。返回空 dict 表示未配置。
+        """
         chain = self.get_llm_providers_chain()
+        # 优先返回 self_check_llm 探测成功的 provider
+        active_name = _get_active_provider_name()
+        if active_name:
+            for p in chain:
+                if p["name"] == active_name:
+                    return p
         return chain[0] if chain else {}
 
     def get_backup_llm_config(self) -> dict:
-        """获取备用 LLM 配置（链中的第二个有效项）；空 dict 表示没有备用"""
+        """获取备用 LLM 配置（链中与 active 不同的另一个有效项）；空 dict 表示没有备用。
+
+        逻辑：如果 self_check_llm 选了 chain[1]（主用失败 → 降级），那「另一个」
+        就是 chain[0]（虽然主用 probe 失败但它仍在 chain 里）。否则传统意义的
+        chain[1]。
+        """
         chain = self.get_llm_providers_chain()
-        return chain[1] if len(chain) > 1 else {}
+        if len(chain) <= 1:
+            return {}
+        active_name = _get_active_provider_name()
+        if active_name:
+            # 找 active 的下一个；如果 active 不在 chain 里，退回 chain[1]
+            for i, p in enumerate(chain):
+                if p["name"] == active_name:
+                    # 优先返回 active 之后的；没有就返回 active 之前的
+                    if i + 1 < len(chain):
+                        return chain[i + 1]
+                    if i - 1 >= 0:
+                        return chain[i - 1]
+                    return {}
+        return chain[1]
 
     # ========================================================================
     # 端到端自检：实际通过 ChatOpenAI 接口发一次最小请求来验证可用性
@@ -329,6 +363,11 @@ class ChatMeConfig:
         2) 主用失败 → 探测备用 → 成功则 active=backup
         3) 都失败 → active=None
 
+        **副作用**：探测成功后把 active provider 名字写入模块级 `_active_provider_name`
+        （通过 `_set_active_provider_name`），下游 `get_active_llm_config()` 会优先
+        返回它。这样首次启动配占位 key（model1 fake key）但备用 model2 真 key 时，
+        ChatWorkflow.init_llms 拿到的是 model2 而不是 model1，避免每个请求都 401。
+
         返回结构：
             {
                 "active": "<provider name>" | None,
@@ -340,6 +379,7 @@ class ChatMeConfig:
         result = {"active": None, "primary": None, "backup": None}
 
         if not chain:
+            # chain 空 → 不动 _active_provider_name（保持上一次值或 None）
             return result
 
         primary = chain[0]
@@ -347,6 +387,7 @@ class ChatMeConfig:
         result["primary"] = {"name": primary.get("name"), "ok": ok, "msg": msg}
         if ok:
             result["active"] = primary.get("name")
+            _set_active_provider_name(result["active"])
             return result
 
         if len(chain) > 1:
@@ -356,6 +397,10 @@ class ChatMeConfig:
             if ok2:
                 result["active"] = backup.get("name")
 
+        # 只有 active 非空时（探测有成功）才写全局；探测全失败时不动它，
+        # 让下游退回 chain[0]（保持历史「失败也要有一个 provider」的语义）
+        if result["active"]:
+            _set_active_provider_name(result["active"])
         return result
 
     def get_app_config(self) -> dict:
@@ -752,6 +797,35 @@ class ChatMeConfig:
 
 
 config = ChatMeConfig()
+
+
+# ========================================================================
+# 模块级「当前生效的 LLM provider 名字」缓存
+# ========================================================================
+# self_check_llm 探测成功后会把 active provider 写到这里，下游所有需要拿
+# LLM 配置的地方（ChatWorkflow.init_llms / VL fallback / /admin/health 的
+# llm_ready 字段等）都通过 _get_active_provider_name() 读，避免「主用 LLM
+# 是占位 key（fresh clone 时引导用户配的 fake key），实际请求应该用备用」
+# 的场景下还硬去拿 chain[0] 导致每个请求 401。
+#
+# 关键不变量：
+# 1) 写时机：只在 self_check_llm 探测成功（有 active）时写；探测全失败时不动它，
+#    让 get_active_llm_config 退回 chain[0]（保持历史行为）
+# 2) 读时机：任何调用方都能读；ChatWorkflow.init_llms 启动时会读到正确的 active
+# 3) 生命周期：与 Python 进程同生；后端重启会重新探测
+# 4) 不写持久化：这是运行时缓存，不写 config.json / redis
+_active_provider_name: Optional[str] = None
+
+
+def _get_active_provider_name() -> Optional[str]:
+    """读取当前生效的 provider 名字（self_check_llm 探测成功后的结果）"""
+    return _active_provider_name
+
+
+def _set_active_provider_name(name: Optional[str]) -> None:
+    """写入当前生效的 provider 名字（仅 self_check_llm 调用）"""
+    global _active_provider_name
+    _active_provider_name = name
 
 
 def get_config(key: str, default: Any = None, fallback_env: str = None) -> Any:

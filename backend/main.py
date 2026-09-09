@@ -1,6 +1,5 @@
 from datetime import datetime
 from contextlib import asynccontextmanager
-from typing import Optional
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -14,6 +13,7 @@ from ChatMe.ChatMeConfig import (
     get_llm_providers_chain,
     self_check_llm,
 )
+from ChatMe.ChatMeConfig.core import _get_active_provider_name  # 探测成功后 ChatMeConfig 写的
 from ChatMe.APIRouter.main import ChatMe_app, chat_service_lifespan
 from ChatMe.APIRouter.admin_config import router as admin_config_router
 from ChatMe.APIRouter.checkpoint_janitor import router as checkpoint_janitor_router
@@ -75,8 +75,12 @@ logger.info(f"\n{'='*60}\n  {app_name} {version} 启动 - {datetime.now().strfti
 # ========== LLM 端到端自检（核心依赖，必须通过）==========
 # 注意：fresh clone / 用户没填 API key 时不应阻塞后端启动 —— 后端先起来，让
 # 前端能进 Settings 页引导用户填 key 再重启。所以下面两处历史 raise RuntimeError
-# 改为 logger.warning，详见 module-level `_llm_active` 与 /health 的 `llm_ready` 字段。
-_llm_active: Optional[str] = None
+# 改为 logger.warning。
+#
+# self_check_llm 探测成功后会把 active provider 名字写入 ChatMeConfig 的模块级
+# `_active_provider_name`（见 _set_active_provider_name）。下游 ChatWorkflow.init_llms
+# 通过 `get_active_llm_config()` 优先读它，避免主用是占位 key 时还硬用主用导致 401。
+# /health 端点的 `llm_ready` 字段也通过 `_get_active_provider_name()` 判断。
 try:
     check = self_check_llm(timeout=10)
     p, b, active = check["primary"], check["backup"], check["active"]
@@ -111,11 +115,9 @@ try:
 
     if active == (p and p["name"]):
         logger.info(f"🚀 当前生效: 主用 LLM ({active})")
-        _llm_active = active
     elif active:
         logger.warning(f"⚠️  主用不可用，已降级到备用 LLM ({active})")
-        _llm_active = active
-    # active=None / (p is None and b is None) 时 _llm_active 保持 None
+    # active=None / (p is None and b is None) 时 _active_provider_name 保持 None
 except Exception as e:
     # 自检过程本身崩了（导入失败、代码异常等）也不再阻塞启动 —— 让用户
     # 至少能进 Settings / 看 /health 排查；之前会硬崩主进程无路可走。
@@ -137,6 +139,11 @@ app.include_router(file_ops_router)
 # 仅在 local=true 时加载本地 VL 模型
 # 关键：必须延迟 import —— model_vl.py 顶层会调 Qwen3VLForConditionalGeneration.from_pretrained
 # 把模型加载到内存；必须按 vl.local 决定是否触发加载，而不是只决定是否挂载路由
+#
+# vl.local=False 时的实际 fallback target 由 `_resolve_vl_fallback()`（在请求链路里）
+# 决定 —— 它调 `get_active_llm_config()`，该函数优先返回 `self_check_llm` 探测成功的
+# provider（写入 _active_provider_name），所以 VL fallback target 跟主用 LLM 实际生效的
+# provider 完全一致（主用占位 key 时 fallback 到备用真 key）。
 try:
     from ChatMe.ChatMeConfig import get_model_vl_config
     vl_config = get_model_vl_config()
@@ -145,7 +152,8 @@ try:
         app.include_router(model_vl_app)
         logger.info("本地 VL 模型已启用")
     else:
-        logger.info("使用外部 VL 模型（fallback 到主用 LLM）")
+        # 真实 fallback target 在请求时由 get_active_llm_config() 决定（可能不是 chain[0]）
+        logger.info("使用外部 VL 模型（fallback 到当前生效的 LLM，由 self_check_llm 探测结果决定）")
 except Exception as e:
     logger.error(f"VL 模型配置检测失败: {e}")
 
@@ -175,7 +183,7 @@ async def health():
     llm_ready=False 表示 llm_providers 自检未通过（用户没配 API key、配置了
     但 key 无效、或网络不通等）。前端可以据此判断是否需要在首页展示引导 banner。
     """
-    return {"status": "ok", "llm_ready": bool(_llm_active)}
+    return {"status": "ok", "llm_ready": bool(_get_active_provider_name())}
 
 def main():
     # 确保全局配置存在

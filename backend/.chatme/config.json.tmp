@@ -1,7 +1,7 @@
 {
   "app": {
     "name": "Lingxi",
-    "version": "v0.2.4",
+    "version": "v0.3.0",
     "description": "AI data-analysis chat assistant with tool use, command approval, code execution, and persistent memory across conversations",
     "host": "127.0.0.1",
     "port": 38211

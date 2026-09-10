@@ -41,6 +41,7 @@ Vue 3 + Vite 单页应用，提供 **Web 端** 和 **Electron 桌面端** 两种
 - **配置向导 SetupView（v0.2.1 新增）**：6 个 pane（欢迎 → API Key → 搜索 Key → 审批策略 → LibreOffice 探测 → 完成）；顶栏 🪄 按钮 + `/setup` 命令打开；保存走 `/admin/config` segment 级热加载（仅 `llm_providers` 改动需重启）；完成页触发全局 restart-mask
 - **启动引导浮窗 BootstrapView（v0.2.1 重构）**：cold start 显示 + autoEnter 三态按钮 + 项目根自动迁移横幅（saved PROJECT_ROOT 版本落后时弹琥珀色「已自动切换到更新的项目目录」）
 - **全局重启遮罩（v0.2.1 统一化）**：banner「重新连接」/ Settings「Save & Restart」/ SetupView 完成含 `llm_providers` 改动 → 统一走 App.vue 的 `handleRestartBackend()`，弹同一个 `.restart-mask`（z-index 1900）+ spinner + 倒计时；`refreshPage()` 走 Electron `webContents.reload()` 避免 `protocol.handle('file')` 下 JS 级 reload 被拦截
+- **生产 build 自动消除 console（v0.3）**：`vite.config.js` 切到 `terser` minify + `pure_funcs: ['console.log', 'console.warn', 'console.info', 'console.debug']`，打包后渲染层从 82 处应用代码 console 调用降到 0 处（仅剩 3 处第三方库边界无法触及：wardley 的方法引用 / arrow body / index chunk `.catch()` 消费者）；`console.error` 保留线上排错用；dev server 不跑 minify 不影响开发；主进程 console 不动（启动 / 5s health polling / IPC 错误处理都是低频路径）
 
 ## 技术栈
 
@@ -368,7 +369,7 @@ const isTest = process.env.NODE_ENV === 'test'
 | `app.name` | `灵析` | 应用名（菜单栏第一项、`app.getName()`） |
 | `app.title` | `灵析——数据分析智能助手` | 窗口标题 / 关于弹窗 |
 | `app.identifier` | `com.chatme.app` | bundle identifier |
-| `app.version` | `0.2.2` | 同步后端版本号 |
+| `app.version` | `0.3.0` | 同步后端版本号 |
 | `window.width × height` | `1100 × 720` | 主窗口尺寸 |
 | `window.minWidth × minHeight` | `650 × 480` | 最小尺寸 |
 | `devServer.url` | 从 Vite 导入的 `http://localhost:18211` | Electron 开发时加载的 URL |
@@ -502,8 +503,8 @@ DMG 阶段需要 `dmgbuild-bundle-arm64-*.tar.gz` 包，npmmirror 当前缺这�
 release/electron-builder/
 ├── mac-arm64/
 │   └── 灵析.app          ← 直接打开
-├── 灵析-0.2.2-arm64-mac.zip
-└── 灵析-0.2.2-mac.zip
+├── 灵析-0.3.0-arm64-mac.zip
+└── 灵析-0.3.0-mac.zip
 ```
 
 打开方式：
@@ -515,7 +516,7 @@ open ~/coding/projects/ChatMe/release/electron-builder/mac-arm64/灵析.app
 "~/coding/projects/ChatMe/release/electron-builder/mac-arm64/灵析.app/Contents/MacOS/灵析"
 
 # 解压 zip 后再打开
-unzip 灵析-0.2.2-arm64-mac.zip -d ~/Downloads
+unzip 灵析-0.3.0-arm64-mac.zip -d ~/Downloads
 open ~/Downloads/灵析.app
 ```
 

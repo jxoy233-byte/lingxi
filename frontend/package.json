@@ -1,6 +1,6 @@
 {
   "name": "lingxi-app",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "private": true,
   "license": "MIT",
   "description": "基于 LangGraph 的多智能体数据分析对话系统",
@@ -129,6 +129,7 @@
     "katex": "^0.16.21",
     "marked": "^17.0.3",
     "mermaid": "^11.15.0",
+    "terser": "^5.51.2",
     "vite": "^5.1.6",
     "vue": "^3.4.21",
     "vue-router": "^4.6.4"

@@ -36,8 +36,19 @@ export const viteServerConfig = {
 
 export const viteBuildConfig = {
   outDir: 'dist',
-  emptyOutDir: true
+  emptyOutDir: true,
+  // 生产 build 自动消除 console.log/warn/info/debug 调用（console.error 保留线上排错用）
+  // 切到 terser minify：esbuild.pure 对 spread 参数调用（console.log(...args)）无效，
+  // 第三方库（marked / highlight.js / cytoscape 等）大量用 spread，esbuild 保守不消除。
+  // terser 的 pure_funcs 能识别并消除 spread 形式。
+  // dev server 启动不跑 minify，console 全保留不影响开发。
   // 注意：base 选项必须在顶层 defineConfig 里设，这里放无效
+  minify: 'terser',
+  terserOptions: {
+    compress: {
+      pure_funcs: ['console.log', 'console.warn', 'console.info', 'console.debug']
+    }
+  }
 }
 
 export const viteResolveConfig = {

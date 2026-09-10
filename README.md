@@ -26,6 +26,11 @@
 
 ## 项目特性
 
+### v0.3 取消上传软删 + 前端 console 清理
+
+- **取消上传软删 upload 阶段产物到 .trash/**（`ChatService/core.py:_move_cached_path_to_trash` + `remove_processed_files` 改造）：原 `os.remove(file_path)` 只删 temp 原文件，docling 解析产物（`{file_id}_output/document.md` + images）残留到下次孤立清理。改为 `shutil.move` 整个 `{filename}_{file_id_short}/` 整树到 `.trash/{sid}/{ts}/`；不动 `data_analysis/`（AI 跑代码生成的，不属于 upload 阶段）。每天 11:30 `daily_trash_cleanup` 兜底物理清
+- **生产 build 自动消除 console.log/warn/info/debug**（`vite.config.js` 切到 terser + `pure_funcs`）：渲染层从 82 处 → 0 处（仅 3 处第三方库边界残留：wardley 的方法引用 + arrow body + index chunk `.catch()` 消费者）；dev server 不跑 minify 不影响开发；主进程 console 不动（低频路径无性能影响）
+
 ### v0.1.x 核心能力
 
 - 多智能体工作流 + ReAct 压缩（5 LLM 角色 + 4 阶段后台异步压缩）
@@ -163,7 +168,7 @@ OPENAI_PRESENCE_PENALTY=0.0
 {
   "app": {
     "name": "ChatMe",
-    "version": "v0.2.4",
+    "version": "v0.3.0",
     "host": "127.0.0.1",
     "port": 38211
   },
@@ -349,13 +354,13 @@ MCP 服务器（`mcps/server.py`，FastMCP 3.x，stdio transport）暴露以下�
 ```bash
 cd backend
 uv build --wheel
-# 输出: dist/ChatMe-0.2.2-py3-none-any.whl
+# 输出: dist/ChatMe-0.3.0-py3-none-any.whl
 ```
 
 ### 安装 wheel
 
 ```bash
-uv pip install dist/ChatMe-0.2.2-py3-none-any.whl
+uv pip install dist/ChatMe-0.3.0-py3-none-any.whl
 # 安装后 chatme_main 和 chatme_mcp 命令全局可用
 ```
 
@@ -387,17 +392,17 @@ npm run electron:build:mac      # macOS arm64 + x64（DMG + ZIP）
 npm run electron:build:win      # Windows NSIS（x64）
 ```
 
-桌面端通过 `electron-builder` 打包，应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.2.2）在 `frontend/electron/electron.config.js` 中配置。
+桌面端通过 `electron-builder` 打包，应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.3.0）在 `frontend/electron/electron.config.js` 中配置。
 
 **输出位置**：`../release/electron-builder/`（项目根，与 Vite 的 `dist/` / `frontend/` 区分开）：
 
 - `mac-arm64/灵析.app` — 直接打开
 - `mac/` — x64 .app
-- `灵析-0.2.2-arm64-mac.zip` / `灵析-0.2.2-mac.zip` — 分发包
+- `灵析-0.3.0-arm64-mac.zip` / `灵析-0.3.0-mac.zip` — 分发包
 - `linux-unpacked/` — Linux 解压目录
-- `灵析-0.2.2.AppImage` — Linux 便携版（需 FUSE，见下文）
-- `灵析-0.2.2.deb` — Debian / Ubuntu 安装包
-- `灵析-0.2.2.rpm` — Fedora / RHEL 安装包
+- `灵析-0.3.0.AppImage` — Linux 便携版（需 FUSE，见下文）
+- `灵析-0.3.0.deb` — Debian / Ubuntu 安装包
+- `灵析-0.3.0.rpm` — Fedora / RHEL 安装包
 - `win-unpacked.exe` — Windows 安装器
 
 ## 开发注意事项

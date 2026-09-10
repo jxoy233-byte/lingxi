@@ -1,12 +1,13 @@
 import asyncio
 import json
-import os
 import re
+import shutil
 import time
 import traceback
 import uuid
 from dataclasses import asdict
 from datetime import datetime
+from pathlib import Path
 from typing import AsyncGenerator, Set, List, Any, Optional, Dict
 
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
@@ -22,6 +23,7 @@ from ChatMe.ChatService.config.models import MessageRole, Message, Conversation,
 from ChatMe.ChatService.FilesLoaders.core import FilesLoaders, OutputFormat
 from ChatMe.ChatWorkflow import ChatWorkflow, MemoryUpdateFormat
 from ChatMe.ChatWorkflow.config.models import AIMessageType
+from ChatMe.paths import CACHED_DIR, TRASH_DIR, BACKEND_ROOT
 from ChatMe.LoggingManager.logging_config import (
     get_logger,
     flush_pending_thinking_for_session,
@@ -90,6 +92,64 @@ def _derive_title_from_latest_human(messages: List[Any]) -> str:
         if cleaned:
             return _truncate_title(cleaned)
     return ""
+
+
+# === 软删除 helper ===
+# 取消上传时把 cached/{sid}/{filename}_{file_id_short}/ 整树（temp 原文件 +
+# docling {file_id}_output/document.md + images/）软删到 .trash/{sid}/{ts}/{...}/，
+# 由 timed_clean.daily_trash_cleanup（每天 11:30）兜底物理清空。失败不抛，
+# 遵循 CLAUDE.md「压缩失败不 raise」原则 —— cleanup best-effort。
+
+# 模块级 logger（ChatService 是类层级 logger；模块级 helper 没 self 拿不到，
+# 用 __name__ 复用同一 logger hierarchy）
+_module_logger = get_logger(__name__)
+
+
+def _move_cached_path_to_trash(abs_path: str) -> Optional[str]:
+    """把 cached/{sid}/{rel_path} 软删到 .trash/{sid}/{ts}/{rel_path}。
+
+    复用 trash.py:delete_session_file（trash.py:80-95）同款语义：
+      1. abs_path 必须在 CACHED_DIR/{sid}/ 下（防 /etc/passwd 类攻击）
+      2. shutil.move 到 .trash/{sid}/{ts}/{rel_path}（保留目录结构）
+      3. 同秒删不同 file 不会撞名（落到不同 rel_path 子目录）
+
+    Args:
+        abs_path: 绝对路径，文件或目录均可（shutil.move 对目录自动递归）
+
+    Returns:
+        成功：.trash/ 下的相对路径字符串（相对 BACKEND_ROOT）
+        失败 / 路径越界 / 不存在：None（不抛，cleanup best-effort）
+    """
+    try:
+        p = Path(abs_path).resolve()
+        cached_root = CACHED_DIR.resolve()
+        if not p.is_relative_to(cached_root):
+            _module_logger.warning(f"[_move_cached_path_to_trash] 拒绝越界路径: {abs_path}")
+            return None
+        # 从解析后的绝对路径反推 session_id + rel_path（不信任 abs_path 字面量）
+        rel_to_cached = p.relative_to(cached_root)
+        if len(rel_to_cached.parts) < 2:
+            # 只传了 CACHED_DIR 本身（无 sid），无意义
+            _module_logger.warning(f"[_move_cached_path_to_trash] 路径缺 session_id: {abs_path}")
+            return None
+        session_id = rel_to_cached.parts[0]
+        rel_path = str(Path(*rel_to_cached.parts[1:]))
+        if not rel_path or ".." in Path(rel_path).parts:
+            _module_logger.warning(f"[_move_cached_path_to_trash] rel_path 非法: {rel_path}")
+            return None
+        if not p.exists():
+            # 已不存在（重复取消/并发删）—— 静默跳过，行为对齐 os.remove
+            return None
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        trash_target = TRASH_DIR / session_id / timestamp / rel_path
+        trash_target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(p), str(trash_target))
+        _module_logger.info(f"[_move_cached_path_to_trash] {abs_path} → {trash_target}")
+        return str(trash_target.relative_to(BACKEND_ROOT))
+    except Exception as e:
+        # 不抛 —— cleanup best-effort；上层 remove_processed_files 也不再 raise
+        _module_logger.warning(f"[_move_cached_path_to_trash] 软删失败 {abs_path}: {e}")
+        return None
 
 
 class ChatService:
@@ -193,15 +253,20 @@ class ChatService:
 
     @staticmethod
     async def remove_processed_files(output: OutputFormat):
-        """
-        删除处理后的文件
+        """取消上传：软删 upload 阶段产物到 .trash/。
 
-        Args:
-            output: 需要删除的处理后的输出格式
+        关键：删的是 file_path.parent，即 cached/{sid}/{filename}_{file_id_short}/
+        整树（temp 原文件 + {file_id}_output/document.md + images/）。docling 输出的
+        markdown/images 与 temp 原文件共享同一父目录（见 FilesLoaders/core.py:268
+        命名 + FilesLoaders/core.py:496 output_dir），一锅端。
+        不动 data_analysis/ —— 那是 AI 跑代码生成的，不属于 upload 阶段。
         """
         file_path = output.file_path
-        if file_path and os.path.exists(file_path):
-            os.remove(file_path)
+        if not file_path:
+            return
+        # 删整个 parent dir（temp + docling 输出），而不是单个 file_path
+        parent_dir = str(Path(file_path).parent)
+        _move_cached_path_to_trash(parent_dir)
 
     @staticmethod
     def _get_mime_type(suffix: str) -> str:

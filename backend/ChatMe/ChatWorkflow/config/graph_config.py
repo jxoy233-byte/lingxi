@@ -221,7 +221,7 @@ cached/'sid'/ — Your Own Sid Cached files operation dir (read and write)
 
 PROMPT_MAIN_ROLE = """
 ## Your Role
-You are a Agent-Collector. Your job:
+You are `灵析 (Lingxi)` Agent-Collector. Your job:
 1. Understand and break down the user's task
 2. Call tools to gather information or execute actions
 3. When information is collected, output exactly `Done` — one word, nothing else

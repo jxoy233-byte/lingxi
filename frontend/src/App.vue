@@ -271,15 +271,46 @@
     当后端从 health→crash 时 appReady 重置为 false，BootstrapView 重新显示「启动应用」。
     v-if 切换走淡入淡出过渡，不直接 v-show（v-show 会让 .bootstrap-overlay 的 animation 反复触发）。
   -->
+  <!--
+    BootstrapView 二态渲染（v0.3.x 起）：
+    - classic 形态：cold start + autoEnter=false → 显示「启动应用 / 进入应用 / 启动中」三态
+      （保留旧行为，让不想自动进的用户手动控制启动）
+    - deps 形态：仅 slash `/bootstrap` 触发（_bootstrapVisible=true）+ autoEnter=true → 显示
+      「保存 / 重启应用 / 进入应用」三按钮（前置依赖配置面板）
+    - cold + autoEnter=true 时**根本不渲染** BootstrapView，App.vue 自动调 bootstrap +
+      显示 StartupLoadingView，避免「自动进」还要用户点启动按钮的逻辑矛盾
+  -->
   <transition name="bootstrap-fade">
     <BootstrapView
-      v-if="isElectron && !appReady"
+      v-if="isElectron && !appReady && !_autoEnterPreference"
+      :mode="'classic'"
       :services-ready="servicesReady === true"
       :swapped-project-root="_swappedProjectRoot"
       :current-project-root="_currentProjectRoot"
       @enter-app="onEnterApp"
     />
+    <BootstrapView
+      v-else-if="isElectron && _bootstrapVisible && _autoEnterPreference"
+      :mode="'deps'"
+      :services-ready="servicesReady === true"
+      :swapped-project-root="_swappedProjectRoot"
+      :current-project-root="_currentProjectRoot"
+      @enter-app="onEnterApp"
+      @restart-requested="handleRestartBackend"
+      @preference-changed="onBootstrapPreferenceChanged"
+    />
   </transition>
+
+  <!--
+    StartupLoadingView：cold start + autoEnter=true 时的启动期 loading 浮层。
+    z-index 1500 由 StartupLoadingView 内部样式控制。
+    启动成功（services-ready-changed ready=true）→ App.vue _hideStartupLoading() 翻 false 自动消失。
+    启动失败 → _autoBootstrap catch 块调 _hideStartupLoading() + 弹 classic BootstrapView。
+  -->
+  <StartupLoadingView
+    :visible="_startupLoadingVisible"
+    :elapsed="_startupElapsed"
+  />
 
   <!--
     NotFound 浮层：访问不存在的 URL 时浮现 10 秒，倒计时 + 进度条 + 像素鹿跳动。
@@ -346,6 +377,7 @@ import MessageList from './components/MessageList.vue'
 import MessageInput from './components/MessageInput.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import BootstrapView from './components/BootstrapView.vue'
+import StartupLoadingView from './components/StartupLoadingView.vue'
 import CheckpointPanel from './components/CheckpointPanel.vue'
 import WebPreviewPanel from './components/WebPreviewPanel.vue'
 import FilePreviewPanel from './components/FilePreviewPanel.vue'
@@ -375,6 +407,7 @@ export default {
     MessageInput,
     ConfirmDialog,
     BootstrapView,
+    StartupLoadingView,
     CheckpointPanel,
     WebPreviewPanel,
     FilePreviewPanel,
@@ -455,16 +488,40 @@ export default {
       settingsVisible: false,  // 设置弹窗可见性
       helpVisible: false,  // /help 弹窗可见性
       setupVisible: false,  // 配置向导浮窗可见性（顶栏 🪄 按钮 + /setup 共用）
+      // v0.3.x —— 启动偏好本地副本：
+      //   来自 getStartupPreferences() 快照，启动期决定是否自动调 bootstrap IPC。
+      //   BootstrapView（deps 形态）点「保存」会 emit preference-changed 同步这个字段，
+      //   让 slash `/bootstrap` 命令列表可见性立刻更新（取消勾选 → 命令消失）。
+      _autoEnterPreference: false,
+      // v0.3.x —— BootstrapView（deps 形态）显示开关：
+      //   仅 slash `/bootstrap` 触发；cold + autoEnter 时根本不渲染（App.vue 自动 bootstrap）。
+      _bootstrapVisible: false,
+      // v0.3.x —— 启动期 loading 浮层相关 state：
+      //   与 .restart-mask 共用 timer 模式（参考 _restartTimer 写法），
+      //   但独立计时避免与 handleRestartBackend 的倒计时串扰。
+      _startupLoadingVisible: false,
+      _startupElapsed: 0,
+      _startupTimer: null,
+      // v0.3.x —— SkillForge 自动刷新守卫：
+      //   一次 SkillForge 调用可能产出 1-3 个 tool_call_result（code 调 create_skill → 拿到
+      //   路径 → 再调一次写入），如果每个都触发 fetchSkills 会重复打后端。
+      //   时间窗口 2s 内只允许一次 refetch + in-flight promise 复用，幂等。
+      _lastSkillFetchAt: 0,
+      _skillFetchInFlight: null,
       // 简洁提示弹窗（slash 命令前置条件不满足时用，例如「/backtrack 当前没有会话」）
       toast: { visible: false, title: '', message: '' },
       // 静态 action 命令清单（永远在前，不依赖后端）：
       // 纯前端动作（打开弹窗 / 刷新页面），name 不会发往后端，无命名约束。
       // 这份副本驱动 HelpDialog「命令」段渲染；input 输入框走 MessageInput.staticActionCommands（独立副本），
       // 两边必须保持一致，否则 /help 弹窗里看不到新增的 action 命令。
+      // v0.3.x：`bootstrap` 命令仅在 _autoEnterPreference=true 时实际生效，
+      // 但**始终列在这里**（不动态加减）—— 保证 HelpDialog 与 MessageInput 命令面板一致，
+      // runFrontAction 内做防御 gate。
       staticActionCommands: [
         { name: 'backtrack', kind: 'action', description: '打开历史版本面板' },
         { name: 'settings',  kind: 'action', description: '打开设置弹窗' },
         { name: 'setup',     kind: 'action', description: '打开安装 / 配置向导（首启推荐）' },
+        { name: 'bootstrap', kind: 'action', description: '重新打开前置依赖配置面板（项目根 / Python / Docker）' },
         { name: 'reload',    kind: 'action', description: '刷新当前会话' },
         { name: 'worktree',  kind: 'action', description: '打开当前会话工作树' },
         { name: 'help',      kind: 'action', description: '显示本项目功能速览' }
@@ -589,18 +646,45 @@ export default {
     if (window.electronAPI?.getServicesReady) {
       // ===== Electron 路径 =====
       this.isElectron = true
-      // 拉一次 servicesReady 快照（避免订阅前错过早期事件），然后订阅后续变更。
-      // 路径分流：
-      //   - ready=true（warm）：servicesReady=true，直接 init，BootstrapView 永远不渲染（不闪）
-      //   - ready=false（cold）：servicesReady=false，BootstrapView 浮窗渲染，主界面灰显
-      window.electronAPI.getServicesReady().then(ready => {
+      // v0.3.x：先拉 startup-preferences 快照，拿到 autoEnterFrontend 副本。
+      // 这个字段决定冷启动走哪条路径：
+      //   - true  → App.vue 主动调 bootstrap IPC（不弹 BootstrapView）+ StartupLoadingView
+      //   - false → 走老路径，BootstrapView（classic 形态）渲染
+      // 与 getServicesReady 并行拉（无依赖关系），都返回后再决定渲染。
+      const startupPrefPromise = window.electronAPI.getStartupPreferences?.()
+      const servicesReadyPromise = window.electronAPI.getServicesReady()
+      Promise.all([startupPrefPromise, servicesReadyPromise]).then(([prefs, ready]) => {
+        this._autoEnterPreference = !!(prefs && prefs.autoEnterFrontend)
         this.servicesReady = !!ready
         this._isInitializing = false
+
+        // v0.3.x：每次启动（cold + warm + autoEnter=true）都显示 StartupLoadingView，
+        // 直到后端 servicesReady=true 翻 appReady=true 才关掉。
+        // - warm：后端其实已经在跑（main.js app.whenReady 里 checkBackendHealth true），
+        //   但用户启动 app 期待「loading」反馈，不应该直接跳进主界面。
+        //   StartupLoadingView 几秒后 services-ready-changed ready=true 自动消失。
+        // - cold：App.vue 主动调 bootstrap IPC + StartupLoadingView 持续显示直到 ready。
+        // _showStartupLoading() 必须在 _autoBootstrap() 之前调，确保 loading 先出现。
+        if (this._autoEnterPreference) {
+          this._showStartupLoading()
+        }
+
+        // 热启动（warm path）：后端已在跑 → appReady=true 直接进主界面。
+        // StartupLoadingView 仍在显示，由后续 services-ready-changed (来源 main init 推送)
+        // 关掉（_hideStartupLoading）。
         if (ready && !this._conversationInited) {
           this._conversationInited = true
           this.appReady = true
           this.$nextTick(() => this.initConversationState())
+          return
         }
+
+        // 冷启动 + autoEnter=true：App.vue 自动调 bootstrap IPC（loading 已显示）。
+        // 失败兜底：bootstrap IPC 返 ok=false → 弹 classic BootstrapView 让用户手动修复。
+        if (!ready && this._autoEnterPreference) {
+          this._autoBootstrap()
+        }
+        // 冷启动 + autoEnter=false：BootstrapView（classic）由 v-if 自动渲染（保持旧行为）
       })
       // 后续变更：bootstrap 完成 / 后端重启。
       // payload = { ready, autoEnterFrontend?, swappedProjectRoot?, source? }：
@@ -616,6 +700,14 @@ export default {
         const wasReady = !!this.servicesReady
         const isRestart = payload?.source === 'restart'
         this.servicesReady = ready
+        // v0.3.x：ready=true 同步关 StartupLoadingView（无条件）。
+        // - cold + autoEnter：App.vue _autoBootstrap() 启动的 timer 关
+        // - warm + autoEnter：mounted 调 _showStartupLoading() 显示，关掉准备进主界面
+        // - restart：用户主动重启完成后 loading 也要关（保险）
+        // 幂等：_hideStartupLoading() 内部 null check，重复调安全。
+        if (ready) {
+          this._hideStartupLoading()
+        }
         // 捕获迁移信息供 BootstrapView 横幅用——只在 ready=true && 还没 appReady 时显示，
         // appReady 一旦翻 true 就没机会展示了（BootstrapView 已卸载）
         if (ready && payload?.swappedProjectRoot) {
@@ -638,6 +730,7 @@ export default {
           //      重发 broadcast。这里 idempotent 等价于「只要看到 ready=true && autoEnter=true
           //      就翻 appReady」，覆盖这种 dead lock。
           // _conversationInited 仅用来 gate initConversationState（避免重复 init）。
+          // 注：_hideStartupLoading() 已在上面 if (ready) 顶层调过，无需重复。
           this.appReady = true
           if (!this._conversationInited) {
             this._conversationInited = true
@@ -645,6 +738,7 @@ export default {
           }
         } else if (ready && !wasReady && !autoEnter) {
           // 没勾自动进 + cold start 完成：保持 appReady=false（默认），BootstrapView 显示「进入应用」等用户点
+          // 这种路径 StartupLoadingView 不会显示（_autoBootstrap 不会触发），无需关
         }
         // 后端从 true 变 false：
         //   - source='restart'（用户主动重启）：保持 appReady=true 不踢回 BootstrapView，
@@ -850,21 +944,103 @@ export default {
      *  - /help 弹窗打开且缓存为空时拉一次（同会话内反复打开 /help 不重复请求；
      *    切/刷会话清空缓存后下次开 /help 才重新拉）
      *
+     * v0.3.x：SkillForge 创建 skill 后，三个 SSE 流（sendMessage / handleResume /
+     *    handleRestream）共用 _maybeRefetchSkills() 触发刷新；窗口期 2s 内重复
+     *    调用合并到同一 promise，避免一次 SkillForge 多次调 create_skill 时打多次后端。
+     *
      * 失败兜底：dynamicSkills 维持上次状态，HelpDialog 至少渲染 action 命令。
      */
     async fetchSkills() {
-      try {
-        const response = await fetch('/chat/skills')
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`)
+      // v0.3.x idempotent 守卫：2s 窗口内重复调合并到同一 promise。
+      // 一次 SkillForge 调用可能产出多个 tool_call_result 触发刷新，去重避免重复打后端。
+      const now = Date.now()
+      if (this._skillFetchInFlight) return this._skillFetchInFlight
+      if (now - this._lastSkillFetchAt < 2000) return  // 静默丢弃
+      this._lastSkillFetchAt = now
+      this._skillFetchInFlight = (async () => {
+        try {
+          const response = await fetch('/chat/skills')
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`)
+          }
+          const data = await response.json()
+          const raw = Array.isArray(data?.skills) ? data.skills : []
+          // 后端已过滤 lazy=true，这里再守一层防止 schema 变动
+          this.dynamicSkills = raw.filter(s => s && typeof s.name === 'string' && s.name && !s.lazy)
+        } catch (error) {
+          console.warn('[App] fetchSkills 失败，维持当前动态列表:', error?.message || error)
+        } finally {
+          this._skillFetchInFlight = null
         }
-        const data = await response.json()
-        const raw = Array.isArray(data?.skills) ? data.skills : []
-        // 后端已过滤 lazy=true，这里再守一层防止 schema 变动
-        this.dynamicSkills = raw.filter(s => s && typeof s.name === 'string' && s.name && !s.lazy)
-      } catch (error) {
-        console.warn('[App] fetchSkills 失败，维持当前动态列表:', error?.message || error)
+      })()
+      return this._skillFetchInFlight
+    },
+    /**
+     * v0.3.x —— SkillForge 创建检测 helper：
+     * 三个 SSE 流（sendMessage / handleResume / handleRestream）的 tool_call_name 分支
+     * 都调这个，根据 args 判定「可能是 SkillForge create_skill 调用」并打标记。
+     * tool_call_result 分支再调一次：标记命中且返回值以 "Created skill " 开头时触发 refetch。
+     *
+     * 多逻辑识别（不只依赖返回值）：
+     *   1. tool_call_name 阶段 —— 检查 args.code 是否含 `from skills.SkillForge import`
+     *      或含 `create_skill(` 调用（regex 容错：可能 LLM 加注释 / 改格式）
+     *   2. tool_call_result 阶段 —— 检查 result 是否以 "Created skill '" 开头
+     *      （SkillForge create_skill 返回固定前缀，其他函数不会撞）
+     * 两阶段都要命中才触发 refetch，避免误判 + 单一来源依赖。
+     */
+    _isSkillForgeCreateCall(message, data) {
+      // tool_call_name 阶段：data.content = {args, name}
+      if (data.type === 'tool_call_name') {
+        const name = data.content?.name
+        const args = data.content?.args || {}
+        if (name !== 'code') return false
+        const code = String(args.code || '')
+        // 多 pattern 容错：覆盖 LLM 写的几种常见形式
+        return (
+          /from\s+skills\.SkillForge\s+import\b/i.test(code) ||
+          /from\s+skills\.SkillForge\s+import\s+\*\s*$/im.test(code) ||
+          /\bcreate_skill\s*\(/i.test(code) && /SkillForge/i.test(code)
+        )
       }
+      // tool_call_result 阶段：data.content 是 ToolMessage.content（字符串）
+      if (data.type === 'tool_call_result') {
+        const result = String(data.content || '')
+        return result.startsWith("Created skill '") || result.includes('Created skill ') && /Created skill '[^']+' at/i.test(result)
+      }
+      return false
+    },
+    /**
+     * v0.3.x —— 三个 SSE 流的 tool_call_name 分支都调这个：
+     * 把 _skillForgePending 标记打到 toolCall entry 上，让 result 阶段判断。
+     * 不在此处 refetch（tool_call_name 阶段还没结果，无法确认 SkillForge 成功）。
+     */
+    _markSkillForgePending(message, data) {
+      if (!message || !message.toolCalls) return message
+      if (!this._isSkillForgeCreateCall(message, data)) return message
+      const toolCalls = [...message.toolCalls]
+      let toolIndex = toolCalls.findIndex(tc => tc.id === data.id)
+      if (toolIndex === -1) {
+        toolIndex = toolCalls.findIndex(tc => tc._pendingApproval)
+      }
+      if (toolIndex === -1) return message
+      toolCalls[toolIndex] = { ...toolCalls[toolIndex], _skillForgePending: true }
+      return { ...message, toolCalls }
+    },
+    /**
+     * v0.3.x —— 三个 SSE 流的 tool_call_result 分支都调这个：
+     * 看 _skillForgePending 标记 + result 内容，双确认才触发 fetchSkills。
+     */
+    _maybeRefetchSkillsAfterResult(message, data) {
+      if (!message || !message.toolCalls) return
+      // 找对应的 toolCall entry（按 id / pending / 最近的）
+      const toolCalls = message.toolCalls
+      let tc = toolCalls.find(t => t.id === data.id)
+      if (!tc) tc = toolCalls.find(t => t._pendingApproval)
+      if (!tc || !tc._skillForgePending) return
+      // result 二次确认
+      if (!this._isSkillForgeCreateCall(message, data)) return
+      // 命中！触发 refetch（idempotent 守卫防止重复打）
+      this.fetchSkills()
     },
     /**
      * 用户在 BootstrapView 上点「进入应用」：
@@ -878,6 +1054,66 @@ export default {
         this.appReady = true
         this.$nextTick(() => this.initConversationState())
       }
+    },
+    /**
+     * v0.3.x —— BootstrapView（deps 形态）保存按钮 emit preference-changed 时回调。
+     * 把 BootstrapView 的 autoEnterFrontend 同步到本地副本 `_autoEnterPreference`，
+     * 让 slash `/bootstrap` 命令列表可见性立即更新（取消勾选 → 命令消失；勾选 → 命令出现）。
+     *
+     * 不需要额外 IPC：BootstrapView checkbox change 已经实时调 setAutoEnterFrontend
+     * 写盘；这里只是同步 UI 副本，保证依赖它的 computed (slashCommands) 立刻响应。
+     */
+    onBootstrapPreferenceChanged(payload) {
+      if (payload && typeof payload.autoEnterFrontend === 'boolean') {
+        this._autoEnterPreference = payload.autoEnterFrontend
+      }
+    },
+    /**
+     * v0.3.x —— cold start + autoEnter=true 路径自动调 bootstrap IPC。
+     * 调成功后由主进程 broadcast services-ready-changed 翻 appReady=true；
+     * 失败 → 弹 classic 形态 BootstrapView 让用户手动修复（与 BootstrapView 内置的
+     * 「启动应用」按钮同等待遇）。
+     *
+     * 显示 StartupLoadingView 提示「正在启动」+ 倒计时，避免用户以为 app 卡死。
+     * 注意：warm path 已经在 mounted 里调过 _showStartupLoading() 了，
+     * 这里不能重置 elapsed —— 用 idempotent 检查避免重置 timer。
+     */
+    async _autoBootstrap() {
+      // 防御：避免重复触发（mounted + 后端回来时的额外 broadcast 都可能再调一次）
+      if (this._startupLoadingVisible) return
+      this._showStartupLoading()
+      try {
+        const result = await window.electronAPI.bootstrap({ autoEnterFrontend: true })
+        if (!result?.ok && !result?.cancelled) {
+          // 失败兜底：关 loading + 弹 classic BootstrapView
+          this._hideStartupLoading()
+          this._bootstrapVisible = false  // 确保 deps 形态不显示
+          this.appReady = false  // 让 v-if 渲染 BootstrapView
+          // 注意：这里不直接置 _autoEnterPreference=false（用户的偏好仍可能正确，
+          // 失败只是单次启动问题；下次重启还是按偏好跑）。
+          console.warn('[App] autoBootstrap 失败，弹 BootstrapView:', result?.error)
+        }
+      } catch (e) {
+        console.error('[App] autoBootstrap IPC 异常:', e)
+        this._hideStartupLoading()
+        this.appReady = false
+      }
+    },
+    _showStartupLoading() {
+      this._startupLoadingVisible = true
+      this._startupElapsed = 0
+      // 1000ms 一次累加；与 _restartElapsed 模式一致但独立 timer
+      if (this._startupTimer) clearInterval(this._startupTimer)
+      this._startupTimer = setInterval(() => {
+        this._startupElapsed = (this._startupElapsed || 0) + 1
+      }, 1000)
+    },
+    _hideStartupLoading() {
+      if (this._startupTimer) {
+        clearInterval(this._startupTimer)
+        this._startupTimer = null
+      }
+      this._startupLoadingVisible = false
     },
     /**
      * 用户点 banner 上的「重新连接」：调 IPC 让主进程 kill mcp/backend 后串行重启。
@@ -1237,9 +1473,11 @@ export default {
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_name') {
                     snap[meta.aiIndex] = this.mergeToolCallStart(snap[meta.aiIndex], data)
+                    snap[meta.aiIndex] = this._markSkillForgePending(snap[meta.aiIndex], data)
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_result') {
                     snap[meta.aiIndex] = this.mergeToolCallResult(snap[meta.aiIndex], data)
+                    this._maybeRefetchSkillsAfterResult(snap[meta.aiIndex], data)
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'done') {
                     this.stopResponseTimer()
@@ -1332,9 +1570,11 @@ export default {
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_name') {
                 this.messages[aiMessageIndex] = this.mergeToolCallStart(this.messages[aiMessageIndex], data)
+                this.messages[aiMessageIndex] = this._markSkillForgePending(this.messages[aiMessageIndex], data)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_result') {
                 this.messages[aiMessageIndex] = this.mergeToolCallResult(this.messages[aiMessageIndex], data)
+                this._maybeRefetchSkillsAfterResult(this.messages[aiMessageIndex], data)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'done') {
                 this.stopResponseTimer()
@@ -1429,9 +1669,11 @@ export default {
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
                 } else if (data.type === 'tool_call_name') {
                   snap[meta.aiIndex] = this.mergeToolCallStart(snap[meta.aiIndex], data)
+                  snap[meta.aiIndex] = this._markSkillForgePending(snap[meta.aiIndex], data)
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
                 } else if (data.type === 'tool_call_result') {
                   snap[meta.aiIndex] = this.mergeToolCallResult(snap[meta.aiIndex], data)
+                  this._maybeRefetchSkillsAfterResult(snap[meta.aiIndex], data)
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
                 } else if (data.type === 'done') {
                   this.stopResponseTimer()
@@ -1494,9 +1736,11 @@ export default {
               this.writeStreamMetrics(this.messages[aiMessageIndex], data)
             } else if (data.type === 'tool_call_name') {
               this.messages[aiMessageIndex] = this.mergeToolCallStart(this.messages[aiMessageIndex], data)
+              this.messages[aiMessageIndex] = this._markSkillForgePending(this.messages[aiMessageIndex], data)
               this.writeStreamMetrics(this.messages[aiMessageIndex], data)
             } else if (data.type === 'tool_call_result') {
               this.messages[aiMessageIndex] = this.mergeToolCallResult(this.messages[aiMessageIndex], data)
+              this._maybeRefetchSkillsAfterResult(this.messages[aiMessageIndex], data)
               this.writeStreamMetrics(this.messages[aiMessageIndex], data)
             } else if (data.type === 'content') {
               this.messages[aiMessageIndex] = {
@@ -1733,6 +1977,15 @@ export default {
         case 'setup':
           // 非阻塞浮窗：不需要 sid，无前置条件
           this.setupVisible = true
+          return
+        case 'bootstrap':
+          // v0.3.x：仅 autoEnter=true 时生效（其他场景用户本来就在 BootstrapView classic 形态里）。
+          // _autoEnterPreference 由 getStartupPreferences() 初始化 + BootstrapView 保存按钮同步更新。
+          if (!this._autoEnterPreference) {
+            this.showToast('前置依赖面板仅在「自动进入前端」开启时可用', '请先在 BootstrapView 引导页完成首次配置')
+            return
+          }
+          this._bootstrapVisible = true
           return
         case 'reload':
           if (!sid) {
@@ -2680,9 +2933,11 @@ export default {
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_name') {
                     snap[meta.aiIndex] = this.mergeToolCallStart(snap[meta.aiIndex], data)
+                    snap[meta.aiIndex] = this._markSkillForgePending(snap[meta.aiIndex], data)
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_result') {
                     snap[meta.aiIndex] = this.mergeToolCallResult(snap[meta.aiIndex], data)
+                    this._maybeRefetchSkillsAfterResult(snap[meta.aiIndex], data)
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'done') {
                     this.stopResponseTimer()
@@ -2773,9 +3028,11 @@ export default {
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_name') {
                 this.messages[aiMessageIndex] = this.mergeToolCallStart(this.messages[aiMessageIndex], data)
+                this.messages[aiMessageIndex] = this._markSkillForgePending(this.messages[aiMessageIndex], data)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_result') {
                 this.messages[aiMessageIndex] = this.mergeToolCallResult(this.messages[aiMessageIndex], data)
+                this._maybeRefetchSkillsAfterResult(this.messages[aiMessageIndex], data)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'done') {
                 this.stopResponseTimer()
@@ -2875,9 +3132,11 @@ export default {
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
                 } else if (data.type === 'tool_call_name') {
                   snap[meta.aiIndex] = this.mergeToolCallStart(snap[meta.aiIndex], data)
+                  snap[meta.aiIndex] = this._markSkillForgePending(snap[meta.aiIndex], data)
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
                 } else if (data.type === 'tool_call_result') {
                   snap[meta.aiIndex] = this.mergeToolCallResult(snap[meta.aiIndex], data)
+                  this._maybeRefetchSkillsAfterResult(snap[meta.aiIndex], data)
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
                 } else if (data.type === 'done') {
                   this.stopResponseTimer()
@@ -2939,9 +3198,11 @@ export default {
               this.writeStreamMetrics(this.messages[aiMessageIndex], data)
             } else if (data.type === 'tool_call_name') {
               this.messages[aiMessageIndex] = this.mergeToolCallStart(this.messages[aiMessageIndex], data)
+              this.messages[aiMessageIndex] = this._markSkillForgePending(this.messages[aiMessageIndex], data)
               this.writeStreamMetrics(this.messages[aiMessageIndex], data)
             } else if (data.type === 'tool_call_result') {
               this.messages[aiMessageIndex] = this.mergeToolCallResult(this.messages[aiMessageIndex], data)
+              this._maybeRefetchSkillsAfterResult(this.messages[aiMessageIndex], data)
               this.writeStreamMetrics(this.messages[aiMessageIndex], data)
             } else if (data.type === 'content') {
               this.messages[aiMessageIndex] = {
@@ -3271,9 +3532,11 @@ export default {
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_name') {
                     snap[meta.aiIndex] = this.mergeToolCallStart(snap[meta.aiIndex], data)
+                    snap[meta.aiIndex] = this._markSkillForgePending(snap[meta.aiIndex], data)
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_result') {
                     snap[meta.aiIndex] = this.mergeToolCallResult(snap[meta.aiIndex], data)
+                    this._maybeRefetchSkillsAfterResult(snap[meta.aiIndex], data)
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'done') {
                     this.stopResponseTimer()
@@ -3366,9 +3629,11 @@ export default {
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_name') {
                 this.messages[aiMessageIndex] = this.mergeToolCallStart(this.messages[aiMessageIndex], data)
+                this.messages[aiMessageIndex] = this._markSkillForgePending(this.messages[aiMessageIndex], data)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_result') {
                 this.messages[aiMessageIndex] = this.mergeToolCallResult(this.messages[aiMessageIndex], data)
+                this._maybeRefetchSkillsAfterResult(this.messages[aiMessageIndex], data)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'done') {
                 this.stopResponseTimer()
@@ -4596,9 +4861,11 @@ export default {
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_name') {
                     snap[meta.aiIndex] = this.mergeToolCallStart(snap[meta.aiIndex], data)
+                    snap[meta.aiIndex] = this._markSkillForgePending(snap[meta.aiIndex], data)
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_result') {
                     snap[meta.aiIndex] = this.mergeToolCallResult(snap[meta.aiIndex], data)
+                    this._maybeRefetchSkillsAfterResult(snap[meta.aiIndex], data)
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'done') {
                     this.stopResponseTimer()
@@ -4707,9 +4974,11 @@ export default {
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_name') {
                 this.messages[aiMessageIndex] = this.mergeToolCallStart(this.messages[aiMessageIndex], data)
+                this.messages[aiMessageIndex] = this._markSkillForgePending(this.messages[aiMessageIndex], data)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_result') {
                 this.messages[aiMessageIndex] = this.mergeToolCallResult(this.messages[aiMessageIndex], data)
+                this._maybeRefetchSkillsAfterResult(this.messages[aiMessageIndex], data)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'done') {
                 this.stopResponseTimer()
@@ -4866,9 +5135,11 @@ export default {
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
                 } else if (data.type === 'tool_call_name') {
                   snap[meta.aiIndex] = this.mergeToolCallStart(snap[meta.aiIndex], data)
+                  snap[meta.aiIndex] = this._markSkillForgePending(snap[meta.aiIndex], data)
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
                 } else if (data.type === 'tool_call_result') {
                   snap[meta.aiIndex] = this.mergeToolCallResult(snap[meta.aiIndex], data)
+                  this._maybeRefetchSkillsAfterResult(snap[meta.aiIndex], data)
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
                 } else if (data.type === 'done') {
                   const wasError = snap[meta.aiIndex]?.error === true
@@ -4932,9 +5203,11 @@ export default {
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_name') {
                 this.messages[aiMessageIndex] = this.mergeToolCallStart(this.messages[aiMessageIndex], data)
+                this.messages[aiMessageIndex] = this._markSkillForgePending(this.messages[aiMessageIndex], data)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_result') {
                 this.messages[aiMessageIndex] = this.mergeToolCallResult(this.messages[aiMessageIndex], data)
+                this._maybeRefetchSkillsAfterResult(this.messages[aiMessageIndex], data)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'content') {
                 this.messages[aiMessageIndex] = {

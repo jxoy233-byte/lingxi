@@ -110,7 +110,7 @@ npm install
 | 仅浏览器调试 | `npm run dev` → 访问 `http://localhost:18211` |
 | Electron 联调（含热更新） | `npm run electron:dev:all` |
 | 桌面端预览构建产物 | `npm run build && npm run electron:prod` |
-| 打包安装包 | `npm run electron:build` 或 `electron:build:mac` / `:win` / `:linux` |
+| 打包安装包 | `npm run electron:build` 或 `electron:build:mac` / `:win` |
 
 ## 项目结构
 
@@ -122,7 +122,7 @@ frontend/
 ├── build/                      # 应用图标（electron-builder buildResources）
 │   ├── icon.icns               # macOS
 │   ├── icon.ico                # Windows
-│   └── icon.png                # Linux + Dock 通用
+│   └── icon.png                # Dock 通用
 ├── public/                     # 静态资源（构建时原样拷贝到 dist/）
 │   └── favicon.ico             # 浏览器标签页图标
 ├── electron/                   # Electron 桌面端
@@ -331,9 +331,8 @@ Vite dev server 通过代理把 `/chat` 和 `/static` 转发到 `http://127.0.0.
 | `npm run build` | `vite build` | 仅产出 `dist/`，不打包桌面端 |
 | `npm run electron:prod` | `NODE_ENV=production electron .` | 见下方「`electron:prod` 实际行为」说明 |
 | `npm run electron:build` | `vite build && electron-builder` | 当前平台安装包（默认 electron-builder 配置） |
-| `npm run electron:build:mac` | `vite build && electron-builder --mac` | macOS DMG + ZIP（arm64 + x64） |
+| `npm run electron:build:mac` | `vite build && electron-builder --mac` | macOS DMG（arm64 + x64） |
 | `npm run electron:build:win` | `vite build && electron-builder --win` | Windows NSIS |
-| `npm run electron:build:linux` | `vite build && electron-builder --linux` | Linux AppImage |
 
 ### 三种环境在 UI 上的差异
 
@@ -369,7 +368,7 @@ const isTest = process.env.NODE_ENV === 'test'
 | `app.name` | `灵析` | 应用名（菜单栏第一项、`app.getName()`） |
 | `app.title` | `灵析——数据分析智能助手` | 窗口标题 / 关于弹窗 |
 | `app.identifier` | `com.chatme.app` | bundle identifier |
-| `app.version` | `0.3.0` | 同步后端版本号 |
+| `app.version` | `0.3.1` | 同步后端版本号 |
 | `window.width × height` | `1100 × 720` | 主窗口尺寸 |
 | `window.minWidth × minHeight` | `650 × 480` | 最小尺寸 |
 | `devServer.url` | 从 Vite 导入的 `http://localhost:18211` | Electron 开发时加载的 URL |
@@ -396,7 +395,7 @@ iconMac: app.isPackaged
   : path.join(__dirname, '../build/icon.png')                // dev: 源码 build/
 ```
 
-`build/` 通过 `package.json` 的 `extraResources: [{ from: "build", to: "build" }]` 自动复制到 `app/Contents/Resources/build/`（macOS）/ `app/resources/build/`（Windows）/ `app/build/`（Linux），运行时用 `process.resourcesPath` 取真实路径。
+`build/` 通过 `package.json` 的 `extraResources: [{ from: "build", to: "build" }]` 自动复制到 `app/Contents/Resources/build/`（macOS）/ `app/resources/build/`（Windows），运行时用 `process.resourcesPath` 取真实路径。
 
 ### IPC 通道
 
@@ -469,7 +468,7 @@ return new Response(data, {
 ### 前置条件
 
 - 应用图标已就位（`build/icon.icns` / `icon.ico` / `icon.png`，`directories.buildResources: "build"`）
-- macOS 打包需要 Xcode Command Line Tools；Windows 打包需要 Wine 或在 Windows 上跑；Linux 打包一般在 Linux 上跑（AppImage 跨平台有限制）
+- macOS 打包需要 Xcode Command Line Tools；Windows 打包需要 Wine 或在 Windows 上跑
 - 国内网络下 Electron 二进制下载慢，参考 [常见问题](#常见问题) 第 4 条
 
 ### 打包命令
@@ -479,9 +478,8 @@ return new Response(data, {
 npm run electron:build
 
 # 明确指定平台
-npm run electron:build:mac      # 输出到 ../release/electron-builder/：*.dmg + *.zip
+npm run electron:build:mac      # 输出到 ../release/electron-builder/：*.dmg（arm64 + x64）
 npm run electron:build:win      # 输出 *.exe（NSIS 安装器）
-npm run electron:build:linux    # 输出 *.AppImage
 ```
 
 `electron-builder` 的输出目录是 `../release/electron-builder/`（项目根，与 Vite 的 `dist/` / `frontend/` 区分开）。

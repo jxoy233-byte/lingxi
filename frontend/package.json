@@ -1,6 +1,6 @@
 {
   "name": "lingxi-app",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "license": "MIT",
   "description": "基于 LangGraph 的多智能体数据分析对话系统",
@@ -50,13 +50,6 @@
       "target": [
         {
           "target": "dmg",
-          "arch": [
-            "arm64",
-            "x64"
-          ]
-        },
-        {
-          "target": "zip",
           "arch": [
             "arm64",
             "x64"

@@ -3,13 +3,25 @@
     浮窗形式：fixed 全屏 + 半透明 backdrop + 居中卡片。
     App.vue 的主界面始终在 DOM 里（appReady=false 时灰显禁用），
     用户点"启动应用" → 主进程广播 servicesReady=true → 浮窗消失，主界面启用。
+
+    二态设计（v0.3.x 起）：
+    - mode='classic'（默认）：冷启动路径。保留旧行为——「启动应用 / 进入应用 / 启动中」三态，
+      launching/cancelling state 全套，启动期可触发主进程 bootstrap IPC。
+    - mode='deps'：slash `/bootstrap` 唤起的前置依赖配置面板。
+      不触发 bootstrap（启动流程已由 App.vue 在 cold start 自动跑），三按钮：
+      「保存」（持久化 autoEnterFrontend + 项目根切换）/
+      「重启应用」（emit restart-requested）/
+      「进入应用」（emit enter-app，仅 servicesReady=true 可点）。
+      launching/cancelling state 完全不挂载。
   -->
   <div class="bootstrap-overlay">
     <div class="bootstrap-backdrop"></div>
     <div class="bootstrap-card">
       <div class="bootstrap-header">
-        <h2>灵析 启动配置</h2>
-        <p class="subtitle">启动需要检测并配置以下依赖项</p>
+        <h2>{{ mode === 'deps' ? '灵析 前置依赖配置' : '灵析 启动配置' }}</h2>
+        <p class="subtitle">{{ mode === 'deps'
+          ? '重新选择项目目录 / 检测 Python / Docker；保存后通过「重启应用」生效'
+          : '启动需要检测并配置以下依赖项' }}</p>
       </div>
 
       <!--
@@ -164,7 +176,14 @@
         <span>后端启动完成后自动进入前端</span>
       </label>
 
-      <div class="actions">
+      <!--
+        底部按钮区：
+        - classic 模式（冷启动）：保留「重新检测 / 停止启动 / 启动应用|进入应用|启动中」旧逻辑
+        - deps 模式（slash `/bootstrap` 唤起）：「重新检测 / 保存 / 重启应用 / 进入应用」四按钮
+          没有 launching/cancelling 概念（不调 bootstrap IPC），
+          「进入应用」仅 servicesReady=true 时可点（其它时候 disabled + 灰色提示）
+      -->
+      <div v-if="mode === 'classic'" class="actions">
         <button class="btn-secondary" @click="recheck" :disabled="checking || launching || cancelling">
           {{ checking ? '检测中...' : '重新检测' }}
         </button>
@@ -210,6 +229,39 @@
         >启动应用</button>
       </div>
 
+      <!--
+        deps 模式按钮区：四按钮「重新检测 / 保存 / 重启应用 / 进入应用」
+        - 「重新检测」：仅触发 probe-all，不动文件
+        - 「保存」：把 autoEnterFrontend + 项目根切换（如有）写盘，发 emit preference-changed
+          让 App.vue 同步 _autoEnterPreference，立即影响 slash 命令列表可见性
+        - 「重启应用」：emit restart-requested → App.vue handleRestartBackend（共用 .restart-mask）
+        - 「进入应用」：emit enter-app → App.vue 翻 appReady=true，
+          仅 servicesReady=true 可点（否则 disabled + 灰色，避免用户「跳过后端启动」误触）
+      -->
+      <div v-else class="actions deps-actions">
+        <button
+          class="btn-secondary"
+          @click="recheck"
+          :disabled="checking"
+        >{{ checking ? '检测中...' : '重新检测' }}</button>
+        <button
+          class="btn-secondary"
+          @click="saveAndClose"
+          :disabled="checking"
+        >保存</button>
+        <button
+          class="btn-secondary"
+          @click="restartApp"
+          :disabled="checking"
+        >重启应用</button>
+        <button
+          class="btn-primary"
+          :disabled="!servicesReady"
+          :title="servicesReady ? '进入主界面' : '后端未就绪，请先点「重启应用」'"
+          @click="enterApp"
+        >进入应用</button>
+      </div>
+
       <div v-if="launchError" class="error-bar">
         启动失败：{{ launchError }}
       </div>
@@ -227,6 +279,15 @@ export default {
       type: Boolean,
       default: false
     },
+    // v0.3.x 二态模式：
+    //   'classic'（默认）— 冷启动路径，保留「启动应用 / 进入应用 / 启动中」三态按钮
+    //   'deps'        — slash `/bootstrap` 唤起的前置依赖配置面板，三按钮：
+    //                   保存 / 重启应用 / 进入应用，不调 bootstrap IPC
+    mode: {
+      type: String,
+      default: 'classic',
+      validator: (v) => v === 'classic' || v === 'deps'
+    },
     // discoverProjectRoot 自动迁移标记：saved PROJECT_ROOT 版本落后于 BFS 候选时
     // 主进程会带 swappedProjectRoot 字段推送 servicesReady=true，App.vue 把这个 prop 下传
     swappedProjectRoot: {
@@ -239,6 +300,12 @@ export default {
       default: ''
     },
   },
+  // v0.3.x 扩展 emits：
+  //   - 'enter-app'           : 用户点「进入应用」按钮（两模式都发）→ App.vue 翻 appReady
+  //   - 'restart-requested'   : 仅 deps 模式「重启应用」按钮 → App.vue handleRestartBackend
+  //   - 'preference-changed'  : 仅 deps 模式「保存」按钮 → App.vue 同步 _autoEnterPreference，
+  //                             让 slash `/bootstrap` 命令列表可见性立即更新
+  emits: ['enter-app', 'restart-requested', 'preference-changed'],
   data() {
     return {
       // 项目目录独立于 items：必须先确定 lingxi/ 根目录才能做后续
@@ -722,6 +789,42 @@ export default {
     enterApp() {
       this.$emit('enter-app')
     },
+    /**
+     * v0.3.x deps 模式「保存」按钮：
+     * 显式持久化 autoEnterFrontend + 项目根切换（如有改动）。
+     * 不发 bootstrap IPC —— 启动流程已由 App.vue 在 cold start 自动跑过，
+     * 这里只是「把用户偏好写到 userData/startup-preferences.json + (可选) 切项目根」。
+     *
+     * 写完后 emit 'preference-changed' + 'enter-app' 两个事件：
+     *   - preference-changed → App.vue 同步本地 _autoEnterPreference，
+     *     让 slash `/bootstrap` 命令列表可见性立即更新（取消勾选 → 命令消失）
+     *   - enter-app → App.vue 翻 appReady=true + 关浮窗，让用户回主界面
+     *
+     * 注：项目根切换（pickProjectRoot）已通过 IPC 内部 saveProjectRoot() 持久化到
+     * userData/project-root.json，无需在「保存」里再做。
+     */
+    async saveAndClose() {
+      if (this.checking) return  // 防止 recheck 进行中点保存撞 race
+      // autoEnterFrontend 在 checkbox change 时已经实时写盘；这里再保险写一次，
+      // 即便用户没动 checkbox（比如只改了项目根）也保证偏好最新。
+      await this.saveAutoEnterPreference()
+      // 通知 App.vue 同步本地偏好副本 → slash 命令列表可见性立刻更新
+      this.$emit('preference-changed', { autoEnterFrontend: this.autoEnterFrontend })
+      // 进入主界面（deps 模式默认 servicesReady=true，否则「进入应用」按钮也点不动）
+      this.enterApp()
+    },
+    /**
+     * v0.3.x deps 模式「重启应用」按钮：
+     * 走 App.vue handleRestartBackend → 全局 .restart-mask + spinner + 倒计时 → reload。
+     * 与 banner「重新连接」/ Settings「Save & Restart」共用同一套 UI（CLAUDE.md 偏好 23）。
+     *
+     * 不在本地调 IPC restartBackend —— handleRestartBackend 已经包了 _restartVersion race
+     * 防护 + 失败 inline retry 提示 + 完成后 webContents.reload()，本地直调会绕过这套逻辑。
+     */
+    restartApp() {
+      if (this.checking) return
+      this.$emit('restart-requested')
+    },
   },
 }
 </script>
@@ -1002,6 +1105,20 @@ export default {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+/*
+ * v0.3.x deps 模式按钮区：4 个 secondary 按钮 + 1 个 primary「进入应用」。
+ * 与 classic 模式（3 个按钮 + primary 三态）不同，靠 .deps-actions modifier 区分。
+ * 不复用 classic 的 flex: end — 5 个按钮塞一行会挤，移动端折行即可。
+ */
+.deps-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.deps-actions .btn-primary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .btn-secondary, .btn-primary {

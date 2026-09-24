@@ -11,16 +11,69 @@
       不触发 bootstrap（启动流程已由 App.vue 在 cold start 自动跑），三按钮：
       「保存」（持久化 autoEnterFrontend + 项目根切换）/
       「重启应用」（emit restart-requested）/
-      「进入应用」（emit enter-app，仅 servicesReady=true 可点）。
+      「关闭」（emit close → App.vue onBootstrapCloseFromStartup）。
       launching/cancelling state 完全不挂载。
+      —— v0.3.2：「进入应用」改为「关闭」。原 `enter-app` emit 在 deps 形态两条路径都没用：
+       ① 主界面 slash `/bootstrap` 打开时 `appReady=true` → App.vue onEnterApp 的 `!appReady` guard 短路，
+          按钮纯无效；② 启动期从 ⚙/✕ 打开时 `appReady=false` → 后端 ready 后
+          onServicesReadyChange 自动翻 appReady=true，不需要手动 emit。
+       改为「关闭」后两条路径都干净：主界面 → 关面板回主界面；启动期 → 关面板回 StartupLoadingView
+       → onServicesReadyChange 自动进主界面。
   -->
   <div class="bootstrap-overlay">
     <div class="bootstrap-backdrop"></div>
-    <div class="bootstrap-card">
+    <!--
+      .bootstrap-card-wrap —— 不滚动的定位壳，只为挂右上角 ✕。
+      **不能**把 ✕ 直接放进 .bootstrap-card：后者是 `overflow-y: auto` 的滚动容器，
+      absolute 子元素会跟着内容一起滚 —— deps 面板内容高（项目目录 + Python + Docker +
+      三按钮 + autoEnter + 日志框），窗口一矮就触发滚动，✕ 被滚出可视区 → 看不到也点不到
+      → 用户只能重启应用（实测反馈）。壳本身不滚动，✕ 锚在壳的右上角 = 卡片可视区右上角。
+      同理，底部那排操作按钮也建议后续移到滚动区外（当前仍会随内容滚动）。
+    -->
+    <div class="bootstrap-card-wrap">
+    <!-- .bootstrap-card 嵌在 .bootstrap-card-wrap 内。缩进故意不再进一级 ——
+         重排会让本文件多出 ~280 行纯空白 diff，淹没真正的改动。 -->
+    <div class="bootstrap-card" :class="{ 'bootstrap-card--deps': mode === 'deps' }">
+      <!-- v0.3.x 右上角关闭按钮。**只切视图 / 关面板，不退 app、不取消启动**。
+         handleCloseCorner() 根据 mode emit 不同事件让 App.vue 处理：
+         - classic 形态：emit('close-classic') → App.vue 切到等待动画视图
+           （StartupLoadingView，见 App.vue onBootstrapCloseClassic）。启动完成后
+           onServicesReadyChange 自动进 app，两个视图一起消失。
+         - deps 形态：emit('close') → App.vue 关掉本面板（bootstrap 后台继续，
+           保留 autoEnter 偏好；若启动还在跑则回到等待动画视图）。
+
+         ⚠️ classic 形态下的显示条件是 showCloseCorner computed（勾了 autoEnter **且**
+         启动在跑/已就绪）——理由见该 computed 的注释。
+         **deps 形态始终显示**：从主界面 slash `/bootstrap` 打开时（不勾 autoEnter 也一样），
+         ✕ 就是「关掉面板回主界面」的正常出口。 -->
+      <button
+        v-if="showCloseCorner"
+        type="button"
+        class="deps-close-corner"
+        @click="handleCloseCorner"
+        :title="closeCornerTitle"
+        aria-label="关闭"
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18"/>
+          <line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
       <div class="bootstrap-header">
-        <h2>{{ mode === 'deps' ? '灵析 前置依赖配置' : '灵析 启动配置' }}</h2>
+        <div class="bootstrap-title-row">
+          <h2>{{ mode === 'deps' ? '灵析 前置依赖配置' : '灵析 启动配置' }}</h2>
+          <!-- v0.3.x —— deps 形态专属状态徽章。应用内 slash `/bootstrap` 打开的这块面板
+               和首启向导共用同一个组件，光看布局容易混；徽章把「后端到底在不在跑」
+               直接摆出来，一眼区分「运行中改配置」vs「首次启动」。
+               classic 形态不显示 —— 那时候后端本来就该是未就绪的，说了是废话。 -->
+          <span
+            v-if="mode === 'deps'"
+            class="mode-badge"
+            :class="servicesReady ? 'is-running' : 'is-stopped'"
+          >{{ servicesReady ? '后端运行中' : '后端未就绪' }}</span>
+        </div>
         <p class="subtitle">{{ mode === 'deps'
-          ? '重新选择项目目录 / 检测 Python / Docker；保存后通过「重启应用」生效'
+          ? '应用运行中：这里只调整项目目录 / Python / Docker 等前置依赖，改动需点「重启应用」才生效'
           : '启动需要检测并配置以下依赖项' }}</p>
       </div>
 
@@ -179,9 +232,9 @@
       <!--
         底部按钮区：
         - classic 模式（冷启动）：保留「重新检测 / 停止启动 / 启动应用|进入应用|启动中」旧逻辑
-        - deps 模式（slash `/bootstrap` 唤起）：「重新检测 / 保存 / 重启应用 / 进入应用」四按钮
-          没有 launching/cancelling 概念（不调 bootstrap IPC），
-          「进入应用」仅 servicesReady=true 时可点（其它时候 disabled + 灰色提示）
+        - deps 模式（slash `/bootstrap` 唤起）：「重新检测 / 保存 / 重启应用 / 关闭」四按钮
+          没有 launching/cancelling 概念（不调 bootstrap IPC），「关闭」永远可点
+          （v0.3.2 替代「进入应用」—— 见下方 deps 按钮区注释）
       -->
       <div v-if="mode === 'classic'" class="actions">
         <button class="btn-secondary" @click="recheck" :disabled="checking || launching || cancelling">
@@ -230,13 +283,17 @@
       </div>
 
       <!--
-        deps 模式按钮区：四按钮「重新检测 / 保存 / 重启应用 / 进入应用」
+        deps 模式按钮区：四按钮「重新检测 / 保存 / 重启应用 / 关闭」
         - 「重新检测」：仅触发 probe-all，不动文件
         - 「保存」：把 autoEnterFrontend + 项目根切换（如有）写盘，发 emit preference-changed
           让 App.vue 同步 _autoEnterPreference，立即影响 slash 命令列表可见性
         - 「重启应用」：emit restart-requested → App.vue handleRestartBackend（共用 .restart-mask）
-        - 「进入应用」：emit enter-app → App.vue 翻 appReady=true，
-          仅 servicesReady=true 可点（否则 disabled + 灰色，避免用户「跳过后端启动」误触）
+        - 「关闭」：emit close → App.vue onBootstrapCloseFromStartup。
+          路由逻辑：主界面（appReady=true）打开时关面板直接回主界面；启动期（appReady=false）打开时
+          关面板回到 StartupLoadingView，onServicesReadyChange 翻 appReady=true 自动进主界面。
+          —— 「进入应用」按钮已被砍掉：原 `enter-app` emit 在两条 deps 路径都无效
+          （主界面 `appReady=true` 触发 onEnterApp 的 `!appReady` guard 短路；
+           启动期 onServicesReadyChange 已经自动翻 appReady=true，不需要手动 emit）。
       -->
       <div v-else class="actions deps-actions">
         <button
@@ -256,16 +313,16 @@
         >重启应用</button>
         <button
           class="btn-primary"
-          :disabled="!servicesReady"
-          :title="servicesReady ? '进入主界面' : '后端未就绪，请先点「重启应用」'"
-          @click="enterApp"
-        >进入应用</button>
+          @click="closeDepsPanel"
+          title="关闭此面板"
+        >关闭</button>
       </div>
 
       <div v-if="launchError" class="error-bar">
         启动失败：{{ launchError }}
       </div>
-    </div>
+      </div><!-- /.bootstrap-card -->
+    </div><!-- /.bootstrap-card-wrap -->
   </div>
 </template>
 
@@ -299,13 +356,27 @@ export default {
       type: String,
       default: ''
     },
+    // v0.3.x —— 主进程推来的「上次 bootstrap 失败原因」（App.vue `_bootstrapError`）。
+    // 场景：用户在本面板点「启动应用」→ 点 ✕ 切到等待动画 → 发起方（本组件）已卸载 →
+    // 失败时没人拿 IPC 返回值。主进程走独立通道推给 App.vue，App.vue 回退到本面板时
+    // 用这个 prop 把原因显示出来（mounted 里灌进 launchError）。
+    initialError: {
+      type: String,
+      default: ''
+    },
   },
   // v0.3.x 扩展 emits：
-  //   - 'enter-app'           : 用户点「进入应用」按钮（两模式都发）→ App.vue 翻 appReady
+  //   - 'enter-app'           : 仅 classic 模式「进入应用」按钮 → App.vue 翻 appReady
+  //                             （v0.3.2 起 deps 模式改「关闭」，不再发 enter-app）
   //   - 'restart-requested'   : 仅 deps 模式「重启应用」按钮 → App.vue handleRestartBackend
   //   - 'preference-changed'  : 仅 deps 模式「保存」按钮 → App.vue 同步 _autoEnterPreference，
   //                             让 slash `/bootstrap` 命令列表可见性立即更新
-  emits: ['enter-app', 'restart-requested', 'preference-changed'],
+  //   - 'close'               : v0.3.x 仅 deps 模式右上角 ✕ 按钮 / 操作区「关闭」按钮
+  //                             → App.vue 关闭本面板（bootstrap 后台继续跑，不发 cancelBootstrap）
+  //   - 'close-classic'       : v0.3.x 仅 classic 模式右上角 ✕ 按钮 → App.vue 翻
+  //                             _autoEnterPreference=true + _startupLoadingVisible=true
+  //                             （让用户看到 loading；后端起来后 onServicesReadyChange 自动进 app）
+  emits: ['enter-app', 'restart-requested', 'preference-changed', 'close', 'close-classic'],
   data() {
     return {
       // 项目目录独立于 items：必须先确定 lingxi/ 根目录才能做后续
@@ -359,12 +430,47 @@ export default {
       // 在 mounted() 里通过 IPC startup:get-default-clone-target 拿到真实 OS 家目录，
       // 这里先用占位符 '~' 兜底（极短窗口，recheck 期间可见）。
       defaultCloneTarget: '~',
+      // v0.3.x —— 'startup:log' 退订函数（preload 的 onStartupLog 返回）。
+      // 必须存下来在 beforeUnmount 调：本组件是「启动状态的两个视图」之一，
+      // 用户 ✕ / ⚙ 来回切会让它反复 mount，不退订就累积 listener →
+      // 每行日志被 N 个历史 listener 各 append 一次 → 日志重复 N 份。
+      _logUnsubscribe: null,
     }
   },
   computed: {
     allOk() {
       // 启动按钮可用 = 项目根 + 2 项基础检查都 ok
       return this.projectRoot.ok && this.items.every(i => i.ok)
+    },
+    /**
+     * 右上角 ✕ 是否渲染。
+     * - deps 形态：始终显示（关闭 = 回主界面 / 回到等待动画视图）
+     * - classic 形态：**必须同时**满足「勾了 autoEnter」+「启动确实在跑或已就绪」
+     *
+     * 为什么 classic 要两个条件：
+     *  1) 没勾 autoEnter → 关掉面板既不会自动进前端、也没有另一个视图可切，✕ 是死路，
+     *     用户必须走「启动应用」→「进入应用」；
+     *  2) 勾了但启动没在跑（用户只是在面板里勾了框、还没点「启动应用」）→ 切到等待动画
+     *     会得到一个永远转圈、背后什么都没发生的假动画。主进程的 startup:bootstrap
+     *     **没有并发守卫**（bootstrapSession 会被第二次调用覆盖），所以也不能由 App.vue
+     *     补发一次来救场 —— 只能不给这个入口。
+     * 「启动中」时 ✕ 才是真的有意义：收起面板、看真实进度，启动完成自动进主界面。
+     */
+    showCloseCorner() {
+      if (this.mode === 'deps') return true
+      return this.autoEnterFrontend && (this.launching || this.servicesReady)
+    },
+    /**
+     * ✕ 的 tooltip。分三种，因为同一个 ✕ 在三种情境下关掉之后落到哪儿不一样：
+     *  - classic：切到等待动画视图（启动完成后自动进前端）
+     *  - deps + 后端还在启动：关面板 → 回到等待动画继续看进度（启动不中断）
+     *  - deps + 后端已就绪：关面板 → 直接回主界面（这是从主界面 `/bootstrap` 打开后的正常出口）
+     */
+    closeCornerTitle() {
+      if (this.mode === 'classic') return '收起配置，看启动动画（启动完成自动进入应用）'
+      return this.servicesReady
+        ? '关闭此面板，回到主界面'
+        : '关闭此面板（不停止后台启动，可回到启动动画继续看）'
     },
   },
   watch: {
@@ -398,6 +504,13 @@ export default {
     }
   },
   async mounted() {
+    // v0.3.x —— 承接「上次 bootstrap 失败原因」（App.vue 从主进程独立失败通道拿到后下传）。
+    // 走这条路径说明用户当时点过 ✕ 切到等待动画、本组件已卸载，失败时没有发起方接住；
+    // 现在 App.vue 回退到 classic 面板，把原因显示在这里，用户直接看到失败原因而非空白面板。
+    if (this.initialError) {
+      this.launchError = this.initialError
+      this.logs += `[启动] ❌ 上次启动失败：${this.initialError}\n`
+    }
     if (window.electronAPI?.getStartupPreferences) {
       const preferences = await window.electronAPI.getStartupPreferences()
       this.autoEnterFrontend = preferences?.autoEnterFrontend === true
@@ -426,9 +539,9 @@ export default {
     if (!this.projectRoot.ok) {
       this.logs += '\n[启动] 未找到本地项目，请选择克隆 lingxi 仓库 / 指向已有目录\n'
     }
-    // 订阅日志流
+    // 订阅日志流（退订函数存起来，beforeUnmount 调 —— 见 data 里 _logUnsubscribe 注释）
     if (window.electronAPI?.onStartupLog) {
-      window.electronAPI.onStartupLog((data) => {
+      this._logUnsubscribe = window.electronAPI.onStartupLog((data) => {
         this.logs += data.msg
         this.$nextTick(() => {
           if (this.$refs.logBox) {
@@ -441,13 +554,33 @@ export default {
     // 自动启动：用户勾选了"启动完成后自动进入前端" + 服务未就绪 + 探测都通过 → 自动触发 bootstrap。
     // 勾了 autoEnter 时主进程 bootstrap 完成后会带 autoEnterFrontend=true 广播，App.vue 翻 appReady
     // 让 BootstrapView 卸载；这里只是发起 bootstrap 这一步。
-    if (this.autoEnterFrontend && !this.servicesReady && this.allOk) {
+    //
+    // ⚠️ `!this.initialError` 是必须的：本面板被渲染出来，很多时候正是因为「上次启动失败」
+    //    （App.vue onBootstrapFailed / _autoBootstrap 失败分支回退到这里）。而主进程在
+    //    bootstrap 开始时就已经把 autoEnterFrontend=true 写进了 userData，所以这里读到的是
+    //    true → 不加这个条件就会立刻再 launch 一次 → 失败 → 再回退 → 再 launch，**无限重试**。
+    //    失败后要重试必须由用户手动点「启动应用」（说明他做了修复动作）。
+    if (this.autoEnterFrontend && !this.servicesReady && this.allOk && !this.initialError) {
       this.$nextTick(() => this.launch())
     }
 
     // 抢焦点到主按钮（启动应用 / 进入应用 / 启动中…），回车直接触发。
     // 主按钮 v-if 三态（启动中 disabled / 进入应用 / 启动应用），自动选第一个非 disabled 的
     this.$nextTick(this.focusPrimaryBtn)
+
+    // Esc 关闭兜底：保证「面板一定关得掉」不依赖那个右上角按钮的可见性。
+    // 实测踩过：✕ 曾挂在 overflow-y:auto 的滚动容器里，内容一高就随内容滚出可视区，
+    // 用户看不到也点不到 → 只能重启应用。布局已修（✕ 移到不滚动的 .bootstrap-card-wrap），
+    // 但这类「视觉上消失 = 功能上消失」的回归很容易再犯，所以留一个键盘出口。
+    document.addEventListener('keydown', this.onDocumentKeydown)
+  },
+  beforeUnmount() {
+    // 摘掉 'startup:log' listener（本组件会被反复 mount —— 见 data 里 _logUnsubscribe 注释）
+    if (this._logUnsubscribe) {
+      this._logUnsubscribe()
+      this._logUnsubscribe = null
+    }
+    document.removeEventListener('keydown', this.onDocumentKeydown)
   },
   methods: {
     /**
@@ -652,7 +785,14 @@ export default {
       const result = await window.electronAPI.setAutoEnterFrontend(this.autoEnterFrontend)
       if (!result?.ok) {
         this.launchError = `保存启动偏好失败：${result?.error || '未知错误'}`
+        return
       }
+      // 同步给 App.vue 的 `_autoEnterPreference` 副本（它是「面板 ✕ 后该切到哪个视图」的判据）。
+      // ⚠️ 只对 **deps** 形态生效：App.vue 只给 deps 那个实例挂了 @preference-changed。
+      //    classic 实例故意不挂 —— classic 分支的渲染条件含 `!_autoEnterPreference`，
+      //    若挂上，用户在本面板一勾选就会把面板自己卸载掉（且此时没有别的视图可显示 = 空白）。
+      //    classic 侧不需要这个同步：`onBootstrapCloseClassic` 里会显式把它置 true。
+      this.$emit('preference-changed', { autoEnterFrontend: this.autoEnterFrontend })
     },
     /**
      * 在系统默认浏览器打开下载页。
@@ -790,6 +930,37 @@ export default {
       this.$emit('enter-app')
     },
     /**
+     * Esc 关闭兜底（mounted 挂 document / beforeUnmount 摘）。
+     * 与 ✕ 按钮**共用 showCloseCorner 这一个判断**，所以永远不会绕过它的规则
+     * （classic + 未勾 autoEnter + 启动没在跑时不响应，因为那种情况关掉面板 = 死路）。
+     */
+    onDocumentKeydown(e) {
+      if (e.key !== 'Escape') return
+      if (!this.showCloseCorner) return
+      e.preventDefault()
+      this.handleCloseCorner()
+    },
+    /**
+     * v0.3.x 右上角 ✕ 按钮统一处理：**只切视图 / 关面板，不退 app、不取消启动**。
+     * BootstrapView 与 StartupLoadingView 是同一个启动状态的两个视图，只显示一个，
+     * ✕ 等价于「切换到另一个」，启动完成后两边一起消失、自动进主界面。
+     *
+     * - classic 形态：emit('close-classic') → App.vue onBootstrapCloseClassic()
+     *   切到等待动画视图（StartupLoadingView）。启动还在后台跑，日志继续接；
+     *   完成后 onServicesReadyChange 收到 ready=true + autoEnter=true → 自动进 app。
+     *   ⚠️ 此分支只在 autoEnterFrontend 已勾选时可达（模板 v-if 挡掉了没勾的情况，
+     *      因为没勾时关面板 = 不会自动进 + 没别的视图可切 = 死路）。
+     * - deps 形态：emit('close') → App.vue onBootstrapCloseFromStartup()
+     *   关面板；启动还在跑则回到等待动画视图，已就绪则由主进程广播翻 appReady 进主界面。
+     */
+    handleCloseCorner() {
+      if (this.mode === 'classic') {
+        this.$emit('close-classic')
+      } else {
+        this.$emit('close')
+      }
+    },
+    /**
      * v0.3.x deps 模式「保存」按钮：
      * 显式持久化 autoEnterFrontend + 项目根切换（如有改动）。
      * 不发 bootstrap IPC —— 启动流程已由 App.vue 在 cold start 自动跑过，
@@ -807,9 +978,10 @@ export default {
       if (this.checking) return  // 防止 recheck 进行中点保存撞 race
       // autoEnterFrontend 在 checkbox change 时已经实时写盘；这里再保险写一次，
       // 即便用户没动 checkbox（比如只改了项目根）也保证偏好最新。
+      // ⚠️ 不要再在这里 emit 'preference-changed' —— saveAutoEnterPreference() 内部
+      // 已经 emit 了一次（deps 实例挂了该监听），重复 emit 会让 App.vue 的
+      // onBootstrapPreferenceChanged 白跑一趟。
       await this.saveAutoEnterPreference()
-      // 通知 App.vue 同步本地偏好副本 → slash 命令列表可见性立刻更新
-      this.$emit('preference-changed', { autoEnterFrontend: this.autoEnterFrontend })
       // 进入主界面（deps 模式默认 servicesReady=true，否则「进入应用」按钮也点不动）
       this.enterApp()
     },
@@ -825,6 +997,20 @@ export default {
       if (this.checking) return
       this.$emit('restart-requested')
     },
+    /**
+     * v0.3.2 deps 模式「关闭」按钮：关面板回原视图。
+     * 等价于 handleCloseCorner 的 deps 分支，统一发 'close' 让 App.vue onBootstrapCloseFromStartup 处理：
+     *   - 主界面（appReady=true）打开：关面板 → 直接回主界面
+     *   - 启动期（appReady=false）打开：关面板 → 回 StartupLoadingView →
+     *     onServicesReadyChange 翻 appReady=true 自动进主界面
+     *
+     * 单独提一个方法（不直接复用 handleCloseCorner）让按钮的语义自洽——
+     * 「关闭」就是关闭，没有「切视图」那种语义负担。
+     */
+    closeDepsPanel() {
+      if (this.checking) return
+      this.$emit('close')
+    },
   },
 }
 </script>
@@ -838,7 +1024,10 @@ export default {
 .bootstrap-overlay {
   position: fixed;
   inset: 0;
-  z-index: 1000;
+  /* v0.3.x z-index 1000 → 2100：盖住 StartupLoadingView（2000），确保从 StartupLoadingView
+     「⚙ 启动配置」按钮唤起的 deps 形态不会被盖住看不到。同时 App.vue 仍调
+     _startupLoadingVisible=false 隐藏 loading（避免两个浮层同时呈现视觉混乱）。 */
+  z-index: 2100;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -857,11 +1046,20 @@ export default {
   -webkit-backdrop-filter: blur(4px);
 }
 
-.bootstrap-card {
+/* v0.3.x —— 卡片外层「不滚动的定位壳」。
+   尺寸约束（width/max-width/z-index）从 .bootstrap-card 移到这里，
+   这样 ✕ 锚在壳的右上角 = 卡片可视区右上角，且**不随卡片内容滚动**。
+   壳自身不设 overflow —— 滚动只发生在里面的 .bootstrap-card 上。 */
+.bootstrap-card-wrap {
   position: relative;
   z-index: 1;
   width: 100%;
   max-width: 640px;
+}
+
+.bootstrap-card {
+  position: relative;
+  width: 100%;
   max-height: calc(100vh - 48px);
   overflow-y: auto;
   background: var(--bg-secondary, #ffffff);
@@ -871,6 +1069,32 @@ export default {
   display: flex;
   flex-direction: column;
   animation: bootstrap-card-in 0.25s ease-out;
+}
+
+/* v0.3.x 右上角 ✕ 按钮：absolute 定位不占 flex 空间。
+   ⚠️ 必须挂在 .bootstrap-card-wrap 上（不滚动），**不能**挂进 .bootstrap-card
+   （overflow-y: auto 的滚动容器）—— 挂里面会跟着内容滚出可视区，用户就关不掉了。 */
+.deps-close-corner {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text-secondary, #6b7280);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  z-index: 2;
+}
+.deps-close-corner:hover {
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--text-primary, #1a1a1a);
+  border-color: var(--border-color, rgba(0, 0, 0, 0.1));
 }
 
 @keyframes bootstrap-fade-in {
@@ -961,6 +1185,49 @@ export default {
   margin: 0;
   font-size: 13px;
   color: var(--text-secondary, #6e6e73);
+}
+
+/*
+ * ===== deps 形态（应用内 slash `/bootstrap` 打开）的视觉区分 =====
+ * 和 classic 首启向导共用同一个组件，光看布局容易混。三层区分：
+ *   ① 标题左侧强调竖线（--primary-color）
+ *   ② 标题右侧状态徽章（后端运行中 / 未就绪）
+ *   ③ 副标题文案直说「应用运行中」
+ * 必须写在 .bootstrap-header h2 / .subtitle 之后 —— 同特异度靠顺序覆盖。
+ */
+.bootstrap-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+.bootstrap-title-row h2 {
+  /* 覆盖 .bootstrap-header h2 的 `margin: 0 0 4px`：间距交给 .bootstrap-title-row 管 */
+  margin: 0;
+}
+.bootstrap-card--deps .bootstrap-title-row h2 {
+  padding-left: 10px;
+  border-left: 3px solid var(--primary-color, #3b82f6);
+}
+
+.mode-badge {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  padding: 4px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+/* 运行中：用应用主绿（--button-bg），与「可用」语义一致 */
+.mode-badge.is-running {
+  color: var(--button-hover, #0d8c6d);
+  background: rgba(16, 163, 127, 0.13);
+}
+/* 未就绪：琥珀警示，与导出 / 权限等提示色一致 */
+.mode-badge.is-stopped {
+  color: #b45309;
+  background: rgba(255, 149, 0, 0.15);
 }
 
 .check-list {

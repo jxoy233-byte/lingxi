@@ -5,10 +5,14 @@ ChatMe 全局配置加载器
 import os
 import json
 import shutil
+import logging
 from pathlib import Path
 from typing import Any, Optional
 
 from ChatMe.paths import get_chatme_dir
+
+
+logger = logging.getLogger(__name__)
 
 
 class ChatMeConfig:
@@ -129,7 +133,7 @@ class ChatMeConfig:
         default_config = {
             "app": {
                 "name": "ChatMe",
-                "version": "v0.3.1",
+                "version": "v0.3.2",
                 "description": "ChatMe LangGraph Workflow",
                 "host": "127.0.0.1",
                 "port": 38211,
@@ -282,22 +286,35 @@ class ChatMeConfig:
         """获取当前生效的 LLM 配置。
 
         优先级：
-        1) 模块级 `_active_provider_name`（self_check_llm 探测成功后的实际可用 provider）
-        2) chain[0]（chain 里第一个有效项，传统意义上的「主用」）
+        1) 用户显式 llm_providers.active 字段（最高优先，让用户手动覆盖 self_check_llm 探测）
+        2) self_check_llm 探测成功的 provider（_active_provider_name）
+        3) chain[0]（chain 里第一个有效项，传统意义上的「主用」）
 
         为什么需要这套逻辑：用户在首次启动时配的 model1 可能是占位 key（fake key 让后端
         能软启动），self_check_llm 探测时 model1 → 401 → 降级到 model2 成功。这之后
-        ChatWorkflow.init_llms 必须用 model2，不能用 model1 的占位 key，否则每个请求
+        ChatWorkflow.get_llm 必须用 model2，不能用 model1 的占位 key，否则每个请求
         都会 401 + fallback 重试浪费延迟。返回空 dict 表示未配置。
         """
         chain = self.get_llm_providers_chain()
-        # 优先返回 self_check_llm 探测成功的 provider
+        if not chain:
+            return {}
+
+        # 1) 用户显式 active（最高优先 — SettingsDialog 让用户手动选主备）
+        user_active = self.get("llm_providers.active")
+        if user_active:
+            for p in chain:
+                if p["name"] == user_active:
+                    return p
+
+        # 2) self_check_llm 探测结果
         active_name = _get_active_provider_name()
         if active_name:
             for p in chain:
                 if p["name"] == active_name:
                     return p
-        return chain[0] if chain else {}
+
+        # 3) chain[0]
+        return chain[0]
 
     def get_backup_llm_config(self) -> dict:
         """获取备用 LLM 配置（链中与 active 不同的另一个有效项）；空 dict 表示没有备用。
@@ -626,6 +643,16 @@ class ChatMeConfig:
         if isinstance(perms, dict):
             result["permissions"] = dict(perms)
 
+        # 运行时 active provider name（不写入 config.json）：
+        #   用户显式 llm_providers.active > self_check_llm 探测 > chain[0]
+        # 让 SettingsDialog 在「用户没显式选过 active」时也能把 radio 勾到当前生效的那个
+        # （避免重启后看到 active bar 显示「未显式指定」+ 所有 radio 都未勾的混乱态）。
+        # 前端读 cfg.active_provider，user_explicit(cfg.llm_providers.active) 优先；
+        # 都不存在时 fall back 到 cfg.active_provider。
+        active_cfg = self.get_active_llm_config()
+        if active_cfg and "name" in active_cfg:
+            result["active_provider"] = active_cfg["name"]
+
         return result
 
     def save_config(self, updates: dict) -> dict:
@@ -658,6 +685,10 @@ class ChatMeConfig:
         # 准备要写入的 merged 配置（不动内存中的 _config；只写文件，避免污染后续 _load()）
         current = json.loads(json.dumps(self._config))  # 深拷贝
 
+        # 保存旧 llm_providers 快照（用于 llm_factory invalidate_for_providers
+        # 比较前后 cache key 差异）。在 updates 合并前抓，避免被覆盖。
+        new_providers_snapshot = json.loads(json.dumps(current.get("llm_providers") or {}))
+
         saved_keys = []
         saved_segments: list[str] = []
         # === llm_providers ===
@@ -665,6 +696,20 @@ class ChatMeConfig:
         if "llm_providers" in updates:
             current.setdefault("llm_providers", {})
             for prov_name, prov_cfg in updates["llm_providers"].items():
+                # active 是 meta 字段（字符串 = provider name），不是 provider 字典。
+                # 单独处理：直接写字符串值，不走 provider 字段迭代。
+                # 不加这个分支会让前端发 `{llm_providers: {active: "model2"}}` 时
+                # `isinstance(prov_cfg, dict)` 为 False → continue → 什么都不保存，
+                # 用户以为点 Save 没生效（实测反馈）。
+                if prov_name == "active":
+                    if prov_cfg is None:
+                        # 显式清空（用户取消勾选所有 active）
+                        current["llm_providers"].pop("active", None)
+                    else:
+                        current["llm_providers"]["active"] = prov_cfg
+                    saved_keys.append("llm_providers.active")
+                    llm_keys.append("llm_providers.active")
+                    continue
                 if not isinstance(prov_cfg, dict):
                     continue
                 current["llm_providers"].setdefault(prov_name, {})
@@ -739,9 +784,11 @@ class ChatMeConfig:
         # 热加载策略：
         # - permissions / skills 段：每次 get() 重读磁盘（mtime check），保存后下一次
         #   get_skills_config() / get_permissions_config() 自动拿到新值 → restart_required=False
-        # - llm_providers 段：ChatOpenAI / Redis client / VL model weights 都是启动期
-        #   构造的长生命周期对象，写文件不会影响已构造的 client → restart_required=True
-        restart_required = "llm_providers" in saved_segments
+        # - llm_providers 段：v0.3.x 起 ChatOpenAI 实例走 llm_factory 懒加载 cache
+        #   （cache key = api_key_fp + base_url + model_name），save_config 时主动
+        #   invalidate → 下次调用自动用新配置 → restart_required=False
+        # 也就是说：所有段都热生效，restart_required 永远为 False。
+        restart_required = False
 
         # 清掉 mtime 缓存 → 下次 _load() 必然重读（即使 stat() 拿到的 mtime 与
         # 写之前一样——某些 fs mtime 精度只到秒，os.replace 后新 inode 的 mtime
@@ -764,6 +811,25 @@ class ChatMeConfig:
                 # Permissions 模块未初始化（极端情况，如只在 ChatMeConfig 单测中调）
                 # 不影响主流程
                 logger.warning(f"permissions 热重载跳过: {e}")
+
+        # 同步热重载 llm_factory cache（ChatWorkflow 的 5 个 LLM 角色 + VL 用）——
+        # 用户改 llm_providers.api_key / base_url / model_name 后无需重启后端，
+        # cache key 变了 → 旧实例被 invalidate_for_providers 清掉 → 下次调用
+        # llm_factory.get_llm() 自动 new 一个用新配置的 ChatOpenAI。
+        if "llm_providers" in saved_segments:
+            try:
+                from ChatMe.ChatWorkflow import llm_factory
+                cleared = llm_factory.invalidate_for_providers(
+                    current.get("llm_providers") or {},
+                    new_providers_snapshot,  # 见下方原子写之前保存的快照
+                )
+                if cleared:
+                    logger.info(
+                        f"[llm_factory] invalidated {cleared} ChatOpenAI 实例"
+                        f"（用户改了 llm_providers，下次调用自动用新配置）"
+                    )
+            except Exception as e:
+                logger.warning(f"llm_factory 热重载跳过: {e}")
 
         return {
             "ok": True,

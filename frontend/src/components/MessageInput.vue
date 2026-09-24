@@ -356,14 +356,15 @@ export default {
       // 静态 action 命令清单（永远在前，不依赖后端返回）：
       // 这些是纯前端动作（打开弹窗 / 刷新页面），name 不会发往后端，无命名约束。
       // kind: 'action' → emit front-action 给 App.vue，不发后端。
-      // v0.3.x：与 App.vue.staticActionCommands 保持完全一致（CLAUDE.md 偏好）。
-      // `bootstrap` 命令防御 gate 在 App.vue runFrontAction 内做（autoEnter=false 不响应），
-      // 这里始终列出，不做动态加减——保持命令面板与 HelpDialog 三处一致。
+      // v0.3.x：与 App.vue.staticActionCommands **逐字一致**（CLAUDE.md 偏好：两处副本必须同步，
+      // 否则 /help 弹窗与输入框 slash 面板显示的命令不一致）。
+      // 全部无条件列出、不做动态加减；前置条件不满足时由 App.vue.runFrontAction 用 showToast 提示。
       staticActionCommands: [
         { name: 'backtrack', kind: 'action', description: '打开历史版本面板' },
         { name: 'settings',  kind: 'action', description: '打开设置弹窗' },
         { name: 'setup',     kind: 'action', description: '打开安装 / 配置向导（首启推荐）' },
-        { name: 'bootstrap', kind: 'action', description: '重新打开前置依赖配置面板（项目根 / Python / Docker）' },
+        { name: 'bootstrap', kind: 'action', description: '打开前置依赖配置面板 / 查看启动进度（项目根 / Python / Docker）' },
+        { name: 'restart',   kind: 'action', description: '重启后端服务（kill 后重新拉起，等同断连横幅的「重新连接」）' },
         { name: 'reload',    kind: 'action', description: '刷新当前会话' },
         { name: 'worktree',  kind: 'action', description: '打开当前会话工作树' },
         { name: 'help',      kind: 'action', description: '显示本项目功能速览' }

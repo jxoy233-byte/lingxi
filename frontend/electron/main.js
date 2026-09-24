@@ -193,6 +193,10 @@ function pushBackendHealth(healthy, source) {
 /**
  * /health 探测：单次成功 → 推 true；失败累加计数，达阈值推 false。
  * 单次抖动（端口刚 kill / OS 回收 socket / 后端短暂 GC）不触发 banner。
+ *
+ * ⚠️ 走 checkBackendHealth 的**默认**语义（纯 /health，不校验 PID 归属）——
+ * 这是运行时监测，后端已经接管了，只关心「还响应不响应」。
+ * 归属校验只在 app.whenReady 的启动接管决策里做（requireOwnership: true）。
  */
 async function runHealthCheck() {
   if (await checkBackendHealth()) {
@@ -1048,12 +1052,57 @@ function setupSecurityPolicies() {
  * 后端健康检查：直接探 /health。
  * 端口 listen ≠ 服务 ready（FastAPI 启动 + 注册路由后才认 200），
  * 用端口探测会把"已 bind 但还没响应"的中间态当成 OK，跳过引导后立刻 502。
+ *
+ * ⚠️ 这个函数有**两种语义**，靠 requireOwnership 区分，混用会出 bug：
+ *
+ *   1) `requireOwnership: false`（默认）—— 「我的 backend 还活着吗？」
+ *      纯 /health 探测。**运行时**用它：5s 健康监测 runHealthCheck、
+ *      renderer mount 快照 get-health。这时后端是我们自己起的、已经接管了，
+ *      只需要知道它还响应不响应。
+ *
+ *   2) `requireOwnership: true` —— 「端口上这个 backend 是我 Lingxi 启的吗？」
+ *      额外校验 PID lockfile（见下方注释）。**只在启动时接管决策**用
+ *      （app.whenReady 里那一次）。
+ *
+ * 为什么必须分开：把归属校验塞进运行时监测会导致「后端活着但被判定失联」——
+ * 只要 PID 对不上（例：上一条老版本 build 起的 backend 没有 backend.pid /
+ * 后端原地重启换了 PID），5s 监测就会连失 2 次 → 推 backend=false →
+ * 用户看到「后端服务已断开连接」红条，而 /health 其实一直是 200。
  */
-function checkBackendHealth() {
+function checkBackendHealth({ requireOwnership = false } = {}) {
   return new Promise(resolve => {
     const req = http.get(`http://127.0.0.1:${currentBackendPort}/health`, res => {
       res.resume()
-      resolve(res.statusCode === 200)
+      const httpOk = res.statusCode === 200
+      if (!httpOk) {
+        resolve(false)
+        return
+      }
+      if (!requireOwnership) {
+        resolve(true)
+        return
+      }
+      // /health 200 不等于「这个 backend 是 Lingxi 自己启的」—— 端口可能被别人占
+      // （用户手动 python main.py 调试 / 上一个 Lingxi 实例残留 backend）。必须再校验
+      // PID lockfile：当前占用 currentBackendPort 的进程 PID 必须等于 Lingxi 写的 backend.pid。
+      // 不匹配 → 视为「端口被别人占，不是我们的 backend」→ 返 false 让 Lingxi 走 cold path
+      // 显示 BootstrapView classic，让用户手动启动自己的 backend。
+      const expectedPid = readBackendPid()
+      if (!expectedPid) {
+        // 没有 PID lockfile → 不是本实例（或本版本之前的实例）起的 backend。
+        // 这条路径上即使端口健康也不能接管 —— 走 cold path 让用户自己启，
+        // 启的过程中 killPortIfListening 会清掉这个来路不明的 backend，写上新 PID。
+        console.log(`[health] /health OK 但无 backend.pid lockfile → 不接管`)
+        resolve(false)
+        return
+      }
+      const listeningPid = portListeningPid(currentBackendPort)
+      if (listeningPid && listeningPid !== expectedPid) {
+        console.log(`[health] /health OK 但端口 PID=${listeningPid} ≠ Lingxi backend.pid=${expectedPid} → 不接管`)
+        resolve(false)
+        return
+      }
+      resolve(true)
     })
     req.on('error', () => resolve(false))
     // 3s timeout（之前 1.5s 太短）：FastAPI 启动期 uvicorn 已经 LISTEN 但 lifespan
@@ -1799,7 +1848,92 @@ function killChild(procRef, name) {
     procRef.value = null
   }
 }
-const backendProcRef = { value: null }  // 替 backendProcess 存引用，封装 kill
+let backendProcRef = { value: null }  // 替 backendProcess 存引用，封装 kill
+
+/**
+ * backend.pid lockfile：Lingxi 启动 backend 时把进程 PID 写到 userData/backend.pid。
+ * checkBackendHealth 时同时检查 38211 端口的 listener PID 是否与 lockfile 匹配 —
+ * 不匹配（端口被别人占，如用户手动 python main.py 跑的 dev backend、上一实例残留）
+ * → 返 false 让 Lingxi 走 cold path 显示 BootstrapView classic，让用户手动启动
+ * 自己的 backend，避免跨实例接管。
+ *
+ * Lingxi 启动时（will-quit / proc.exit / killChild）清理 lockfile，避免 stale 文件。
+ */
+const BACKEND_PID_FILE = 'backend.pid'
+function backendPidFilePath() {
+  return path.join(app.getPath('userData'), BACKEND_PID_FILE)
+}
+function writeBackendPid(pid) {
+  try {
+    fs.writeFileSync(backendPidFilePath(), String(pid))
+  } catch (e) {
+    console.warn('[backend] 写 PID lockfile 失败（继续启动）:', e.message)
+  }
+}
+function clearBackendPid() {
+  try {
+    fs.unlinkSync(backendPidFilePath())
+  } catch (e) {
+    // 不存在也无所谓
+    if (e?.code !== 'ENOENT') {
+      console.warn('[backend] 清 PID lockfile 失败:', e.message)
+    }
+  }
+}
+function readBackendPid() {
+  try {
+    const raw = fs.readFileSync(backendPidFilePath(), 'utf8')
+    const pid = parseInt(raw.trim(), 10)
+    return Number.isFinite(pid) && pid > 0 ? pid : null
+  } catch {
+    return null
+  }
+}
+/**
+ * 用 `lsof -nP -tiTCP:<port> -sTCP:LISTEN` 拿 38211 端口的 LISTEN 进程 PID。
+ * macOS / Linux 通吃（lsof 跨平台）；Windows 用 `netstat -ano | findstr :PORT` 单独处理。
+ * 返 null = 端口空闲 / 拿不到 / 不是预期 PID。
+ */
+function portListeningPid(port) {
+  try {
+    if (IS_WIN) {
+      const { execSync } = require('child_process')
+      const out = execSync(`netstat -ano | findstr :${port}`, { encoding: 'utf8' })
+      // 行格式: "  TCP    0.0.0.0:38211    0.0.0.0:0    LISTENING    12345"
+      for (const line of out.split(/\r?\n/)) {
+        if (!line.includes('LISTENING')) continue
+        const parts = line.trim().split(/\s+/)
+        const pid = parseInt(parts[parts.length - 1], 10)
+        if (Number.isFinite(pid)) return pid
+      }
+      return null
+    }
+    const { execSync } = require('child_process')
+    const out = execSync(`lsof -nP -tiTCP:${port} -sTCP:LISTEN`, { encoding: 'utf8' })
+    const pid = parseInt(out.trim().split(/\s+/)[0], 10)
+    return Number.isFinite(pid) ? pid : null
+  } catch {
+    return null
+  }
+}
+/**
+ * Lingxi 启动时清理 stale backend.pid：
+ * PID 文件存在但对应进程已死 → 删（避免新 Lingxi 实例启动时误把别人的 PID 当成自己的）。
+ * PID 文件存在且 PID 还活着 → 不动。
+ */
+function cleanupStaleBackendPid() {
+  const pid = readBackendPid()
+  if (!pid) return
+  try {
+    process.kill(pid, 0)  // signal 0 = 检测进程是否存在
+    // 还活着 → 保留 PID 文件（可能另一个 Lingxi 实例正在用）
+  } catch (e) {
+    // 进程已死 → 清理
+    if (e?.code === 'ESRCH') {
+      clearBackendPid()
+    }
+  }
+}
 
 async function startBackend(onLog) {
   const root = requireProjectRoot()
@@ -1844,6 +1978,8 @@ async function startBackend(onLog) {
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   backendProcRef.value = proc
+  // 写 PID lockfile，让 checkBackendHealth 能识别「这个 Lingxi 实例启的 backend」
+  writeBackendPid(proc.pid)
 
   // stdout/stderr 推到引导页日志，让用户能看到 traceback / ImportError 等真实原因
   proc.stdout?.on('data', d => {
@@ -1858,6 +1994,8 @@ async function startBackend(onLog) {
   })
   proc.on('exit', (code) => {
     console.log('[backend] exited:', code)
+    // 清 PID lockfile（不论正常退出还是异常死），避免下一次启动读到 stale PID
+    clearBackendPid()
     // 后端意外退出（非 0 退出码 + 不是正常 SIGTERM/SIGKILL）→ 立即推一次 health check
     // 让 banner 尽早出现。50ms 后跑 runHealthCheck（连失败阈值=2，约 10s 内出 banner）。
     // 之前 5s 间隔发现 → 用户看到 403 一脸懵；现在提前到 next tick 推 + 连失败阈值兜底。
@@ -1949,6 +2087,27 @@ function setServicesReady(ready, payload = {}) {
     // 重启窗口期：立即推 backendHealth=false，让 banner 立刻出现，不等 5s 间隔。
     // 这是权威信号（用户主动点重启），不走连续失败计数阈值。
     pushBackendHealth(false, 'restart-kill')
+  }
+}
+
+/**
+ * 推「bootstrap 失败」事件给 renderer。
+ *
+ * 为什么需要独立通道（不复用 setServicesReady）：
+ * bootstrap 失败时 setServicesReady(false) 几乎必然被去重（servicesReady 本来就是
+ * false）→ 广播不出去。发起 bootstrap 的一方（App.vue 的 _autoBootstrap 或
+ * BootstrapView.launch）手里虽有 IPC 返回值可展示错误，但 v0.3.x 起两个视图互斥：
+ * 用户可能已经切到等待动画、发起方组件已卸载 → 没人处理失败 → 动画永远转。
+ * 这条通道不参与任何去重，保证「失败了」这个事实一定送达当前可见的那个视图。
+ *
+ * 消费方：App.vue onBootstrapFailed → 关等待动画 + 回退 classic BootstrapView
+ * （autoEnter 会话内降级为 false）并把 error 透给面板展示。
+ * 注意只降级**会话内**的 _autoEnterPreference，不动 userData 里持久化的偏好
+ * （用户勾了就尊重，下次启动仍按 autoEnter 尝试）。
+ */
+function sendBootstrapFailed(error) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('startup:bootstrap-failed', { error: error || '' })
   }
 }
 
@@ -2136,6 +2295,21 @@ function registerStartupIpc() {
     // 翻 cancelled 后不会真抛给用户「启动失败」——catch 块识别 err.code === 'BOOTSTRAP_CANCELLED'
     // 后返 { ok: false, cancelled: true }，UI 把它当成「正常取消」处理（按钮回到「启动应用」可点）。
     bootstrapSession = { cancelled: false, startedAt: Date.now() }
+    // v0.3.2 修：warm-path 早返回。servicesReady 已 true = 后端已经过完整的
+    // startBackend + /health 200 校验在跑，跳过 probe + startBackend 直接返 ok。
+    // 不加这个早返回会：
+    //   1) probe steps 重复跑（~50-200ms × 4，纯浪费）；
+    //   2) startBackend() 杀掉已起的 backend 进程再起一个 → 用户看到「第二次重启」动画
+    //      + 重复 startup logs（handleRestartBackend → refreshPage → 重新挂载 App.vue 后
+    //      _autoBootstrap() 调到这里触发）；
+    //   3) backend 短暂 down + up 期间，App.vue 的 banner 状态会闪一下。
+    // servicesReady=true 是「后端健康」的可信信号（只在 startBackend 轮询 /health 200 后才翻 true）。
+    // 若后续 backend 挂了，runHealthCheck / backendProcRef 'exit' handler 会兜住。
+    if (servicesReady) {
+      console.log('[bootstrap] warm path: servicesReady=true, skipping probe + startBackend')
+      bootstrapSession = null
+      return { ok: true }
+    }
     try {
       // 1. uv
       checkBootstrapCancelled()
@@ -2194,6 +2368,13 @@ function registerStartupIpc() {
       // 杀不到；但保险起见再清一次，防止某步没正确 unregister）
       killTrackedChildren('bootstrap-failed')
       setServicesReady(false)
+      // ⚠️ 上面的 setServicesReady(false) 在 servicesReady 本来就是 false 时会被
+      // 「servicesReady === ready 则早返回」去重掉 → **广播不出去**。
+      // 平时不致命（发起 bootstrap 的那一方手里有 IPC 返回值，自己展示错误）。
+      // 但 v0.3.x 起 BootstrapView 和 StartupLoadingView 是同一启动状态的两个视图：
+      // 用户在 classic 面板点 ✕ 切到等待动画后 BootstrapView 已卸载，此时失败就成了
+      // 「动画永远转、错误没人知道」。所以失败必须走一条**独立、不参与去重**的通道。
+      sendBootstrapFailed(err.message)
       return { ok: false, error: err.message }
     } finally {
       // 任何路径退出（成功 / 失败 / 取消）都清掉 bootstrapSession，避免下次启动
@@ -2253,6 +2434,7 @@ function registerStartupIpc() {
     // / lastBackendHealth / apiFailureCount），只读。
     // 真实状态由 runHealthCheck 的 5s 间隔维护 + API 调用结果维护，避免 get-health 快照
     // 和 runHealthCheck 互相干扰导致 banner 抖动。
+    // 同样是运行时语义：纯 /health，不校验 PID 归属（见 checkBackendHealth 注释）。
     const probe = await checkBackendHealth()
     if (probe) {
       // 单次成功：保守返回 true（不写 lastBackendHealth，避免后续 runHealthCheck 探测失败
@@ -2352,6 +2534,13 @@ app.whenReady().then(async () => {
   // file:// 协议拦截器（必须在 createWindow 之前注册）
   registerFileProtocolInterceptor()
 
+  // Lingxi 启动时清理 stale backend.pid lockfile：
+  // 上一次 Lingxi 实例异常退出（强杀 / 崩溃 / 关窗没走 will-quit）会留下 lockfile，
+  // 但进程已死 → 删。否则下次启动 readBackendPid() 会读到死 PID →
+  // checkBackendHealth 看到端口被另一个 backend 占 + PID 不匹配 → 走 cold path 显示
+  // BootstrapView，但 lockfile 残留可能误导日志诊断，先清掉。
+  cleanupStaleBackendPid()
+
   // 全局安全策略（app-level event，**只**在 app 启动时注册一次即可，
   // 两条进入主窗口的路径（端口都在用 / 引导完成）共用）。原代码在
   // createWindow() 之后再注册，逻辑上跟两条路径绑死、易漏。
@@ -2396,7 +2585,11 @@ app.whenReady().then(async () => {
   // 探测当前服务状态。已健康时直接置 servicesReady=true，App.vue 翻 appReady=true
   // 直接进主界面，BootstrapView 不会渲染。autoEnterFrontend 现在由 BootstrapView 消费，
   // 用来自动触发 bootstrap；这里不再分流到 setup 窗口。
-  const backendOk = await checkBackendHealth()
+  //
+  // ⚠️ requireOwnership: true —— 这是**启动接管决策**，唯一需要校验「端口上的 backend
+  // 是不是我 Lingxi 启的」的地方。运行时监测（runHealthCheck / get-health）走默认的
+  // 纯 /health 探测，否则 PID 对不上会把活着的后端判成失联（红条误报）。
+  const backendOk = await checkBackendHealth({ requireOwnership: true })
   // 初始化 health 状态机：用 pushBackendHealth 包装（mainWindow 还不存在，
   // 内部 webContents.send 会被跳过；runHealthCheck 5s 间隔会补推 IPC）。
   pushBackendHealth(backendOk, 'init')

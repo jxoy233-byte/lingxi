@@ -167,6 +167,11 @@ const SKIP_DIRS = new Set([
   'node_modules', '.git', '.venv', 'venv', '__pycache__', 'dist',
   'Trash', '.Trash', 'AppData', 'Windows', 'Program Files',
   'Downloads', 'downloads', 'Desktop', 'desktop',
+  // macOS TCC 保护目录：readdir 会触发「"灵析"想访问"文稿"文件夹」系统弹窗。
+  // 这个弹窗**每次启动都弹**且「允许」记不住（app 是 ad-hoc 签名，每次 build
+  // cdhash 变化 → TCC 当成另一个 app）。项目放进 ~/Documents 的场景本就少见，
+  // 直接不扫最省事——从源头不碰 TCC 管辖的目录，比让用户反复点「允许」正确。
+  'Documents', 'documents',
   // Linux 大目录（避免 maxVisits=4000 被吃掉扫不到项目）
   // .cargo / .rustup 是 registry cache / git refs，几乎不可能放项目源码
   '.cache', '.config', '.local', '.cargo', '.rustup',
@@ -179,10 +184,13 @@ const SKIP_DIRS = new Set([
  * BFS 优先扫的 home 下子目录（绝大多数用户把项目放这几个地方）。
  * 不扫全 home——一是隐私（不该 readdir 用户所有目录），二是速度。
  * 找不到再降级到 home 全量 BFS。
+ *
+ * ⚠️ 不要加 Documents / Desktop / Downloads —— macOS TCC 保护目录，readdir 会弹
+ *    「想访问"文稿"文件夹」系统授权框（见 SKIP_DIRS 注释）。
  */
 const COMMON_WORK_DIRS = [
   'Code', 'code', 'Projects', 'projects', 'work', 'workspace',
-  'repos', 'src', 'dev', 'Developer', 'Documents',
+  'repos', 'src', 'dev', 'Developer',
 ]
 
 /**
@@ -306,12 +314,63 @@ function startupPreferencesPath(app) {
   return path.join(app.getPath('userData'), STARTUP_PREFERENCES_FILE)
 }
 
+/**
+ * 当前 build 的唯一标识。从 .buildstamp.json 读 buildId：
+ *
+ * 来源：scripts/inject-build-id.js 在每次 `npm run electron:build:*` 之前自动跑
+ * （通过 preelectron:build:* 钩子），写入 `{ buildId: Date.now().toString() }`。
+ * electron-builder 的 extraResources 把 .buildstamp.json 复制到 packaged app 的
+ * Resources/ 目录，main.js 启动时通过 process.resourcesPath 读到。
+ *
+ * 为什么这个方案 100% 准：
+ * - 主动注入：build 脚本必然写一个新时间戳 → buildId 必然变
+ * - 不依赖文件 mtime 探测：用户改任何文件 / 只改一行 CSS 都触发（因为 prebuild 钩子必跑）
+ * - .buildstamp.json 加到 .gitignore → 不污染 git history
+ *
+ * dev 模式：app.getAppPath() 是源码目录，.buildstamp.json 也在这里 → 同字段读。
+ * packaged 模式：process.resourcesPath 指向 Resources/，.buildstamp.json 由 extraResources 复制过来。
+ *
+ * ⚠️ app 必须由 caller 传进来：本模块是纯 Node 模块（顶部注释），不 import electron，
+ * 直接引用 `app` 会 ReferenceError。走 saveStartupPreferences 时该错误不在 try 内，
+ * 会原样冒到 IPC → 前端显示「保存启动偏好失败：app is not defined」。
+ */
+function getCurrentBuildId(app) {
+  // packaged 模式优先读 process.resourcesPath（extraResources 目标位置）
+  const candidates = [
+    process.resourcesPath ? path.join(process.resourcesPath, '.buildstamp.json') : null,
+    app ? path.join(app.getAppPath(), '.buildstamp.json') : null,
+  ].filter(Boolean)
+  for (const stampPath of candidates) {
+    try {
+      const data = JSON.parse(fs.readFileSync(stampPath, 'utf8'))
+      return data.buildId || ''
+    } catch {
+      // 该路径不存在/不可读 → 试下一个
+    }
+  }
+  return ''
+}
+
 export function readStartupPreferences(app) {
   try {
     const raw = fs.readFileSync(startupPreferencesPath(app), 'utf8')
     const parsed = JSON.parse(raw)
+    // Build 变更检测：每次重新 build / 安装新版本时强制重置 autoEnterFrontend=false。
+    // prefs 文件里同时存了上次写入时的 buildId；读取时与当前 build 的 buildId
+    // （getCurrentBuildId 读 .buildstamp.json）对比，不匹配 → 视为「新 build」→
+    // 重置为 false（不写回文件，等下次用户主动勾选时 saveStartupPreferences 自然覆盖）。
+    // Why：重新 build 后 autoEnter UX 可能改动 / 修 bug，默认让用户走 manual 路径
+    // 重新确认一次比「沿用旧版本偏好可能撞坑」更安全。
+    const currentBuildId = getCurrentBuildId(app)
+    // parsed.buildId === undefined 视为新 build —— 兼容 v0.3.1 之前的 prefs（没有 buildId 字段）
+    if (parsed.buildId !== currentBuildId) {
+      return { autoEnterFrontend: false }
+    }
     return { autoEnterFrontend: parsed.autoEnterFrontend === true }
-  } catch {
+  } catch (err) {
+    // 静默 return false 会让「偏好永远存不下来」这种 bug 完全无声（真发生过：
+    // getCurrentBuildId 引用未定义的 app → 每次读都走这里）。至少留一条 warn。
+    console.warn('[setup] 读取启动偏好失败（按 false 处理）:', err.message)
     return { autoEnterFrontend: false }
   }
 }
@@ -319,9 +378,13 @@ export function readStartupPreferences(app) {
 export function saveStartupPreferences(app, preferences) {
   const p = startupPreferencesPath(app)
   fs.mkdirSync(path.dirname(p), { recursive: true })
+  // 写入时同时存 buildId，下次启动 readStartupPreferences 用它判断「是否新 build」。
   fs.writeFileSync(
     p,
-    JSON.stringify({ autoEnterFrontend: preferences.autoEnterFrontend === true }, null, 2),
+    JSON.stringify({
+      buildId: getCurrentBuildId(app),
+      autoEnterFrontend: preferences.autoEnterFrontend === true,
+    }, null, 2),
     'utf8'
   )
 }
@@ -437,8 +500,14 @@ function _scanAllProjectRoots(maxDepth = 5, maxVisits = 4000) {
     pushUnique(_bfsCollectAll(full, maxDepth, maxVisits))
   }
 
-  // 降级：home 全量
-  pushUnique(_bfsCollectAll(home, maxDepth, maxVisits))
+  // 降级：home 全量 BFS。**仅当常见目录一个都没命中**才跑——
+  // 之前这里无条件执行，导致 discoverProjectRoot 的 saved 分支（每次启动都调）
+  // 每次都要把整个 home 走一遍：既慢，又必然 readdir 到 TCC 保护目录。
+  // 常见目录命中即代表找到了项目，没必要再全盘扫（saved 分支要的也是「有没有
+  // 更新的副本」，而新副本绝大多数也落在常见目录里）。
+  if (collected.length === 0) {
+    pushUnique(_bfsCollectAll(home, maxDepth, maxVisits))
+  }
 
   return collected
 }

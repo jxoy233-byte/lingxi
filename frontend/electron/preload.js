@@ -60,9 +60,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setAutoEnterFrontend: (value) => ipcRenderer.invoke('startup:set-auto-enter', value === true),
 
   // 订阅实时日志（bootstrap 期间 stdout/stderr 流）
+  // ⚠️ 返回退订函数：BootstrapView / StartupLoadingView 是「同一启动状态的两个视图」，
+  //    用户来回切换会让组件反复 mount。不退订就会累积 listener →
+  //    ipcRenderer 每收到一行日志，所有历史 listener 各 append 一次 → 日志重复 N 份。
   onStartupLog: (callback) => {
     const handler = (_event, data) => callback(data)
     ipcRenderer.on('startup:log', handler)
+    return () => ipcRenderer.removeListener('startup:log', handler)
+  },
+
+  // 订阅「bootstrap 失败」（独立通道，不参与 setServicesReady 的去重 ——
+  // 失败时服务状态本来就已是 false，走 services-ready-changed 会广播不出去）。
+  // payload: { error: string }。同样返回退订函数。
+  onBootstrapFailed: (callback) => {
+    const handler = (_event, data) => callback(data)
+    ipcRenderer.on('startup:bootstrap-failed', handler)
+    return () => ipcRenderer.removeListener('startup:bootstrap-failed', handler)
   },
 
   // 服务就绪状态：renderer 首次 mount 拉一次（避免订阅前错过事件），
@@ -71,10 +84,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   //   - onServicesReadyChange：返 { ready, autoEnterFrontend? }；
   //     cold start 完成时 main 带 autoEnterFrontend 让 renderer 决定是否立刻翻 appReady；
   //     autoEnterFrontend=undefined 时 BootstrapView 不需要重渲染按钮（warm / false 都是 noop）。
+  //   同样返回退订函数（理由见 onStartupLog）。
   getServicesReady: () => ipcRenderer.invoke('startup:get-services-ready'),
   onServicesReadyChange: (callback) => {
     const handler = (_event, payload) => callback(payload)
     ipcRenderer.on('startup:services-ready-changed', handler)
+    return () => ipcRenderer.removeListener('startup:services-ready-changed', handler)
   },
 
   // ===== 健康监测（5s 轮询）=====

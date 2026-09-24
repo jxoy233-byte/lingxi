@@ -204,16 +204,24 @@ docker-compose up -d redis       # 端口 48211，密码 123456
 21. **静态文件 fallback（无 sid 才跨会话找 + Referer 推断 sid 优先）**：`APIRouter/static_file.py` `serve_cached_file` 精确路径命中失败时分流：**带 sid 路径**（dual regex 32+12 hex）找不到 → **直接 404**；**无 sid 路径**找不到 → 双层 fallback：先从 `Referer` header 正则提取 sid 作 `primary_sid`（32 位写前面，路径边界 `/[/?#]|$`），在 `cached/{primary_sid}/**` 下递归找；没命中再跨 `cached/*/` 所有 sid 找（按 `st_mtime` 最新返回）。**Why 只无 sid 才 fallback**：实际请求 URL 都带 sid，fallback 是少数兜底；带 sid fallback 会把"我自己 session 缺文件"变成"别人 session 同名图"。**Why Referer**：浏览器 `<img>` 加载 markdown 图片**不能**加自定义 header，EventSource 也不能；Referer 浏览器自动带。
 22. **删除会话行内二次确认（小红叉状态机）**：`ConversationItem.vue` 维护 `isConfirmingDelete`：第一次点 × → `confirming` class 变红 `rgba(239,68,68,0.12)` 底常显；第二次点红 × → **立刻** `isConfirmingDelete = false` 再 `$emit('delete')`；点别处 / Esc 取消（`mounted` 绑 `document.click` + `keydown(Escape)`，`beforeUnmount` 解绑）。**App.vue `deleteConversation` finally** 必须清理三件套（`stopStreamTimer` + 三个 Map/Set delete + `new Set(...)` 触发响应式）+ 当前会话切换（关 SSE + `cleanupLoadingState()` + `createNewChat()`）。
 23. **Electron 单窗口架构 + autoEnter 三态按钮**：单 BrowserWindow + 主界面永远在 DOM 里（`appReady=false` 时加 `.app-disabled` 灰显禁用），`<BootstrapView>` 浮窗叠加（fixed + z-index 1000 + backdrop-filter 模糊）。主进程 `let servicesReady = false`；bootstrap 完成后 `webContents.send('startup:services-ready-changed', { ready, autoEnterFrontend })` 推 object payload。warm / cold / warm-refresh 三条路径一律不闪 BootstrapView。**三态按钮**：`launching=true` → 「启动中...」disabled；`servicesReady=true && !autoEnterFrontend` → 「进入应用」emit `enter-app`；其他 → 「启动应用」（`!allOk` 时 disabled）。**避免双源真相**：`BootstrapView.servicesReady` 是 prop，不重复 invoke `getServicesReady`；所有 `appReady` 翻转都在 App.vue 一处。**重启路径**：`restartBackend()` 完成后 `setServicesReady(true, { autoEnterFrontend: true })` —— 用户已在 app 里，重启恢复直接交回交互权。
+24. **LLM 懒加载 + 热切换（v0.3.x）**：用户改 `llm_providers`（api_key / base_url / model_name / active）后**无需重启后端**，下次调用自动用新配置。设计：
+    - **`backend/ChatMe/ChatWorkflow/llm_factory.py`**：`WeakValueDictionary` 按 `(role, api_key_fp, base_url, model_name)` 缓存 `ChatOpenAI`；`get_llm("main")` cache miss → 自动 new，cache hit → 返回缓存实例（~0 耗时）。
+    - **5 个工作流角色共享同一实例**：`llm_core / agent_llm / agent_llm_with_done / summary_llm / react_compact_llm / llm_imp_ipt / should_end_llm` 都拿 `llm_factory.get_llm("main")`（连接三元组相同），VL 走 `get_llm("vl")`（独立 base_url / api_key / model_name，vl.local=False fallback 时与主模型 key 撞 → 复用同实例）。
+    - **`ChatWorkflow/core.py`**：7 个 `self.xxx_llm = ChatOpenAI(**)` 改为 8 个 `@property` getter（每次访问重新组合 LCEL `prompt | llm.bind_tools(tools)`，~µs 级开销）；`init_llms` 只持有 prompts 不 new `ChatOpenAI`。
+    - **`ChatMeConfig.save_config`** 加 `llm_factory.invalidate_for_providers()` hook（写之前抓旧快照 + 写后比对前后 key，主动 pop 旧 key → 旧实例失去强引用 → GC 释放 httpx 连接池）；`restart_required` 一律 False（v0.3.x 起所有段都热生效）。
+    - **`ChatMeConfig.get_active_llm_config`** 加 `llm_providers.active` 字段优先级（最高 > self_check_llm 探测 > chain[0]），让用户在 SettingsDialog / SetupView 手动选主用 provider。
+    - **新增路由**：`GET /admin/llm/models?provider=xxx`（后端 proxy 调 `{base_url}/v1/models`，**严格按远端返回**，不拼白名单；远端空就返空 + source='remote'/models=[], 失败返 source='error'/models=[]），`GET /admin/llm/cache-info`（调试用）。**Why 不拼白名单**：旧版拼了 `gpt-4o/deepseek-chat/Qwen` 等硬编码列表，用户不知情选了和 base_url 不匹配的模型 → 401。误导 > 兜底。
+    - **前端 SettingsDialog / SetupView**：「⟳ 拉取模型列表」按钮填充 model 下拉框、provider group-title 加「设为当前生效」radio、顶部 active-bar 显示当前生效 provider + model。`buildPayload` 把 `activeProviderName` 单独 diff 写到 `payload.llm_providers.active`。
+    - **vl.local 切换例外**：决定是否加载 Qwen3-VL 本地模型到内存，必须重启后端。SetupView.onFinish 的 `needsRestart` 只在 `vl.local` 变了才 emit('restart-requested')。
 
 
 ### 版本约定（按版本倒排）
 
-**v0.3.1** — 首启 UX 重构（基于 `autoEnterFrontend` 切换形态）：
-- **BootstrapView 加 `mode: 'classic' | 'deps'` prop**：classic 保留旧三态；deps 三按钮变「保存 / 重启应用 / 进入应用」（不调 bootstrap IPC）。emits 加 `enter-app / restart-requested / preference-changed`。SetupView（LLM/Key/审批）与 deps 模式（前置依赖）职责严格分离。
-- **App.vue 自动 bootstrap + StartupLoadingView**（新建，z-index 1500）：cold + autoEnter=true 自动调 bootstrap IPC 且不渲染 BootstrapView；warm path 同样显示 loading。复用 NotFoundView 同款 16x18 像素鹿 SVG + 顺向进度条（0% → 100% over 120s）。slash `/bootstrap` 仅 autoEnter=true 生效（App.vue + MessageInput.vue 两处 `staticActionCommands` 同步）；BootstrapView emit `preference-changed` 同步 `_autoEnterPreference`，HelpDialog 通过 `slashCommands` computed 自动包含。
-- **SkillForge 自动 refetch slash 面板**（**复用现有 SSE 流通道，零后端改动**）：4 流 × 4 sub-branch × 2 事件类型 = 16 个 SSE 分支全部加 hook（CLAUDE.md 偏好「SSE 事件 handler 覆盖率」）。多逻辑识别：tool_call_name regex 匹配 `from skills.SkillForge import` / `create_skill(` → 打 `_skillForgePending` 标记 + tool_call_result 检查 `"Created skill '"` 前缀双确认 → `fetchSkills()` refetch → 后端 SKILL.md frontmatter description 优先。`fetchSkills()` 加 2s 窗口 idempotent 守卫。
+**v0.3.2** — BootstrapView deps 模式「进入应用」按钮无效 bug 修复 + 移除 LLM 模型白名单兜底（`/admin/llm/models` 严格按远端返回，空就返空）。
 
-**v0.3** — 取消 upload 阶段产物软删到 `.trash/{sid}/{ts}/`（`ChatService/core.py:_move_cached_path_to_trash` + `remove_processed_files` 删整树）；不动 `data_analysis/`，11:30 `daily_trash_cleanup` 兜底物理清。
+**v0.3.1** — 首启 UX 重构：基于 `autoEnterFrontend` 切换 BootstrapView `classic` / `deps` 二形态 + App.vue 自动 bootstrap + StartupLoadingView 等待动画 + SkillForge 自动 refetch slash 面板。
+
+**v0.3** — 取消 upload 阶段产物软删到 `.trash/{sid}/{ts}/`，11:30 `daily_trash_cleanup` 兜底物理清。
 
 **v0.2.4** — 启动链路鲁棒性 + 重启遮罩 retry（`main.js:bootstrapSession` 取消令牌 / `App.vue:handleRestartBackend` `_restartVersion` race 防护 / 单实例锁 + macOS 退出行为符合 HIG）。
 
@@ -234,78 +242,11 @@ docker-compose up -d redis       # 端口 48211，密码 123456
 **v0.1.5** — Memory + SkillForge + Scheduler + CheckpointJanitor + 热加载：Memory 4 变体（`facts/preference × thread/global`）/ SkillForge `create_skill/list_skills/read_skill` 写入必须 `code(..., local=True)` + registry mtime 自动重扫 + SKILL.md frontmatter YAML（`name/description/aliases/mount/module/lazy`）+ `build_mount_args()` `@lru_cache(maxsize=1)` + Scheduler 4 层模块 + CheckpointJanitor 拆两层 + `/admin/config` 热加载（segment 级，`permissions/skills` 立即生效，`llm_providers` 需重启）+ `ChatMeConfig._load()` mtime。
 
 **v0.1.4** — `mcps/` 三包重构（permissions / sandbox / tools，各 `__init__.py` 只写说明不 re-export，除 `tools/platforms/`）+ 定时任务 = Skill + REST（不走 MCP）+ 启动配置 lifespan 嵌套顺序 `chat_service_lifespan → scheduler_lifespan → cleanup_lifespan` + `uvicorn.run(app, ...)` 传对象不传字符串 + 消息排队（`/chat/{sid}/queue` Redis FIFO ≤20 × 4000 字符，不主动 drain）+ 回溯走 `CheckpointJanitor.retarget_to()` 覆写 latest 指针 + 未知工具名不崩（`ToolNode._validate_tool_call` 返错误 ToolMessage）+ MAIN_FLOW 只讲「怎么想」工具用法下沉 `platforms/base.py` 的 `<tool>_tool_prompt_block`。
-- **搜索源健康探测**（`skills/_search_health.py`）：三个搜索 skill（Bocha / Exa / Tavily）任一失败时，**并发 GET ping** 其余源 3s timeout（`ThreadPoolExecutor` 并发，最坏延迟 = max，非 sum）；4xx 算 alive，5xx + `RequestException` = 不可用。**`format_others_available(failed)`** 把可用情况追加错误信息末尾。
-- **SandboxPool 池锁修复**（`ChatWorkflow/mcps/sandbox/pool.py:_acquire`）：v2 用 `Condition.wait` **整个 while 循环包在 `with self._pool_lock:` 内**，避免 `cannot wait on un-acquired lock`。`_create_container` **sha1 seed bug 修复**：误写 `os.time()` → AttributeError → silent 0-pool，改回 `sha1(pid + time + counter)`。
-- **Redis 端口 48211**（v0.2.1 是 6024 → v0.2.2 改 48211）：Windows Hyper-V / ICS / WSL excludedportrange 默认 `8000-9000` 段，6024 偶发落进排除范围 → bind WSAEACCES (10013) 失败。**改用 48211 远离所有已知排除范围**，与 backend 端口 38211 错开 10000。
-- **final_node SysMsg 改写（双轨制）**：`agent_node` 注入端保留直白停止指令，`final_node` 消费端识别 directive SysMsg 后改写为 final_node 视角的中性陈述（"本轮思维链已提前结束"）。
-
-**v0.2.1** — 配置向导 SetupView + 应用启动链路健壮性 + 全局重启遮罩：
-- **BootstrapView ≠ SetupView**：v0.2.1 起 `frontend/src/components/` 既有 `BootstrapView.vue`（首启 / 服务未就绪时浮窗 + bootstrap 进度 + autoEnter 三态按钮）又有 `SetupView.vue`（独立配置向导，**首次启动 + 任何时候 🪄 按钮**打开）。**注意**：偏好 22 / 23 描述的「SetUpView」是 BootstrapView 的前身（v0.2.0 之前的命名）；SetupView 是独立组件，**不要混用**。
-- **SetupView 关键约束**（1223 行大组件）：`emit('close')` / `emit('restart-requested')` **必须声明在 `emits: []`**（Vue 3 runtime 丢弃未声明事件）。**重启逻辑完全交给 App.vue**：SetupView 自己**不**写 `setInterval` / `restartBackend` / `window.location.reload()`，只 `emit('restart-requested')`。
-- **fixRedis ping-first + 状态归一化**（启动链路 bug 修复核心）：`probeRedisContainer` / `fixRedis` 不能直接相信 `docker inspect` 返的 status。**四段判定**：① `tryRedisPing` PONG 视为「健康」**完全跳过修复**；② ping 失败 + status = running/restarting：只 `waitForRedisReady` 探，不再 `docker start`（避免端口重绑冲突）；③ ping 失败 + status = exited/created/paused/dead：`docker start chatme-redis`，**失败不立即 throw**；④ ping 失败 + 容器不存在：`docker compose up -d redis`。
-- **startBackend 启动前端口预检**：`killPortIfListening(port)` 跨平台 helper（Win `netstat -ano | findstr :PORT → taskkill /F /PID`；Unix `lsof -ti:PORT -sTCP:LISTEN | xargs kill -9`），spawn backend 前清理 38211 残留。
-- **discoverProjectRoot 自动迁移**：`~/lingxi` / `~/lingxi-v2` 多副本共存 + git pull 后旧 saved 路径指向老副本冲突。`_readProjectFingerprint` 读 pyproject `version` + main.py `app_config.get("port")`；candidate 更新 → 自动 swap → 弹琥珀色横幅。
-- **启动期健康监测健壮性**：`_hasEverConnected` gate 抑制启动期 banner（冷启动 backend=false 是预期 → 不弹）；主进程 `HEALTH_FAILURE_THRESHOLD=2`（单次失败可能是抖动 → 不立刻推 false）；`source='restart'` 重启窗口期主进程 `setServicesReady(false, { source: 'restart' })` → App.vue 保持 `appReady=true`，主界面走 `.app-disabled` 灰显 + banner 提示；`proc.on('exit')` 立即推 health 检查（后端意外退出 → 50ms 后 `runHealthCheck`）；`checkBackendHealth` timeout 1.5s → 3s（uvicorn LISTEN 但 lifespan 没跑完时 /health 会 timeout）。
-- **Windows `file://` API 转发路径修复**：`file:///C:/.../dist/index.html` 下 renderer `fetch('/chat/xxx')` 解析成 `file:///C:/chat/xxx`（带盘符），`startsWith('/chat/')` 失败。**解法**：`apiPathname = IS_WIN ? pathname.replace(/^\/[A-Za-z]:/, '') : pathname`。
-- **三处入口共用一份 UI（unified restart overlay）**：banner「重新连接」/ Settings「Save & Restart」/ SetupView 改 apikey → 统一走 App.vue `handleRestartBackend()`，弹同一个 `.restart-mask`（z-index 1900）+ spinner + 倒计时。`_backendRestarting` / `_restartElapsed` / `_restartTimer` 都在 App.vue；`setInterval` 内 **`this._restartElapsed = (this._restartElapsed || 0) + 1`**（显式赋值不用 `++` —— Vue 3 Proxy 自增在 minify 下会丢响应性）。
-- **SetupView wizard 5 步骤**：基础检查 / LLM 连接 / skill 开关 / 权限策略 / 完成 → diff 摘要 → `putConfig` → 若 `llm_providers` 在改动段里 → `emit('restart-requested')` → App.vue 接管。
-
-**v0.2.0** — 图工作流大重构 + done 工具 + ReAct 压缩健壮性：
-- **新默认图 `_create_graph_improved` 替换 `_create_graph_core2`**：老 `_create_graph_core2` **完整保留**作回滚基线。工具集用 `init_llms` 内 `self.tools` vs `self.tools_with_done` 区分（`include_done` 参数）。**Why**：老图 prompt 强制 LLM 输出 `Done` + `should_end_node` LLM 决策不收敛；新图改纯结构化路由 + `done` 工具作显式收尾。
-- **MCP `done` 工具**（`mcps/server.py`）：无参函数，调用即返回固定字符串。**只在 `_create_graph_improved` 工具集里**暴露；老图 `get_mcp_tools(include_done=False)` 过滤掉。
-- **`route_agent_output` 决策函数**：纯结构化路由 —— 倒序找最后 AIMessage（含 tool_calls → tool_execution_node；无且 `retries >= 3` → final_node；retry < 3 → context_assembly_node 注入英文 SysMsg）。
-- **`route_after_context_assembly` 双源**：done cycle 已被 `RemoveMessage` 把 AIMessage(done) 从 messages 里删了；改看 `state["done_cycle_detected"]` flag（每轮开头重置 False）。
-- **agent no-tool-call retry**：AIMessage 无 tool_calls → `retry_times += 1`；`< 3` 注入英文 SysMsg；成功调出 tool_calls → `retry_times = 0`；`= 3` → route_agent_output 强制 final_node。
-- **`RemoveMessage` 清理 done cycle**：单 done（tool_calls 长度 1 且唯一是 done）→ 整轮清理；并发调度（done 跟其他 tool 并存同 AIMessage）→ 只删匹配 done `tool_call_id` 的 ToolMessage，其余保留。
-- **`compression_handled_this_round` 防重复压缩**：bool 标记，iteration 2+ 跳过整个 ReAct 压缩段。`is_done_cycle=True` 时整段不跑。
-- **`pending_compaction_replace_at` 改完整 loop 数**：`= len(_find_complete_tool_loops(context)) + REACT_KEEP_LOOPS`，**不**用 `tool_call_times + REACT_COMPACT_REPLACE_AFTER`。**Why**：agent 并行调 1-3 个工具会让 `tool_call_times` 一次 +1~3；loop 数版本无论并行多少次都稳定。
-- **`REACT_COMPACT_DETECTION_MIN_ROUNDS` 4 → 5**：`REACT_COMPACT_REPLACE_AFTER` 字段移除；**保留 `REACT_KEEP_LOOPS`**。
-- **前端 `done` 工具调用过滤**（`App.vue` 两处）：① `mergeToolCallStart` `if (data.content?.name === 'done') return message`；② `_processBackendToolCalls` `if (tc.name === 'done') continue`（老 checkpoint 迁移安全网）。
-- **许可证**：项目 **MIT License**（`LICENSE` / `NOTICE` / `THIRD_PARTY_LICENSES.md` 三件套）；「灵析™」/「Lingxi™」为产品名商标，MIT 不授予商标使用权。
-
-
-**v0.1.8** — 文件树 Finder 化大优化：
-- **长按框选**（`Sidebar._startBoxSelect`）：`mousedown` 后等 **250ms** 或 **移动 ≥8px** 才进 box-select；`mouseup` 矩宽 `<4px` 且非 additive → 清选区。
-- **HTML5 拖拽移动**：节点 `:draggable="!renaming"` + `dragstart.stop`；多选拖用 `setData('application/x-lingxi-paths', ...)` + `effectAllowed='copyMove'`（Alt 切 copy/move）+ 自定义 ghost；drop 调 `POST /chat/{sid}/files/move?auto_rename=true`。
-- **焦点目录 `focusDir`（Cmd/Ctrl+V 目标）**：点目录行 → 该目录相对路径；点文件行 → 父目录（Finder 习惯）；操作后回根。视觉 `.dtn-dir.focus-target` —— 蓝色实心左边框 + 浅蓝底。
-- **copy / cut 视觉**：copy amber 500 浅底 + ⎘ 角标；focus 蓝色实心左边框；focus + copy 共存时背景偏 amber 但保留蓝色左竖线。
-- **空状态 + 树底 `+` 操作行**：`.empty-state` 重做（📂 + 标题 + 提示 + [新建文件夹/文件]）；树底 `.tree-new-actions` 始终挂 `+文件夹 / +文件` 按钮 + `Cmd+Shift+N` / `Cmd+Shift+Alt+N`；按钮 `@mousedown.stop` 防 box-select。**OS 系统拖拽 overlay** —— Finder/Explorer 拖系统文件时显示「⬇ 释放以上传」全屏浮层。
-- **拖拽事件穿透重构**（`MessageInput.handleWindowDrop` + `_isDragOverFilesTree(e)`）：原 `drag-overlay` 拦截所有 drop 导致 Sidebar drop 失效，改为 `pointer-events: none` + window-level `drop` 监听 + 检测 `.files-tree` 内（在则让 Sidebar 处理）。
-- **后端文件操作体验优化**：`_find_unique_name` 计数器剥除（regex `^(.*?)\((\d+)\)$`：`(bar)` / `(v1-beta)` 保留）；`move_file` 自粘贴兜底（`src.parent == dst_dir` no-op）；同名静默追加；空 session 懒加载。
-- **Skill 描述前端覆盖**（`skillDescriptionOverrides`）：App.vue + MessageInput.vue 维护 `{ Memory, ImageParser, SkillForge }` 三条更准确描述，缺省 fallback 后端 `/chat/skills`。
-
-
-**v0.1.7** — 文件树行内删除 + 软删除 + 标题派生：
-- **文件树行内删除 + 软删除 `.trash/` 兜底**：路径 `backend/.trash/{sid}/{YYYYMMDD_HHMMSS}_{rel_path_underscored}`（同秒追加 sha1[:6] 防碰撞）。**API**：`DELETE /chat/{sid}/file?file_path=<rel>`（拒绝绝对路径 / `..` / 越界）；`DELETE /chat/{sid}/trash` 手工清空。**定时清空**：`timed_clean.py` 每天 11:30 `daily_trash_cleanup`（与 23:30 `daily_cleanup` 错开避免 IO 叠加）。**前端**：`DataTreeNode.vue` × 红叉（沿用偏好 22）；`DataAnalysisTree` 面板 🗑 + `ConfirmDialog` 清回收站。**Why 软删除**：误删能找回（直到 11:30 才物理清）。
-- **标题自动派生**（`ChatService/core.py` 模块级 helpers + `_derive_title_from_latest_human`）：剥离 `<quote>` + `/[xxx]` + 截断 12 字符，倒序找 HumanMessage，multimodal 取首个 text 段，全 quote/pill 返 `""`。`update_conversation_title(session_id, new_title=None) -> Optional[str]`：空 → 调派生；派生空 → 返 `None`。**API**：`PUT /chat/{sid}/title` 的 `title` 改 `Optional[str] = Body(None)`；响应 `new_title` 是后端实际写入。前端 `updateTitleOnly` / `updateTitleAndRefresh` 用 `body: JSON.stringify({})` 触发派生。
-
-**v0.1.6** — matplotlib 中文字体随 skill 自动 mount：`NotoSansSC-Regular.otf` 放 `backend/skills/DataAnalysis/fonts/`，容器内 `/skills/DataAnalysis/fonts/` 可用。**`get_fonts_setup_header()` 同时扫描 4 路径**（按序、去重、不存在 no-op）：① `/skills/DataAnalysis/fonts` ② `<cwd>/skills/DataAnalysis/fonts` ③ `/cached/.fonts`（legacy）④ `<cwd>/cached/.fonts`（legacy）。**优先 skill 路径**。**`legacy cached/.fonts/` 保留兼容老部署**：`PRESERVED_TOP_DIRS={"cached/.fonts"}`。
-
-**v0.1.5** — Memory + SkillForge + Scheduler + CheckpointJanitor + 热加载：
-- **Memory / SkillForge**：Memory（`backend/skills/Memory/` mount=ro）4 变体（`facts`/`preference` × `thread`/`global`）；SkillForge（mount=rw）`create_skill()` / `list_skills()` / `read_skill()`。两者写入**都必须 `code(..., local=True)`**（沙盒 ro / 无写权限）。SkillForge **registry mtime 自动重扫**（APFS 不更新父目录 mtime，按每个 SKILL.md `stat()` 检测）。保留名禁用 `SkillForge` / `_xxx` 前缀。路径 `.chatme/memory/{tid|global}/{category}.md`。
-- **SKILL.md frontmatter**：YAML 支持 `name` / `description` / `aliases` / `mount`（`ro`/`rw`，默认 ro）/ `module` / `lazy`。`build_mount_args()` 加 `@functools.lru_cache(maxsize=1)`；`reset_skill_registry()` 必须 `cache_clear()`。
-- **Scheduler 4 层模块** + **CheckpointJanitor 拆两层**：Scheduler `models.py` / `handlers.py` / `registry.py` / `core.py`（handlers lazy import 避免循环）；CheckpointJanitor 业务类 `ChatWorkflow/CheckpointJanitor.py` + HTTP `APIRouter/checkpoint_janitor.py`（唯一路由 `POST /admin/checkpoints/prune`）。
-- **`/admin/config` 热加载（segment 级）**：`permissions` / `skills` 立即生效（`save_config()` 后 `force_reload()` + `get_permissions().force_reload()`）；`llm_providers` 需重启。前端 `buildPayload()` 维护 `originalConfig` + `_deepDiff()` + `_stripEmptyObjects()`，只发修改段。
-- **REST 三件套**：`POST /admin/restart` 写 marker `.restart_pending` + 0.3s sleep + `os.execv`；`GET /admin/health` 前端 `pollHealth(120s)`。
-- **Sidebar 内嵌定时任务**：`ScheduledTasksPanel` 已删除；`ConversationItem` 底部内嵌 ⏰ + `<transition name="scheduled-expand">`（max-height 0 → 110px）；展开状态 `lingxi.scheduledTasksExpanded` localStorage 持久化。
-- **四色侧栏状态点**：streaming 蓝闪 / approval 黄脉冲 / errored 红常显 / completed 绿常显。**App.vue 四 Set 独立维护**（`_activeStreamingSessions` / `_approvalPendingSessions` / `_completedSessions` / `_errorSessions`），**不是** union；`_sessionHadError`（保护态）与 `_errorSessions`（视觉驱动）并行。
-- **`ChatMeConfig._load()` mtime**：`current_mtime == cached_mtime` → 直接 return；变了 → 重读；不存在文件按需生成默认 / 保留旧 `_config`（外部误删可恢复）。
-
-
-**v0.1.4**：
-- **`mcps/` 三包重构**：`mcps/permissions/core.py` / `mcps/sandbox/pool.py` / `mcps/tools/`（`code_fingerprint.py` + `deprecated.py` + `platforms/`）。**各包 `__init__.py` 只写说明不 re-export**（除 `tools/platforms/__init__.py` 导出 adapter）—— import 必须写到具体模块：`from ...mcps.permissions.core import PermissionedToolNode`，不能 `from ...mcps.permissions import`。
-- **定时任务 = Skill + REST**：不是 MCP 工具。`skills/Scheduler/` 4 个顶层函数走 HTTP 调 `/admin/scheduled-tasks/*`，agent 用 `code(..., local=True)` 调用（沙盒缺 `apscheduler` / `redis`）。
-- **启动配置**：lifespan 嵌套顺序不可换 `chat_service_lifespan → scheduler_lifespan → cleanup_lifespan`；`uvicorn.run(app, ...)` 传对象不传字符串（`"main:app"` 让 uvicorn 重新 import → banner 打两次 / LLM 自检跑两遍）。
-- **消息排队（前端 drain，后端只存）**：`/chat/{sid}/queue` 只做 Redis `queue:{sid}` FIFO 持久化（≤20 × 4000 字符），**不主动 drain**。
-- **回溯走 `CheckpointJanitor.retarget_to()`**：覆写 LangGraph latest 指针 + 删其余 checkpoint / write，**不再产 artifact checkpoint**；回溯前 `_wait_previous_memory_update`。
-- **未知工具名不崩**：走 LangGraph `ToolNode._validate_tool_call` 返回错误 `ToolMessage`（含未知工具名 + 可用工具列表）让模型重试。
-- **MAIN_FLOW 只讲「怎么想」**：具体工具调用模式下沉 `platforms/base.py` 的 `<tool>_tool_prompt_block`，由 `all_tool_prompt_blocks()` 拼接。
-
-
-
 **v0.1.3**：**Pre-check 拦截 SSE 兜底**——`PermissionedToolNode._permission_wrap` pre-check（`dangerous` / `whitelist not_allowed`）拦截时直接 `return ToolMessage` 不调 `execute()`，LangGraph 不发 `on_tool_start`/`on_tool_end`，前端流式看不到拦截结果必须 F5 刷新。**兜底**：`on_chain_end` 节点为 `tool_execution_node` 时按 `tool_call_id` 配对 AIMessage.tool_calls 与 ToolMessage，补 `tool_call_name` + `tool_call_result` SSE。**去重**：per-stream `emitted_tool_call_ids: set`。**Helper**：`ChatService._build_intercepted_tool_call_events(chunk, emitted_ids, elapsed_ms, token_usage)` 统一封装，3 个 SSE 流都加。
 
-**v0.1.2**：跨 SSE 临时 metrics 累加器（每 round 独立 `round_metrics:{sid}` Redis hash，**不**写正式 `threads:{sid}:checkpoints`）。**实时累加**：`on_chat_model_end` 触发 `_accumulate_workflow_tokens` 累加本地 `token_usage`，返 `True` 立刻 `_persist_round_token_usage` 刷到临时键。**stream `finally` 兜底**：3 个 SSE 流 `return` 都套 `finally` 末尾 `_persist_round_token_usage`。**终态清理**：`_save_round_checkpoint` 写完 `cp_meta` 后 `_clear_round_metrics(session_id)` 清临时键。**`delete_conversation` 必须 `DEL round_metrics:{sid}`**。
+
+**v0.1.2**：跨 SSE 临时 metrics 累加器（每 round 独立 `round_metrics:{sid}` Redis hash，**不**写正式 `threads:{sid}:checkpoints`）。实时累加 + stream `finally` 兜底 + 终态清理 + `delete_conversation` 必须 `DEL round_metrics:{sid}`。
+
 
 **v0.1.1**：`PermissionedToolNode` + LangGraph `interrupt()` 审批（`_awrap_tool_call` hook 是 `ToolNode` 官方扩展点，自己 try/except 拦截会被 runtime 忽略）；决策存 Redis `permission:{sid}` hash；`resume` 走 `Command(resume=decision)`。**4 档决策**：`approve` / `this-time-only` / `deny` / `feedback:<text>`；`code_fingerprint` = SHA1(`imports + calls + lang + sandbox`)。**审批 UI 内嵌**到 `toolCall` 行。**多平台 prompt adapter**：`platforms/` 抽 `cmd`/`code`/`ctime` shell 差异到 `darwin.py`/`linux.py`/`windows.py` + `base.py`。**`sub_agent` 工具 deprecated**。**session_id 兼容 32 + 12 位 hex**：dual regex 都接受。
 

@@ -71,6 +71,25 @@ export async function healthCheck() {
   return request('/admin/health', { method: 'GET' })
 }
 
+/**
+ * 拉取 provider 对应的 {base_url}/v1/models（OpenAI 兼容标准）
+ * 用于 SettingsDialog / SetupView 的「⟳ 拉取模型列表」按钮
+ * @param {string} provider - llm_providers 里的 key（如 "model1" / "openai"）
+ * Returns: { ok, models: string[], source: 'remote'|'fallback', error }
+ */
+export async function listLLMModels(provider) {
+  return request(`/admin/llm/models?provider=${encodeURIComponent(provider)}`, {
+    method: 'GET',
+  })
+}
+
+/**
+ * 调试用：llm_factory 当前 cache 状态
+ */
+export async function getLLMCacheInfo() {
+  return request('/admin/llm/cache-info', { method: 'GET' })
+}
+
 // =========================================================================
 // Scheduled Tasks（定时任务）
 // =========================================================================

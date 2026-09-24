@@ -1,6 +1,6 @@
 {
   "name": "lingxi-app",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
   "license": "MIT",
   "description": "基于 LangGraph 的多智能体数据分析对话系统",
@@ -18,10 +18,14 @@
     "electron:dev": "NODE_ENV=development electron .",
     "electron:prod": "NODE_ENV=production electron .",
     "electron:build": "vite build && electron-builder",
+    "preelectron:build": "node scripts/inject-build-id.js",
     "electron:build:mac": "vite build && electron-builder --mac",
+    "preelectron:build:mac": "node scripts/inject-build-id.js",
     "electron:build:win": "vite build && electron-builder --win",
+    "preelectron:build:win": "node scripts/inject-build-id.js",
     "electron:build:win:clean": "vite build && electron-builder --win && rm -rf release/electron-builder/win-unpacked",
-    "electron:build:linux": "vite build && electron-builder --linux"
+    "electron:build:linux": "vite build && electron-builder --linux",
+    "preelectron:build:linux": "node scripts/inject-build-id.js"
   },
   "build": {
     "appId": "com.chatme.app",
@@ -42,6 +46,10 @@
       {
         "from": "build",
         "to": "build"
+      },
+      {
+        "from": ".buildstamp.json",
+        "to": ".buildstamp.json"
       }
     ],
     "mac": {

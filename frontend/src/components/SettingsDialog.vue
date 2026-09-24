@@ -68,15 +68,36 @@
             <section v-else-if="activeTab === 'llm'" class="section">
               <div class="section-header">
                 <h4>Models</h4>
-                <p class="section-desc">LLM 提供方配置。修改后需重启后端。</p>
+                <p class="section-desc">
+                  LLM 提供方配置。修改后<strong>立即生效</strong>，下次对话自动用新模型，无需重启。
+                </p>
               </div>
+
+              <!-- 当前生效 provider 提示（顶部条；让用户在改之前看清状态）。
+                   没生效 provider 时整个条不显示（chain 空 / 没勾选 = 啥都不是），
+                   不暴露 self_check_llm / chain[0] 这类内部回退逻辑。 -->
+              <div v-if="activeProviderName && formConfig.llm_providers[activeProviderName]" class="active-bar">
+                <span class="active-bar-label">当前生效：</span>
+                <strong class="active-bar-name">{{ providerLabel(activeProviderName) }}</strong>
+                <span class="active-bar-model">— {{ formConfig.llm_providers[activeProviderName].model_name || '(未选 model)' }}</span>
+              </div>
+
               <div v-for="(prov, name) in formConfig.llm_providers" :key="name" class="group">
                 <div class="group-title">
+                  <label class="radio-label" v-if="name !== 'vl'">
+                    <input
+                      type="radio"
+                      name="active-provider"
+                      :value="name"
+                      v-model="activeProviderName"
+                    />
+                    <span>设为当前生效</span>
+                  </label>
                   {{ providerLabel(name) }}
                   <span v-if="name === 'vl'" class="tag">vision</span>
                 </div>
 
-                <!-- VL 专用：local 开关（决定是否走独立视觉模型 vs fallback 主用 LLM） -->
+                <!-- VL 专用：local 开关 -->
                 <div v-if="name === 'vl'" class="field">
                   <label class="toggle-label">
                     <input
@@ -87,17 +108,35 @@
                     <span>使用独立视觉模型 (local)</span>
                   </label>
                   <p class="field-hint">
-                    勾选：用下方专属 <code>Model / Base URL / API Key</code> 跑视觉任务（默认 Qwen3-VL-2B 本地模型）。<br>
-                    <strong>不勾选（local=false）</strong>：忽略下方三个字段，<strong>fallback 到主用 LLM</strong>
-                    （取 <code>llm_providers</code> 中第一个有效 provider，已自动 main→backup 切换），
-                    适用于「不想额外配 VL、让主模型兼职看图」的场景。<br>
-                    改动需重启后端生效 —— <code>local</code> 字段决定是否加载本地模型到内存。
+                    勾选用专属视觉模型（下方三字段）跑图像任务；不勾选则用主模型兼职看图。改动后立即生效。
                   </p>
                 </div>
 
                 <div class="field">
                   <label>Model</label>
-                  <input v-model="prov.model_name" type="text" placeholder="如 gpt-4o" />
+                  <div class="model-pick">
+                    <select v-model="prov.model_name">
+                      <option v-for="m in availableModels(name)" :key="m" :value="m">{{ m }}</option>
+                    </select>
+                    <button
+                      type="button"
+                      class="btn-fetch"
+                      :disabled="fetchingModels[name]"
+                      @click="fetchModels(name)"
+                    >
+                      {{ fetchingModels[name] ? '⟳ 拉取中…' : '⟳ 拉取模型列表' }}
+                    </button>
+                  </div>
+                  <p v-if="fetchErrors[name]" class="field-hint warn">{{ fetchErrors[name] }}</p>
+                  <p v-else-if="modelLists[name]?.source === 'remote' && modelLists[name].models.length > 0" class="field-hint">
+                    远端返回 {{ modelLists[name].models.length }} 个模型。
+                  </p>
+                  <p v-else-if="modelLists[name]?.source === 'remote'" class="field-hint warn">
+                    远端未返回任何模型，请直接手填 model_name。
+                  </p>
+                  <p v-else-if="modelLists[name]?.source === 'error'" class="field-hint warn">
+                    拉取失败：{{ modelLists[name].error || '未知错误' }}。请检查 base_url / api_key 或直接手填。
+                  </p>
                 </div>
                 <div class="field">
                   <label>Base URL</label>
@@ -276,14 +315,15 @@
             <button class="btn-text" @click="saveOnly" :disabled="saving || activeTab === 'appearance'">
               {{ saving ? 'Saving...' : 'Save' }}
             </button>
-            <!-- Save & Restart 只在 llm tab 显示：模型连接字段（ChatOpenAI / Redis / VL weights
-                 是启动期常驻对象，写 config 不影响已构造的 client，必须重启才生效。
-                 permissions / skills / appearance 都是热加载，不需要重启按钮。
+            <!-- Save & Restart 只在 llm tab 显示：v0.3.x 起 LLM 配置改动已热生效
+                 （llm_factory cache invalidate），Save 按钮就够了。
+                 Save & Restart 留给用户主动选择（如改完 vl.local 切换本地 VL 模型
+                 weights 加载，需要重启 uv 后端才能 pick up）。
                  点击后 emit('restart-requested') → App.vue 接管，弹出全局 restart-mask
                  （与 banner「重新连接」共用同一套 spinner + 倒计时）。dialog 立即关闭，
                  不在 dialog 内自渲染遮罩（避免重复 / 焦点错位）。 -->
             <button v-if="activeTab === 'llm'" class="btn-primary" @click="saveAndRestart" :disabled="saving">
-              Save & Restart
+              Save &amp; Restart
             </button>
           </div>
         </div>
@@ -294,7 +334,7 @@
 </template>
 
 <script>
-import { getConfig, putConfig } from '@/utils/api.js'
+import { getConfig, putConfig, listLLMModels } from '@/utils/api.js'
 
 export default {
   name: 'SettingsDialog',
@@ -336,6 +376,22 @@ export default {
       originalConfig: null,
 
       showKey: {},
+
+      // 当前生效的 provider name（写入 config.json 的 llm_providers.active 字段）
+      // 空字符串 = 不显式指定，后端用 self_check_llm 探测结果或 chain[0]
+      activeProviderName: '',
+      // originalConfigActive：loadConfig 抓到的 llm_providers.active 旧值，
+      // 用于 buildPayload diff 检测 active radio 变化
+      originalConfigActive: '',
+      // 远端拉的模型列表，key = provider name
+      // value: { ok, models: string[], source: 'remote'|'error', error }
+      //   - 'remote': 远端 200 返回（models 可能为空）
+      //   - 'error' : 配置缺失 / 远端 4xx-5xx / 请求异常（models 必为空）
+      modelLists: {},
+      // 拉取状态（防连点）
+      fetchingModels: {},
+      // 拉取错误信息
+      fetchErrors: {},
 
       saving: false,
       // 重启遮罩 / 计时器 / IPC 都搬到 App.vue（_backendRestarting / _restartElapsed / _restartTimer），
@@ -433,6 +489,40 @@ export default {
       const map = { model1: 'Primary model', model2: 'Backup model', vl: 'Vision model' }
       return map[name] || name
     },
+    /**
+     * 返回 provider 的可用 model 列表：远端拉的 ∪ 当前已填的 model_name
+     * （保证 select 里至少有当前值，不会因为 modelLists 还没拉就消失）
+     */
+    availableModels(name) {
+      const remote = (this.modelLists[name] && this.modelLists[name].models) || []
+      const current = this.formConfig.llm_providers[name]?.model_name
+      const set = new Set(remote)
+      if (current && !set.has(current)) {
+        return [current, ...remote]
+      }
+      return remote
+    },
+    /**
+     * 调后端 GET /admin/llm/models?provider=xxx，拉取 api_key 可见的模型列表
+     */
+    async fetchModels(name) {
+      if (this.fetchingModels[name]) return
+      this.fetchingModels[name] = true
+      this.fetchErrors[name] = ''
+      try {
+        const resp = await listLLMModels(name)
+        this.modelLists[name] = resp
+        if (!resp.ok) {
+          this.fetchErrors[name] = resp.error || '拉取失败'
+        }
+      } catch (e) {
+        this.fetchErrors[name] = '请求失败：' + (e.message || e)
+        // 网络/IPC 失败时维持空，让当前已填的 model_name 仍显示在选项里
+        this.modelLists[name] = this.modelLists[name] || { ok: false, models: [], source: 'error' }
+      } finally {
+        this.fetchingModels[name] = false
+      }
+    },
     async loadConfig() {
       this.loading = true
       this.loadError = ''
@@ -445,11 +535,28 @@ export default {
         cfg.permissions.approved_commands = cfg.permissions.approved_commands || []
         cfg.permissions.denied_commands = cfg.permissions.denied_commands || []
 
+        // 提取 llm_providers.active（用户显式选的当前生效 provider）——
+        // 不放在 formConfig.llm_providers 里（否则 v-for 会渲染成一个空 group），
+        // 单独存到 activeProviderName + originalConfigActive。
+        // 保存时由 buildPayload 重新塞回 payload.llm_providers.active。
+        //
+        // active_provider fallback（运行时 active：用户 active > self_check_llm 探测 > chain[0]）：
+        // 用户首次安装 + 没显式选过 active → llm_providers.active 不存在 → 旧逻辑 radio
+        // 一个都不勾，UI 看着像「没生效」。加上 active_provider fallback 后，radio 至少
+        // 勾到当前真正在用的 provider（可能是 self_check_llm 探测降级到的 model2）。
+        // 用户若想覆盖 → 点 Save 后 llm_providers.active 才会被持久化。
+        const savedActive = (cfg.llm_providers && cfg.llm_providers.active) || cfg.active_provider || ''
+        if (cfg.llm_providers && 'active' in cfg.llm_providers) {
+          delete cfg.llm_providers.active
+        }
+
         // 存一份脱敏前的快照给 buildPayload 做 diff：
         // originalConfig 里 api_key 是 masked 串（真值的 4*4 形式），
         // formConfig 里 api_key 是空字符串——diff 时两边都是"未修改"状态（用户输入新值
         // 后 formConfig 里的空字符串会被替换，diff 能识别）。
         this.originalConfig = JSON.parse(JSON.stringify(cfg))
+        this.originalConfigActive = savedActive
+        this.activeProviderName = savedActive
 
         // 脱敏的 api_key 不入 form（masked 串带回会被当新 key 覆盖真值，401）
         // 留空让 placeholder "留空表示不修改" 显示，buildPayload 会 delete 掉，后端 save_config 跳过
@@ -478,6 +585,13 @@ export default {
       this.saving = true
       try {
         const payload = this.buildPayload()
+        // 没改任何配置 → 友好提示，不发 PUT（避免后端 HTTP 400 "payload 为空"）
+        // 也不能走 alert：用户没犯错、无需引起警觉。
+        if (Object.keys(payload).length === 0) {
+          this.flashTip('未修改任何配置')
+          this.close()
+          return
+        }
         const result = await putConfig(payload)
         this.flashTip(this._tipForResult(result))
         // 保存成功即关闭 dialog（permissions / skills 等可热加载段无需重启），
@@ -495,32 +609,34 @@ export default {
       }
     },
     _tipForResult(result) {
-      // 后端可能未升级（缺 saved_segments 字段）→ 兼容 fallback 到 restart_required
+      // v0.3.x 起所有段（llm_providers / skills / permissions）都热生效：
+      // llm_providers 走 llm_factory cache invalidate（save_config 主动清
+      // 旧 key → 下次调用 llm_factory.get_llm 自动 new）；其余段原本就热。
+      // 后端 restart_required 永远为 False（save_config 改造），但保留字段
+      // 兼容老后端。
       const segments = result.saved_segments || []
-      const hasLlm = segments.includes('llm_providers')
-      const hotSegments = segments.filter(s => s !== 'llm_providers')
-
       if (segments.length === 0) {
         return '已保存'
       }
-      if (hasLlm && hotSegments.length > 0) {
-        // 混合：permissions/skills 立即生效 + llm 重启生效
-        const hotLabels = hotSegments.map(s =>
-          s === 'permissions' ? '审批配置' : 'API key'
-        ).join(' + ')
-        return `已保存：${hotLabels} 立即生效，模型配置重启后端后生效`
-      }
-      if (hasLlm) {
-        return '已保存，重启后端后生效'
-      }
-      // 纯 permissions / 纯 skills / 两者皆有 → 都热加载
-      return '已保存，立即生效'
+      const labels = segments.map(s => {
+        if (s === 'llm_providers') return '模型'
+        if (s === 'permissions') return '审批'
+        if (s === 'skills') return '搜索 API key'
+        return s
+      }).join(' + ')
+      return `已保存：${labels} 立即生效，下次对话自动用新配置`
     },
     async saveAndRestart() {
       this.saving = true
       try {
         const payload = this.buildPayload()
-        await putConfig(payload)
+        if (Object.keys(payload).length === 0) {
+          // 没改任何配置 → 跳过 PUT（避免后端 HTTP 400），但仍触发重启
+          // （用户明确点了 Save & Restart，可能就是为了 reload backend）
+          this.flashTip('无配置改动，仅重启后端')
+        } else {
+          await putConfig(payload)
+        }
       } catch (e) {
         alert('保存失败：' + (e.message || e))
         this.saving = false
@@ -575,6 +691,17 @@ export default {
         if (payload[topKey] && Object.keys(payload[topKey]).length === 0) {
           delete payload[topKey]
         }
+      }
+
+      // llm_providers.active 字段单独处理：active 不在 formConfig.llm_providers 里
+      // （v-for 会渲染空 group），由 activeProviderName state 持有。
+      // 用户改了 active radio → 写进 payload.llm_providers.active；
+      // 用户清空选择 → 写空字符串（后端 save_config 会保留，因为 active 是顶层字段）
+      const curActive = this.activeProviderName || ''
+      const origActive = this.originalConfigActive || ''
+      if (curActive !== origActive) {
+        if (!payload.llm_providers) payload.llm_providers = {}
+        payload.llm_providers.active = curActive
       }
 
       // 递归清空空对象：_deepDiff 后可能产出像
@@ -924,6 +1051,95 @@ export default {
   font-size: 11.5px;
   color: var(--text-secondary);
   line-height: 1.4;
+}
+.field-hint.warn {
+  color: #d97706; /* amber-600，与「失败提示」视觉一致 */
+}
+
+/* 当前生效 provider 顶部条 */
+.active-bar {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  background: var(--bg-secondary, rgba(99, 102, 241, 0.06));
+  border-left: 3px solid var(--accent, #6366f1);
+  border-radius: 4px;
+  font-size: 13px;
+}
+.active-bar-label {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+.active-bar-name {
+  color: var(--text-primary);
+}
+.active-bar-model {
+  color: var(--text-secondary);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+}
+.muted {
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+/* 「设为当前生效」radio（嵌在 group-title 行内） */
+.radio-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-right: 12px;
+  padding: 2px 8px;
+  border: 1px solid var(--border-color, transparent);
+  border-radius: 12px;
+  transition: background 0.15s, border-color 0.15s;
+}
+.radio-label:has(input:checked) {
+  background: rgba(99, 102, 241, 0.08);
+  border-color: var(--accent, #6366f1);
+  color: var(--accent, #6366f1);
+  font-weight: 500;
+}
+.radio-label input[type='radio'] {
+  margin: 0;
+  cursor: pointer;
+}
+
+/* Model 字段：select + 「⟳ 拉取模型列表」按钮并排 */
+.model-pick {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+.model-pick select {
+  flex: 1;
+  min-width: 0;
+}
+.btn-fetch {
+  flex-shrink: 0;
+  padding: 0 14px;
+  height: 34px;
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.15));
+  background: var(--bg-secondary, rgba(255, 255, 255, 0.04));
+  color: var(--text-primary);
+  border-radius: 6px;
+  font-size: 12.5px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s;
+}
+.btn-fetch:hover:not(:disabled) {
+  background: rgba(99, 102, 241, 0.08);
+  border-color: var(--accent, #6366f1);
+}
+.btn-fetch:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .password-wrap {

@@ -98,7 +98,7 @@ docker-compose build sandbox
 {
   "app": {
     "name": "ChatMe",
-    "version": "v0.3.1",
+    "version": "v0.3.2",
     "host": "127.0.0.1",
     "port": 38211
   },
@@ -256,7 +256,7 @@ npm run electron:build:mac      # macOS arm64 + x64（DMG + ZIP）
 npm run electron:build:win      # Windows NSIS（x64）
 ```
 
-应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.3.1）在 `frontend/electron/electron.config.js` 中配置。**输出位置**：`../release/electron-builder/`，包含 `灵析.app` / `灵析-0.3.1-arm64.dmg` / `灵析-0.3.1.dmg` / `灵析 Setup 0.3.1.exe`。
+应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.3.2）在 `frontend/electron/electron.config.js` 中配置。**输出位置**：`../release/electron-builder/`，包含 `灵析.app` / `灵析-0.3.2-arm64.dmg` / `灵析-0.3.2.dmg` / `灵析 Setup 0.3.2.exe`。
 
 ## 开发注意事项
 

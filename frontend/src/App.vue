@@ -275,22 +275,29 @@
     BootstrapView 二态渲染（v0.3.x 起）：
     - classic 形态：cold start + autoEnter=false → 显示「启动应用 / 进入应用 / 启动中」三态
       （保留旧行为，让不想自动进的用户手动控制启动）
-    - deps 形态：仅 slash `/bootstrap` 触发（_bootstrapVisible=true）+ autoEnter=true → 显示
-      「保存 / 重启应用 / 进入应用」三按钮（前置依赖配置面板）
+    - deps 形态：仅 slash `/bootstrap` 触发（_bootstrapVisible=true）→ 显示
+      「重新检测 / 保存 / 重启应用 / 关闭」四按钮（前置依赖配置面板）。
+      v0.3.2 起按钮从「进入应用」改为「关闭」——原 enter-app 在两条 deps 路径都没用
+      （主界面 appReady=true 触发 onEnterApp 的 `!appReady` guard 短路；启动期
+      onServicesReadyChange 已经自动翻 appReady=true）。
+      deps 形态渲染条件已不含 `_autoEnterPreference`（v0.3.2 起 `_bootstrapVisible` 单条件即可），
+      但 `_autoEnterPreference` 还是 true 时打开通常（勾选状态只决定是否走 classic 路径）。
     - cold + autoEnter=true 时**根本不渲染** BootstrapView，App.vue 自动调 bootstrap +
       显示 StartupLoadingView，避免「自动进」还要用户点启动按钮的逻辑矛盾
   -->
   <transition name="bootstrap-fade">
     <BootstrapView
-      v-if="isElectron && !appReady && !_autoEnterPreference"
+      v-if="isElectron && !appReady && !_autoEnterPreference && !_bootstrapVisible"
       :mode="'classic'"
       :services-ready="servicesReady === true"
       :swapped-project-root="_swappedProjectRoot"
       :current-project-root="_currentProjectRoot"
+      :initial-error="_bootstrapError"
       @enter-app="onEnterApp"
+      @close-classic="onBootstrapCloseClassic"
     />
     <BootstrapView
-      v-else-if="isElectron && _bootstrapVisible && _autoEnterPreference"
+      v-else-if="isElectron && _bootstrapVisible"
       :mode="'deps'"
       :services-ready="servicesReady === true"
       :swapped-project-root="_swappedProjectRoot"
@@ -298,23 +305,47 @@
       @enter-app="onEnterApp"
       @restart-requested="handleRestartBackend"
       @preference-changed="onBootstrapPreferenceChanged"
+      @close="onBootstrapCloseFromStartup"
+      @close-classic="onBootstrapCloseClassic"
     />
   </transition>
 
   <!--
-    StartupLoadingView：cold start + autoEnter=true 时的启动期 loading 浮层。
-    z-index 1500 由 StartupLoadingView 内部样式控制。
-    启动成功（services-ready-changed ready=true）→ App.vue _hideStartupLoading() 翻 false 自动消失。
-    启动失败 → _autoBootstrap catch 块调 _hideStartupLoading() + 弹 classic BootstrapView。
+    StartupLoadingView：启动期等待动画。**与 BootstrapView 是同一个启动状态的两个视图**，
+    任意时刻只显示一个，互相切换等价于「换个方式看同一件事」：
+
+      BootstrapView（检测项 / 三态按钮 / 实时日志框）
+        ⇄ ✕(classic 形态) / ⚙(等待动画侧) ⇄
+      StartupLoadingView（等待动画 + 折叠日志）
+
+    两边的日志来自**同一份** App.vue `_startupLogs` 缓冲（mounted 订阅一次，见 mounted 注释），
+    所以切来切去日志不断。启动完成后 onServicesReadyChange 收到 ready=true →
+    appReady=true → 两个视图一起消失、自动进主界面（无需用户点「进入应用」）。
+
+    浮层 z-index 由内到外：NotFoundView 1800 < StartupLoadingView 2000 < BootstrapView 2100
+    < .restart-mask 2400。重启遮罩必须在最上层（否则重启进度被面板盖住）。
+    - 启动失败 → 主进程走 startup:bootstrap-failed 独立通道（不参与 setServicesReady 去重）
+      推给 App.vue `_onBootstrapFailed()` → 关动画 + 回退 classic 面板 + 显示失败原因。
+    - 用户点「⏹ 停止启动」→ emit('cancel') 调 main.js cancelBootstrap()，**真正放弃**自动启动，
+      主进程翻 cancelled → 广播 servicesReady=false → BootstrapView 接管走老路径。
+    - 用户点「⚙ 启动配置」/ 右上角 ✕ → emit('open-bootstrap') 切到 BootstrapView（deps 形态）。
+
+    ⚠️ 本注释块内**禁止**出现连续两个短横线（HTML 注释规范），尤其不要用 `--` 画箭头：
+    含 `--` 会让解析器提前闭合注释，后面的文字会当正文渲染到页面上（已踩过一次坑）。
   -->
   <StartupLoadingView
     :visible="_startupLoadingVisible"
     :elapsed="_startupElapsed"
+    :startup-logs="_startupLogs"
+    :cancelable="true"
+    @open-bootstrap="_openBootstrapFromStartup"
+    @cancel="_cancelStartup"
   />
 
   <!--
     NotFound 浮层：访问不存在的 URL 时浮现 10 秒，倒计时 + 进度条 + 像素鹿跳动。
-    z-index 1800（NotFoundView 内部样式）比 BootstrapView 1500 高，确保盖住所有 UI。
+    z-index 1800（NotFoundView 内部样式）—— 低于 StartupLoadingView 2000 / BootstrapView 2100
+    / .restart-mask 2400，即启动与重启期的浮层会盖住它，这是预期的。
     任何点击 → _navigateHome → hide + location.replace('/')，跳回主页并清理 pathname。
   -->
   <transition name="not-found-fade">
@@ -327,7 +358,8 @@
 
   <!--
     全局后端重启遮罩：所有触发点（Settings「Save & Restart」/ banner「重新连接」）
-    都共用这一个 spinner 动画。z-index 1900 比 NotFoundView 1800 + BootstrapView 1500 都高，
+    都共用这一个 spinner 动画。z-index 2400 —— 必须高于 StartupLoadingView 2000 /
+    BootstrapView 2100（详见下方 .restart-mask CSS 注释里的浮层层级链），
     确保重启中全屏盖住，用户的鼠标 / 键盘输入被屏蔽（背景 click 事件禁用）。
 
     状态机：
@@ -502,6 +534,24 @@ export default {
       _startupLoadingVisible: false,
       _startupElapsed: 0,
       _startupTimer: null,
+      // v0.3.x —— 启动期实时日志（订阅 main.js 'startup:log' 通道）：
+      //   mounted 订阅一次（与「谁发起 bootstrap」解耦，见 mounted 注释），
+      //   主进程每行日志 push 进本数组，上限 500 行防止长启动期内存爆炸。
+      //   _hideStartupLoading() 只清空数组、**不**退订 —— BootstrapView ↔ 等待动画
+      //   来回切换期间订阅必须活着，否则切回去日志面板是空的。退订在 beforeUnmount。
+      //   StartupLoadingView / BootstrapView 各自渲染它（前者折叠面板，后者日志框）。
+      _startupLogs: [],
+      _startupLogUnsubscribe: null,
+      _servicesReadyUnsubscribe: null,
+      _bootstrapFailedUnsubscribe: null,
+      // v0.3.x —— 最近一次 bootstrap 的失败原因（'' = 无）。
+      // 由 onBootstrapFailed handler（主进程独立失败通道）写入，作为 prop 透给
+      // classic BootstrapView 的 initial-error，让用户在回退的面板上看到失败原因。
+      // 只在 _showStartupLoading()（= 新开一次启动）里清空，避免旧错误反复重现。
+      _bootstrapError: '',
+      // v0.3.x —— _autoBootstrap 幂等 gate：mounted 与可能的二次 broadcast 都会触发
+      // Promise.all 回调，第二次触发时已经在跑就直接 return，不再起新 promise。
+      _autoBootstrapInFlight: false,
       // v0.3.x —— SkillForge 自动刷新守卫：
       //   一次 SkillForge 调用可能产出 1-3 个 tool_call_result（code 调 create_skill → 拿到
       //   路径 → 再调一次写入），如果每个都触发 fetchSkills 会重复打后端。
@@ -513,15 +563,15 @@ export default {
       // 静态 action 命令清单（永远在前，不依赖后端）：
       // 纯前端动作（打开弹窗 / 刷新页面），name 不会发往后端，无命名约束。
       // 这份副本驱动 HelpDialog「命令」段渲染；input 输入框走 MessageInput.staticActionCommands（独立副本），
-      // 两边必须保持一致，否则 /help 弹窗里看不到新增的 action 命令。
-      // v0.3.x：`bootstrap` 命令仅在 _autoEnterPreference=true 时实际生效，
-      // 但**始终列在这里**（不动态加减）—— 保证 HelpDialog 与 MessageInput 命令面板一致，
-      // runFrontAction 内做防御 gate。
+      // **两边必须逐字一致**（CLAUDE.md 偏好），否则 /help 弹窗与输入框面板会不一致。
+      // 所有 action 命令都无条件列出、不做动态加减 —— 保证 HelpDialog / 输入框面板 / App.vue
+      // 三处永远同一份清单；前置条件不满足时由 runFrontAction 内部用 showToast 提示。
       staticActionCommands: [
         { name: 'backtrack', kind: 'action', description: '打开历史版本面板' },
         { name: 'settings',  kind: 'action', description: '打开设置弹窗' },
         { name: 'setup',     kind: 'action', description: '打开安装 / 配置向导（首启推荐）' },
-        { name: 'bootstrap', kind: 'action', description: '重新打开前置依赖配置面板（项目根 / Python / Docker）' },
+        { name: 'bootstrap', kind: 'action', description: '打开前置依赖配置面板 / 查看启动进度（项目根 / Python / Docker）' },
+        { name: 'restart',   kind: 'action', description: '重启后端服务（kill 后重新拉起，等同断连横幅的「重新连接」）' },
         { name: 'reload',    kind: 'action', description: '刷新当前会话' },
         { name: 'worktree',  kind: 'action', description: '打开当前会话工作树' },
         { name: 'help',      kind: 'action', description: '显示本项目功能速览' }
@@ -646,6 +696,26 @@ export default {
     if (window.electronAPI?.getServicesReady) {
       // ===== Electron 路径 =====
       this.isElectron = true
+      // v0.3.x —— 启动期实时日志：**mount 时订阅一次，活到 beforeUnmount**。
+      // 为什么不在 _autoBootstrap() 里订阅：BootstrapView 和 StartupLoadingView 是
+      // 同一个启动状态的两个视图，谁在跑 bootstrap 取决于用户从哪条路径进来——
+      //   - autoEnter=true 冷启动：App.vue 的 _autoBootstrap() 发起
+      //   - classic 面板点「启动应用」：BootstrapView.launch() 发起
+      // 后者不经过 _autoBootstrap，若订阅挂在里面，切到等待动画时日志面板永远是空的。
+      // 订阅放在这里就与「谁发起」解耦：主进程任何一路的 'startup:log' 都进同一份缓冲。
+      // 上限 500 行防长启动期内存涨爆；_hideStartupLoading() 只清缓冲不退订（见该函数注释）。
+      this._startupLogUnsubscribe = window.electronAPI.onStartupLog(({ item, msg }) => {
+        this._startupLogs.push({ item, msg })
+        if (this._startupLogs.length > 500) {
+          this._startupLogs.splice(0, this._startupLogs.length - 500)
+        }
+      })
+      // 订阅「bootstrap 失败」：独立通道（主进程 setServicesReady(false) 在服务状态本来
+      // 就是 false 时会被去重早返回，失败广播不出去）。必须由「当前可见的那个视图」无关的
+      // 位置统一处理——因为 ✕ 切到等待动画后，发起 bootstrap 的组件可能已经卸载。
+      this._bootstrapFailedUnsubscribe = window.electronAPI.onBootstrapFailed(({ error }) => {
+        this._onBootstrapFailed(error)
+      })
       // v0.3.x：先拉 startup-preferences 快照，拿到 autoEnterFrontend 副本。
       // 这个字段决定冷启动走哪条路径：
       //   - true  → App.vue 主动调 bootstrap IPC（不弹 BootstrapView）+ StartupLoadingView
@@ -658,20 +728,32 @@ export default {
         this.servicesReady = !!ready
         this._isInitializing = false
 
-        // v0.3.x：每次启动（cold + warm + autoEnter=true）都显示 StartupLoadingView，
-        // 直到后端 servicesReady=true 翻 appReady=true 才关掉。
-        // - warm：后端其实已经在跑（main.js app.whenReady 里 checkBackendHealth true），
-        //   但用户启动 app 期待「loading」反馈，不应该直接跳进主界面。
-        //   StartupLoadingView 几秒后 services-ready-changed ready=true 自动消失。
-        // - cold：App.vue 主动调 bootstrap IPC + StartupLoadingView 持续显示直到 ready。
+        // v0.3.2：仅 **cold start**（servicesReady=false）才走 auto-bootstrap 流程。
+        // warm path（servicesReady=true）直接进主界面，不再显示 StartupLoadingView +
+        // 调 _autoBootstrap()。理由：
+        //   1) 用户实测反馈：handleRestartBackend → refreshPage() 后再触发 _autoBootstrap
+        //      会让 main.js 走完 probe + startBackend（**杀掉刚启好的 backend 再起一个**），
+        //      用户看到「第二次重启动画」+ 重复 startup logs + 偶发卡死。
+        //   2) Promise.all 同步把 appReady=true 设掉了，_autoBootstrap 后到达的
+        //      `if (ready && !this.appReady)` 永远是 false → _hideStartupLoading() 不触发
+        //      → deer 动画卡住不消失，必须手动 ✕ 关。
+        // warm path 跳过这条路径后：直接走下方 `if (ready && !_conversationInited)` 分支
+        // 设 appReady=true + initConversationState，零额外动画、零额外 IPC。
         // _showStartupLoading() 必须在 _autoBootstrap() 之前调，确保 loading 先出现。
-        if (this._autoEnterPreference) {
+        if (this._autoEnterPreference && !ready) {
           this._showStartupLoading()
+          // v0.3.x：_autoBootstrap() 由 _autoBootstrapInFlight gate 防并发，不在内部
+          // 拿 _startupLoadingVisible 当防重守卫（条件恒真 → bootstrap IPC 从不发出）。
+          if (!this._autoBootstrapInFlight) {
+            this._autoBootstrapInFlight = true
+            this._autoBootstrap().finally(() => {
+              this._autoBootstrapInFlight = false
+            })
+          }
         }
 
-        // 热启动（warm path）：后端已在跑 → appReady=true 直接进主界面。
-        // StartupLoadingView 仍在显示，由后续 services-ready-changed (来源 main init 推送)
-        // 关掉（_hideStartupLoading）。
+        // 热启动（warm path）+ cold 但后端已被外部拉起（罕见）：后端已就绪 → 直接进主界面。
+        // 不需要 StartupLoadingView（详见上方 v0.3.2 注释）。
         if (ready && !this._conversationInited) {
           this._conversationInited = true
           this.appReady = true
@@ -679,12 +761,8 @@ export default {
           return
         }
 
-        // 冷启动 + autoEnter=true：App.vue 自动调 bootstrap IPC（loading 已显示）。
-        // 失败兜底：bootstrap IPC 返 ok=false → 弹 classic BootstrapView 让用户手动修复。
-        if (!ready && this._autoEnterPreference) {
-          this._autoBootstrap()
-        }
-        // 冷启动 + autoEnter=false：BootstrapView（classic）由 v-if 自动渲染（保持旧行为）
+        // 冷启动 + autoEnter=true：_autoBootstrap 已在上面触发（无条件），这里不再重复。
+        // 兜底：bootstrap IPC 返 ok=false → 弹 classic BootstrapView 让用户手动修复。
       })
       // 后续变更：bootstrap 完成 / 后端重启。
       // payload = { ready, autoEnterFrontend?, swappedProjectRoot?, source? }：
@@ -694,7 +772,7 @@ export default {
       //     BootstrapView 显示「我们自动换到新版本」横幅用
       //   - source: 'restart' 表示用户主动重启后端（banner 路径，不踢回 BootstrapView），
       //     undefined 表示冷启动 / 自动迁移路径
-      window.electronAPI.onServicesReadyChange((payload) => {
+      this._servicesReadyUnsubscribe = window.electronAPI.onServicesReadyChange((payload) => {
         const ready = !!(payload && payload.ready)
         const autoEnter = !!(payload && payload.autoEnterFrontend)
         const wasReady = !!this.servicesReady
@@ -907,7 +985,10 @@ export default {
      * 全量 slash 命令 = 静态 action + 动态 skill，供 HelpDialog 渲染。
      * - action 永远在前（高频且稳定）
      * - skill 顺序由 /chat/skills 返回值决定（按 name 字母序）
-     * - runSlashCommandFromHelp 用 find() 取第一个，action 优先语义自然生效
+     * - **与 autoEnterFrontend 勾选状态无关**：这里不做任何过滤，
+     *   `/bootstrap` 等 action 命令不勾 autoEnter 也能用（勾选状态只决定
+     *   「启动完成后是否自动进前端」和「面板/等待动画显示哪一个」，不是命令可用性门槛）。
+     * - HelpDialog 是纯展示（emits 只有 'close'），点命令不派发；命令统一在输入框里敲。
      */
     slashCommands() {
       return [
@@ -1079,34 +1160,184 @@ export default {
      * 这里不能重置 elapsed —— 用 idempotent 检查避免重置 timer。
      */
     async _autoBootstrap() {
-      // 防御：避免重复触发（mounted + 后端回来时的额外 broadcast 都可能再调一次）
-      if (this._startupLoadingVisible) return
-      this._showStartupLoading()
+      // ⚠️ 这里**绝对不能**写 `if (this._startupLoadingVisible) return` 当防重守卫。
+      // 唯一调用方（mounted 的 autoEnter 分支）是「先 _showStartupLoading()，再调本函数」，
+      // 那样写条件恒为 true → 本函数直接 return → window.electronAPI.bootstrap() 从不发出 →
+      // 表现就是「等待动画一直转，但依赖检测 / redis / uv sync / 起后端一个都没跑」。
+      // 幂等由调用方的 `_autoBootstrapInFlight` gate 负责（且全仓只有那一个调用点），
+      // 主进程的 startup:bootstrap **没有**并发守卫（bootstrapSession 会被第二次调用覆盖），
+      // 所以「防重复调用」这件事必须留在调用点，不能靠本函数内的状态反射。
+      if (!this._startupLoadingVisible) {
+        // 兜底：正常路径调用方已经显示过了，这里只为「从别处调用」的情况补上。
+        // 已经显示时**不要**再调 —— _showStartupLoading() 会把 _startupElapsed 归零
+        // 并重启倒计时 timer，那会让进行中的等待动画跳回 0 秒。
+        this._showStartupLoading()
+      }
+      // 清空日志缓冲（订阅已在 mounted 挂好，这里只重置内容，避免上一轮日志残留）
+      this._startupLogs = []
       try {
         const result = await window.electronAPI.bootstrap({ autoEnterFrontend: true })
         if (!result?.ok && !result?.cancelled) {
-          // 失败兜底：关 loading + 弹 classic BootstrapView
+          // 失败兜底：关 loading + **回退到 classic 形态**（让用户手动修复）
+          // 关键：必须 _autoEnterPreference = false，否则 classic v-if ( !_autoEnterPreference )
+          // 不命中 → BootstrapView 不弹 → loading 没了但啥都不显示 → 用户卡死。
+          // 只在失败分支覆盖 _autoEnterPreference（成功路径保持用户偏好不动）。
           this._hideStartupLoading()
-          this._bootstrapVisible = false  // 确保 deps 形态不显示
-          this.appReady = false  // 让 v-if 渲染 BootstrapView
-          // 注意：这里不直接置 _autoEnterPreference=false（用户的偏好仍可能正确，
-          // 失败只是单次启动问题；下次重启还是按偏好跑）。
-          console.warn('[App] autoBootstrap 失败，弹 BootstrapView:', result?.error)
+          this._bootstrapVisible = false
+          this.appReady = false
+          this._autoEnterPreference = false
+          console.warn('[App] autoBootstrap 失败，回退到 classic BootstrapView:', result?.error)
+          return
+        }
+        if (result?.ok) {
+          // 成功路径兜底：主进程 setServicesReady(true) 会广播 'startup:services-ready-changed'
+          // → App.vue onServicesReadyChange 接管翻 appReady。但 broadcast 有 race：
+          //   1) renderer mounted 时 onServicesReadyChange 注册晚于 servicesReadyPromise resolve
+          //   2) 主进程 setServicesReady 有「servicesReady === ready 则早返回」去重
+          //   3) IPC 通道在 ready=true 那一瞬间返回时 broadcast 可能被漏
+          // 这里主动拉一次 servicesReady 同步状态 → ready 且 appReady 没翻 → 立即翻 appReady=true。
+          // 与 broadcast 路径完全 idempotent，不会与 onServicesReadyChange 重复。
+          //
+          // v0.3.2 修：**_hideStartupLoading() 提到 if 外**。原来嵌套在
+          // `if (ready && !this.appReady)` 里，warm path / post-restart reload 下
+          // Promise.all 同步把 appReady=true 设掉了，这里 `!appReady` 永远是 false →
+          // loading 永远不消失，必须手动 ✕ 关。bootstrap 返回 ok 就该 hide loading，
+          // 与 appReady 是否被外部设过无关。
+          try {
+            const ready = window.electronAPI?.getServicesReady
+              ? await window.electronAPI.getServicesReady()
+              : null
+            if (ready && !this.appReady) {
+              this.appReady = true
+              if (!this._conversationInited) {
+                this._conversationInited = true
+                this.$nextTick(() => this.initConversationState())
+              }
+            }
+          } catch (e) { /* ignore — broadcast 路径兜底 */ }
+          // 无论 appReady 是否已被 Promise.all 同步设过，bootstrap 返回 ok = 启动已就绪，
+          // loading 必须消失（哪怕是 broadcast race 丢失的兜底）。
+          this._hideStartupLoading()
         }
       } catch (e) {
         console.error('[App] autoBootstrap IPC 异常:', e)
         this._hideStartupLoading()
         this.appReady = false
+        this._autoEnterPreference = false  // 同样回退 classic
       }
+    },
+    /**
+     * 用户在 StartupLoadingView 点「⏹ 停止启动」：**真正放弃自动启动**，回退到
+     * classic 形态 BootstrapView 走老路径手动启动。
+     *
+     * - cancelBootstrap IPC → 主进程翻 cancelled=true，1-2s 内跳出启动链 + 杀 backend 子进程
+     * - hide StartupLoadingView（loading 消失）
+     * - 翻 _autoEnterPreference=false → classic v-if (!_autoEnterPreference) 命中
+     * - appReady=false → 让 BootstrapView 渲染
+     * - _bootstrapVisible=false → 确保 deps 形态不显示
+     *
+     * 注意与「✕ 退出等待」的区别：✕ 等同于「⚙ 配置」（emit('open-bootstrap')），
+     * 只 hide loading + 弹 deps，不取消后台 bootstrap，**保留 _autoEnterPreference=true**；
+     * ⏹ 才是真正的「放弃自动启动」语义。
+     */
+    async _cancelStartup() {
+      try {
+        await window.electronAPI.cancelBootstrap()
+      } catch (e) {
+        console.error('[App] cancelBootstrap 异常:', e)
+      }
+      // 同步翻 BootstrapView 到 classic（不需要等主进程 broadcast —— 用户已经主动放弃）
+      this._hideStartupLoading()
+      this._bootstrapVisible = false  // 确保 deps 形态不显示
+      this.appReady = false
+      this._autoEnterPreference = false  // 这次会话回退到手动模式
+    },
+    /**
+     * 等待动画（StartupLoadingView）→ BootstrapView 的**切视图**入口。
+     * 触发点：浮层上的「⚙ 启动配置」和右上角 ✕（两者语义完全一致）。
+     *
+     * bootstrap 流程继续在后台跑；用户改的配置**不会立刻生效**（bootstrap 子流程已经
+     * 按启动时探测结果在跑），但会持久化到 startup-preferences.json 作为下次启动预设。
+     *
+     * 同时隐藏本浮层（_startupLoadingVisible=false）—— BootstrapView z-index 1000 <
+     * 本浮层 z-index 2000，不隐藏会被盖住。**只翻 visible、不调 _hideStartupLoading()**：
+     * 倒计时 timer 要继续跑（启动还在进行），日志缓冲也要继续接（切回来时是连续的）。
+     * 反向切换见 onBootstrapCloseFromStartup（BootstrapView ✕ → 回本浮层）。
+     */
+    _openBootstrapFromStartup() {
+      this._bootstrapVisible = true
+      this._startupLoadingVisible = false
+    },
+    /**
+     * BootstrapView deps 形态的「✕ 关闭」emit 处理：切回等待动画视图。
+     * 不调 cancelBootstrap —— 用户只是「换个视图看」，后台 bootstrap 该跑还跑。
+     *
+     * 判据是 `_autoEnterPreference && !appReady` 而不是 `!servicesReady`：
+     *  - autoEnter=true（用户是从等待动画的 ⚙/✕ 过来的）→ 切回等待动画，两个视图互切；
+     *    这里不能只看 servicesReady —— 存在「servicesReady=true 但 appReady 还没翻」
+     *    的广播时序窗口，那种情况下两个视图都不渲染会露出空白。
+     *  - autoEnter=false（用户是从主界面 slash `/bootstrap` 过来的）→ 不显示动画，
+     *    交给 classic 分支（其 v-if 条件 `!_autoEnterPreference` 此时命中）。
+     * 注意用裸 `= true` 而不是 _showStartupLoading()：后者会把 elapsed 归零并重启 timer，
+     * 而启动是连续的，倒计时必须接着走（_showStartupLoading 只用于「新开一次启动」）。
+     */
+    onBootstrapCloseFromStartup() {
+      this._bootstrapVisible = false
+      if (this._autoEnterPreference && !this.appReady) {
+        this._startupLoadingVisible = true
+      }
+    },
+    /**
+     * 用户在 BootstrapView classic 形态右上角 ✕：**切到等待动画视图**，不退 app、不取消启动。
+     *
+     * 两个视图是一体的（同一份 servicesReady 状态机 + 同一份实时日志缓冲）：
+     *   BootstrapView（配置 / 日志 / 三态按钮）  ⇄  StartupLoadingView（等待动画）
+     * ✕ 只是「收起面板、看动画」，等价于切视图；`⚙ 启动配置`（等待动画侧）切回来。
+     * 启动完成后 onServicesReadyChange 收到 ready=true + autoEnter=true → 翻 appReady=true
+     * 自动进主界面，两个视图一起消失。
+     *
+     * ⚠️ 前置条件：✕ 只在 autoEnterFrontend 已勾选时才渲染（BootstrapView 模板 v-if）。
+     * 没勾时关掉面板 = 既不会自动进前端、也没别的视图可切 → 死路，所以那种情况不给 ✕，
+     * 用户必须走「启动应用」→「进入应用」。
+     *
+     * ⚠️ 必须走 _showStartupLoading()（而不是裸 `_startupLoadingVisible = true`）：
+     * 后者不启动倒计时 timer，等待动画上的秒数会停在 0 不动（看着像卡死）。
+     */
+    onBootstrapCloseClassic() {
+      this._bootstrapVisible = false
+      this._autoEnterPreference = true  // 防御性重申（✕ 可见 ⟹ 本就已勾选）
+      this._showStartupLoading()
     },
     _showStartupLoading() {
       this._startupLoadingVisible = true
       this._startupElapsed = 0
+      // 新开一次启动 → 清掉上一轮的失败原因（避免回退面板时旧错误反复重现）
+      this._bootstrapError = ''
       // 1000ms 一次累加；与 _restartElapsed 模式一致但独立 timer
       if (this._startupTimer) clearInterval(this._startupTimer)
       this._startupTimer = setInterval(() => {
         this._startupElapsed = (this._startupElapsed || 0) + 1
       }, 1000)
+    },
+    /**
+     * 主进程推「bootstrap 失败」（独立通道，见 preload onBootstrapFailed 注释）。
+     *
+     * 处理成和 `_autoBootstrap()` 自己的失败分支同样的终态：关等待动画 + 回退到
+     * classic 形态 BootstrapView 让用户手动修复。这是「两个视图」设计下唯一能兜住
+     * 「发起方组件已卸载（用户点过 ✕）→ 没人拿 IPC 返回值」的路径。
+     *
+     * ⚠️ 只降级**会话内**的 `_autoEnterPreference`，不改 userData 持久化的偏好 ——
+     * 用户勾了 autoEnter 是用户的决定，下次启动仍按 autoEnter 尝试（不替用户重置）。
+     *
+     * 幂等：重复收到（理论上主进程只在失败时发一次）时状态已经是终态，重设无害。
+     */
+    _onBootstrapFailed(error) {
+      this._bootstrapError = error || ''
+      this._hideStartupLoading()
+      this._bootstrapVisible = false   // 确保不走 deps 形态分支
+      this.appReady = false
+      this._autoEnterPreference = false  // 让 classic v-if (!_autoEnterPreference) 命中
+      console.warn('[App] bootstrap 失败，回退到 classic BootstrapView:', this._bootstrapError)
     },
     _hideStartupLoading() {
       if (this._startupTimer) {
@@ -1114,6 +1345,11 @@ export default {
         this._startupTimer = null
       }
       this._startupLoadingVisible = false
+      // 清空日志缓冲（避免下次启动叠加旧日志）。
+      // **不退订** 'startup:log' —— 订阅在 mounted 挂、beforeUnmount 摘，
+      // 生命周期与「谁在显示」解耦：BootstrapView ↔ 等待动画来回切换时，
+      // 缓冲要能继续接日志（否则切回等待动画看到的是空面板）。
+      this._startupLogs = []
     },
     /**
      * 用户点 banner 上的「重新连接」：调 IPC 让主进程 kill mcp/backend 后串行重启。
@@ -1979,13 +2215,33 @@ export default {
           this.setupVisible = true
           return
         case 'bootstrap':
-          // v0.3.x：仅 autoEnter=true 时生效（其他场景用户本来就在 BootstrapView classic 形态里）。
-          // _autoEnterPreference 由 getStartupPreferences() 初始化 + BootstrapView 保存按钮同步更新。
-          if (!this._autoEnterPreference) {
-            this.showToast('前置依赖面板仅在「自动进入前端」开启时可用', '请先在 BootstrapView 引导页完成首次配置')
+          // v0.3.x：slash `/bootstrap` **任何状态下都能触发，与 autoEnterFrontend 勾选无关** ——
+          // 弹 deps 形态让用户查看 / 修改前置依赖配置（项目根 / Python / Docker / Redis / sandbox）
+          // + 点「重启应用」重启后端。
+          // 之前那版用 `if (!this._autoEnterPreference) return` 挡住，导致没勾选时敲命令只弹一句
+          // toast「前置依赖面板仅在「自动进入前端」开启时可用」—— 那个 gate 已删除。
+          // 勾选状态只决定两件事：①冷启动自动 bootstrap 并自动进前端；②启动期显示等待动画
+          // 还是 classic 面板。**都不是「能不能打开配置面板」的门槛。**
+          // 渲染侧对应 deps 分支 `v-else-if="isElectron && _bootstrapVisible"`（不含 autoEnter 项），
+          // 所以主界面（appReady=true）里没勾选也能正常打开。
+          this._bootstrapVisible = true
+          return
+        case 'restart':
+          // 重启后端：复用 banner「重新连接」那条路径（kill → startBackend → 广播 servicesReady），
+          // 走统一的 .restart-mask 遮罩 + 倒计时 + 失败重试，不另造流程。
+          //
+          // ⚠️ 启动中禁止重启：主进程的 startup:bootstrap **没有并发守卫**（bootstrapSession
+          // 是单个模块级 token，第二次调用直接覆盖），而 restart 内部也会 kill + startBackend。
+          // 两者并发 → 两个启动链同时 spawn backend / 抢 38211，会产生孤儿进程。
+          // 这时用户该用的是等待动画上的「⏹ 停止启动」。
+          if (this._startupLoadingVisible || this._autoBootstrapInFlight || this._backendRestarting) {
+            this.showToast(
+              '启动 / 重启进行中',
+              '后端正在启动，请等它完成（或在等待动画上点「停止启动」）。'
+            )
             return
           }
-          this._bootstrapVisible = true
+          await this.handleRestartBackend()
           return
         case 'reload':
           if (!sid) {
@@ -5630,6 +5886,19 @@ export default {
     // （Electron 单窗口架构下基本不会触发，但规范做法）
     if (this._notFoundTimer) clearTimeout(this._notFoundTimer)
     if (this._notFoundTickInterval) clearInterval(this._notFoundTickInterval)
+    // v0.3.x —— 启动期 IPC 订阅退订（mounted 挂的生命周期在这里收尾；中途切换视图不退订）
+    if (this._startupLogUnsubscribe) {
+      this._startupLogUnsubscribe()
+      this._startupLogUnsubscribe = null
+    }
+    if (this._servicesReadyUnsubscribe) {
+      this._servicesReadyUnsubscribe()
+      this._servicesReadyUnsubscribe = null
+    }
+    if (this._bootstrapFailedUnsubscribe) {
+      this._bootstrapFailedUnsubscribe()
+      this._bootstrapFailedUnsubscribe = null
+    }
     window.removeEventListener('keydown', this.handleDoubleSlashFocus)
   },
   watch: {
@@ -6137,8 +6406,19 @@ body {
 
 /*
  * Restart overlay:所有触发后端重启的入口共用一套 UI —— banner「重新连接」/ Settings
- * 「Save & Restart」/ SetupView 修改 apikey 后必重启等。z-index 1900 比 NotFoundView 1800
- * + BootstrapView 1500 都高，确保重启中全屏盖住，用户输入被屏蔽。
+ * 「Save & Restart」/ SetupView 修改 apikey 后必重启 / slash `/restart` / BootstrapView
+ * deps 形态「重启应用」。
+ *
+ * z-index 必须**高于所有可能同时挂载的浮层**，否则重启进度会被盖住、用户以为卡死：
+ *   NotFoundView 1800 < StartupLoadingView 2000 < BootstrapView 2100 < .restart-mask 2400
+ * （早期是 1900，当时 BootstrapView 还是 1500；后来 BootstrapView 提到 2100 让 deps 形态
+ *   能盖住等待动画，这个不变式就破了 —— 点「重启应用」时遮罩被面板压在下面。）
+ * 改这里时请同步检查上面这条链，别只改一个。
+ *
+ * 例外（有意置于其上，不参与这条链）：.resume-input-overlay（续接输入弹窗）与
+ * .image-preview-overlay（图片预览）都是 10000 —— 它们只在主界面可交互时由用户主动打开，
+ * 与重启/启动期（主界面禁用）不相交，所以让它们保持最上层的用户交互语义。
+ *
  * CSS 写在 App.vue 顶层（非 scoped），因为 .restart-mask / .spinner 是 template 里直接
  * 写的全局 class,scoped 限定会拿不到。
  */
@@ -6150,7 +6430,8 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1900;
+  /* 2400 —— 必须高于 StartupLoadingView(2000) / BootstrapView(2100)，见上方注释 */
+  z-index: 2400;
 }
 .dark-theme .restart-mask {
   background: rgba(0, 0, 0, 0.75);

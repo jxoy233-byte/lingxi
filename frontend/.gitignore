@@ -18,6 +18,9 @@ dist-ssr/
 # Logs
 *.log
 logs/
+
+# Build stamp（prebuild 脚本注入，build 时被覆盖）
+.buildstamp.json
 **/logs/
 **/*.log
 

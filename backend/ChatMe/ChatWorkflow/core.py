@@ -17,6 +17,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.redis import AsyncRedisSaver
 from langgraph.types import Send, interrupt
 
+from . import llm_factory
 from .config.graph_config import get_agent_node_config, get_graph_final_node_config, \
     get_imp_ipt_config, get_history_summary_node_config, get_llm_memory_config, get_model_vl_config, \
     get_should_end_node_config, get_react_compact_config, get_agent_node_improved_config
@@ -80,13 +81,9 @@ class ChatWorkflow:
             self.logger.info(f"[启动 sweep] 已 merge {swept} 个残留 thinking_chain 临时文件")
 
         self._final_system_template = None
-        self.llm_core = None
-        self.agent_llm = None
-        self.summary_llm = None
-        self.react_compact_llm = None
-        self.llm_imp_ipt = None
-        self.llm_imp_ipt_vl = None
-        self.should_end_llm = None
+        # llm_core / agent_llm / summary_llm / react_compact_llm / llm_imp_ipt /
+        # should_end_llm / llm_imp_ipt_vl / agent_llm_with_done 全部改为
+        # @property（懒加载 + llm_factory cache），不在 __init__ 预构造。
 
         self.tools = None
         self.graph = None
@@ -141,62 +138,101 @@ class ChatWorkflow:
         self.memory_manager = MemoryManager(llm_config=llm_memory_config, memory_prompt=llm_memory_prompt)
 
     async def init_llms(self):
-        # 最终节点配置
-        llm_config, system_prompt = get_graph_final_node_config()
+        """
+        v0.3.x 改造：不再启动期构造 ChatOpenAI，改为懒加载（llm_factory）。
 
-        # final_node 用 dynamic system prompt 注入（imp_ipt 占位段由 final_node.format() 注入），
+        启动期只持有 LCEL prompt（启动期定一次，不会随 config 变化）。
+        5 个 LLM 角色（llm_core / agent_llm / summary_llm / react_compact_llm /
+        llm_imp_ipt / should_end_llm）共享同一个 ChatOpenAI 实例（连接三元组相同），
+        实例通过 llm_factory.get_llm("main") 懒加载，按 (api_key_fp, base_url,
+        model_name) 缓存；config 改了 → cache 自动失效 → 下次调用 new。
+
+        详见 ChatMe/ChatWorkflow/llm_factory.py。
+        """
+        # final_node system prompt
+        _, system_prompt = get_graph_final_node_config()
         self._final_system_template = system_prompt
-        self.llm_core = ChatOpenAI(**llm_config)
 
-        # agent_node配置
-        agent_node_config ,agent_prompt = get_agent_node_config()
+        # agent_node prompt（老 graph）
+        _, agent_prompt = get_agent_node_config()
+        self._agent_prompt = ChatPromptTemplate.from_messages(
+            [("system", agent_prompt), MessagesPlaceholder("messages")]
+        )
 
-        self.agent_llm = ChatOpenAI(**agent_node_config).bind_tools(self.tools)
-        prompt = ChatPromptTemplate.from_messages([("system", agent_prompt), MessagesPlaceholder("messages")])
-        self.agent_llm = prompt | self.agent_llm
+        # agent_node prompt（新 graph，含 done tool）
+        _, agent_improved_prompt = get_agent_node_improved_config()
+        self._agent_improved_prompt = ChatPromptTemplate.from_messages(
+            [("system", agent_improved_prompt), MessagesPlaceholder("messages")]
+        )
 
-        # 新 graph（_create_graph_improved）专用 agent_llm：
-        # bind_tools 含 done tool，prompt 用优化版（教 AI 用 done tool 而不是 'output Done 单词'）
-        agent_node_improved_config, agent_improved_prompt = get_agent_node_improved_config()
-        self.agent_llm_with_done = ChatOpenAI(**agent_node_improved_config).bind_tools(self.tools_with_done)
-        improved_prompt = ChatPromptTemplate.from_messages([("system", agent_improved_prompt), MessagesPlaceholder("messages")])
-        self.agent_llm_with_done = improved_prompt | self.agent_llm_with_done
+        # summary_llm prompt
+        _, summary_llm_prompt = get_history_summary_node_config()
+        self._summary_prompt = ChatPromptTemplate.from_messages(
+            [("system", summary_llm_prompt), MessagesPlaceholder("messages")]
+        )
 
-        # 历史对话总结节点配置
-        summary_llm_config, summary_llm_prompt = get_history_summary_node_config()
+        # react_compact_llm prompt
+        _, react_compact_prompt = get_react_compact_config()
+        self._react_compact_prompt = ChatPromptTemplate.from_messages(
+            [("system", react_compact_prompt), MessagesPlaceholder("messages")]
+        )
 
-        self.summary_llm = ChatOpenAI(**summary_llm_config)
-        prompt = ChatPromptTemplate.from_messages([("system", summary_llm_prompt), MessagesPlaceholder("messages")])
-        self.summary_llm = prompt | self.summary_llm
+        # llm_imp_ipt prompt
+        _, imp_ipt_llm_prompt = get_imp_ipt_config()
+        self._imp_ipt_prompt = ChatPromptTemplate.from_messages(
+            [("system", imp_ipt_llm_prompt), MessagesPlaceholder("messages")]
+        )
 
-        # ReAct 流程压缩节点配置
-        react_compact_llm_config, react_compact_prompt = get_react_compact_config()
+        # should_end_llm prompt
+        _, should_end_prompt_content = get_should_end_node_config()
+        self._should_end_prompt = ChatPromptTemplate.from_messages(
+            [("system", should_end_prompt_content), MessagesPlaceholder("messages")]
+        )
 
-        self.react_compact_llm = ChatOpenAI(**react_compact_llm_config)
-        prompt = ChatPromptTemplate.from_messages([("system", react_compact_prompt), MessagesPlaceholder("messages")])
-        self.react_compact_llm = prompt | self.react_compact_llm
+        # VL：当前用法是直接 ainvoke([file_msg]) 不套 prompt，prompt 字段先存住备用
+        _, imp_ipt_vl_llm_prompt = get_model_vl_config()
+        self._imp_ipt_vl_prompt = imp_ipt_vl_llm_prompt
 
-        # 输入优化大模型配置
-        imp_ipt_llm_config, imp_ipt_llm_prompt = get_imp_ipt_config()
+    # === 5 个 LLM 角色 + VL 全部走 property（懒加载 + cache）===
+    # 每次访问：cache hit 直接返 ChatOpenAI（~0 耗时）；cache miss → new + 缓存
+    # bind_tools(self.tools) / LCEL prompt | 每次访问重新组合（O(microseconds)，
+    # 远小于 LLM 调用耗时）；组合返回的对象不可缓存（与 tools 列表关联）
 
-        self.llm_imp_ipt = ChatOpenAI(**imp_ipt_llm_config)
-        prompt = ChatPromptTemplate.from_messages([("system", imp_ipt_llm_prompt), MessagesPlaceholder("messages")])
-        self.llm_imp_ipt = prompt | self.llm_imp_ipt
+    @property
+    def llm_core(self):
+        """final_node 用：裸 ChatOpenAI。"""
+        return llm_factory.get_llm("main")
 
-        # should_end_node 配置
-        should_end_llm_config, should_end_prompt_content = get_should_end_node_config()
-        self.should_end_llm = ChatOpenAI(**should_end_llm_config)
-        should_end_prompt = ChatPromptTemplate.from_messages([("system", should_end_prompt_content), MessagesPlaceholder("messages")])
-        self.should_end_llm = should_end_prompt | self.should_end_llm
+    @property
+    def agent_llm(self):
+        """老 graph agent_node 用：prompt | ChatOpenAI.bind_tools(self.tools)。"""
+        return self._agent_prompt | llm_factory.get_llm("main").bind_tools(self.tools)
 
-        # 输入优化视觉模型配置
-        imp_ipt_vl_llm_config, imp_ipt_vl_llm_prompt = get_model_vl_config()
-        # local=true 时使用本地 VL 模型，否则使用外部 VL 模型
-        # 从配置中分离 local 标志，ChatOpenAI 不接受该参数
-        vl_local = imp_ipt_vl_llm_config.pop("local", None)
-        self.llm_imp_ipt_vl = ChatOpenAI(**imp_ipt_vl_llm_config)
-        # prompt = ChatPromptTemplate.from_messages([("system", imp_ipt_vl_llm_prompt), ("human", "{messages}")])
-        # self.llm_imp_ipt_vl = prompt | self.llm_imp_ipt_vl
+    @property
+    def agent_llm_with_done(self):
+        """新 graph agent_node 用：prompt | ChatOpenAI.bind_tools(self.tools_with_done)。"""
+        return self._agent_improved_prompt | llm_factory.get_llm("main").bind_tools(self.tools_with_done)
+
+    @property
+    def summary_llm(self):
+        return self._summary_prompt | llm_factory.get_llm("main")
+
+    @property
+    def react_compact_llm(self):
+        return self._react_compact_prompt | llm_factory.get_llm("main")
+
+    @property
+    def llm_imp_ipt(self):
+        return self._imp_ipt_prompt | llm_factory.get_llm("main")
+
+    @property
+    def should_end_llm(self):
+        return self._should_end_prompt | llm_factory.get_llm("main")
+
+    @property
+    def llm_imp_ipt_vl(self):
+        """视觉模型：独立 base_url/api_key/model_name（除非 vl.local=False fallback）。"""
+        return llm_factory.get_llm("vl")
 
     async def ainit(self):
         """
@@ -707,8 +743,6 @@ class ChatWorkflow:
         （≤4096 tokens 中文 markdown 摘要 / 禁止 tool_call 块等），让 prompt 真正生效，
         强化压缩执行效果。
         """
-        if self.react_compact_llm is None:
-            return None
         if len(context) < 4:
             return None
 

@@ -81,10 +81,16 @@ def get_llm(role: str = "main", cfg: Optional[dict] = None) -> ChatOpenAI:
         return llm
 
     # cache miss → new 一个 ChatOpenAI
+    # 必须显式带 model_kwargs={"stream_options": {"include_usage": True}}：
+    # LangChain 在 base_url 非空（非 OpenAI 官方端点）时默认关闭 stream_usage，
+    # 请求 body 不会带 stream_options → MiniMax/严格 OpenAI 兼容端点不返回 usage，
+    # 最后一个 AIMessageChunk.usage_metadata 是 None → 前端 token 永远 0。
+    # DeepSeek 服务端宽容偶尔返回 usage，所以误以为「正常」其实是部分数据。
     llm = ChatOpenAI(
         model=cfg["model_name"],
         api_key=cfg["api_key"],
         base_url=cfg["base_url"],
+        model_kwargs={"stream_options": {"include_usage": True}},
     )
     _cache[key] = llm
     logger.info(

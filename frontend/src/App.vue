@@ -1678,10 +1678,16 @@ export default {
           const { done, value } = await reader.read()
           if (done) break
           buffer += decoder.decode(value, { stream: true })
-          const parts = buffer.split('\n\n')
-          buffer = parts.pop() || ''
-          for (const part of parts) {
-            const line = part.trim()
+          // 用 indexOf + slice 替代 split('\n\n') + parts.pop()：
+          // chunk 边界切到 \n\n 中间时，老写法 split 拆出半截 JSON 被 try/catch 吞掉，
+          // 整个 SSE 事件（含 token_usage 字段）丢失。Win + Chromium 后台节流切回时
+          // 反弹 fetch chunk 切分更激进，丢事件概率比 mac 高 → token 不累加。
+          // 新写法只在遇到完整 \n\n 时才切，buffer 累积未完整段等下一轮。
+          let idx
+          while ((idx = buffer.indexOf('\n\n')) !== -1) {
+            const raw = buffer.slice(0, idx)
+            buffer = buffer.slice(idx + 2)
+            const line = raw.trim()
             if (!line) continue
             try {
               const data = JSON.parse(line)
@@ -3755,11 +3761,15 @@ export default {
           if (done) break
 
           buffer += decoder.decode(value, { stream: true })
-          const parts = buffer.split('\n\n')
-          buffer = parts.pop() || ''
-
-          for (const part of parts) {
-            const line = part.trim()
+          // 用 indexOf + slice 替代 split('\n\n') + parts.pop()：
+          // chunk 边界切到 \n\n 中间时，老写法 split 拆出半截 JSON 被 try/catch 吞掉，
+          // 整个 SSE 事件（含 token_usage 字段）丢失。Win 上概率更高。
+          // 新写法只在遇到完整 \n\n 时才切。
+          let idx
+          while ((idx = buffer.indexOf('\n\n')) !== -1) {
+            const raw = buffer.slice(0, idx)
+            buffer = buffer.slice(idx + 2)
+            const line = raw.trim()
             if (!line) continue
 
             try {
@@ -5079,12 +5089,15 @@ export default {
 
           buffer += decoder.decode(value, { stream: true })
 
-          const parts = buffer.split('\n\n')
-
-          buffer = parts.pop() || ''
-
-          for (const part of parts) {
-            const line = part.trim()
+          // 用 indexOf + slice 替代 split('\n\n') + parts.pop()：
+          // chunk 边界切到 \n\n 中间时，老写法 split 拆出半截 JSON 被 try/catch 吞掉，
+          // 整个 SSE 事件（含 token_usage 字段）丢失。Win 上概率更高。
+          // 新写法只在遇到完整 \n\n 时才切。
+          let idx
+          while ((idx = buffer.indexOf('\n\n')) !== -1) {
+            const raw = buffer.slice(0, idx)
+            buffer = buffer.slice(idx + 2)
+            const line = raw.trim()
             if (!line) continue
 
             try {

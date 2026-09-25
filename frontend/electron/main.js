@@ -148,13 +148,14 @@ let apiFailureWindowStart = Date.now()
 // Windows + Chromium 后台节流：窗口 blur 后渲染层 setInterval / SSE 被节流到 1Hz，
 // 切回瞬间多个 fetch（SSE reconnect / refreshConversation / getConversations / queue drain）
 // 集体 retry 撞后端慢响应（timeout 3s 边界）→ 5s 内累积 3 次失败 → banner 误弹。
-// focus 后给 500ms 缓冲让反弹 timer 自然收敛，500ms 后正常阈值接管。
+// focus 后给 2s 缓冲让反弹 timer 自然收敛，2s 后正常阈值接管。
+// （之前 500ms 太短——Win 上 fetch 反弹批次持续 1-2s，grace 一过又计入失败计数 → banner 误闪。）
 let focusGraceUntil = 0
 
 const HEALTH_FAILURE_THRESHOLD = 2   // /health 探测：2 次连续失败 = 真挂（约 10s）
 const API_FAILURE_THRESHOLD = 3      // API 调用：5s 窗口内 3 次失败 = 真挂
 const API_FAILURE_WINDOW = 5000
-const FOCUS_GRACE_MS = 500
+const FOCUS_GRACE_MS = 2000   // focus 后 2s 内的 API 失败不计（覆盖 Win fetch 反弹收敛期）
 
 function startHealthMonitor() {
   if (healthMonitorInterval) return
@@ -225,7 +226,7 @@ function recordApiCall(success) {
     return
   }
   // 切回瞬间的宽限期：节流反弹的 fetch 失败大概率是因为 timer 反弹 + 后端还没醒，
-  // 不是真挂。失败不计入，让反弹自然收敛；500ms 后正常阈值接管。
+  // 不是真挂。失败不计入，让反弹自然收敛；2s 后正常阈值接管。
   // 成功不受影响（success 路径早返，不走到这里）。
   if (Date.now() < focusGraceUntil) {
     console.log('[health] api-call failed during focus grace (ignored)')
@@ -262,7 +263,7 @@ function onWindowActivated() {
   apiFailureCount = 0
   apiFailureWindowStart = Date.now()
   focusGraceUntil = Date.now() + FOCUS_GRACE_MS
-  console.log('[health] window activated → reset failures + grace 500ms + immediate probe')
+  console.log('[health] window activated → reset failures + grace 2000ms + immediate probe')
   runHealthCheck()
 }
 

@@ -120,7 +120,9 @@
     }
   },
   "dependencies": {
-    "dompurify": "^3.4.12"
+    "dompurify": "^3.4.12",
+    "mammoth": "^1.8.0",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.0.4",

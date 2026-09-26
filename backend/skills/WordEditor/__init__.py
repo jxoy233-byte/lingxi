@@ -5,13 +5,15 @@
 LLM 调用方式（沙盒 code() 内）:
     from skills.WordEditor import WordDoc, OfficeDocError
 
-    doc = WordDoc.create("/work/report.docx")
+    doc = WordDoc.create("/cached/report.docx")
     doc.add_paragraph("标题", style="Title")
     doc.add_heading("执行摘要", level=1)
     doc.add_paragraph("正文", alignment="justify", font_size="小四")
     doc.add_table(rows=3, cols=2, data=[["a", "b"], ["c", "d"]], header=True)
-    doc.add_image("/work/chart.png", width="15cm")
+    doc.add_image("/cached/chart.png", width="15cm")
     doc.save()
+
+路径约定：沙盒内 `/cached/` 直接挂 host `backend/cached/`（rw），写入即落地。落盘后通过 `/static/cached/{file}` 访问。
 """
 import io
 import re
@@ -1563,17 +1565,6 @@ class WordDoc(metaclass=_HelpMeta):
 # ============================================================================
 # 公共辅助函数
 # ============================================================================
-
-def path_to_work(sandbox_path: str) -> str:
-    """沙盒 `/work/xxx` → 主进程 `cached/{sid}/xxx` 相对路径。详细 help("path_to_work")。
-
-    Args: sandbox_path 沙盒内绝对路径（如 `/work/data.xlsx`）或其他字符串。
-    Returns: 去掉 `/work/` 前缀的相对路径；非 `/work/` 开头的输入原样返回。
-    """
-    p = Path(sandbox_path)
-    if p.is_absolute() and str(p).startswith("/work/"):
-        return str(p.relative_to("/work"))
-    return sandbox_path
 
 
 def version_info() -> dict:

@@ -13,9 +13,9 @@ module: skills.WordEditor
 ```python
 from skills.WordEditor import WordDoc
 
-doc = WordDoc.create("/work/report.docx")    # 或 WordDoc.open(path)
+doc = WordDoc.create("/cached/report.docx")    # 或 WordDoc.open(path)
 doc.add_paragraph(...)
-doc.save()                                     # 或 doc.save("/work/new.docx")
+doc.save()                                     # 或 doc.save("/cached/new.docx")
 ```
 
 ## 核心约定（必须记住）
@@ -45,7 +45,7 @@ doc.remove_paragraph(N)                          # 删第 N 行
 ```python
 from skills.WordEditor import WordDoc
 
-doc = WordDoc.create("/work/q3_report.docx")
+doc = WordDoc.create("/cached/q3_report.docx")
 
 doc.add_paragraph("Q3 营收分析报告", style="Title")
 doc.add_heading("执行摘要", level=1)
@@ -60,7 +60,7 @@ doc.add_table(
           ["Q2", "120M", "+20%"], ["Q3", "150M", "+25%"]],
     header=True, header_fill="4472C4",
 )
-doc.add_image("/work/charts/q3.png", width="15cm", alignment="center")
+doc.add_image("/cached/charts/q3.png", width="15cm", alignment="center")
 doc.save()
 ```
 

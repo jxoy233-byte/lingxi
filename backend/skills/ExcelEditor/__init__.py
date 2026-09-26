@@ -6,15 +6,17 @@
 LLM 调用方式（沙盒 code() 内）:
     from skills.ExcelEditor import ExcelDoc, ExcelDocError
 
-    doc = ExcelDoc.create("/work/sales.xlsx", sheet_name="Q3")
+    doc = ExcelDoc.create("/cached/sales.xlsx", sheet_name="Q3")
     doc.write_table("A1", [["日期","产品","金额"], ...], header=True)
     doc.add_formula("D5", "=SUM(D2:D4)")
     doc.save()
 
-    doc = ExcelDoc.from_csv("/work/data.csv", header=True)
+    doc = ExcelDoc.from_csv("/cached/data.csv", header=True)
     doc.save()
 
-    doc.to_csv("/work/report.csv")
+    doc.to_csv("/cached/report.csv")
+
+路径约定：沙盒内 `/cached/` 直接挂 host `backend/cached/`（rw），写入即落地。落盘后通过 `/static/cached/{file}` 访问。
 """
 import csv
 import datetime
@@ -474,12 +476,6 @@ class ExcelDoc(metaclass=_HelpMeta):
 
 
 # 公共辅助函数
-def path_to_work(sandbox_path: str) -> str:
-    """沙盒 /work/xxx → 主进程 cached/{sid}/xxx。"""
-    p = Path(sandbox_path)
-    if p.is_absolute() and str(p).startswith("/work/"):
-        return str(p.relative_to("/work"))
-    return sandbox_path
 
 
 def version_info() -> dict:

@@ -52,10 +52,16 @@
       <main class="chat-area">
         <ChatHeader
           :has-session="!!currentSessionId"
+          :word-drawer-available="!!_wordDrawer.filePath"
+          :excel-drawer-available="!!_excelDrawer.filePath"
+          :word-drawer-open="_wordDrawer.visible"
+          :excel-drawer-open="_excelDrawer.visible"
           @open-settings="settingsVisible = true"
           @open-setup="setupVisible = true"
           @toggle-checkpoints="toggleCheckpoints"
           @toggle-sidebar="toggleMobileSidebar"
+          @toggle-word-drawer="toggleWordDrawer"
+          @toggle-excel-drawer="toggleExcelDrawer"
           @refresh="refreshPage"
         />
 
@@ -172,6 +178,24 @@
         v-if="showFilePreview"
         class="file-preview-overlay"
         @click="showFilePreview = false"
+      />
+
+      <!-- v0.5.x —— WordEditor 实时预览抽屉（AI 调 WordDoc.create/open 时自动弹出） -->
+      <WordDocDrawer
+        :visible="_wordDrawer.visible"
+        :file-path="_wordDrawer.filePath"
+        :version="_wordDrawer.version"
+        :is-streaming="_wordDrawer.isStreaming"
+        @close="_wordDrawer.visible = false"
+      />
+
+      <!-- v0.5.x —— ExcelEditor 实时预览抽屉（手动打开：AI 写入时只跟踪不弹出） -->
+      <ExcelDocDrawer
+        :visible="_excelDrawer.visible"
+        :file-path="_excelDrawer.filePath"
+        :version="_excelDrawer.version"
+        :is-streaming="_excelDrawer.isStreaming"
+        @close="_excelDrawer.visible = false"
       />
 
       <!-- 点击空白区域关闭历史记录面板 -->
@@ -413,6 +437,8 @@ import StartupLoadingView from './components/StartupLoadingView.vue'
 import CheckpointPanel from './components/CheckpointPanel.vue'
 import WebPreviewPanel from './components/WebPreviewPanel.vue'
 import FilePreviewPanel from './components/FilePreviewPanel.vue'
+import WordDocDrawer from './components/WordDocDrawer.vue'
+import ExcelDocDrawer from './components/ExcelDocDrawer.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import HelpDialog from './components/HelpDialog.vue'
 import ToastDialog from './components/ToastDialog.vue'
@@ -443,6 +469,8 @@ export default {
     CheckpointPanel,
     WebPreviewPanel,
     FilePreviewPanel,
+    WordDocDrawer,
+    ExcelDocDrawer,
     SettingsDialog,
     HelpDialog,
     ToastDialog,
@@ -558,6 +586,16 @@ export default {
       //   时间窗口 2s 内只允许一次 refetch + in-flight promise 复用，幂等。
       _lastSkillFetchAt: 0,
       _skillFetchInFlight: null,
+      // v0.5.x —— WordEditor 写作抽屉：AI 调 WordDoc.create/open 时自动弹出右侧预览。
+      // - toolCallId 用于配对 tool_call_result（只刷新同一次调用的产物）
+      // - version 每次 +1 触发 WordDocDrawer 重新 fetch + mammoth 渲染
+      // - isStreaming=false 时抽屉保持打开（对标 CheckpointPanel，不自动关）
+      // - visible=false 时整个抽屉卸载，组件卸载前最后一次 version 仍生效（用于切回再看）
+      _wordDrawer: { visible: false, filePath: '', version: 0, isStreaming: false, toolCallId: null, rawPath: '' },
+      // v0.5.x —— ExcelEditor 写作抽屉：与 WordDrawer 共用检测，但 visible 默认 false 不自动开。
+      // 用户点 ChatHeader 📊 按钮 → toggleExcelDrawer 翻 visible。
+      // AI 实时写入时抽屉仍然 update version（保证用户打开时是最新），但不抢视觉焦点。
+      _excelDrawer: { visible: false, filePath: '', version: 0, isStreaming: false, toolCallId: null, rawPath: '' },
       // 简洁提示弹窗（slash 命令前置条件不满足时用，例如「/backtrack 当前没有会话」）
       toast: { visible: false, title: '', message: '' },
       // 静态 action 命令清单（永远在前，不依赖后端）：
@@ -877,6 +915,24 @@ export default {
     helpVisible(visible) {
       if (visible && this.dynamicSkills.length === 0) this.fetchSkills()
     },
+    // v0.5.x —— 写作抽屉的 streaming 状态跟随当前 session 的流式状态。
+    // _activeStreamingSessions.delete(sid) 触发时（done / error / interrupt 走完清理）→ drawer 退出"AI 正在写入"。
+    // deep:true 不需要 —— Set 引用变化由 Vue 响应式自动捕获。
+    '_activeStreamingSessions'(next, prev) {
+      if (next === prev) return
+      if (!this.currentSessionId) return
+      if (!next.has(this.currentSessionId)) {
+        this._markWordDrawerStreamingDone()
+        this._markExcelDrawerStreamingDone()
+      }
+    },
+    // v0.5.x —— 切会话时关闭 drawer：drawer 的 filePath 是相对当前 session 算的（_normalizeWordPath 用 sid），
+    // 切到另一 session 后原 drawer 指向的文件路径失效；且 drawer 打开期间被锁在旧 session 的视图上
+    // 会让用户看不到新 session 的写作状态。直接关掉最稳。
+    currentSessionId() {
+      this._wordDrawer = { visible: false, filePath: '', version: 0, isStreaming: false, toolCallId: null, rawPath: '' }
+      this._excelDrawer = { visible: false, filePath: '', version: 0, isStreaming: false, toolCallId: null, rawPath: '' }
+    },
     // 侧栏视图切换持久化（跨 F5 恢复）
     sidebarView(newVal) {
       try { localStorage.setItem('lingxi.sidebarView', newVal) } catch { /* 静默 */ }
@@ -1122,6 +1178,152 @@ export default {
       if (!this._isSkillForgeCreateCall(message, data)) return
       // 命中！触发 refetch（idempotent 守卫防止重复打）
       this.fetchSkills()
+    },
+    /**
+     * v0.5.x —— WordEditor 实时预览抽屉检测。
+     * 与 SkillForge 模式对称：tool_call_name 阶段检测 + 提取路径，tool_call_result 阶段触发刷新。
+     *
+     * 检测：args.code 含 `from skills.WordEditor import` + `WordDoc.create/open(...)`。
+     * 路径：AI 在沙盒写 `/cached/X.docx` 或 `cached/X.docx`，规范化成 `/static/cached/{sid-or-flat}/X.docx`。
+     * 沙盒实际 mount 是 `/cached:rw` → host `backend/cached/`（flat，无 sid scoping）；
+     * 但为了让不同会话的同名文件不撞，前端 fetch URL 仍拼 sid（仅用于 URL，不影响实际落盘）。
+     */
+    _isWordEditorCall(data) {
+      if (data.type !== 'tool_call_name') return false
+      const name = data.content?.name
+      const args = data.content?.args || {}
+      if (name !== 'code') return false
+      const code = String(args.code || '')
+      return /from\s+skills\.WordEditor\s+import\b/i.test(code)
+        && /\bWordDoc\.(?:create|open)\s*\(/i.test(code)
+    },
+    /**
+     * 把 AI 传给 WordDoc.create/open 的 sandbox 路径规范化成前端可 fetch 的 URL。
+     * 规则：
+     *   /cached/X.docx       → /static/cached/{sid?}/X.docx
+     *   cached/X.docx        → 同上
+     *   /work/X.docx         → 同上（遗留 docstring 容错，旧 SKILL.md 写的）
+     *   X.docx（裸）         → 同上
+     *   /work/sub/X.docx     → /static/cached/{sid?}/sub/X.docx
+     */
+    _normalizeWordPath(raw, sid) {
+      let p = String(raw || '').replace(/^\/?(?:cached|work)\//, '').replace(/^cached\//, '')
+      if (!p) return null
+      // 裸文件名（无 /） → 加 sid 防跨会话冲突
+      if (sid && !p.includes('/')) {
+        p = `${sid}/${p}`
+      } else if (sid && !p.startsWith(`${sid}/`) && !p.startsWith('cached/')) {
+        // 子目录（如 sub/X.docx）：仍加 sid prefix，让 URL 唯一指向本会话产物
+        p = `${sid}/${p}`
+      }
+      return `/static/cached/${p}`
+    },
+    _markWordDrawerPending(data) {
+      if (!this._isWordEditorCall(data)) return
+      const code = String(data.content?.args?.code || '')
+      const m = code.match(/\bWordDoc\.(?:create|open)\s*\(\s*["']([^"']+)["']/)
+      if (!m) return
+      const raw = m[1]
+      const norm = this._normalizeWordPath(raw, this.currentSessionId)
+      if (!norm) {
+        console.warn('[WordDrawer] 无法规范化路径:', raw)
+        return
+      }
+      // 互斥：如果 Excel drawer 当前可见，先关掉 —— 两个 drawer 都从右侧滑入会重叠
+      const excelVisible = this._excelDrawer?.visible
+      this._wordDrawer = {
+        visible: true,
+        filePath: norm,
+        version: (this._wordDrawer?.version || 0) + 1,
+        isStreaming: true,
+        toolCallId: data.id,
+        rawPath: raw
+      }
+      if (excelVisible) {
+        this._excelDrawer = { ...this._excelDrawer, visible: false }
+      }
+    },
+    /**
+     * 收到 WordEditor 相关 tool_call_result 时 version++ 触发组件 reload。
+     * 用 toolCallId 配对（不靠 args，因为 args.code 不在 result 里）。
+     */
+    _maybeRefreshWordDrawerAfterResult(data) {
+      if (!this._wordDrawer || this._wordDrawer.toolCallId !== data.id) return
+      this._wordDrawer.version = (this._wordDrawer.version || 0) + 1
+    },
+    /**
+     * 整轮流结束（done / error / interrupt）→ drawer 退出"AI 正在写入"状态，保留可见。
+     */
+    _markWordDrawerStreamingDone() {
+      if (this._wordDrawer && this._wordDrawer.isStreaming) {
+        this._wordDrawer = { ...this._wordDrawer, isStreaming: false }
+      }
+    },
+    /**
+     * v0.5.x —— ExcelEditor 实时预览检测。
+     * 与 WordEditor 完全对称的检测逻辑，唯一区别：_markExcelDrawerPending 不自动打开 drawer
+     * （_excelDrawer.visible 保持 false），用户需手动点 ChatHeader 📊 按钮才弹出。
+     *
+     * Why 手动打开：Excel 内容是数据表格，AI 一边生成时实时看每行没意义（用户看的是最终结构），
+     * 而自动弹出会和 Word drawer 撞视觉位 / 抢焦点。手动开关让用户决定何时展开。
+     */
+    _isExcelEditorCall(data) {
+      if (data.type !== 'tool_call_name') return false
+      const name = data.content?.name
+      const args = data.content?.args || {}
+      if (name !== 'code') return false
+      const code = String(args.code || '')
+      return /from\s+skills\.ExcelEditor\s+import\b/i.test(code)
+        && /\bExcelDoc\.(?:create|open)\s*\(/i.test(code)
+    },
+    _markExcelDrawerPending(data) {
+      if (!this._isExcelEditorCall(data)) return
+      const code = String(data.content?.args?.code || '')
+      // 匹配 ExcelDoc.create/open/from_csv 的第一个字符串参数
+      const m = code.match(/\bExcelDoc\.(?:create|open|from_csv)\s*\(\s*["']([^"']+)["']/)
+      if (!m) return
+      const raw = m[1]
+      const norm = this._normalizeWordPath(raw, this.currentSessionId)   // 共用路径 normalize
+      if (!norm) {
+        console.warn('[ExcelDrawer] 无法规范化路径:', raw)
+        return
+      }
+      // 与 WordDrawer 唯一区别：visible 保持 false，让用户决定何时打开
+      this._excelDrawer = {
+        visible: false,
+        filePath: norm,
+        version: (this._excelDrawer?.version || 0) + 1,
+        isStreaming: true,
+        toolCallId: data.id,
+        rawPath: raw
+      }
+    },
+    _maybeRefreshExcelDrawerAfterResult(data) {
+      if (!this._excelDrawer || this._excelDrawer.toolCallId !== data.id) return
+      this._excelDrawer.version = (this._excelDrawer.version || 0) + 1
+    },
+    _markExcelDrawerStreamingDone() {
+      if (this._excelDrawer && this._excelDrawer.isStreaming) {
+        this._excelDrawer = { ...this._excelDrawer, isStreaming: false }
+      }
+    },
+    // ChatHeader 按钮触发：切换 Excel drawer 显隐（仅当 filePath 已跟踪时才有效）。
+// 互斥：开 Excel 时关 Word —— 两个 drawer 都从右侧滑入，重叠不可读。
+    toggleExcelDrawer() {
+      if (!this._excelDrawer?.filePath) return
+      const willOpen = !this._excelDrawer.visible
+      this._excelDrawer = { ...this._excelDrawer, visible: willOpen }
+      if (willOpen && this._wordDrawer?.visible) {
+        this._wordDrawer = { ...this._wordDrawer, visible: false }
+      }
+    },
+    toggleWordDrawer() {
+      if (!this._wordDrawer?.filePath) return
+      const willOpen = !this._wordDrawer.visible
+      this._wordDrawer = { ...this._wordDrawer, visible: willOpen }
+      if (willOpen && this._excelDrawer?.visible) {
+        this._excelDrawer = { ...this._excelDrawer, visible: false }
+      }
     },
     /**
      * 用户在 BootstrapView 上点「进入应用」：
@@ -1716,10 +1918,14 @@ export default {
                   } else if (data.type === 'tool_call_name') {
                     snap[meta.aiIndex] = this.mergeToolCallStart(snap[meta.aiIndex], data)
                     snap[meta.aiIndex] = this._markSkillForgePending(snap[meta.aiIndex], data)
+                    this._markWordDrawerPending(data)
+                    this._markExcelDrawerPending(data)
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_result') {
                     snap[meta.aiIndex] = this.mergeToolCallResult(snap[meta.aiIndex], data)
                     this._maybeRefetchSkillsAfterResult(snap[meta.aiIndex], data)
+                    this._maybeRefreshWordDrawerAfterResult(data)
+                    this._maybeRefreshExcelDrawerAfterResult(data)
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'done') {
                     this.stopResponseTimer()
@@ -1813,10 +2019,14 @@ export default {
               } else if (data.type === 'tool_call_name') {
                 this.messages[aiMessageIndex] = this.mergeToolCallStart(this.messages[aiMessageIndex], data)
                 this.messages[aiMessageIndex] = this._markSkillForgePending(this.messages[aiMessageIndex], data)
+                this._markWordDrawerPending(data)
+                this._markExcelDrawerPending(data)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_result') {
                 this.messages[aiMessageIndex] = this.mergeToolCallResult(this.messages[aiMessageIndex], data)
                 this._maybeRefetchSkillsAfterResult(this.messages[aiMessageIndex], data)
+                this._maybeRefreshWordDrawerAfterResult(data)
+                this._maybeRefreshExcelDrawerAfterResult(data)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'done') {
                 this.stopResponseTimer()
@@ -1912,10 +2122,14 @@ export default {
                 } else if (data.type === 'tool_call_name') {
                   snap[meta.aiIndex] = this.mergeToolCallStart(snap[meta.aiIndex], data)
                   snap[meta.aiIndex] = this._markSkillForgePending(snap[meta.aiIndex], data)
+                  this._markWordDrawerPending(data)
+                  this._markExcelDrawerPending(data)
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
                 } else if (data.type === 'tool_call_result') {
                   snap[meta.aiIndex] = this.mergeToolCallResult(snap[meta.aiIndex], data)
                   this._maybeRefetchSkillsAfterResult(snap[meta.aiIndex], data)
+                  this._maybeRefreshWordDrawerAfterResult(data)
+                  this._maybeRefreshExcelDrawerAfterResult(data)
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
                 } else if (data.type === 'done') {
                   this.stopResponseTimer()
@@ -1979,10 +2193,14 @@ export default {
             } else if (data.type === 'tool_call_name') {
               this.messages[aiMessageIndex] = this.mergeToolCallStart(this.messages[aiMessageIndex], data)
               this.messages[aiMessageIndex] = this._markSkillForgePending(this.messages[aiMessageIndex], data)
+              this._markWordDrawerPending(data)
+              this._markExcelDrawerPending(data)
               this.writeStreamMetrics(this.messages[aiMessageIndex], data)
             } else if (data.type === 'tool_call_result') {
               this.messages[aiMessageIndex] = this.mergeToolCallResult(this.messages[aiMessageIndex], data)
               this._maybeRefetchSkillsAfterResult(this.messages[aiMessageIndex], data)
+              this._maybeRefreshWordDrawerAfterResult(data)
+              this._maybeRefreshExcelDrawerAfterResult(data)
               this.writeStreamMetrics(this.messages[aiMessageIndex], data)
             } else if (data.type === 'content') {
               this.messages[aiMessageIndex] = {
@@ -3196,10 +3414,14 @@ export default {
                   } else if (data.type === 'tool_call_name') {
                     snap[meta.aiIndex] = this.mergeToolCallStart(snap[meta.aiIndex], data)
                     snap[meta.aiIndex] = this._markSkillForgePending(snap[meta.aiIndex], data)
+                    this._markWordDrawerPending(data)
+                    this._markExcelDrawerPending(data)
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_result') {
                     snap[meta.aiIndex] = this.mergeToolCallResult(snap[meta.aiIndex], data)
                     this._maybeRefetchSkillsAfterResult(snap[meta.aiIndex], data)
+                    this._maybeRefreshWordDrawerAfterResult(data)
+                    this._maybeRefreshExcelDrawerAfterResult(data)
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'done') {
                     this.stopResponseTimer()
@@ -3291,10 +3513,14 @@ export default {
               } else if (data.type === 'tool_call_name') {
                 this.messages[aiMessageIndex] = this.mergeToolCallStart(this.messages[aiMessageIndex], data)
                 this.messages[aiMessageIndex] = this._markSkillForgePending(this.messages[aiMessageIndex], data)
+                this._markWordDrawerPending(data)
+                this._markExcelDrawerPending(data)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_result') {
                 this.messages[aiMessageIndex] = this.mergeToolCallResult(this.messages[aiMessageIndex], data)
                 this._maybeRefetchSkillsAfterResult(this.messages[aiMessageIndex], data)
+                this._maybeRefreshWordDrawerAfterResult(data)
+                this._maybeRefreshExcelDrawerAfterResult(data)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'done') {
                 this.stopResponseTimer()
@@ -3395,10 +3621,14 @@ export default {
                 } else if (data.type === 'tool_call_name') {
                   snap[meta.aiIndex] = this.mergeToolCallStart(snap[meta.aiIndex], data)
                   snap[meta.aiIndex] = this._markSkillForgePending(snap[meta.aiIndex], data)
+                  this._markWordDrawerPending(data)
+                  this._markExcelDrawerPending(data)
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
                 } else if (data.type === 'tool_call_result') {
                   snap[meta.aiIndex] = this.mergeToolCallResult(snap[meta.aiIndex], data)
                   this._maybeRefetchSkillsAfterResult(snap[meta.aiIndex], data)
+                  this._maybeRefreshWordDrawerAfterResult(data)
+                  this._maybeRefreshExcelDrawerAfterResult(data)
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
                 } else if (data.type === 'done') {
                   this.stopResponseTimer()
@@ -3461,10 +3691,14 @@ export default {
             } else if (data.type === 'tool_call_name') {
               this.messages[aiMessageIndex] = this.mergeToolCallStart(this.messages[aiMessageIndex], data)
               this.messages[aiMessageIndex] = this._markSkillForgePending(this.messages[aiMessageIndex], data)
+              this._markWordDrawerPending(data)
+              this._markExcelDrawerPending(data)
               this.writeStreamMetrics(this.messages[aiMessageIndex], data)
             } else if (data.type === 'tool_call_result') {
               this.messages[aiMessageIndex] = this.mergeToolCallResult(this.messages[aiMessageIndex], data)
               this._maybeRefetchSkillsAfterResult(this.messages[aiMessageIndex], data)
+              this._maybeRefreshWordDrawerAfterResult(data)
+              this._maybeRefreshExcelDrawerAfterResult(data)
               this.writeStreamMetrics(this.messages[aiMessageIndex], data)
             } else if (data.type === 'content') {
               this.messages[aiMessageIndex] = {
@@ -3799,10 +4033,14 @@ export default {
                   } else if (data.type === 'tool_call_name') {
                     snap[meta.aiIndex] = this.mergeToolCallStart(snap[meta.aiIndex], data)
                     snap[meta.aiIndex] = this._markSkillForgePending(snap[meta.aiIndex], data)
+                    this._markWordDrawerPending(data)
+                    this._markExcelDrawerPending(data)
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_result') {
                     snap[meta.aiIndex] = this.mergeToolCallResult(snap[meta.aiIndex], data)
                     this._maybeRefetchSkillsAfterResult(snap[meta.aiIndex], data)
+                    this._maybeRefreshWordDrawerAfterResult(data)
+                    this._maybeRefreshExcelDrawerAfterResult(data)
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'done') {
                     this.stopResponseTimer()
@@ -3896,10 +4134,14 @@ export default {
               } else if (data.type === 'tool_call_name') {
                 this.messages[aiMessageIndex] = this.mergeToolCallStart(this.messages[aiMessageIndex], data)
                 this.messages[aiMessageIndex] = this._markSkillForgePending(this.messages[aiMessageIndex], data)
+                this._markWordDrawerPending(data)
+                this._markExcelDrawerPending(data)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_result') {
                 this.messages[aiMessageIndex] = this.mergeToolCallResult(this.messages[aiMessageIndex], data)
                 this._maybeRefetchSkillsAfterResult(this.messages[aiMessageIndex], data)
+                this._maybeRefreshWordDrawerAfterResult(data)
+                this._maybeRefreshExcelDrawerAfterResult(data)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'done') {
                 this.stopResponseTimer()
@@ -5131,10 +5373,14 @@ export default {
                   } else if (data.type === 'tool_call_name') {
                     snap[meta.aiIndex] = this.mergeToolCallStart(snap[meta.aiIndex], data)
                     snap[meta.aiIndex] = this._markSkillForgePending(snap[meta.aiIndex], data)
+                    this._markWordDrawerPending(data)
+                    this._markExcelDrawerPending(data)
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_result') {
                     snap[meta.aiIndex] = this.mergeToolCallResult(snap[meta.aiIndex], data)
                     this._maybeRefetchSkillsAfterResult(snap[meta.aiIndex], data)
+                    this._maybeRefreshWordDrawerAfterResult(data)
+                    this._maybeRefreshExcelDrawerAfterResult(data)
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'done') {
                     this.stopResponseTimer()
@@ -5244,10 +5490,14 @@ export default {
               } else if (data.type === 'tool_call_name') {
                 this.messages[aiMessageIndex] = this.mergeToolCallStart(this.messages[aiMessageIndex], data)
                 this.messages[aiMessageIndex] = this._markSkillForgePending(this.messages[aiMessageIndex], data)
+                this._markWordDrawerPending(data)
+                this._markExcelDrawerPending(data)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_result') {
                 this.messages[aiMessageIndex] = this.mergeToolCallResult(this.messages[aiMessageIndex], data)
                 this._maybeRefetchSkillsAfterResult(this.messages[aiMessageIndex], data)
+                this._maybeRefreshWordDrawerAfterResult(data)
+                this._maybeRefreshExcelDrawerAfterResult(data)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'done') {
                 this.stopResponseTimer()
@@ -5405,10 +5655,14 @@ export default {
                 } else if (data.type === 'tool_call_name') {
                   snap[meta.aiIndex] = this.mergeToolCallStart(snap[meta.aiIndex], data)
                   snap[meta.aiIndex] = this._markSkillForgePending(snap[meta.aiIndex], data)
+                  this._markWordDrawerPending(data)
+                  this._markExcelDrawerPending(data)
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
                 } else if (data.type === 'tool_call_result') {
                   snap[meta.aiIndex] = this.mergeToolCallResult(snap[meta.aiIndex], data)
                   this._maybeRefetchSkillsAfterResult(snap[meta.aiIndex], data)
+                  this._maybeRefreshWordDrawerAfterResult(data)
+                  this._maybeRefreshExcelDrawerAfterResult(data)
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
                 } else if (data.type === 'done') {
                   const wasError = snap[meta.aiIndex]?.error === true
@@ -5473,10 +5727,14 @@ export default {
               } else if (data.type === 'tool_call_name') {
                 this.messages[aiMessageIndex] = this.mergeToolCallStart(this.messages[aiMessageIndex], data)
                 this.messages[aiMessageIndex] = this._markSkillForgePending(this.messages[aiMessageIndex], data)
+                this._markWordDrawerPending(data)
+                this._markExcelDrawerPending(data)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_result') {
                 this.messages[aiMessageIndex] = this.mergeToolCallResult(this.messages[aiMessageIndex], data)
                 this._maybeRefetchSkillsAfterResult(this.messages[aiMessageIndex], data)
+                this._maybeRefreshWordDrawerAfterResult(data)
+                this._maybeRefreshExcelDrawerAfterResult(data)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'content') {
                 this.messages[aiMessageIndex] = {

@@ -16,16 +16,16 @@ module: skills.ExcelEditor
 from skills.ExcelEditor import ExcelDoc
 
 # 创建 / 打开
-doc = ExcelDoc.create("/work/sales.xlsx", sheet_name="Q3")
+doc = ExcelDoc.create("/cached/sales.xlsx", sheet_name="Q3")
 doc.write_table("A1", data, header=True)
 doc.save()
-doc = ExcelDoc.open("/work/existing.xlsx")
+doc = ExcelDoc.open("/cached/existing.xlsx")
 text = doc.read_table("A1", "D10")
 
 # CSV ↔ xlsx
-doc = ExcelDoc.from_csv("/work/data.csv", "/work/data.xlsx", header=True)
+doc = ExcelDoc.from_csv("/cached/data.csv", "/cached/data.xlsx", header=True)
 doc.save()
-doc.to_csv("/work/report.csv")
+doc.to_csv("/cached/report.csv")
 ```
 
 ## 核心约定（必须记住）
@@ -50,7 +50,7 @@ doc.to_csv("/work/report.csv")
 from skills.ExcelEditor import ExcelDoc
 import datetime
 
-doc = ExcelDoc.create("/work/q3_report.xlsx", sheet_name="Q3")
+doc = ExcelDoc.create("/cached/q3_report.xlsx", sheet_name="Q3")
 doc.write_table("A1", [
     ["日期", "产品", "金额", "客户"],
     [datetime.date(2026, 9, 1), "Pro", 12500, "ACME"],

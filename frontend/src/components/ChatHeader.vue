@@ -37,6 +37,37 @@
           <polyline points="12 6 12 12 16 14"/>
         </svg>
       </button>
+      <!-- v0.5.x —— Word 写作抽屉切换：仅当 AI 写过 Word 文件时显示 -->
+      <button
+        v-if="hasSession && wordDrawerAvailable"
+        @click="$emit('toggle-word-drawer')"
+        class="drawer-toggle-btn"
+        :class="{ active: wordDrawerOpen }"
+        :title="wordDrawerOpen ? '关闭 Word 写作抽屉' : '打开 Word 写作抽屉'"
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+          <polyline points="14 2 14 8 20 8"/>
+          <line x1="9" y1="13" x2="15" y2="13"/>
+          <line x1="9" y1="17" x2="15" y2="17"/>
+        </svg>
+      </button>
+      <!-- v0.5.x —— Excel 写作抽屉切换：仅当 AI 写过 Excel 文件时显示。默认不自动打开 -->
+      <button
+        v-if="hasSession && excelDrawerAvailable"
+        @click="$emit('toggle-excel-drawer')"
+        class="drawer-toggle-btn"
+        :class="{ active: excelDrawerOpen }"
+        :title="excelDrawerOpen ? '关闭 Excel 表格预览' : '打开 Excel 表格预览（手动）'"
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+          <line x1="3" y1="9" x2="21" y2="9"/>
+          <line x1="3" y1="15" x2="21" y2="15"/>
+          <line x1="9" y1="3" x2="9" y2="21"/>
+          <line x1="15" y1="3" x2="15" y2="21"/>
+        </svg>
+      </button>
       <button
         @click="$emit('open-settings')"
         class="settings-btn"
@@ -76,9 +107,32 @@ export default {
     hasSession: {
       type: Boolean,
       default: false
+    },
+    // v0.5.x —— 写作抽屉可用性：AI 是否在本会话写过 Word/Excel 文件
+    wordDrawerAvailable: {
+      type: Boolean,
+      default: false
+    },
+    excelDrawerAvailable: {
+      type: Boolean,
+      default: false
+    },
+    // v0.5.x —— 抽屉是否当前打开（按钮高亮态）
+    wordDrawerOpen: {
+      type: Boolean,
+      default: false
+    },
+    excelDrawerOpen: {
+      type: Boolean,
+      default: false
     }
   },
-  emits: ['open-settings', 'open-setup', 'toggle-checkpoints', 'toggle-sidebar', 'refresh']
+  emits: [
+    'open-settings', 'open-setup', 'toggle-checkpoints', 'toggle-sidebar',
+    'refresh',
+    // v0.5.x —— 抽屉切换
+    'toggle-word-drawer', 'toggle-excel-drawer'
+  ]
 }
 </script>
 
@@ -143,7 +197,8 @@ export default {
 .checkpoint-btn,
 .settings-btn,
 .refresh-btn,
-.setup-btn {
+.setup-btn,
+.drawer-toggle-btn {
   width: 40px;
   height: 40px;
   border: none;
@@ -195,5 +250,22 @@ export default {
   background: var(--bg-hover);
   color: var(--button-bg);
   opacity: 0.8;
+}
+
+/* v0.5.x —— 抽屉切换按钮：active 态有蓝色高亮表示抽屉已开 */
+.drawer-toggle-btn {
+  color: var(--text-secondary);
+}
+.drawer-toggle-btn:hover {
+  background: var(--bg-hover);
+  color: var(--button-bg);
+  opacity: 0.8;
+}
+.drawer-toggle-btn.active {
+  background: var(--button-bg, #6366f1);
+  color: #ffffff;
+}
+.drawer-toggle-btn.active:hover {
+  opacity: 1;
 }
 </style>

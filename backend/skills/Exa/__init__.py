@@ -11,7 +11,14 @@ from ChatMe.ChatMeConfig import get_skills_config
 from skills._search_health import format_others_available
 
 class ExaSearch:
-    """Exa 搜索引擎客户端"""
+    """Exa 搜索引擎客户端（class 形态，适合复用连接 / 复杂配置场景）。
+
+    一般 LLM 直接用顶层 `exa_search(...)` / `exa_find_similar(...)` 即可；
+    本类用于需要多次调用同一客户端 / 自定义 `api_key` / `base_url` 的场景。
+
+    Raises:
+        ValueError: EXA_API_KEY 未配置时（构造时抛）。
+    """
 
     def __init__(self):
         # 优先级：config.json (via get_skills_config) > os.getenv
@@ -22,18 +29,8 @@ class ExaSearch:
             raise ValueError("EXA_API_KEY 未配置（config.json 的 skills.exa_api_key 或环境变量）")
 
     def search(self, query: str, num_results: int = 3, type: Literal["instant","fast","auto","deep"] = "auto", maxCharacters:int =2000, **metadata) -> List[Dict[str, Any]]:
-        """
-        语义搜索
-
-        Args:
-            query: 搜索查询
-            num_results: 返回结果数量 (默认 3，最大10)
-            type: 查询精细方式的不同(instant:200ms, fast:400ms, auto:1s, deep:4~12s)
-            maxCharacters: 页面摘要的最大返回字体数
-            metadata:
-
-        Returns:
-            搜索结果列表
+        """调 Exa `/search` 端点；返回 list[dict]（title/url/publishedDate/highlights/author）。
+        详细 `help("ExaSearch.search")`。
         """
         headers = {
             "X-Api-Key": self.api_key,
@@ -77,18 +74,8 @@ class ExaSearch:
             raise Exception(f"Exa 搜索失败：{str(e)}{format_others_available('Exa')}")
 
     def find_similar(self, ids: List[str], maxCharacters:int =2000, maxAgeHours:int = 168, livercrawlTimeout: int =5000, **metadata) -> List[Dict[str, Any]]:
-        """
-        查找与给定 URL 相似的内容
-
-        Args:
-            ids: 给定urls, 比如:tesla.com
-            num_results: 返回结果数量0
-            maxCharacters: 页面摘要的最大返回字体数
-            maxAgeHours: 缓存内容最大有效期，缓存信息距离现在时间(0:始终进行实时爬取，-1:从不进行实时爬取，168:仅对超过 7 天（168 小时）的缓存内容触发实时爬取)
-            livercrawlTimeout: 最大等待实施爬取的时长
-
-        Returns:
-            相似内容列表
+        """调 Exa `/contents` 端点按 URL 找相似；返回 list[dict]（title/url/author/highlights）。
+        详细 `help("ExaSearch.find_similar")`。
         """
         headers = {
             "X-Api-Key": self.api_key,
@@ -133,10 +120,13 @@ class ExaSearch:
 
 def exa_search(query: str, num_results: int = 5, type: Literal["instant","fast","auto","deep"] = "auto", maxCharacters:int =2000, **kwargs) -> List[dict]:
     """
-    使用 Exa进行语义搜索
+    Exa 语义搜索（少量多次，`num_results ≤5`；研究 / 原理 / 对比分析场景）。
 
-    Returns:
-        格式化输出结果列表
+    Args: query 关键词；num_results Exa 上限 10；type "instant"/"fast"/"auto"/"deep"（响应时长递增）；
+          maxCharacters 页面摘要最大字符数。
+    Returns: list[dict]，每项含 `title`/`url`/`publishedDate`/`highlights`/`author`。
+    Raises: EXA_API_KEY 未配置抛 `ValueError`；网络错误转 `Exception`（含其他搜索源提示）。
+    详细 `help("exa_search")`。
     """
 
     exa = ExaSearch()
@@ -146,14 +136,48 @@ def exa_search(query: str, num_results: int = 5, type: Literal["instant","fast",
 
 def exa_find_similar(ids: List[str], maxCharacters:int =2000, maxAgeHours:int = 168, livercrawlTimeout: int =5000, **kwargs) -> List[dict]:
     """
-    查找与指定 URL 相似的内容
+    Exa 相似内容查找（基于 URL / 域名列表找类似网页）。
 
-    Returns:
-        JSON 格式的相似内容列表字符串
+    Args: ids URL 或域名列表（例 `["tesla.com", "https://nvidia.com/article"]`）；
+          maxCharacters 页面摘要最大字符数；maxAgeHours 缓存有效期（0 始终实时爬 / -1 从不实时爬 / 168 仅 >7 天缓存实时爬）；
+          livercrawlTimeout 实时爬最长等待（毫秒）。
+    Returns: list[dict]（title/url/author/highlights）。
+    Raises: EXA_API_KEY 未配置抛 `ValueError`；网络错误转 `Exception`。
+    详细 `help("exa_find_similar")`。
     """
 
     exa = ExaSearch()
     results = exa.find_similar(ids=ids, maxCharacters=maxCharacters, maxAgeHours=maxAgeHours, livercrawlTimeout=livercrawlTimeout, **kwargs)
 
     return results
+
+
+def doc(name=None):
+    """查询本 skill 的函数 docstring。
+
+    Args:
+        name: None 列出全部；str 返回该函数 / 类的完整 docstring
+
+    Returns:
+        字符串（直接 print 即可看）
+
+    用法：
+        from skills.Exa import help
+        help()              # 列出全部函数 / 类签名 + summary
+        help("func_name")   # 单个函数 / 类完整 docstring
+    """
+    import sys
+    from skills._shared._skill_help import skill_help
+    return skill_help(sys.modules[__name__], name)
+
+
+def help(name=None):
+    """doc() 别名。"""
+    return doc(name)
+
+
+# 自动给所有顶层函数 / 类挂 .help 属性（func.help / ExaSearch.search.help 直接拿 docstring）
+import sys as _sys
+from skills._shared._skill_help import auto_attach_help_module as _auto_attach_help_module
+_auto_attach_help_module(_sys.modules[__name__])
 

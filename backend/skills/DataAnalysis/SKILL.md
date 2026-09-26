@@ -8,8 +8,6 @@ module: skills.DataAnalysis
 
 # 数据分析技能规范
 
-> 方法签名 / 边界条件见 `ChatDataAnalysisFormat` docstring（`format.py`）。
-
 ## 技能索引
 
 | 场景 | 方法 |
@@ -20,12 +18,25 @@ module: skills.DataAnalysis
 | 新一轮分析（自增批次） | `gen = da.new_generation(); OUTPUT_DIR = str(da.base_dir / gen)` |
 | 画图 header（抑制 warning） | `da.get_data_analysis_header()` |
 | 画图 header（注册字体） | `da.get_fonts_setup_header()` |
-| 保存数据 csv / json / txt | `da.save_data(content, "name.csv")` |
+| 保存数据 csv / json / txt | `da.save_data(content, "name.csv")`（filename 需含后缀） |
 | 保存报告 md（续写 mode="a"） | `da.save_report(content, "report.md", mode="w")` |
-| 保存脚本（可追溯） | `da.save_script(code)` |
+| 保存脚本（filename 缺省自动 `script_{ts}.py`） | `da.save_script(code)` |
 | 保存 Mermaid 流程图 / ER 图 | `da.save_mermaid(mmd_code, "flow.mmd")` |
-| 校验文件可访问 | `da.check_static_file(path)` → `{accessible, status_code, error}` |
-| 删除指定批次 | `da.remove_dir("gen_xxx")` |
+| 校验文件可访问（HTTP `/static/path`） | `da.check_static_file(path)` → `{accessible, status_code, error}` |
+| 删除指定批次（真删不可恢复） | `da.remove_dir("gen_xxx")` |
+| 归档二进制 / 任意文件 | `da.save_path(src_path, target_subdir="exports", *, action="mv", filename=None)` |
+
+### gen 子目录约定
+
+`save_*` 方法各自落到 `gen_xxx/{子目录}/`：
+
+| 子目录 | 内容 | 对应方法 |
+|---|---|---|
+| `charts/` | `.png` / `.html` / `.mmd` | matplotlib / plotly / `save_mermaid` |
+| `data/` | `.csv` / `.json` / `.txt` | `save_data` |
+| `reports/` | `.md` | `save_report` |
+| `scripts/` | `.py` | `save_script` |
+| `exports/` | `.xlsx` / `.docx` 等二进制 | `save_path` |
 
 ## 典型工作流
 
@@ -39,6 +50,7 @@ INPUT = ChatDataAnalysisFormat.get_file_dir("cached/{sid}/datasets/q1.csv")
 # 3) 选 generation
 #    - 同会话连续多次分析：复用 output_dir（首次访问自建 gen_001，不自增）
 #    - 用户要"重做 / 换一批"：调 new_generation() 进 gen_002
+#    - **new_generation() 后用返回的 `gen` 拼路径**，不要再调 `da.output_dir`（会拿到旧 gen）
 OUTPUT_DIR = da.output_dir
 
 # 4) 拼 code() 入参（两个 header 顺序无关，都 prepend 到顶部）
@@ -69,70 +81,50 @@ da.save_script(code)
 da.remove_dir("gen_001")
 ```
 
-## 长报告分块写入
-
-单次 `code()` 受 LLM max_tokens 限制，长报告必须分块：
-
-```python
-da.save_report(intro,    "report.md")                # mode="w" 创建
-da.save_report(section1, "report.md", mode="a")     # 续写
-da.save_report(section2, "report.md", mode="a")     # 续写
-```
-
-Markdown 段落分隔建议在 content 末尾留 `\n\n`。
-
-## Header 拼接
-
-```python
-code = da.get_data_analysis_header() + da.get_fonts_setup_header() + "<用户代码>"
-```
-
-`get_data_analysis_header` 抑制 warning（省 token），`get_fonts_setup_header` 注册中英文字体（避免中文 tofu）。
-
 ## 路径格式
 
-`da.save_*` 返回的路径形如 `/.../backend/cached/{sid}/data_analysis/gen_xxx/charts/xxx.png`。
-AI 在回复里引用产物时，用 `[[cached/{sid}/data_analysis/gen_xxx/...]]` 语法（去掉 `backend/` 前缀）：
+- 沙盒内绝对路径 `/work/foo.xlsx` ↔ 主进程 `cached/{sid}/work/foo.xlsx`；相对路径 `work/foo.xlsx` 等价
+- AI 回复里引用产物用 `[[cached/{sid}/work/foo.xlsx]]`（**不带** `backend/` 前缀）
+- `da.check_static_file` 的 `path` 也用同款格式（不带 `backend/` 前缀，相对 `/static/`）
 
-```
-[[cached/{session_id}/data_analysis/gen_xxx/charts/xxx.png]]
-[[...(同上)/charts/xxx.html]]
-[[...(同上)/charts/xxx.mmd]]
-[[...(同上)/data/xxx.csv]]
-[[...(同上)/reports/xxx.md]]
-```
+## 数据库分析（按需）
 
-`check_static_file` 的 `path` 参数也用同款格式（不带 `backend/` 前缀，相对 `/static/`）。
-
-## 目录结构
-
-```
-cached/{sid}/data_analysis/{gen_xxx}/
-├── charts/      ← .png / .html / .mmd
-├── data/        ← .csv / .json / .txt
-├── reports/     ← .md
-└── scripts/     ← 保存的可执行脚本
-└── _meta.json   ← generation 计数
-```
-
-## 数据库分析能力（按需动态加载）
-
-本 skill 默认不展示数据库相关细节。DataAnalysis agent 只在用户提到数据库、SQL、数据表、MySQL、PostgreSQL、MongoDB、SQLite 等关键词时，才按下面的方式动态加载数据库模块文档。
+用户提到数据库 / SQL / MySQL / PostgreSQL / MongoDB / SQLite 等关键词时，加载子文档：
 
 ```python
 cmd("cat /skills/DataAnalysis/database/SKILL.md")
 ```
 
-加载完成后，数据库配置、只读查询、schema 探索、SQL/MongoDB 示例、结果落盘、SQL 方言选择等全部由 `skills/DataAnalysis/database/SKILL.md` 提供。本 skill 不在此处复制粘贴数据库相关函数和示例，避免占用上下文 token。
+数据库配置、查询、schema 探索由子文档提供。不相关时不要加载。
 
-加载数据库子文档后再继续后续步骤：检查 `list_database_configs()`、必要时中断询问用户、调用 `save_database_config()`、用 `query_sql()` / `query_mongo()` 探索结构与抽取数据、最后把结果转成 `pandas.DataFrame` 并交给本 skill 的 `ChatDataAnalysisFormat` 落盘和分析。
+## 文档生成（按需）
 
-如果用户的问题与数据库无关，不要加载该子文档。
+用户明确要 Word / xlsx 时（关键词：Word 报告 / .docx / .xlsx / Excel 表格 / WordEditor / ExcelEditor）：
 
+1. `find_skill(query="WordEditor" / "ExcelEditor")` + `cmd("cat /skills/X/SKILL.md")` 加载对应 skill，按 SKILL.md 调对应类生成 .docx / .xlsx（落到 `/work/foo.ext`）
+2. `da.save_path("/work/foo.ext", "exports")` 归档到 `data_analysis/{gen}/exports/`（默认 mv，源文件移走）
 
+DataAnalysis 出图（matplotlib PNG / plotly HTML）可作为 `WordEditor.add_image()` 输入；`save_data` 出的 csv 可经 `ExcelDoc.from_csv()` 转 xlsx。
 
+## 按需查函数详细用法
+
+拿到引用后直接 `.help`（最常用）：
+
+```python
+from skills.DataAnalysis.format import ChatDataAnalysisFormat
+print(ChatDataAnalysisFormat.save_data.help)        # content/filename/返回值
+print(xxx.save_path.help)        # src_path/action="cp"/mv + target_subdir
+print(xxx.check_static_file.help) # 探活 /static/ 完整返回字段
+```
+
+不确定方法名时：`from skills.DataAnalysis.format import help; help()` 列全部 / `help("ChatDataAnalysisFormat.save_data")` 单查。
+
+`SKILL.md` 只放最常用 80% 用法 + 极简示例；详细按需拿 `.help`，避免 SKILL.md 膨胀。
+
+## 不要
 
 - **不要重复 `ChatDataAnalysisFormat(session_id)`** 或重复访问 `da.output_dir`（会复用同一 `gen_001`，不自增）
 - **不要绕过 `da.save_*` 直接 `open()` 写文件**（绕过 generation 管理 + 路径校验）
-- **不要**装 MiSans / HarmonyOS Sans SC / OPPO Sans / 阿里普惠体（商用需单独授权）
+- **不要**用 `save_report` / `save_data` 存 `.xlsx` / `.docx` 等二进制文件——它们只支持文本写入；二进制文件用 WordEditor / ExcelEditor 生成后 `da.save_path(...)` 归档
+- **不要**装 MiSans / HarmonyOS Sans SC / OPPO Sans / 阿里普惠体——商用需单独授权；用思源黑体 / 思源宋体 / 系统字体（PingFang SC / Microsoft YaHei）
 - **不要**在 `check_static_file` 报错时仍引用 `[[path]]`（用户会看到 broken image）

@@ -159,17 +159,12 @@ def _safe_json(resp: requests.Response) -> dict:
 
 
 def create_scheduled_task(name: str, cron: str, prompt: str, session_id: str = "") -> str:
-    """创建定时任务。返回 task_id 与 cron 摘要。
+    """创建 cron 定时任务（到点自动注入 session 跑一轮 agent；持久化 Redis，重启 APScheduler 自动恢复）。
 
-    Args:
-        name: 任务名（1-100 字符，用户侧栏显示用）
-        cron: 5-field cron，Asia/Shanghai 时区，例如 "0 9 * * *"
-        prompt: 触发时注入到 session 的用户消息
-        session_id: 目标 session。空=触发时自动新建；非空=复用/创建该 sid
-
-    Returns:
-        成功：`Scheduled task 'X' (id=abc123456789, cron='0 9 * * *', session='<auto>')`
-        失败：`[类型] 描述 | 建议` 错误文本
+    Args: name 任务名（1-100 字符）；cron 5-field Asia/Shanghai 时区（例 `"0 9 * * *"`）；
+          prompt 触发时注入到 session 的用户消息；session_id 目标 sid（`""`=触发时自动新建）。
+    Returns: `Scheduled task 'X' (id=..., cron='...', session='<auto>')` 或 `[类型] 描述 | 建议`。
+    详细 `help("create_scheduled_task")`。
     """
     url = f"{_backend_base()}/admin/scheduled-tasks"
     payload = {
@@ -193,14 +188,11 @@ def create_scheduled_task(name: str, cron: str, prompt: str, session_id: str = "
 
 
 def list_scheduled_tasks(session_id: str = "") -> str:
-    """列出 session 下所有任务（session_id=""=全部）。
+    """列出 scheduled tasks（按 session_id 过滤；`""` = 全部；task_id 全 12 位输出便于复制粘贴）。
 
-    Returns:
-        多行文本，格式：
-        3 scheduled task(s):
-          - 每日销售汇总 (id=abc123456789, cron='0 9 * * *', enabled, session='<auto>')
-          ...
-        空时：`No scheduled tasks.`
+    Args: session_id 过滤条件；`""`=全部，非空=只列该 session。
+    Returns: 多行字符串 `"{N} scheduled task(s):\n  - name (id=..., cron='...', enabled/disabled, session='...')"`；空时返 `"No scheduled tasks."`。
+    详细 `help("list_scheduled_tasks")`。
     """
     url = f"{_backend_base()}/admin/scheduled-tasks"
     if session_id:
@@ -231,11 +223,11 @@ def list_scheduled_tasks(session_id: str = "") -> str:
 
 
 def cancel_scheduled_task(task_id: str) -> str:
-    """按 task_id 取消（支持前缀匹配）。返回确认文本。
+    """按 task_id 取消定时任务（支持前缀匹配；传 `abc123` 也能命中 `abc123456789`）。
 
-    Returns:
-        成功：`Cancelled task abc123456789`
-        失败：`[NotFound] task abc12345 not found | 调 list_scheduled_tasks 查 task_id`
+    Args: task_id 任务 ID。
+    Returns: `Cancelled task abc123456789` 或 `[NotFound]/[HTTPError]` 错误文本。
+    详细 `help("cancel_scheduled_task")`。
     """
     url = f"{_backend_base()}/admin/scheduled-tasks/{task_id}"
     try:
@@ -252,11 +244,11 @@ def cancel_scheduled_task(task_id: str) -> str:
 
 
 def run_scheduled_task_now(task_id: str) -> str:
-    """立即触发一次（不修改 cron）。返回触发确认。
+    """立即触发一次定时任务（不修改 cron，下次仍按原计划触发；task_id 支持前缀匹配）。
 
-    Returns:
-        成功：`Triggered task abc123456789 to run now (next cron unchanged)`
-        失败：`[NotFound] task abc12345 not found | 调 list_scheduled_tasks 查 task_id`
+    Args: task_id 任务 ID。
+    Returns: `Triggered task abc123456789 to run now (next cron unchanged)` 或 `[NotFound]/[HTTPError]`。
+    详细 `help("run_scheduled_task_now")`。
     """
     url = f"{_backend_base()}/admin/scheduled-tasks/{task_id}/run"
     try:
@@ -270,3 +262,33 @@ def run_scheduled_task_now(task_id: str) -> str:
         return _format_error(resp.status_code, _safe_json(resp), task_id=task_id)
 
     return f"Triggered task {task_id} to run now (next cron unchanged)"
+
+
+def doc(name=None):
+    """查询本 skill 的函数 docstring。
+
+    Args:
+        name: None 列出全部；str 返回该函数的完整 docstring
+
+    Returns:
+        字符串（直接 print 即可看）
+
+    用法：
+        from skills.Scheduler import help
+        help()              # 列出全部函数签名 + summary
+        help("func_name")   # 单个函数完整 docstring
+    """
+    import sys
+    from skills._shared._skill_help import skill_help
+    return skill_help(sys.modules[__name__], name)
+
+
+def help(name=None):
+    """doc() 别名。"""
+    return doc(name)
+
+
+# 自动给所有顶层函数挂 .help 属性（func.help 直接拿 docstring）
+import sys as _sys
+from skills._shared._skill_help import auto_attach_help_module as _auto_attach_help_module
+_auto_attach_help_module(_sys.modules[__name__])

@@ -50,3 +50,17 @@ from ImageParser import parse_image
 ### `parse_images_batch(image_sources, prompt=None, max_tokens=2048, temperature=0.7, **kwargs)`
 
 按顺序解析多张图片，返回与输入一一对应的结果列表；单张失败不会终止整个批次。
+
+## 按需查函数详细用法
+
+拿到引用后直接 `.help`（最常用）：
+
+```python
+from skills.ImageParser import parse_image, parse_images_batch
+print(parse_image.help)            # 完整参数（image_source / prompt / max_tokens / **kwargs）
+print(parse_images_batch.help)     # 批量解析
+```
+
+不确定函数名时：`from skills.ImageParser import help; help()` 列全部 / `help("parse_image")` 单查。
+
+`SKILL.md` 只放最常用 80% 用法 + 极简示例；详细按需拿 `.help`，避免 SKILL.md 膨胀。

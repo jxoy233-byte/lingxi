@@ -135,28 +135,13 @@ def remember(
     category: Literal["facts", "preference"] = "facts",
     scope: Literal["thread", "global"] = "thread",
 ) -> str:
-    """记住一条精确事实或用户偏好到记忆文件。
+    """upsert 一条精确事实 / 用户偏好到 `.chatme/memory/{tid|global}/{facts|preference}.md`，同名 key 替换。
 
-    与 MemoryManager.write_memory 不同：本函数只管 facts.md / preference.md
-    这两条"精确事实 + 用户偏好"线，写入语义是按 key upsert；current.md
-    仍是 LLM 后台自动维护的叙事性总结。
-
-    Args:
-        key: 事实标题（短而具体，agent 用此 key 做 dedup）。
-              推荐 "主谓宾" 短语：Q2 销售聚合口径 / 用户偏好单位 / DB 端口。
-        value: 内容。单行 ≤200 字符自动 inline；含 \\n 或 ≥200 字符自动 block。
-        thread_id: 当前会话 ID（agent 从 prompt context 取 12 / 32 位 hex）。
-                   即使 scope="global" 也要传（用于审计日志）。
-        category: "facts"（精确事实 / 数值 / 路径 / 业务规则）
-                  或 "preference"（用户偏好 / 习惯 / 风格）。
-        scope: "thread"（仅当前会话）或 "global"（跨会话共享）。
-
-    Returns:
-        写入确认文本：
-        - `[OK] remembered/updated '{key}' ({N} chars) → {path}`
-        - `[BadRequest] ...`  / `[ReadError] ...` / `[WriteError] ...`
-
-    语义：同名 key 替换旧值（updated），新 key 追加（appended）。
+    Args: key 短而具体；value 自包含（≤200 字符自动 inline，含 \\n 或 ≥200 字符自动 block）；
+          thread_id 当前会话 ID；category "facts"/"preference"；scope "thread"/"global"。
+    Returns: `[OK] remembered/updated '{key}' → {path}` 或 `[BadRequest]/[ReadError]/[WriteError]`。
+    Raises: 仅文件 IO 错误被捕获并以 `[WriteError] ...` 文本返回，不主动 raise。
+    详细 `help("remember")`。
     """
     if category not in ("facts", "preference"):
         return f"[BadRequest] category 必须为 'facts' 或 'preference'，收到: {category!r}"
@@ -212,19 +197,11 @@ def recall(
     category: Literal["facts", "preference"] = "facts",
     scope: Literal["thread", "global"] = "thread",
 ) -> str:
-    """回忆事实或偏好文件完整内容。
+    """读完整记忆文件（context_assembly_node 已自动注入；本函数用于主动核对 / 展示给用户）。
 
-    与 MemoryManager.read_memory 不同：本函数只读 facts.md / preference.md
-    （精确事实 / 用户偏好）；current.md 由 context_assembly_node 自动合并注入，
-    不需要主动调本函数。
-
-    Args:
-        thread_id: 当前会话 ID。
-        category: "facts" / "preference"。
-        scope: "thread" / "global"。
-
-    Returns:
-        完整文件内容；文件不存在时返回 "（空）"。
+    Args: thread_id 当前会话 ID；category "facts"/"preference"；scope "thread"/"global"。
+    Returns: 文件内容字符串；不存在返 `"（空）"`；读失败返 `[ReadError] ...`。
+    详细 `help("recall")`。
     """
     file_path = _memory_file_path(scope, thread_id, category)
     if not file_path.exists():
@@ -233,3 +210,33 @@ def recall(
         return file_path.read_text(encoding="utf-8")
     except Exception as e:
         return f"[ReadError] 读取 {file_path} 失败: {e}"
+
+
+def doc(name=None):
+    """查询本 skill 的函数 docstring。
+
+    Args:
+        name: None 列出全部；str 返回该函数的完整 docstring
+
+    Returns:
+        字符串（直接 print 即可看）
+
+    用法：
+        from skills.Memory import help
+        help()              # 列出全部函数签名 + summary
+        help("func_name")   # 单个函数完整 docstring
+    """
+    import sys
+    from skills._shared._skill_help import skill_help
+    return skill_help(sys.modules[__name__], name)
+
+
+def help(name=None):
+    """doc() 别名。"""
+    return doc(name)
+
+
+# 自动给所有顶层函数挂 .help 属性（func.help 直接拿 docstring）
+import sys as _sys
+from skills._shared._skill_help import auto_attach_help_module as _auto_attach_help_module
+_auto_attach_help_module(_sys.modules[__name__])

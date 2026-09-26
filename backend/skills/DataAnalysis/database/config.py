@@ -79,12 +79,28 @@ def save_database_config(alias: str, engine: str, **connection: Any) -> dict[str
 
 
 def list_database_configs() -> list[dict[str, Any]]:
+    """列出已配置的所有数据库（脱敏：只返 alias / engine / host / database / description，不含密码 / DSN）。
+
+    Returns:
+        list[dict]，每个 dict 含 alias / engine / host / port / database / description 字段
+    """
     with _locked():
         configs = _read()
     return [_public(alias, config) for alias, config in configs.items()]
 
 
 def load_database_config(alias: str) -> dict[str, Any]:
+    """读单个数据库配置（包含敏感字段，供 query_* 内部使用）。
+
+    Args:
+        alias: 配置别名
+
+    Returns:
+        dict，含 engine / host / port / database / user / password 等全部字段
+
+    Raises:
+        KeyError: alias 不存在
+    """
     with _locked():
         configs = _read()
     try:
@@ -94,6 +110,11 @@ def load_database_config(alias: str) -> dict[str, Any]:
 
 
 def delete_database_config(alias: str) -> None:
+    """删除单个数据库配置（按 alias）。
+
+    Args:
+        alias: 配置别名；不存在时静默 no-op
+    """
     with _locked():
         configs = _read()
         configs.pop(alias, None)

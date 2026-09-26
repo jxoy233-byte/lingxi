@@ -19,17 +19,12 @@ def search_web(
     **kwargs
 ) -> str:
     """
-    使用 Bocha Web Search API 进行网页搜索。
+    博查（Bocha）实时网页搜索 —— 中文互联网深度优化（少量多次，`count ≤5`，信息不足调 `query`/`freshness` 再搜）。
 
-    参数:
-    - query: 搜索关键词
-    - freshness: 搜索的时间范围（"noLimit" / "oneDay" / "oneWeek" / "oneMonth" / "oneYear"）
-    - summary: 是否显示文本摘要
-    - count: 返回的搜索结果数量（默认 3）
-    - **kwargs: 其他可选参数（透传给 API）
-
-    返回:
-    - 格式化后的搜索结果字符串（包含引用 / 标题 / URL / 摘要 / 网站名称 / 发布时间）
+    Args: query 关键词；freshness "noLimit"/"oneDay"/"oneWeek"/"oneMonth"/"oneYear"；
+          summary True 返文本摘要 / False 只返标题+URL（更快）；count 返回结果数（建议 ≤5）。
+    Returns: 格式化字符串（引用编号 / 标题 / URL / 摘要 / 网站名 / 发布时间）；无结果返 `"未找到相关结果。"`；错时返可读错误文本。
+    详细 `help("search_web")`。
     """
     url = "https://api.bochaai.com/v1/web-search"
 
@@ -84,6 +79,36 @@ def search_web(
         if "SSLError" in err_msg or "Connection" in err_msg or "timeout" in err_msg.lower():
             return f"Bocha 搜索失败（网络层不可达）：{err_msg}\n提示：请检查网络 / 代理设置，或确认 api.bochaai.com 可访问。{others}"
         return f"Bocha 搜索API请求失败：{err_msg}{others}"
+
+
+def doc(name=None):
+    """查询本 skill 的函数 docstring。
+
+    Args:
+        name: None 列出全部；str 返回该函数的完整 docstring
+
+    Returns:
+        字符串（直接 print 即可看）
+
+    用法：
+        from skills.Bocha import help
+        help()              # 列出全部函数签名 + summary
+        help("func_name")   # 单个函数完整 docstring
+    """
+    import sys
+    from skills._shared._skill_help import skill_help
+    return skill_help(sys.modules[__name__], name)
+
+
+def help(name=None):
+    """doc() 别名。"""
+    return doc(name)
+
+
+# 自动给所有顶层函数挂 .help 属性（func.help 直接拿 docstring）
+import sys as _sys
+from skills._shared._skill_help import auto_attach_help_module as _auto_attach_help_module
+_auto_attach_help_module(_sys.modules[__name__])
 
 
 if __name__ == "__main__":

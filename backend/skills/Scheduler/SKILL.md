@@ -18,21 +18,6 @@ module: skills.Scheduler
 
 适用关键词：定时、周期、每天、每小时、cron、提醒、schedule、recurring、reminder、trigger、run now。
 
-## ⚠️ 调 `code()` 必须传 `local=True`
-
-主进程跑（不走沙盒），4 个函数内部走 HTTP 调 `127.0.0.1:38211/admin/scheduled-tasks/*`；沙盒网络层在本项目不可靠且缺 `apscheduler`/`redis` 包，`local=False` 会卡死 / `ModuleNotFoundError`。看到 `ConnectionError` / `Timeout` / `ModuleNotFoundError` → 检查是否漏了 `local=True`。
-
-```python
-# code("""...""", local=True)
-from skills.Scheduler import create_scheduled_task
-print(create_scheduled_task(
-    name="每日销售汇总",
-    cron="0 9 * * *",
-    prompt="汇总昨天的 sales.csv",
-    session_id="<current_thread_id>",
-))
-```
-
 ## 调用方式
 
 skill 暴露 **4 个独立顶层函数**，不通过 action dispatch。LLM 直接按需 import 调用（`code()` 工具里 `print(...)` 顶层结果，**且 `local=True`**）：
@@ -44,12 +29,6 @@ from skills.Scheduler import (
     cancel_scheduled_task,
     run_scheduled_task_now,
 )
-```
-
-主进程本机也兼容别名导入（Python path 包含 `/skills`）：
-
-```python
-from Scheduler import create_scheduled_task
 ```
 
 ## 函数
@@ -100,7 +79,23 @@ from Scheduler import create_scheduled_task
 
 ## 注意事项
 
-- 4 个函数都是 `code()` 工具调用，**必须 `local=True` + `print(...)` 顶层结果**（详见顶部 ⚠️ 节）
 - `session_id` 不在工具参数里自动注入；LLM 需从 memory block 的 `## 缓存文件目录\n- cached/{thread_id}` 读 thread_id 透传
 - Skill 内的错误响应都已格式化（含可读建议），LLM 看到 `[类型]` 前缀就知道该换策略
 - 持久化依赖主后端 Redis，**重启后端服务**会从 Redis 恢复所有任务（APScheduler RedisJobStore）
+
+## 按需查函数详细用法
+
+拿到引用后直接 `.help`（最常用）：
+
+```python
+from skills.Scheduler import (
+    create_scheduled_task, list_scheduled_tasks,
+    cancel_scheduled_task, run_scheduled_task_now,
+)
+print(create_scheduled_task.help)        # name/cron/prompt/session_id 完整签名 + 返回格式
+print(list_scheduled_tasks.help)         # 过滤规则 + 多行返回格式
+```
+
+不确定函数名时：`from skills.Scheduler import help; help()` 列全部 / `help("create_scheduled_task")` 单查。
+
+`SKILL.md` 只放最常用 80% 用法 + 极简示例；详细按需拿 `.help`，避免 SKILL.md 膨胀。

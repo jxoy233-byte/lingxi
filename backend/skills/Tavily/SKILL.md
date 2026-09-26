@@ -51,3 +51,16 @@ from Tavily import tavily_search
 返回格式化文本，包含标题、URL、内容、可用时的发布时间和答案摘要。
 
 不要编造检索结果；调用后基于函数实际返回内容总结，并保留来源 URL。
+
+## 按需查函数详细用法
+
+拿到引用后直接 `.help`（最常用）：
+
+```python
+from skills.Tavily import tavily_search
+print(tavily_search.help)        # 完整参数（search_depth/max_results/include_answer/**kwargs）
+```
+
+不确定函数名时：`from skills.Tavily import help; help()` 列全部 / `help("tavily_search")` 单查。
+
+`SKILL.md` 只放最常用 80% 用法 + 极简示例；详细按需拿 `.help`，避免 SKILL.md 膨胀。

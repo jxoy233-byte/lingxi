@@ -61,3 +61,17 @@ similar = exa_find_similar(["https://example.com/article"])
 ```
 
 不要编造检索结果；调用后基于函数实际返回内容总结，并保留来源 URL。
+
+## 按需查函数详细用法
+
+拿到引用后直接 `.help`（最常用）：
+
+```python
+from skills.Exa import exa_search, exa_find_similar
+print(exa_search.help)            # 完整参数（num_results/type/maxCharacters/**kwargs）
+print(exa_find_similar.help)      # URL 找相似
+```
+
+不确定函数名时：`from skills.Exa import help; help()` 列全部 / `help("exa_search")` 单查。
+
+`SKILL.md` 只放最常用 80% 用法 + 极简示例；详细按需拿 `.help`，避免 SKILL.md 膨胀。

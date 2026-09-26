@@ -26,21 +26,13 @@ def create_skill(
     overwrite: bool = False,
 ) -> str:
     """
-    创建新 skill。
+    在 /skills/<name>/ 下创建新 skill：写入 SKILL.md + __init__.py，registry 自动重扫（无需重启后端）。
 
-    Args:
-        name: skill 名（小写字母/数字/下划线），会作为目录名 + module 名
-        description: 一句话描述，会写入 frontmatter + 默认 SKILL.md
-        functions_py: 完整 __init__.py 内容（含 import + 顶层函数）。
-                      skill 是 Python wrapper，但 wrapper 内部可调任意
-                      外部服务（REST API / CLI / 数据库 / 其他程序），
-                      不局限于写 Python helper 函数 —— 封装好能用就行。
-        aliases: 别名列表（用于 find_skill 关键词匹配）
-        skill_md_body: 自定义 SKILL.md 正文（不含 frontmatter）；空=自动生成
-        overwrite: True 时覆盖已存在的同名 skill（默认 False 防误覆盖）
-
-    Returns:
-        成功消息（含写入路径）/ 失败消息（[类型] 描述）
+    Args: name 字母数字下划线（保留 `SkillForge`/`_*`）；description 一句话写 frontmatter；
+          functions_py `__init__.py` 完整内容；aliases 别名列表；skill_md_body 自定义正文（空=自动）；
+          overwrite True 时先 rmtree 再 mkdir（默认 False 防误覆盖）。
+    Returns: `Created skill 'X' at ...` 或 `[BadRequest]/[Exists]`。
+    详细 `help("create_skill")`。
     """
     # 1. name 校验
     if not name or not all(c.isalnum() or c == "_" for c in name):
@@ -99,7 +91,11 @@ def create_skill(
 
 
 def list_skills() -> str:
-    """列出 /skills/ 下所有 skill 目录（含 SKILL.md 的）。"""
+    """列出 /skills/ 下所有带 SKILL.md 的 skill 目录名（按字典序，跳过隐藏目录 / `__pycache__`）。
+
+    Returns: 多行字符串，每行一个 skill 名；空目录返 `"No skills found."`。
+    详细 `help("list_skills")`。
+    """
     if not SKILLS_ROOT.is_dir():
         return "[Error] /skills/ 目录不存在"
     skills = []
@@ -113,9 +109,11 @@ def list_skills() -> str:
 
 def read_skill(name: str) -> str:
     """
-    读现有 skill 的 SKILL.md + __init__.py 内容（用于复制格式 / 修改前参考）。
+    读现有 skill 的 SKILL.md + __init__.py 完整内容（用于复制格式 / 修改前参考）。
 
-    返回：完整文件内容（SKILL.md 在前，__init__.py 在后）
+    Args: name skill 名（与目录名一致）。
+    Returns: SKILL.md + `__init__.py` 内容（`=== filename ===` 分隔）；不存在返 `[NotFound]`；都缺返 `[Empty]`。
+    详细 `help("read_skill")`。
     """
     target_dir = SKILLS_ROOT / name
     if not target_dir.is_dir():
@@ -126,3 +124,33 @@ def read_skill(name: str) -> str:
         if fpath.exists():
             parts.append(f"=== {fname} ===\n{fpath.read_text(encoding='utf-8')}")
     return "\n\n".join(parts) if parts else f"[Empty] skill {name!r} 没有文件"
+
+
+def doc(name=None):
+    """查询本 skill 的函数 docstring。
+
+    Args:
+        name: None 列出全部；str 返回该函数的完整 docstring
+
+    Returns:
+        字符串（直接 print 即可看）
+
+    用法：
+        from skills.SkillForge import help
+        help()              # 列出全部函数签名 + summary
+        help("func_name")   # 单个函数完整 docstring
+    """
+    import sys
+    from skills._shared._skill_help import skill_help
+    return skill_help(sys.modules[__name__], name)
+
+
+def help(name=None):
+    """doc() 别名。"""
+    return doc(name)
+
+
+# 自动给所有顶层函数挂 .help 属性（func.help 直接拿 docstring）
+import sys as _sys
+from skills._shared._skill_help import auto_attach_help_module as _auto_attach_help_module
+_auto_attach_help_module(_sys.modules[__name__])

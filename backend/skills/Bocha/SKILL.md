@@ -58,13 +58,6 @@ from BochaSearch import search_web
 
 返回格式化文本，包含引用编号、标题、URL、摘要、网站名称、网站图标、发布时间。
 
-## API Key 配置
-
-- **config.json 路径**：`skills.bocha_api_key`
-- **环境变量**：`BOCHA_API_KEY`
-- **申请**：https://bochaai.com → 控制台 → API Key
-- **套餐**：免费 1000 次/3 个月试用；正式 ¥36/1000 次
-
 ## 错误处理
 
 - 网络层错误（SSL EOF / Connection timeout）→ 返回「网络层不可达」提示（不是代码 bug）
@@ -72,3 +65,16 @@ from BochaSearch import search_web
 - 业务错误（code != 200）→ 返回 API 给的 msg 字段
 
 不要编造检索结果；调用后基于函数实际返回内容总结，并保留来源 URL。
+
+## 按需查函数详细用法
+
+拿到引用后直接 `.help`（最常用）：
+
+```python
+from skills.Bocha import search_web
+print(search_web.help)        # 完整参数（freshness/summary/count/**kwargs）
+```
+
+不确定函数名时：`from skills.Bocha import help; help()` 列全部 / `help("search_web")` 单查。
+
+`SKILL.md` 只放最常用 80% 用法 + 极简示例；详细按需拿 `.help`，避免 SKILL.md 膨胀。

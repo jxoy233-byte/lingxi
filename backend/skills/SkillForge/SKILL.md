@@ -47,3 +47,18 @@ print(create_skill(
 ### `read_skill(name)`
 
 读现有 skill 的 `SKILL.md` + `__init__.py` 完整内容（用于复制格式 / 修改前参考）。
+
+## 按需查函数详细用法
+
+拿到引用后直接 `.help`（最常用）：
+
+```python
+from skills.SkillForge import create_skill, list_skills, read_skill
+print(create_skill.help)        # name/description/functions_py/aliases/skill_md_body/overwrite 完整签名
+print(list_skills.help)         # 列出 /skills/ 全部目录
+print(read_skill.help)          # 读 SKILL.md + __init__.py 完整内容
+```
+
+不确定函数名时：`from skills.SkillForge import help; help()` 列全部 / `help("create_skill")` 单查。
+
+`SKILL.md` 只放最常用 80% 用法 + 极简示例；详细按需拿 `.help`，避免 SKILL.md 膨胀。

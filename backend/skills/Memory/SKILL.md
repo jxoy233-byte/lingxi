@@ -4,7 +4,6 @@ description: 记住精确事实 / 用户偏好到会话或全局记忆文件，c
 mount: ro
 aliases: [Memory, 记忆, remember, recall, save_memory, 记住, fact, preference, 偏好, 事实, 记录]
 module: skills.Memory
-lazy: false
 ---
 
 # Memory
@@ -107,3 +106,17 @@ print(recall(thread_id="<current>", category="facts"))
 | thread | preference | `.chatme/memory/{thread_id}/preference.md` | `/memory/{thread_id}/preference.md` |
 | global | facts | `.chatme/memory/global/facts.md` | `/memory/global/facts.md` |
 | global | preference | `.chatme/memory/global/preference.md` | `/memory/global/preference.md` |
+
+## 按需查函数详细用法
+
+拿到引用后直接 `.help`（最常用）：
+
+```python
+from skills.Memory import remember, recall
+print(remember.help)        # 完整签名 + 返回值 + 写入语义
+print(recall.help)          # recall 返回格式
+```
+
+不确定函数名时：`from skills.Memory import help; help()` 列全部 / `help("remember")` 单查。
+
+`SKILL.md` 只放最常用 80% 用法 + 极简示例；详细按需拿 `.help`，避免 SKILL.md 膨胀。

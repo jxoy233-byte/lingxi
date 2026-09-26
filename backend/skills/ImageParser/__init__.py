@@ -130,33 +130,13 @@ def parse_image(
     **kwargs
 ) -> str:
     """
-    使用 VL 模型解析图片
+    VL 模型解析单张图片（OCR / 截图理解 / 视觉描述）。
 
-    参数:
-        image_source: 图片源，可以是:
-            - OSS URL (http/https 开头)
-            - 本地文件路径（支持相对路径和绝对路径）
-            - base64 data URL (data:image/...;base64,...)
-        prompt: 可选的提示词，默认使用通用图片描述
-        max_tokens: 最大生成 token 数
-        temperature: 温度参数
-
-    返回:
-        VL 模型对图片的解析结果文本
-
-    路径解析规则:
-        - 绝对路径：直接使用
-        - "cached/xxx" 路径：相对于 backend/ 目录
-        - 其他相对路径：相对于 backend/cached/ 目录
-
-    示例:
-        >>> parse_image("https://example.com/image.jpg")
-        '这张图片展示了一只可爱的橘猫...'
-
-        >>> parse_image("screenshot.png")
-        '界面顶部是导航栏，左侧...'
-
-        >>> parse_image("cached/screenshot.png")
+    Args: image_source HTTP(S) URL / 绝对路径 / `cached/xxx.png` / `xxx.png`（默认 `backend/cached/`）/ `data:image/...;base64,...`；
+          prompt None=默认通用描述；max_tokens VL 最大 token；temperature 采样温度。
+    Returns: VL 输出文本（已 strip）；出错时返 `"调用 VL 模型失败: ..."`。
+    Raises: 文件不存在 `FileNotFoundError`；URL 协议非 http(s) `ValueError`；下载失败 `requests.HTTPError`。
+    详细 `help("parse_image")`。
     """
     # 确定图片源类型（统一压缩：encode 前再压一次，保证三个入口对称）
     if image_source.startswith("data:image/"):
@@ -216,21 +196,22 @@ def parse_images_batch(
     **kwargs
 ) -> list[str]:
     """
-    批量解析多张图片
+    批量解析多张图片（顺序处理，单张失败不终止整个批次）。
 
-    参数:
-        image_sources: 图片源列表
-        prompt: 可选的统一提示词
-        max_tokens: 最大生成 token 数
-        temperature: 温度参数
+    Args:
+        image_sources: 图片源列表（路径规则同 `parse_image`）。
+        prompt: 统一提示词，None 用默认。默认 None。
+        max_tokens: VL 模型最大生成 token 数。默认 2048。
+        temperature: 采样温度。默认 0.7。
+        **kwargs: 透传给 `parse_image`。
 
-    返回:
-        每张图片解析结果的列表
+    Returns:
+        与输入一一对应的解析结果列表；失败的位置返 `"解析失败: {err}"`。
+        不会因单张失败抛异常。
 
-    示例:
-        >>> results = parse_images_batch(["image1.jpg", "image2.png"])
-        >>> for i, result in enumerate(results):
-        ...     print(f"图片{i+1}: {result}")
+    Example:
+        >>> parse_images_batch(["cached/a.png", "cached/b.png"])
+        ["图片 a 的描述...", "图片 b 的描述..."]
     """
     results = []
     for source in image_sources:
@@ -240,3 +221,33 @@ def parse_images_batch(
         except Exception as e:
             results.append(f"解析失败: {str(e)}")
     return results
+
+
+def doc(name=None):
+    """查询本 skill 的函数 docstring。
+
+    Args:
+        name: None 列出全部；str 返回该函数的完整 docstring
+
+    Returns:
+        字符串（直接 print 即可看）
+
+    用法：
+        from skills.ImageParser import help
+        help()              # 列出全部函数签名 + summary
+        help("func_name")   # 单个函数完整 docstring
+    """
+    import sys
+    from skills._shared._skill_help import skill_help
+    return skill_help(sys.modules[__name__], name)
+
+
+def help(name=None):
+    """doc() 别名。"""
+    return doc(name)
+
+
+# 自动给所有函数挂 .help 属性（AI 一行 func.help 拿到完整 docstring）
+import sys as _sys
+from skills._shared._skill_help import auto_attach_help_module as _auto_attach_help_module
+_auto_attach_help_module(_sys.modules[__name__])

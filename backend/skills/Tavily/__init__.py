@@ -12,7 +12,14 @@ from skills._search_health import format_others_available
 
 
 class TavilySearch:
-    """Tavily 搜索引擎客户端"""
+    """Tavily 搜索引擎客户端（class 形态，适合复用连接 / 复杂配置场景）。
+
+    一般 LLM 直接用顶层 `tavily_search(...)` 即可；本类用于需要
+    多次调用同一客户端 / 自定义 `api_key` / `base_url` 的场景。
+
+    Raises:
+        ValueError: TAVILY_API_KEY 未配置时（构造时抛）。
+    """
 
     def __init__(self):
         # 优先级：config.json (via get_skills_config) > os.getenv
@@ -32,20 +39,8 @@ class TavilySearch:
         include_images: bool = False,
         **kwargs
     ) -> dict[str, list[Any] | Any]:
-        """
-        使用 Tavily 进行网页搜索
-
-        Args:
-            query: 搜索查询
-            search_depth: 搜索深度 ("basic": 快速, "advanced": 深度)
-            max_results: 返回结果数量 (默认 5，最大 20)
-            include_answer: 是否包含 AI 生成的答案摘要
-            include_raw_content: 是否包含页面原始内容摘要
-            include_images: 是否包含相关图片
-            **kwargs: 其他可选参数
-
-        Returns:
-            搜索结果列表
+        """调 Tavily `/search` 端点；返回 dict 含 `results` / `answer` / `response_time`。
+        详细 `help("TavilySearch.search")`。
         """
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -103,16 +98,13 @@ def tavily_search(
     **kwargs
 ) -> str:
     """
-    使用 Tavily 进行网页搜索
+    Tavily 网页搜索（少量多次，`max_results ≤5`；可带 AI 答案摘要）。
 
-    Args:
-        query: 搜索查询
-        search_depth: 搜索深度 ("basic": 快速, "advanced": 深度)
-        max_results: 返回结果数量
-        include_answer: 是否包含 AI 生成的答案摘要
-
-    Returns:
-        格式化输出结果字符串
+    Args: query 关键词；search_depth "basic"/"advanced"；max_results 上限 20（建议 ≤5）；
+          include_answer True 时末尾追加 Tavily 生成的 AI 答案摘要。
+    Returns: 格式化字符串（标题/URL/内容/发布时间）+ 可选 `AI 答案摘要`。
+    Raises: TAVILY_API_KEY 未配置抛 `ValueError`；网络错误转 `Exception`（含其他搜索源提示）。
+    详细 `help("tavily_search")`。
     """
     tavily = TavilySearch()
     result = tavily.search(
@@ -139,3 +131,31 @@ def tavily_search(
     return output.strip()
 
 
+def doc(name=None):
+    """查询本 skill 的函数 docstring。
+
+    Args:
+        name: None 列出全部；str 返回该函数 / 类的完整 docstring
+
+    Returns:
+        字符串（直接 print 即可看）
+
+    用法：
+        from skills.Tavily import help
+        help()              # 列出全部函数 / 类签名 + summary
+        help("func_name")   # 单个函数 / 类完整 docstring
+    """
+    import sys
+    from skills._shared._skill_help import skill_help
+    return skill_help(sys.modules[__name__], name)
+
+
+def help(name=None):
+    """doc() 别名。"""
+    return doc(name)
+
+
+# 自动给所有顶层函数 / 类挂 .help 属性（func.help / TavilySearch.search.help 直接拿 docstring）
+import sys as _sys
+from skills._shared._skill_help import auto_attach_help_module as _auto_attach_help_module
+_auto_attach_help_module(_sys.modules[__name__])

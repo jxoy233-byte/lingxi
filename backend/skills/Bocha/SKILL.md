@@ -1,6 +1,6 @@
 ---
 name: Bocha
-description: 博查（Bocha）实时网页搜索，针对中文互联网深度优化。适合查询最新新闻、时效性资讯、政策、自媒体内容、国内网站信息。支持按时间范围筛选（当天 / 一周 / 一月 / 一年）。少量多次，单次结果数量保持精炼。
+description: 博查实时网页搜索（中文互联网深度优化）。适合新闻、时效资讯、政策、国内网站信息；支持当天 / 一周 / 一月 / 一年时间筛选
 mount: ro
 aliases: [Bocha, 博查, news, latest, realtime, web_search, search]
 module: skills.Bocha

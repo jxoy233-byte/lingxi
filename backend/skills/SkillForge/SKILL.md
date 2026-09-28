@@ -1,6 +1,6 @@
 ---
 name: skillforge
-description: 动态创建新 skill；给一段 Python wrapper 代码 + 描述，落到 /skills/<name>/，立即被 find_skill 发现（无需重启）
+description: 动态创建新 skill。给 Python wrapper + 描述，立即可被 find_skill 发现
 mount: rw
 aliases: [SkillForge, create_skill, new_skill, forge, 创建技能, 新建技能, 制作技能, 自定义技能]
 module: skills.SkillForge

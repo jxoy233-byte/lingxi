@@ -162,12 +162,12 @@
         </div>
 
         <!-- 思考过程区块 -->
-        <div v-if="message.role === 'ai' && hasThinking" class="thinking-section" :class="{ 'thinking-active': !message.thinkingDone, 'thinking-collapsed': thinkingCollapsed, 'thinking-interrupted': isInterrupted && isLatestAiMessage && (isInterruptedSessionId === currentSessionId || isInterruptedSessionId === pendingInterruptSessionId) }">
+        <div v-if="message.role === 'ai' && hasThinking" class="thinking-section" :class="{ 'thinking-active': !message.thinkingDone, 'thinking-collapsed': effectiveThinkingCollapsed, 'thinking-interrupted': isInterruptionRelevant }">
           <div class="thinking-header" @click="toggleThinking">
             <div class="thinking-header-left">
-              <span class="thinking-status-dot" :class="{ 'dot-active': !message.thinkingDone, 'dot-interrupted': isInterrupted && isLatestAiMessage && (isInterruptedSessionId === currentSessionId || isInterruptedSessionId === pendingInterruptSessionId) }"></span>
-              <span class="thinking-label">{{ isInterrupted && isLatestAiMessage && (isInterruptedSessionId === currentSessionId || isInterruptedSessionId === pendingInterruptSessionId) ? '思考已中断' : (message.thinkingDone ? '思考过程' : '正在思考...') }}</span>
-              <span v-if="isInterrupted && isLatestAiMessage && (isInterruptedSessionId === currentSessionId || isInterruptedSessionId === pendingInterruptSessionId)" class="interrupt-reason-hint" @click.stop="toggleInterruptReason">
+              <span class="thinking-status-dot" :class="{ 'dot-active': !message.thinkingDone, 'dot-interrupted': isInterruptionRelevant }"></span>
+              <span class="thinking-label">{{ isInterruptionRelevant ? '思考已中断' : (message.thinkingDone ? '思考过程' : '正在思考...') }}</span>
+              <span v-if="isInterruptionRelevant" class="interrupt-reason-hint" @click.stop="toggleInterruptReason">
                 {{ interruptReasonExpanded ? '隐藏原因' : '查看原因' }}
               </span>
               <span v-if="message.toolCalls && message.toolCalls.length" class="tool-badge">
@@ -181,118 +181,152 @@
               <polyline points="9 18 15 12 9 6"/>
             </svg>
           </div>
-          <div class="thinking-body" v-show="!effectiveThinkingCollapsed">
-            <!-- 中断原因显示 -->
-            <div v-if="isInterrupted && isLatestAiMessage && (isInterruptedSessionId === currentSessionId || isInterruptedSessionId === pendingInterruptSessionId) && interruptReasonExpanded" class="interrupt-reason-inline">
-              <span class="interrupt-reason-text">{{ displayInterruptReason }}</span>
-            </div>
-            <div v-if="message.toolCalls && message.toolCalls.length" class="tool-calls">
-              <div
-                v-for="(tool, i) in message.toolCalls"
-                :key="i"
-                class="tool-call-item"
-                :class="{
-                  'tool-done': tool.result !== null,
-                  'awaiting-approval': isToolAwaitingApproval(i)
-                }"
-              >
-                <div class="tool-call-header" @click="toggleTool(i)" :style="tool.result !== null ? 'cursor:pointer' : ''">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
-                  </svg>
-                  <span class="tool-name">{{ tool.name }}</span>
-                  <span v-if="getToolExecutionEnv(tool.name, tool.args)" class="tool-env-label" :class="`env-${getToolExecutionEnv(tool.name, tool.args)}`">:: {{ getToolExecutionEnv(tool.name, tool.args) }}</span>
-                  <span v-if="isToolAwaitingApproval(i)" class="tool-awaiting-badge">需要批准</span>
-                  <span v-else-if="tool.result !== null" class="tool-check">✓</span>
-                  <span v-else class="tool-running-dot"></span>
-                  <svg v-if="tool.result !== null" class="tool-expand-chevron" :class="{ rotated: expandedTools[i] }" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <polyline points="9 18 15 12 9 6"/>
-                  </svg>
-                </div>
-                <div v-if="tool.args && hasArgs(tool.args, tool.name)" class="tool-args">{{ formatArgs(tool.args, tool.name) }}</div>
-                <div v-if="tool.result !== null && expandedTools[i]" class="tool-result">{{ tool.result }}</div>
+          <!-- 中断原因显示：紧贴 header -->
+          <div v-if="isInterruptionRelevant && interruptReasonExpanded" class="interrupt-reason-inline">
+            <span class="interrupt-reason-text">{{ displayInterruptReason }}</span>
+          </div>
+          <!-- v0.3.4 —— CC 风格「按轮次分组」渲染：
+               一组 = 一段 reasoning（这个 AIMessage 的思考）+ 它这批 tool_calls + 对应 ToolMessage 的结果。
+               组与组按 ReAct 轮次顺序排开（不再把所有 reasoning 堆到面板顶部）。
+               每个 tool 行下方用 `⎿` 连接线挂它的执行结果 —— 让「AIMessage 的调用」和
+               「ToolMessage 的结果」在视觉上读作一个整体，而不是两块游离内容。
+               分组序列由 thinkingBlocks 计算（见 script，按 toolCall.reasoningBefore 切分）。 -->
+          <template v-for="(blk, bi) in thinkingBlocks" :key="bi">
+            <!-- 组头：这一段思考 -->
+            <div v-if="blk.type === 'reasoning'" class="reasoning-text">{{ blk.text }}</div>
 
-                <!-- 内嵌审批 UI：仅当此 tool 是当前 pending 审批目标时渲染 -->
-                <div
-                  v-if="isToolAwaitingApproval(i)"
-                  class="tool-inline-approval"
-                  :class="`tool-inline-approval--${getToolExecutionEnv(tool.name, tool.args) || 'sandbox'}`"
-                  tabindex="-1"
-                  ref="approvalBox"
-                  @keydown="handleApprovalKeydown($event, i)"
-                >
-                  <div class="tool-inline-approval-header">
-                    <!-- local 时换成警告符号 ⚠️ 提醒用户走的是本机执行（不是沙盒隔离） -->
-                    <svg v-if="getToolExecutionEnv(tool.name, tool.args) !== 'local'" class="tool-inline-approval-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                      <path d="M12 2L4 6v6c0 5 3.5 9.5 8 10 4.5-.5 8-5 8-10V6l-8-4z"
-                        stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
-                      <path d="M9 12l2 2 4-4" stroke="currentColor" stroke-width="1.8"
-                        stroke-linecap="round" stroke-linejoin="round"/>
-                    </svg>
-                    <span v-else class="tool-inline-approval-warn">⚠️</span>
-                    <span>需要批准这个 {{ pendingToolApproval.action }} 操作吗？</span>
-                  </div>
-                  <!-- 默认 4 选项：取消 / 仅本次 / 告诉 AI 怎么做 / 批准 -->
-                  <div v-if="!feedbackExpanded[i]" class="tool-inline-approval-actions">
+            <!-- 组体：tool 调用 + 它的 ToolMessage 结果 -->
+            <div
+              v-else
+              class="tool-call-item"
+              :class="{
+                'tool-done': blk.tool.result !== null && !wasInterruptedTool(blk.index),
+                'tool-running': blk.tool.result === null && !isToolAwaitingApproval(blk.index) && !wasInterruptedTool(blk.index),
+                'awaiting-approval': isToolAwaitingApproval(blk.index),
+                'was-interrupted': wasInterruptedTool(blk.index),
+                'tool-expanded': expandedTools[blk.index]
+              }"
+            >
+              <div class="tool-call-header" @click="toggleTool(blk.index)">
+                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+                </svg>
+                <span class="tool-name">{{ blk.tool.name }}</span>
+                <!-- 折叠态显示：参数摘要（灰色文本） -->
+                <span v-if="!expandedTools[blk.index]" class="tool-summary">{{ summarizeTool(blk.tool) }}</span>
+                <!-- 展开态没有 summary 撑开时，用占位把右侧的 env / 状态 / chevron 继续顶到行尾 -->
+                <span v-else class="tool-header-spacer"></span>
+                <span v-if="getToolExecutionEnv(blk.tool.name, blk.tool.args)" class="tool-env-label" :class="`env-${getToolExecutionEnv(blk.tool.name, blk.tool.args)}`">::{{ getToolExecutionEnv(blk.tool.name, blk.tool.args) }}</span>
+                <span v-if="isToolAwaitingApproval(blk.index)" class="tool-awaiting-badge">需要批准</span>
+                <span v-else-if="blk.tool.result !== null" class="tool-check">✓</span>
+                <span v-else class="tool-running-dot"></span>
+                <!-- chevron：仅当有内容可展开时显示（running / awaiting 时无内容，隐藏） -->
+                <svg v-if="!isToolAwaitingApproval(blk.index) && (blk.tool.result !== null || (blk.tool.args && hasArgs(blk.tool.args, blk.tool.name)))" class="tool-expand-chevron" :class="{ rotated: expandedTools[blk.index] }" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="9 18 15 12 9 6"/>
+                </svg>
+              </div>
+
+              <!-- 折叠态：一行结果摘要（CC 的 `⎿` 行）—— 让 ToolMessage 在折叠时也可见 -->
+              <div
+                v-if="!expandedTools[blk.index] && blk.tool.result !== null"
+                class="tool-result-line tool-result-line--summary"
+              >
+                <span class="tool-result-connector">⎿</span>
+                <span class="tool-result-summary">{{ summarizeResult(blk.tool) }}</span>
+              </div>
+
+              <!-- 展开态：args 全文 + result 全文，同属这一组 -->
+              <div v-if="expandedTools[blk.index]" class="tool-detail">
+                <div v-if="blk.tool.args && hasArgs(blk.tool.args, blk.tool.name)" class="tool-args">{{ formatArgs(blk.tool.args, blk.tool.name) }}</div>
+                <div v-if="blk.tool.result !== null" class="tool-result-line">
+                  <span class="tool-result-connector">⎿</span>
+                  <span class="tool-result">{{ blk.tool.result }}</span>
+                </div>
+              </div>
+
+              <!-- 内嵌审批 UI：仅当此 tool 是当前 pending 审批目标时渲染 -->
+              <div
+                v-if="isToolAwaitingApproval(blk.index)"
+                class="tool-inline-approval"
+                :class="`tool-inline-approval--${getToolExecutionEnv(blk.tool.name, blk.tool.args) || 'sandbox'}`"
+                tabindex="-1"
+                @keydown="handleApprovalKeydown($event, blk.index)"
+              >
+                <div class="tool-inline-approval-header">
+                  <!-- local 时换成警告符号 ⚠️ 提醒用户走的是本机执行（不是沙盒隔离） -->
+                  <svg v-if="getToolExecutionEnv(blk.tool.name, blk.tool.args) !== 'local'" class="tool-inline-approval-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M12 2L4 6v6c0 5 3.5 9.5 8 10 4.5-.5 8-5 8-10V6l-8-4z"
+                      stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+                    <path d="M9 12l2 2 4-4" stroke="currentColor" stroke-width="1.8"
+                      stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                  <span v-else class="tool-inline-approval-warn">⚠️</span>
+                  <span>需要批准这个 {{ pendingToolApproval.action }} 操作吗？</span>
+                </div>
+                <!-- 默认 4 选项：取消 / 仅本次 / 告诉 AI 怎么做 / 批准 -->
+                <div v-if="!feedbackExpanded[blk.index]" class="tool-inline-approval-actions">
+                  <button
+                    class="tool-btn-deny"
+                    :class="{ 'kb-active': approvalSelectedIndex === 0 }"
+                    :disabled="submittingToolDecision"
+                    @focus="approvalSelectedIndex = 0"
+                    @click.stop="emitToolDecision('deny')"
+                  >取消</button>
+                  <button
+                    class="tool-btn-once"
+                    :class="{ 'kb-active': approvalSelectedIndex === 1 }"
+                    :disabled="submittingToolDecision"
+                    @focus="approvalSelectedIndex = 1"
+                    @click.stop="emitToolDecision('this-time-only')"
+                  >仅本次</button>
+                  <button
+                    class="tool-btn-feedback"
+                    :class="{ 'kb-active': approvalSelectedIndex === 2 }"
+                    :disabled="submittingToolDecision"
+                    @focus="approvalSelectedIndex = 2"
+                    @click.stop="toggleFeedback(blk.index)"
+                  >告诉 AI 怎么做</button>
+                  <button
+                    class="tool-btn-approve"
+                    :class="{ 'kb-active': approvalSelectedIndex === 3 }"
+                    :disabled="submittingToolDecision"
+                    @focus="approvalSelectedIndex = 3"
+                    @click.stop="emitToolDecision('approve')"
+                  >批准</button>
+                </div>
+                <!-- 反馈模式：textarea + 取消/发送 两个按钮 -->
+                <div v-else class="tool-inline-feedback">
+                  <textarea
+                    v-model="feedbackText[blk.index]"
+                    class="tool-feedback-textarea"
+                    placeholder="例如：用 Python sandbox；先列出将删除的文件再删；不要递归 ..."
+                    :disabled="submittingToolDecision"
+                    rows="3"
+                    @click.stop
+                    @keydown="handleFeedbackKeydown($event, blk.index)"
+                  ></textarea>
+                  <div class="tool-inline-feedback-actions">
                     <button
                       class="tool-btn-deny"
-                      :class="{ 'kb-active': approvalSelectedIndex === 0 }"
                       :disabled="submittingToolDecision"
-                      @click.stop="emitToolDecision('deny')"
+                      @click.stop="cancelFeedback(blk.index)"
                     >取消</button>
                     <button
-                      class="tool-btn-once"
-                      :class="{ 'kb-active': approvalSelectedIndex === 1 }"
-                      :disabled="submittingToolDecision"
-                      @click.stop="emitToolDecision('this-time-only')"
-                    >仅本次</button>
-                    <button
-                      class="tool-btn-feedback"
-                      :class="{ 'kb-active': approvalSelectedIndex === 2 }"
-                      :disabled="submittingToolDecision"
-                      @click.stop="toggleFeedback(i)"
-                    >告诉 AI 怎么做</button>
-                    <button
                       class="tool-btn-approve"
-                      :class="{ 'kb-active': approvalSelectedIndex === 3 }"
-                      :disabled="submittingToolDecision"
-                      @click.stop="emitToolDecision('approve')"
-                    >批准</button>
-                  </div>
-                  <!-- 反馈模式：textarea + 取消/发送 两个按钮 -->
-                  <div v-else class="tool-inline-feedback">
-                    <textarea
-                      v-model="feedbackText[i]"
-                      class="tool-feedback-textarea"
-                      placeholder="例如：用 Python sandbox；先列出将删除的文件再删；不要递归 ..."
-                      :disabled="submittingToolDecision"
-                      rows="3"
-                      @click.stop
-                      @keydown="handleFeedbackKeydown($event, i)"
-                    ></textarea>
-                    <div class="tool-inline-feedback-actions">
-                      <button
-                        class="tool-btn-deny"
-                        :disabled="submittingToolDecision"
-                        @click.stop="cancelFeedback(i)"
-                      >取消</button>
-                      <button
-                        class="tool-btn-approve"
-                        :disabled="submittingToolDecision || !(feedbackText[i] || '').trim()"
-                        @click.stop="submitFeedback(i)"
-                      >发送给 AI</button>
-                    </div>
+                      :disabled="submittingToolDecision || !(feedbackText[blk.index] || '').trim()"
+                      @click.stop="submitFeedback(blk.index)"
+                    >发送给 AI</button>
                   </div>
                 </div>
               </div>
             </div>
-            <div v-if="message.reasoning" class="reasoning-text">{{ message.reasoning }}</div>
-            <!-- 空状态：reasoning / toolCalls / 中断原因都为空时给用户一个明确提示 -->
-            <div
-              v-if="!hasThinkingContent"
-              class="thinking-empty"
-            >暂无思考内容</div>
-          </div>
+          </template>
+
+          <!-- ③ 空状态：reasoning / toolCalls / 中断原因都为空时给用户一个明确提示 -->
+          <div
+            v-if="!hasThinkingContent"
+            class="thinking-empty"
+          >暂无思考内容</div>
         </div>
 
         <!-- 用户消息：可能包含引用块 + 正文 -->
@@ -380,12 +414,12 @@
                 <line x1="12" y1="15" x2="12" y2="3"/>
               </svg>
             </button>
-            <button v-if="isInterrupted && isLatestAiMessage && (isInterruptedSessionId === currentSessionId || isInterruptedSessionId === pendingInterruptSessionId)" class="action-button resume-action" @click="$emit('resume')" title="续接对话">
+            <button v-if="isInterruptionRelevant" class="action-button resume-action" @click="$emit('resume')" title="续接对话">
               <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <polygon points="5 3 19 12 5 21 5 3"/>
               </svg>
             </button>
-            <button v-if="isInterrupted && isLatestAiMessage && (isInterruptedSessionId === currentSessionId || isInterruptedSessionId === pendingInterruptSessionId)" class="action-button" @click="$emit('restart-session')" title="重新对话">
+            <button v-if="isInterruptionRelevant" class="action-button" @click="$emit('restart-session')" title="重新对话">
               <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="23 4 23 10 17 10"/>
                 <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
@@ -598,8 +632,6 @@ export default {
       // 如果消息已完成（thinkingDone: true），默认折叠思考区块
       thinkingCollapsed: this.message.thinkingDone === true,
       expandedTools: {},
-      // 工具调用 > 6 时记录"用户主动展开过"，避免被持续覆盖回折叠
-      thinkingOverflowExpanded: false,
       activeFileIndex: 0,
       isUserMessageCollapsed: false,
       interruptReasonExpanded: false,
@@ -815,17 +847,67 @@ export default {
     componentUid() {
       return this._uid
     },
-    // 工具调用超过 6 个时，强制折叠整个思考过程
-    // 但用户主动展开后不再强制覆盖回折叠状态
+    // 思考面板的折叠态：工具调用一直累积也不折叠（让用户看到完整执行过程），
+    // 只有走完 final_node（App.vue 收到 `content` 事件 → thinkingDone=true）才自动折叠。
     effectiveThinkingCollapsed() {
-      // 等待审批的工具条目在这条消息里 → 强制展开（让用户看到内嵌审批按钮）
-      // 覆盖用户手动折叠的状态，因为审批按钮就在 thinking-body 里
+      // 等待审批的工具条目在这条消息里 → 强制展开（让用户看到内嵌审批按钮），
+      // 覆盖用户手动折叠的状态，因为审批按钮就在 thinking-body 里。
       if (this.pendingToolApproval && this.pendingToolApproval.messageIndex === this.messageIndex) {
         return false
       }
-      const tcLen = this.message.toolCalls && this.message.toolCalls.length
-      if (tcLen > 6 && !this.thinkingOverflowExpanded) return true
       return this.thinkingCollapsed
+    },
+    /**
+     * 当前消息是否处于"被中断"且确实是当前会话 / 待审批会话的视角。
+     * 抽 computed 是为了把 5 处模板上重复的复合条件统一到一处。
+     */
+    isInterruptionRelevant() {
+      return this.isInterrupted
+          && this.isLatestAiMessage
+          && (this.isInterruptedSessionId === this.currentSessionId
+              || this.isInterruptedSessionId === this.pendingInterruptSessionId)
+    },
+    /**
+     * 单 tool 粒度的"中断时正在跑"识别：isInterruptionRelevant 为真 + 此 tool.result === null
+     * → 高亮这一个 tool（左侧 2px 红竖条 + 淡红底），其他 done tool 不变。
+     */
+    wasInterruptedTool() {
+      return (i) => {
+        if (!this.isInterruptionRelevant) return false
+        if (!this.message.toolCalls || !this.message.toolCalls[i]) return false
+        return this.message.toolCalls[i].result === null
+      }
+    },
+    /**
+     * 思考面板的渲染序列：按 ReAct 轮次分组 —— 一段 reasoning 紧贴它这批 tool_calls，
+     * 而不是把所有 reasoning 堆到面板顶部、所有 tool 排在下面两块。
+     *
+     * 数据来源约定（App.vue 的 mergeToolCallStart / processConversationMessages）：
+     * 每个 toolCall 上的 `reasoningBefore` = "它之前那段还没归属给任何工具的原始思考切片"。
+     * 同一批（同一个 AIMessage 发的多个 tool_call）只有第一个带切片，其余为 ''，
+     * 因此渲染出来正好是 `[思考] [tool] [tool] … [思考] [tool] …` 的轮次分组。
+     * 切片按原始长度累加、渲染时才 trim，避免空格被吃掉后串位；`message.reasoning` 减去
+     * 已归属长度就是尾部那段（最后一个工具之后、最终回答之前的思考）。
+     *
+     * 没有切片的旧数据 / 审批占位 entry 天然退化成"tool 行 + 尾部整段"，不会渲染出错。
+     */
+    thinkingBlocks() {
+      const tools = this.message.toolCalls || []
+      const reasoning = this.message.reasoning || ''
+      const blocks = []
+      let consumed = 0
+      tools.forEach((tool, index) => {
+        const raw = tool.reasoningBefore
+        if (raw) {
+          const text = raw.trim()
+          if (text) blocks.push({ type: 'reasoning', text })
+          consumed += raw.length
+        }
+        blocks.push({ type: 'tool', index, tool })
+      })
+      const tail = reasoning.slice(consumed).trim()
+      if (tail) blocks.push({ type: 'reasoning', text: tail })
+      return blocks
     },
     /**
      * thinking-body 是否真的有任何内容（reasoning / toolCalls / 中断原因）。
@@ -836,12 +918,7 @@ export default {
       if (this.message.toolCalls && this.message.toolCalls.length > 0) return true
       if (this.message.additional_kwargs?.type === 'REASONING') return true
       // 中断原因面板展开时也算有内容
-      if (
-        this.isInterrupted &&
-        this.isLatestAiMessage &&
-        (this.isInterruptedSessionId === this.currentSessionId || this.isInterruptedSessionId === this.pendingInterruptSessionId) &&
-        this.interruptReasonExpanded
-      ) return true
+      if (this.isInterruptionRelevant && this.interruptReasonExpanded) return true
       return false
     },
     // 用户消息实际是否处于折叠态：
@@ -869,10 +946,10 @@ export default {
         if (!newVal) return
         const isThisMessage = newVal.messageIndex === this.messageIndex
         const wasThisMessage = oldVal && oldVal.messageIndex === this.messageIndex
-        if (isThisMessage && !wasThisMessage) {
+        if (isThisMessage && (!wasThisMessage || oldVal.toolIndex !== newVal.toolIndex)) {
           this.approvalSelectedIndex = 0
           // 等 v-if 把审批区 DOM 挂上后再 focus（nextTick 不够，因为 v-if 是同步下次 render）
-          this.$nextTick(() => this.focusApproval(newVal.toolIndex))
+          this.$nextTick(() => this.focusApproval())
         }
       },
       immediate: true
@@ -2237,11 +2314,6 @@ export default {
     },
     toggleThinking() {
       this.thinkingCollapsed = !this.thinkingCollapsed
-      // 工具调用 > 6 时一旦用户主动展开过，就不再被强制覆盖回折叠
-      const tcLen = this.message.toolCalls && this.message.toolCalls.length
-      if (!this.thinkingCollapsed && tcLen > 6) {
-        this.thinkingOverflowExpanded = true
-      }
     },
     toggleInterruptReason() {
       this.interruptReasonExpanded = !this.interruptReasonExpanded
@@ -2270,7 +2342,44 @@ export default {
       this.$emit('tool-decide', decision)
     },
     /**
+     * 当前这条消息里的审批容器（最多一个 —— isToolAwaitingApproval 按 messageIndex + toolIndex 双匹配）。
+     *
+     * 不要用 `$refs` + 下标定位：模板是 `v-for="blk in thinkingBlocks"`，只有「待审批的那个 tool」
+     * 才会渲染审批容器，ref 数组恒为 0..1 长度，跟 tool 下标对不上 —— 待审批 tool 不是第 0 个时
+     * `arr[toolIndex]` 恒为 undefined，焦点永远落不上去（Tab 也就无从在按钮间移动）。
+     */
+    approvalBoxEl() {
+      return this.$el ? this.$el.querySelector('.tool-inline-approval') : null
+    },
+    /**
+     * 把键盘焦点移到审批容器（审批刚出现时调用一次）。
+     * 焦点落到容器后 Tab 能在 4 个按钮间正常走（按钮是原生 tabbable），
+     * 按钮上的 @focus 再把 approvalSelectedIndex 同步回来 → 高亮跟着焦点走。
+     */
+    focusApproval() {
+      this.$nextTick(() => {
+        const box = this.approvalBoxEl()
+        if (box && box.focus) box.focus()
+      })
+    },
+    /**
+     * 移动高亮项 + 同步真实 DOM 焦点（←/→、数字键走这里）。
+     * 只改 approvalSelectedIndex 的话真实焦点会留在旧按钮上，后续 Tab 的起点就错了。
+     */
+    setApprovalIndex(index) {
+      this.approvalSelectedIndex = index
+      this.$nextTick(() => {
+        const btns = this.approvalBoxEl()
+          ? this.approvalBoxEl().querySelectorAll('.tool-inline-approval-actions button')
+          : null
+        if (!btns) return
+        const target = btns[index]
+        if (target && target.focus) target.focus()
+      })
+    },
+    /**
      * 工具审批 4 按钮键盘导航：
+     *   - Tab / Shift+Tab: 原生在 4 个按钮间走（按钮上的 @focus 同步高亮）
      *   - Left / Right (或 ↑ / ↓): 切换高亮选项（deny=0 / once=1 / feedback=2 / approve=3）
      *   - 1 / 2 / 3 / 4: 直接跳到对应选项
      *   - Enter: 确认当前高亮选项（行为等价于点击该按钮）
@@ -2278,7 +2387,7 @@ export default {
      *
      * 监听挂在 .tool-inline-approval 容器 div 上（带 tabindex=-1），用户焦点进入
      * approval 区后所有键盘事件在这里处理。submittingToolDecision 期间禁用避免
-     * 双发。autoFocusOnApproval() 在审批出现时把焦点抢过来（无需用户先 Tab）。
+     * 双发。focusApproval() 在审批出现时把焦点抢过来（无需用户先 Tab）。
      */
     handleApprovalKeydown(e, toolIndex) {
       if (this.submittingToolDecision) return
@@ -2290,10 +2399,10 @@ export default {
       const opts = ['deny', 'this-time-only', 'feedback', 'approve']
       if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
         e.preventDefault()
-        this.approvalSelectedIndex = (this.approvalSelectedIndex + opts.length - 1) % opts.length
+        this.setApprovalIndex((this.approvalSelectedIndex + opts.length - 1) % opts.length)
       } else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
         e.preventDefault()
-        this.approvalSelectedIndex = (this.approvalSelectedIndex + 1) % opts.length
+        this.setApprovalIndex((this.approvalSelectedIndex + 1) % opts.length)
       } else if (e.key === 'Escape') {
         e.preventDefault()
         this.emitToolDecision('deny')
@@ -2302,9 +2411,9 @@ export default {
         this.emitToolDecision(opts[this.approvalSelectedIndex])
       } else if (/^[1-4]$/.test(e.key)) {
         e.preventDefault()
-        this.approvalSelectedIndex = Number(e.key) - 1
         // 数字键直接触发，不必再按 Enter（Codex 风「一键到位」）
-        this.emitToolDecision(opts[this.approvalSelectedIndex])
+        this.setApprovalIndex(Number(e.key) - 1)
+        this.emitToolDecision(opts[Number(e.key) - 1])
       }
     },
     /**
@@ -2327,20 +2436,6 @@ export default {
         this.submitFeedback(toolIndex)
       }
       // Shift+Enter: 不拦，让 textarea 走原生换行
-    },
-    /**
-     * 把焦点抢到当前审批容器（仅审批刚出现时调用一次）。
-     * 用 $nextTick 等 v-if 把 DOM 挂上后再 focus。
-     */
-    focusApproval(toolIndex) {
-      // 找审批容器：审批区在某个 tool row 内部，靠 toolIndex 定位
-      this.$nextTick(() => {
-        const boxes = this.$refs.approvalBox
-        if (!boxes) return
-        const arr = Array.isArray(boxes) ? boxes : [boxes]
-        const target = arr[toolIndex]
-        if (target && target.focus) target.focus()
-      })
     },
     /**
      * 「告诉 AI 怎么做」按钮：展开反馈 textarea
@@ -2379,13 +2474,45 @@ export default {
       const filtered = this.filterInternalArgs(args, toolName)
       return Object.keys(filtered).length > 0
     },
-    formatArgs(args, toolName = '') {
-      const filtered = this.filterInternalArgs(args, toolName)
-      try {
-        return JSON.stringify(filtered, null, 2)
-      } catch {
-        return String(filtered)
+    /**
+     * 单行折叠态 summary：CC 风格的"▸ Reading foo.py"摘要。
+     * cmd → 命令前 60 字符；code → "python · 248 字符"；其他 → JSON dump 截断。
+     */
+    summarizeTool(tool) {
+      const args = this.filterInternalArgs(tool.args || {}, tool.name)
+      const truncate = (s, n) => (s.length > n ? s.slice(0, n) + '…' : s)
+      if (tool.name === 'cmd') {
+        const cmd = String(args.command || '')
+        return truncate(cmd, 60)
       }
+      if (tool.name === 'code') {
+        const code = String(args.code || '')
+        const lang = args.language || 'python'
+        return `${lang} · ${code.length} 字符`
+      }
+      // 其他工具：JSON dump 截断
+      try {
+        const json = JSON.stringify(args)
+        return truncate(json, 60)
+      } catch {
+        return ''
+      }
+    },
+    /**
+     * 折叠态的单行结果摘要：CC 风格 `⎿` 行。
+     * 单行短结果 → 直接显示首行；多行 / 长结果 → 首行截断 + 行数提示。
+     * result 为 null（还在跑）返回空串，调用处已用 v-if 挡住。
+     */
+    summarizeResult(tool) {
+      const result = tool && tool.result
+      if (result === null || result === undefined) return ''
+      const text = String(result)
+      if (!text.trim()) return '(空结果)'
+      const lines = text.split('\n').filter(l => l.trim() !== '')
+      const first = (lines[0] || '').trim()
+      const truncate = (s, n) => (s.length > n ? s.slice(0, n) + '…' : s)
+      if (lines.length <= 1) return truncate(first, 90)
+      return `${truncate(first, 70)} · ${lines.length} 行`
     },
     filterInternalArgs(args, toolName = '') {
       if (!args || typeof args !== 'object') return {}
@@ -3520,31 +3647,34 @@ export default {
 }
 
 /* 思考过程区块 */
+/* v0.3.4 —— CC 风格思考面板：整块只有一条 3px 左竖条作为"思考主线"，内部不再套边框 / 底色。
+   主线上按顺序排布：思考段落（普通文本）+ 它触发的工具调用（节点行）。 */
 .thinking-section {
-  margin-bottom: 10px;
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  overflow: hidden;
+  margin: 4px 0 10px;
+  padding: 2px 0 2px 14px;
+  border: none;
+  border-left: 3px solid var(--thinking-bar);
+  border-radius: 0;
+  background: transparent;
   font-size: 13px;
-  transition: border-color 0.3s;
+  transition: border-left-color 0.3s;
 }
 
 .thinking-section.thinking-active {
-  border-color: color-mix(in srgb, var(--button-bg) 40%, var(--border-color));
+  border-left-color: var(--thinking-accent);
 }
 
-.thinking-section.thinking-interrupted {
-  border-color: #ef4444;
-}
+/* thinking-interrupted：整块不再变红 —— 高亮收窄到具体 tool（见 .tool-call-item.was-interrupted） */
 
 .thinking-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 7px 10px;
+  padding: 3px 6px 3px 0;
   cursor: pointer;
-  background: var(--bg-secondary);
+  background: transparent;
   user-select: none;
+  border-radius: 4px;
   transition: background 0.15s;
 }
 
@@ -3568,13 +3698,13 @@ export default {
 }
 
 .thinking-status-dot.dot-active {
-  background: var(--button-bg);
+  background: var(--thinking-accent);
   opacity: 1;
   animation: live-pulse 1.2s ease-in-out infinite;
 }
 
 .thinking-status-dot.dot-interrupted {
-  background: #ef4444;
+  background: var(--accent-red);
   opacity: 1;
   animation: none;
 }
@@ -3605,63 +3735,89 @@ export default {
   transform: rotate(90deg);
 }
 
-.thinking-body {
-  padding: 8px 10px;
-  border-top: 1px solid var(--border-color);
-  background: var(--bg-primary);
-}
+/* 折叠态下隐藏除 header 外的所有直接子节点（reasoning 段落 / 工具行 / 中断原因都是直接子节点） */
+.thinking-section.thinking-collapsed > :not(.thinking-header) { display: none; }
 
-/* 工具调用 */
-.tool-calls {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-bottom: 8px;
-}
-
+/* v0.3.4 ——
+   ① tool 行不再有自己的左边框 / padding-left / margin-left，跟 reasoning 段一起平级排在
+      thinking-section 的 3px 主竖条下；层级只靠 chevron + 行内左缩进表达
+   ② 待审批 / 中断态仅用淡色背景，不再叠左竖条 —— 整组只允许『外层 3px 主竖条』这一条边框 */
 .tool-call-item {
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  overflow: hidden;
-  opacity: 0.75;
-  transition: opacity 0.2s, border-color 0.2s, box-shadow 0.2s;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  padding: 0;
+  margin: 0 0 2px;
+  transition: background 0.15s;
 }
 
-.tool-call-item.tool-done {
-  opacity: 1;
-}
-
-/* 待审批的 tool call：高亮黄色边框 + 阴影 + 顶部 badge */
+/* 待审批的 tool call：淡琥珀底，不加左边框（避免跟外层 3px 主竖条视觉打架） */
 .tool-call-item.awaiting-approval {
-  opacity: 1;
-  border-color: #f59e0b;
-  box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.35), 0 2px 8px rgba(245, 158, 11, 0.12);
+  background: color-mix(in srgb, var(--accent-amber) 7%, transparent);
+}
+
+/* 中断时正在跑的 tool：淡红底（done 的工具不受影响） */
+.tool-call-item.was-interrupted {
+  background: color-mix(in srgb, var(--accent-red) 6%, transparent);
 }
 
 .tool-awaiting-badge {
-  font-size: 10px;
-  color: #b45309;
-  background: rgba(245, 158, 11, 0.15);
+  font-size: 10.5px;
+  color: var(--accent-amber);
+  background: color-mix(in srgb, var(--accent-amber) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent-amber) 25%, transparent);
   padding: 1px 6px;
   border-radius: 4px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
+  font-weight: 500;
 }
 
+/* v0.3.4 —— 工具调用单行：透明横排，hover 才浮出底色；点整行展开/折叠 args + result */
 .tool-call-header {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 5px 8px;
-  background: var(--bg-secondary);
+  padding: 4px 8px 4px 4px;
+  background: transparent;
   color: var(--text-secondary);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.tool-call-header:hover {
+  background: var(--bg-hover);
+}
+
+.tool-call-header > svg {
+  flex-shrink: 0;
+  opacity: 0.55;
 }
 
 .tool-name {
   font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
-  font-size: 12px;
+  font-size: 12.5px;
+  font-weight: 500;
   color: var(--text-primary);
+  flex-shrink: 0;
+}
+
+/* 折叠态单行 summary：CC 风格的灰色参数摘要 */
+.tool-summary {
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 11px;
+  color: var(--text-tool-args);
   flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.85;
+  min-width: 0;
+}
+
+/* 展开态占位：summary 不渲染时接管 flex:1，把 env / 状态 / chevron 继续顶到行尾 */
+.tool-header-spacer {
+  flex: 1;
+  min-width: 0;
 }
 
 .tool-env-label {
@@ -3669,6 +3825,7 @@ export default {
   font-size: 12px;
   color: var(--text-secondary);
   font-weight: 400;
+  flex-shrink: 0;
 }
 
 .tool-env-label.env-local {
@@ -3678,51 +3835,107 @@ export default {
 
 .tool-check {
   font-size: 11px;
-  color: var(--button-bg);
+  color: var(--accent-green);
   font-weight: 600;
+  flex-shrink: 0;
 }
 
 .tool-running-dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--text-secondary);
+  background: var(--thinking-accent);
   animation: live-pulse 1s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+.tool-expand-chevron {
+  margin-left: auto;
+  color: var(--text-secondary);
+  opacity: 0.6;
+  flex-shrink: 0;
+  transition: transform 0.15s;
+}
+
+/* v0.3.4 —— 展开态容器：args + result 都在 tool 行内部，靠行内左缩进表示从属关系。
+   整组只允许外层 thinking-section 的 3px 主竖条这一条边框 —— tool 内部不再画第二条线。 */
+.tool-detail {
+  padding: 2px 0 8px 22px;
+  margin: 0;
 }
 
 .tool-args {
-  padding: 5px 8px;
+  padding: 0;
   font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
-  font-size: 11px;
-  color: var(--text-secondary);
+  font-size: 11.5px;
+  color: var(--text-tool-args);
   white-space: pre-wrap;
-  word-break: break-all;
-  max-height: 80px;
+  word-break: break-word;
+  max-height: 400px;
   overflow-y: auto;
-  background: var(--bg-primary);
+  background: transparent;
+}
+
+/* v0.3.4 —— ToolMessage 结果：CC 风格 `⎿` 连接线挂在它那条工具调用正下方，
+   让「AIMessage 发出的 tool_call」和「ToolMessage 的执行结果」在视觉上读作一组。
+   折叠态只显示一行摘要（tool-result-line--summary），展开态显示全文。 */
+.tool-result-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 2px 0 0 22px;
+  margin: 0;
+}
+
+/* 展开态下 result 已在外层 .tool-detail 缩进过，避免双重缩进 */
+.tool-detail .tool-result-line {
+  padding-left: 0;
+}
+
+.tool-result-connector {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  opacity: 0.55;
+  font-size: 11.5px;
+  line-height: 1.55;
+  user-select: none;
+}
+
+.tool-result,
+.tool-result-summary {
+  flex: 1;
+  min-width: 0;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text-tool-args);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .tool-result {
-  padding: 6px 8px;
-  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
-  font-size: 11px;
-  color: var(--text-secondary);
-  white-space: pre-wrap;
-  word-break: break-all;
-  max-height: 200px;
+  max-height: 320px;
   overflow-y: auto;
-  background: var(--bg-primary);
-  border-top: 1px solid var(--border-color);
 }
 
-/* 内嵌审批 UI：出现在 awaiting-approval 的 tool call 下方 */
+/* 折叠态单行摘要：超长省略号截断，不换行 */
+.tool-result-summary {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.8;
+}
+
+/* v0.3.4 —— 内嵌审批 UI：CC 风格横排 prompt，去所有外层边框 / 左竖条，留行内左缩进 + 琥珀色文本 */
 .tool-inline-approval {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 8px 10px;
-  background: rgba(245, 158, 11, 0.06);
-  border-top: 1px solid rgba(245, 158, 11, 0.25);
+  padding: 6px 0 6px 22px;
+  margin: 4px 0 0 0;
+  border: none;
+  background: transparent;
+  border-radius: 0;
 }
 
 .tool-inline-approval-header {
@@ -3730,19 +3943,21 @@ export default {
   align-items: center;
   gap: 6px;
   font-size: 12px;
-  color: var(--text-primary);
+  color: var(--accent-amber);
   font-weight: 500;
+  font-style: italic;
 }
 
 .tool-inline-approval-icon {
   width: 14px;
   height: 14px;
-  color: #f59e0b;
+  color: var(--accent-amber);
   flex-shrink: 0;
 }
 
 .tool-inline-approval-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
 }
 
@@ -3750,15 +3965,15 @@ export default {
 .tool-btn-once,
 .tool-btn-feedback,
 .tool-btn-approve {
-  padding: 4px 12px;
-  border: 1px solid var(--border-color);
-  border-radius: 5px;
+  padding: 3px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent-amber) 30%, transparent);
+  border-radius: 4px;
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
-  background: var(--bg-secondary);
+  background: transparent;
   color: var(--text-primary);
-  transition: all 0.15s ease;
+  transition: background 0.15s, border-color 0.15s;
 }
 
 .tool-btn-deny:disabled,
@@ -3776,38 +3991,41 @@ export default {
 }
 
 .tool-btn-once:hover:not(:disabled) {
-  background: var(--bg-hover);
-  border-color: var(--text-secondary);
+  background: color-mix(in srgb, var(--accent-amber) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent-amber) 50%, transparent);
 }
 
 /* 「告诉 AI 怎么做」按钮：amber 主色调，呼应审批 UI 顶部的盾牌图标 */
 .tool-btn-feedback {
-  background: rgba(245, 158, 11, 0.08);
+  background: color-mix(in srgb, var(--accent-amber) 8%, transparent);
   color: #b45309;
-  border-color: rgba(245, 158, 11, 0.35);
+  border-color: color-mix(in srgb, var(--accent-amber) 35%, transparent);
 }
 
 .tool-btn-feedback:hover:not(:disabled) {
-  background: rgba(245, 158, 11, 0.18);
-  border-color: #f59e0b;
+  background: color-mix(in srgb, var(--accent-amber) 18%, transparent);
+  border-color: var(--accent-amber);
   color: #92400e;
 }
 
 /* 批准按钮：sandbox 默认绿色（v0.1.3 保持原样） */
 .tool-btn-approve {
-  background: #10b981;
+  background: var(--accent-amber);
   color: white;
-  border-color: #10b981;
+  border-color: var(--accent-amber);
 }
 
 .tool-btn-approve:hover:not(:disabled) {
-  background: #059669;
-  border-color: #059669;
+  background: #d97706;
+  border-color: #d97706;
 }
 
-/* local 审核变体：淡红背景叠加（v0.1.3 区分 sandbox vs local） */
-.tool-inline-approval--local {
-  background: rgba(239, 68, 68, 0.06);  /* 淡红底，叠加在黄色边框上 */
+/* v0.3.4 —— local 审核变体：只换 header / icon 颜色为红（不再 border-left） */
+.tool-inline-approval--local .tool-inline-approval-header {
+  color: var(--accent-red);
+}
+.tool-inline-approval--local .tool-inline-approval-icon {
+  color: var(--accent-red);
 }
 
 /* 键盘高亮选项：双线 box-shadow 模拟 outline（不占布局空间） + 微缩放提示。
@@ -3849,7 +4067,7 @@ export default {
 
 .tool-inline-approval--local .tool-btn-approve:hover:not(:disabled) {
   background: rgba(239, 68, 68, 0.22);
-  border-color: #ef4444;
+  border-color: var(--accent-red);
   color: #991b1b;
 }
 
@@ -3892,13 +4110,7 @@ export default {
   justify-content: flex-end;
 }
 
-.tool-expand-chevron {
-  margin-left: auto;
-  color: var(--text-secondary);
-  transition: transform 0.2s;
-  flex-shrink: 0;
-}
-
+/* v0.3.4 —— tool 展开 chevron：仅当有内容可展开时显示（running / awaiting 时隐藏） */
 .tool-expand-chevron.rotated {
   transform: rotate(90deg);
 }
@@ -3920,56 +4132,62 @@ export default {
 .message-text :deep(.katex) {
   font-size: 1.1em;
 }
+/* v0.3.4 ——
+   reasoning 是「一组」的开头：它后面紧跟这批 tool_calls（组内间距紧），
+   上一组结束时留出更大间距把它和上一组分开 —— 靠间距表达分组，不靠边框。
+   纯文本、不加边框 / 左缩进 / 底色，整组只允许外层 thinking-section 的 3px 主竖条一条边框。 */
 .reasoning-text {
-  font-size: 12px;
+  font-size: 12.5px;
   color: var(--text-secondary);
-  line-height: 1.6;
+  line-height: 1.75;
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 200px;
-  overflow-y: auto;
-  opacity: 0.8;
-  padding: 2px 0;
+  max-height: none;
+  overflow-y: visible;
+  opacity: 1;
+  padding: 0;
+  margin: 10px 0 4px;
 }
 
 /* 空状态：reasoning / toolCalls / 中断原因都为空时显示 */
 .thinking-empty {
   font-size: 12px;
-  color: var(--text-secondary);
-  opacity: 0.55;
-  padding: 8px 2px 4px;
+  color: var(--text-tertiary, #9ca3af);
   font-style: italic;
+  padding: 4px 0;
+  opacity: 1;
 }
 
-/* 中断原因提示 */
+/* 中断原因提示：红色徽章，引用 token */
 .interrupt-reason-hint {
   font-size: 11px;
-  color: #ef4444;
+  color: var(--accent-red);
   cursor: pointer;
   padding: 1px 8px;
   border-radius: 10px;
-  background: rgba(239, 68, 68, 0.1);
+  background: color-mix(in srgb, var(--accent-red) 10%, transparent);
   transition: background 0.15s;
-  border: 1px solid rgba(239, 68, 68, 0.2);
+  border: 1px solid color-mix(in srgb, var(--accent-red) 20%, transparent);
   font-weight: 500;
 }
 
 .interrupt-reason-hint:hover {
-  background: rgba(239, 68, 68, 0.2);
+  background: color-mix(in srgb, var(--accent-red) 20%, transparent);
 }
 
-/* 中断原因内联显示 */
+/* v0.3.4 —— 中断原因内联显示：去所有外层边框 / 左竖条，仅靠红色 italic 文本传达 */
 .interrupt-reason-inline {
-  padding: 6px 10px;
-  background: var(--bg-primary);
-  border: 1px solid rgba(239, 68, 68, 0.3);
-  border-radius: 6px;
-  margin-bottom: 8px;
+  padding: 4px 0 6px 22px;
+  margin: 0;
+  background: transparent;
+  border: none;
+  border-radius: 0;
 }
 
 .interrupt-reason-text {
-  color: var(--text-primary);
+  color: var(--accent-red);
   font-size: 12px;
+  font-style: italic;
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;

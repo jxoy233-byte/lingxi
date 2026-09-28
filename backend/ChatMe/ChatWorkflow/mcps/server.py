@@ -250,7 +250,7 @@ def find_skill(
 def done() -> str:
     """Mark your thinking chain as complete
 
-    Call `done` when the reasoning is finished: task complete, stuck, casual chat, or out of scope.
+    Call `done` when the reasoning is finished: info collected, task complete, stuck, casual chat, or out of scope.
 
     Use `interrupt(...)` instead when you need to ask the user a specific question mid-flow.
     """

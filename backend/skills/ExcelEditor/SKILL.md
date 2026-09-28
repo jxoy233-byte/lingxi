@@ -1,14 +1,12 @@
 ---
 name: excel_editor
-description: 创建和编辑 .xlsx 表格（Excel OOXML）。基于 openpyxl，内容精确性（数字格式 / 日期 / 公式 / CSV 互转 quote-aware + BOM 处理）。仅支持 .xlsx；.xls / .csv 需先转换
+description: 创建 / 编辑 Excel 表格。支持单元格、批量数据、公式、格式、Sheet 管理、CSV 互转。仅 .xlsx
 mount: ro
 aliases: [ExcelEditor, excel, xlsx, spreadsheet, Excel表格, 数据表, table, sheet]
 module: skills.ExcelEditor
 ---
 
 # ExcelEditor
-
-基于 `openpyxl` 读写 `.xlsx`。
 
 ## 调用方式
 

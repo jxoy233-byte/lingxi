@@ -37,7 +37,7 @@
           <polyline points="12 6 12 12 16 14"/>
         </svg>
       </button>
-      <!-- v0.5.x —— Word 写作抽屉切换：仅当 AI 写过 Word 文件时显示 -->
+      <!-- v0.3.4 —— Word 写作抽屉切换：仅当 AI 写过 Word 文件时显示 -->
       <button
         v-if="hasSession && wordDrawerAvailable"
         @click="$emit('toggle-word-drawer')"
@@ -52,7 +52,7 @@
           <line x1="9" y1="17" x2="15" y2="17"/>
         </svg>
       </button>
-      <!-- v0.5.x —— Excel 写作抽屉切换：仅当 AI 写过 Excel 文件时显示。默认不自动打开 -->
+      <!-- v0.3.4 —— Excel 写作抽屉切换：仅当 AI 写过 Excel 文件时显示。默认不自动打开 -->
       <button
         v-if="hasSession && excelDrawerAvailable"
         @click="$emit('toggle-excel-drawer')"
@@ -108,7 +108,7 @@ export default {
       type: Boolean,
       default: false
     },
-    // v0.5.x —— 写作抽屉可用性：AI 是否在本会话写过 Word/Excel 文件
+    // v0.3.4 —— 写作抽屉可用性：AI 是否在本会话写过 Word/Excel 文件
     wordDrawerAvailable: {
       type: Boolean,
       default: false
@@ -117,7 +117,7 @@ export default {
       type: Boolean,
       default: false
     },
-    // v0.5.x —— 抽屉是否当前打开（按钮高亮态）
+    // v0.3.4 —— 抽屉是否当前打开（按钮高亮态）
     wordDrawerOpen: {
       type: Boolean,
       default: false
@@ -130,7 +130,7 @@ export default {
   emits: [
     'open-settings', 'open-setup', 'toggle-checkpoints', 'toggle-sidebar',
     'refresh',
-    // v0.5.x —— 抽屉切换
+    // v0.3.4 —— 抽屉切换
     'toggle-word-drawer', 'toggle-excel-drawer'
   ]
 }
@@ -252,7 +252,7 @@ export default {
   opacity: 0.8;
 }
 
-/* v0.5.x —— 抽屉切换按钮：active 态有蓝色高亮表示抽屉已开 */
+/* v0.3.4 —— 抽屉切换按钮：active 态有蓝色高亮表示抽屉已开 */
 .drawer-toggle-btn {
   color: var(--text-secondary);
 }

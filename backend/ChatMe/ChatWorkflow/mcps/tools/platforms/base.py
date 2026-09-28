@@ -166,6 +166,22 @@ Parameters:
 - query (required, string): Keywords or task description (e.g. "semantic search", "深度搜索", "image parsing")
 - mode (default: 'match'): 'match' for keyword search (top 3) | 'list' for full <available_skills> block"""
 
+    @property
+    def done_tool_prompt_block(self) -> str:
+        """### done 章节——跨平台一致，base 默认提供。
+
+        done 是新 graph（_create_graph_improved）的思维链收尾信号，作用域与 shell /
+        沙盒无关，任何平台 prompt 完全相同。子类无需覆盖。
+
+        ⚠️ 它**不在 all_tool_prompt_blocks() 里**：那块列表新老图共用，而老图
+        （get_mcp_tools(include_done=False)）bind 不到 done，拼进去会让老图 LLM
+        去调一个不存在的工具。新图由 get_agent_node_improved_prompt() 单独拼。
+        """
+        return """### done — Chain Termination
+Use when: The thinking chain is complete — task done, stuck, casual chat, or out of scope.
+The tool call IS your whole response — the graph writes the reply afterwards. A text summary instead gets rejected and costs an extra round.
+Parameters: none"""
+
     def all_tool_prompt_blocks(self) -> list[str]:
         """按 canonical 顺序返回全部 MCP 工具的 prompt 块。
 
@@ -174,10 +190,15 @@ Parameters:
         find_skill 是「先查现成能力」类工具，摆在 cmd/code 之前让 LLM 优先考虑；
         cmd_code_common_notes 是 cmd/code 共享约束提示，单独成块方便扩展。
 
+        ⚠️ 例外：``done`` 不在这里（见 done_tool_prompt_block docstring）——
+        本列表新老图共用，而 done 只有新图 bind 得到，由
+        get_agent_node_improved_prompt() 单独拼进新图 prompt。
+
         加新工具时：
         1. base 加一个 ``<tool>_tool_prompt_block`` property（跨平台一致）
            或在子类覆盖（需要平台特定描述）
         2. 把新 block 按 prompt 段需求插入到本方法的列表里
+           （若该工具只有某一个图暴露，插到对应图的 prompt 拼装里，不要放这里）
         """
         return [
             self.interrupt_tool_prompt_block,

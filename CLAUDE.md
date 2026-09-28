@@ -217,6 +217,10 @@ docker-compose up -d redis       # 端口 48211，密码 123456
 
 ### 版本约定（按版本倒排）
 
+**v0.3.5** — **滚动行为整体重做**（`ResizeObserver` 改观察 `.messages-column` 修图片渲染处卡住根因 + `_runRaf` 函数式 `targetTop` 让动画期间 `scrollHeight` 上涨仍能追底 + 打断检测改 `lastSetTop` 方向无关 + `localStorage` 会话滚动位置缓存 TTL 30 天 / 最多 60 个会话 / 底部自动跳过）+ **`done` 工具 prompt 块**（base 加 `done_tool_prompt_block`，新图 `get_agent_node_improved_prompt()` 单独 splice——不放 `all_tool_prompt_blocks()` 共用列表，老图 bind 不到 done 会让 LLM 看见不存在的工具）+ `PROMPT_MAIN_FLOW` 数字编号去掉 + `output \`Done\`` 短串优先替换为 `call the done tool` + `PROMPT_MAIN_ROLE_IMPROVED` 允许 `brief reasoning` 避免 LLM 误以为不能再带思考 + 顺手修 `server.py` `done` docstring 拼写（`finished:info` 缺空格冒号）+ `ChatHeader.vue` 6 处过期 `v0.5.x` 注释头修复。
+
+**v0.3.4** — skill func.help 双轨 API（`_HelpMeta` 自动挂 `.help` 到类 / 方法 / 属性 + `auto_attach_help_module` 补 module-level）+ SKILL.md 精简（删除冗余 fonts/path_convention/format_units 共享 .md，硬约束内联）+ WordEditor / ExcelEditor 写作抽屉（AI 调 skill 时右侧自动弹只读预览，mammoth / SheetJS 实时渲染，200ms debounce + 互斥 drawer）+ CC 风格面板重设计（thinking-section 仅留 3px 左竖条、tool-call-item 去外框、args 默认折叠为灰色 summary 点击展开、单 tool 粒度审批/中断高亮）+ 6 个新 theme token（`--thinking-accent` / `--thinking-bar` / `--accent-amber` / `--accent-red` / `--accent-green` / `--text-tool-args`）+ **思考段落与工具调用配对**（`toolCall.reasoningBefore` 存原始切片，`MessageItem.thinkingBlocks` 按长度累加切分 `message.reasoning`，渲染成"思考段 → 它触发的工具"交替序列；不再全部堆在面板顶部）+ 顺手修 3 个 code smell（重复 formatArgs / 5 处 interrupt 复合条件 / `thinking-collapsed` 类未生效）。
+
 **v0.3.2** — BootstrapView deps 模式「进入应用」按钮无效 bug 修复 + 移除 LLM 模型白名单兜底（`/admin/llm/models` 严格按远端返回，空就返空）。
 
 **v0.3.1** — 首启 UX 重构：基于 `autoEnterFrontend` 切换 BootstrapView `classic` / `deps` 二形态 + App.vue 自动 bootstrap + StartupLoadingView 等待动画 + SkillForge 自动 refetch slash 面板。

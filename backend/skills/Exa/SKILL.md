@@ -1,6 +1,6 @@
 ---
 name: exa
-description: 深度语义搜索与相似网页发现，适合研究、原理、对比和综合分析。默认少量结果（≤5 条），信息不足再调关键词/角度/type 重搜，少量多次优于单次多量。
+description: 深度语义搜索 + 相似网页发现。适合研究、原理、对比、综合分析
 mount: ro
 aliases: [Exa, research, semantic_search, deep_search, find_similar]
 module: skills.Exa

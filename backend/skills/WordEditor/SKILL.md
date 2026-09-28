@@ -1,6 +1,6 @@
 ---
 name: word_editor
-description: 创建和编辑 .docx 文档（Word OOXML）。WPS 与 Microsoft Word 双端可打开。仅支持 .docx；.doc / .wps / .odt 需用户先另存为 .docx
+description: 创建 / 编辑 Word 文档。支持段落、标题、表格、图片、分页符、字段。仅 .docx
 mount: ro
 aliases: [WordEditor, word, docx, wps, document, Word文档, doc, 报告, report]
 module: skills.WordEditor

@@ -180,7 +180,7 @@
         @click="showFilePreview = false"
       />
 
-      <!-- v0.5.x —— WordEditor 实时预览抽屉（AI 调 WordDoc.create/open 时自动弹出） -->
+      <!-- v0.3.4 —— WordEditor 实时预览抽屉（AI 调 WordDoc.create/open 时自动弹出） -->
       <WordDocDrawer
         :visible="_wordDrawer.visible"
         :file-path="_wordDrawer.filePath"
@@ -189,7 +189,7 @@
         @close="_wordDrawer.visible = false"
       />
 
-      <!-- v0.5.x —— ExcelEditor 实时预览抽屉（手动打开：AI 写入时只跟踪不弹出） -->
+      <!-- v0.3.4 —— ExcelEditor 实时预览抽屉（手动打开：AI 写入时只跟踪不弹出） -->
       <ExcelDocDrawer
         :visible="_excelDrawer.visible"
         :file-path="_excelDrawer.filePath"
@@ -586,13 +586,13 @@ export default {
       //   时间窗口 2s 内只允许一次 refetch + in-flight promise 复用，幂等。
       _lastSkillFetchAt: 0,
       _skillFetchInFlight: null,
-      // v0.5.x —— WordEditor 写作抽屉：AI 调 WordDoc.create/open 时自动弹出右侧预览。
+      // v0.3.4 —— WordEditor 写作抽屉：AI 调 WordDoc.create/open 时自动弹出右侧预览。
       // - toolCallId 用于配对 tool_call_result（只刷新同一次调用的产物）
       // - version 每次 +1 触发 WordDocDrawer 重新 fetch + mammoth 渲染
       // - isStreaming=false 时抽屉保持打开（对标 CheckpointPanel，不自动关）
       // - visible=false 时整个抽屉卸载，组件卸载前最后一次 version 仍生效（用于切回再看）
       _wordDrawer: { visible: false, filePath: '', version: 0, isStreaming: false, toolCallId: null, rawPath: '' },
-      // v0.5.x —— ExcelEditor 写作抽屉：与 WordDrawer 共用检测，但 visible 默认 false 不自动开。
+      // v0.3.4 —— ExcelEditor 写作抽屉：与 WordDrawer 共用检测，但 visible 默认 false 不自动开。
       // 用户点 ChatHeader 📊 按钮 → toggleExcelDrawer 翻 visible。
       // AI 实时写入时抽屉仍然 update version（保证用户打开时是最新），但不抢视觉焦点。
       _excelDrawer: { visible: false, filePath: '', version: 0, isStreaming: false, toolCallId: null, rawPath: '' },
@@ -915,7 +915,7 @@ export default {
     helpVisible(visible) {
       if (visible && this.dynamicSkills.length === 0) this.fetchSkills()
     },
-    // v0.5.x —— 写作抽屉的 streaming 状态跟随当前 session 的流式状态。
+    // v0.3.4 —— 写作抽屉的 streaming 状态跟随当前 session 的流式状态。
     // _activeStreamingSessions.delete(sid) 触发时（done / error / interrupt 走完清理）→ drawer 退出"AI 正在写入"。
     // deep:true 不需要 —— Set 引用变化由 Vue 响应式自动捕获。
     '_activeStreamingSessions'(next, prev) {
@@ -926,7 +926,7 @@ export default {
         this._markExcelDrawerStreamingDone()
       }
     },
-    // v0.5.x —— 切会话时关闭 drawer：drawer 的 filePath 是相对当前 session 算的（_normalizeWordPath 用 sid），
+    // v0.3.4 —— 切会话时关闭 drawer：drawer 的 filePath 是相对当前 session 算的（_normalizeWordPath 用 sid），
     // 切到另一 session 后原 drawer 指向的文件路径失效；且 drawer 打开期间被锁在旧 session 的视图上
     // 会让用户看不到新 session 的写作状态。直接关掉最稳。
     currentSessionId() {
@@ -1180,7 +1180,7 @@ export default {
       this.fetchSkills()
     },
     /**
-     * v0.5.x —— WordEditor 实时预览抽屉检测。
+     * v0.3.4 —— WordEditor 实时预览抽屉检测。
      * 与 SkillForge 模式对称：tool_call_name 阶段检测 + 提取路径，tool_call_result 阶段触发刷新。
      *
      * 检测：args.code 含 `from skills.WordEditor import` + `WordDoc.create/open(...)`。
@@ -1260,7 +1260,7 @@ export default {
       }
     },
     /**
-     * v0.5.x —— ExcelEditor 实时预览检测。
+     * v0.3.4 —— ExcelEditor 实时预览检测。
      * 与 WordEditor 完全对称的检测逻辑，唯一区别：_markExcelDrawerPending 不自动打开 drawer
      * （_excelDrawer.visible 保持 false），用户需手动点 ChatHeader 📊 按钮才弹出。
      *
@@ -2904,6 +2904,15 @@ export default {
         return message
       }
       const toolCalls = [...(message.toolCalls || [])]
+      // 归属本轮 reasoning：每个 tool 记下"它之前那段还没归属的思考文本"。
+      // 渲染时按 tool 顺序切分 message.reasoning（见 MessageItem.thinkingBlocks），
+      // 这样每段思考紧贴它对应的工具，而不是全部堆在面板顶部。
+      // 存原始切片（不 trim），保证各段长度之和 === 已归属长度、尾部切分不串位。
+      const reasoning = message.reasoning || ''
+      let consumed = 0
+      for (const toolCall of toolCalls) {
+        consumed += (toolCall.reasoningBefore || '').length
+      }
       // 1. 精确匹配：_pendingApproval && name===data.content.name
       //    （正常路径——前端 handlePermissionRequest 已按 tool_call_name 精确标过位）
       let pendingIdx = toolCalls.findIndex(
@@ -2929,6 +2938,9 @@ export default {
           name: data.content.name,
           args: data.content.args,
           _pendingApproval: false,
+          // 审批占位 entry（handlePermissionRequest 建的）在此时才拿到真正的启动信号，
+          // 在这里补记 reasoning 归属；已经记过的（resume 重放）保持不变。
+          reasoningBefore: toolCalls[pendingIdx].reasoningBefore ?? reasoning.slice(consumed),
         }
       } else {
         toolCalls.push({
@@ -2936,6 +2948,7 @@ export default {
           args: data.content.args,
           id: data.id,
           result: null,
+          reasoningBefore: reasoning.slice(consumed),
         })
       }
       return { ...message, toolCalls, responseTime: this.currentResponseTime }
@@ -5058,6 +5071,8 @@ export default {
         // 释放 sendMessage 并发锁（避免删除会话后锁卡住）
         this._sendingLock.delete(sessionId)
         this._sendingLock = new Map(this._sendingLock)
+        // 清掉该会话的滚动位置缓存（MessageList 维护，key 约定见 SCROLL_POS_PREFIX）
+        localStorage.removeItem(`chatme-scroll-pos:${sessionId}`)
       }
     },
     async updateConversationTitle({ sessionId, title }) {
@@ -6121,6 +6136,13 @@ export default {
                 // 4. tool_calls 放入 toolCalls 队列等待 ToolMessage 填入结果（对应流式的 tool_call_name 事件）
                 const backendToolCalls = aiMsg.additional_kwargs?.tool_calls
                 if (backendToolCalls && backendToolCalls.length > 0) {
+                  // 本轮 reasoning 归属给这批 tool：存原始切片，长度之和 === 已归属长度
+                  // （与 mergeToolCallStart 同一套约定，见那里的注释）
+                  const consumed = aiTurn.toolCalls.reduce(
+                    (n, toolCall) => n + (toolCall.reasoningBefore || '').length, 0
+                  )
+                  const delta = aiTurn.reasoning.slice(consumed)
+                  let first = true
                   for (const tc of backendToolCalls) {
                     // 兜底:后端 RemoveMessage 已保证 messages 里不会有 done,
                     // 这里再防一道(老 checkpoint / 跨版本迁移场景的安全网)
@@ -6129,8 +6151,10 @@ export default {
                     aiTurn.toolCalls.push({
                       name: tc.name || '工具调用',
                       args: tc.args || null,
-                      result: null
+                      result: null,
+                      reasoningBefore: first ? delta : ''
                     })
+                    first = false
                     pendingToolCallIndices.push(idx)
                   }
                 }
@@ -6204,6 +6228,7 @@ export default {
   --bg-hover: #e8e8e8;
   --text-primary: #1a1a1a;
   --text-secondary: #6b7280;
+  --text-tertiary: #9ca3af;
   --border-color: #e5e5e5;
   --user-msg-bg: #dcdcdc;
   --user-msg-border: #c0c0c0;
@@ -6224,6 +6249,13 @@ export default {
   --code-lang-bg: rgba(255, 255, 255, 0.8);
   --code-lang-border: rgba(220, 222, 224, 0.9);
   --code-lang-color: #6b7280;
+  /* v0.3.4 —— CC 风格面板：思考 / 工具调用 / 状态色 */
+  --thinking-accent: var(--button-bg);
+  --thinking-bar: var(--border-color);
+  --accent-amber: #f59e0b;
+  --accent-red: #ef4444;
+  --accent-green: #10b981;
+  --text-tool-args: #6b7280;
 }
 
 .dark-theme {
@@ -6232,6 +6264,7 @@ export default {
   --bg-hover: #383838;
   --text-primary: #ececec;
   --text-secondary: #9ca3af;
+  --text-tertiary: #6b7280;
   --border-color: #363636;
   --user-msg-bg: #2d2d2d;
   --user-msg-border: #404040;
@@ -6250,6 +6283,9 @@ export default {
   --code-lang-bg: rgba(0, 0, 0, 0.3);
   --code-lang-border: rgba(255, 255, 255, 0.08);
   --code-lang-color: #9ca3af;
+  /* v0.3.4 —— dark 主题适配 */
+  --thinking-bar: #2f2f2f;
+  --text-tool-args: #9ca3af;
 }
 
 /* 移动端侧边栏遮罩 */

@@ -1,6 +1,6 @@
 <template>
   <div class="messages-container" ref="messagesContainer">
-    <div class="messages-column">
+    <div class="messages-column" ref="messagesColumn">
       <div v-if="messages.length === 0" class="welcome-message">
         <h2>你好！我是灵析——数据分析智能助手</h2>
         <p>有什么我可以帮助你的吗？</p>
@@ -59,6 +59,15 @@ const RAMP_PHASE1_MS        = 600
 const RAMP_PHASE2_MS        = 250
 const LOCKED_FOLLOW_MS      = 150
 const INTERRUPT_DEBOUNCE_MS = 100    // ramp 开始后这段时间内的 wheel 不算打断（吸收触摸板惯性）
+
+// —— 会话滚动位置缓存（localStorage，一个会话一个 key）——
+// 只在「用户主动滚开过」时才有值：停在底部 = 无需记忆（下次默认就滑到底），
+// 所以缓存天然自清理，只会为"读历史读一半就切走"的会话留记录。
+const SCROLL_POS_PREFIX       = 'chatme-scroll-pos:'
+const SCROLL_CACHE_MAX        = 60                      // 最多保留多少个会话（超出按 ts 淘汰最旧）
+const SCROLL_CACHE_TTL_MS     = 30 * 24 * 3600 * 1000   // 30 天没再进入过的会话位置直接丢
+const SCROLL_SAVE_DEBOUNCE_MS = 600
+const AT_BOTTOM_RATIO         = 0.995                   // 进度 ≥ 此值视为"在底部"，不写缓存
 
 function _easeOutCubic(t) { return 1 - Math.pow(1 - t, 3) }
 function _easeInCubic(t)  { return t * t * t }
@@ -133,7 +142,13 @@ export default {
       scrollMode: 'idle',
       _rampStartedAt: 0,
       _suppressScroll: false,
-      _wasLoading: false
+      _snapScrollInFlight: false,
+      _wasLoading: false,
+      // 该会话的「入场」还没执行（会话切了但消息还没到位 / 首次挂载时还没有消息）——
+      // 等 messages watcher 拿到真正属于该会话的内容后再入场，避免对着上一个会话的
+      // 内容算位置、对着旧 scrollTop 起步
+      _pendingEntry: false,
+      _saveScrollTimer: null
     }
   },
   computed: {
@@ -228,11 +243,11 @@ export default {
           this._setMode('entry')
           this._startEntry()
         } else {
-          // 普通跟随：短 snappy easeOut
+          // 普通跟随：短 snappy easeOut（目标动态求值，跟随期间内容变高也追得上）
           this._runRaf({
             container,
             startTop: container.scrollTop,
-            targetTop: container.scrollTop + distance,
+            targetTop: (c) => c.scrollHeight - c.clientHeight,
             duration: LOCKED_FOLLOW_MS,
             easing: 'easeOutCubic'
           })
@@ -260,28 +275,40 @@ export default {
     },
 
     // 通用 RAF stepper：duration ms 内把 container.scrollTop 从 startTop 走到 targetTop
+    // - targetTop 可以是数字（固定目标）或函数（每帧重新求值）——后者用于「目标本身会动」的场景：
+    //   图片 / 异步内容在动画期间加载会撑高 scrollHeight，固定目标会让动画停在旧底部
     _runRaf({ container, startTop, targetTop, duration, easing, onUpdate, onComplete }) {
       this._cancelRaf()
-      const diff = targetTop - startTop
       const startTime = performance.now()
       this.isAutoScrolling = true
+      // 上一帧我们设下去的值。用它判断「滚动条被谁动了」——方向无关：
+      // 位置恢复动画本身可能向上走（目标在上方），那一帧的 scrollTop 比 startTop 小，
+      // 但那是我们自己设的，不该被误判成用户打断。
+      let lastSetTop = container.scrollTop
 
       const step = (now) => {
-        // 检测「用户主动往上滚」而非「是否在底部」：
-        //   - content 增长时 scrollTop 不变，scrollHeight 涨，原本的 !isAtBottom() 误 bail
-        //   - 用户主动 wheel/touchstart 才会让 scrollTop 减小（往上），这是真正要 bail 的信号
-        //   - 用户中断主要被 _handleUserIntent 同步处理；这里是冗余安全网
-        if (container.scrollTop < startTop - 1) {
+        // 检测「滚动条被外部动过」（用户 wheel / 内容整体替换导致浏览器 clamp）：
+        //   - content 增长时 scrollTop 不变、scrollHeight 涨，原 !isAtBottom() 会误 bail
+        //   - 用户主动 wheel/touchstart 主要被 _handleUserIntent 同步处理，这里是冗余安全网
+        //   - 顺手把 mode 交回 idle，否则 entry/ramping 会永久卡住，
+        //     后续 watcher / ResizeObserver 全被 mode 挡住（表现为"停在半路不动"）
+        if (Math.abs(container.scrollTop - lastSetTop) > 1) {
           this.isAutoScrolling = false
+          this._setMode('idle')
           return
         }
         const elapsed = now - startTime
-        const t = Math.min(elapsed / duration, 1)
+        // ResizeObserver 回调和 rAF 在同一个渲染步里，前者跑在帧时间戳之后 →
+        // 那种路径起步时 elapsed 可能为负，clamp 到 0 免得第一帧往回跳
+        const t = Math.min(Math.max(elapsed / duration, 0), 1)
         const eased = this._easeFn(t, easing)
-        const newTop = startTop + diff * eased
+        // 函数目标：每帧重算当前物理底部，动画期间内容变高也能一路跟到底
+        const target = typeof targetTop === 'function' ? targetTop(container) : targetTop
         // 防御：防止越过当前 scrollHeight
         const maxTop = container.scrollHeight - container.clientHeight
-        container.scrollTop = Math.min(newTop, maxTop)
+        const newTop = Math.min(startTop + (target - startTop) * eased, maxTop)
+        container.scrollTop = newTop
+        lastSetTop = newTop
         if (onUpdate) onUpdate(newTop, t)
         if (t < 1) {
           this.rafId = requestAnimationFrame(step)
@@ -321,11 +348,119 @@ export default {
       this._runRaf({
         container,
         startTop: container.scrollTop,
-        targetTop: container.scrollHeight - container.clientHeight,
+        // 动态目标：图片 / 异步内容在入场动画期间陆续加载会撑高文档，
+        // 固定目标会让入场停在"图片还没算进高度时"的旧底部
+        targetTop: (c) => c.scrollHeight - c.clientHeight,
         duration: ENTRY_SCROLL_MS,
         easing: 'easeInOutCubic',
         onComplete: () => { this._setMode('idle') }
       })
+    },
+
+    // —— 会话入场 ——
+    // 消息到位 / 首次挂载时走一次：有位置缓存就滑回上次离开的地方，否则滑到最新处。
+    // 两种都是一段动画，用户 wheel/touch 随时可以打断（_handleUserIntent 取消 RAF）。
+    _enterConversation() {
+      const container = this.$refs.messagesContainer
+      if (!container) return
+      this._cancelRaf()
+
+      // 流式中不做位置恢复（会跟跟随抢），直接滑到最新处
+      const ratio = this.isLoading ? null : this._readScrollRatio(this.currentSessionId)
+      if (ratio === null || ratio >= AT_BOTTOM_RATIO) {
+        // 没缓存 / 上次就停在底部 → 滑到最新处（图片异步加载由 ResizeObserver 继续兜）
+        this._userScrolledAway = false
+        this._setMode('entry')
+        this._startEntry()
+        return
+      }
+
+      // 有缓存：滑回上次的位置。期间置 _userScrolledAway，别让 RO / watcher 抢着往底拖；
+      // 真滑到底部会自动清掉（handleScrollEvent），恢复跟随。
+      this._userScrolledAway = true
+      this._setMode('entry')
+      this._runRaf({
+        container,
+        startTop: container.scrollTop,
+        // 动态目标：图片加载撑高文档时按同一比例跟，位置不会跑偏
+        targetTop: (c) => ratio * (c.scrollHeight - c.clientHeight),
+        duration: ENTRY_SCROLL_MS,
+        easing: 'easeInOutCubic',
+        onComplete: () => { this._setMode('idle') }
+      })
+    },
+
+    // —— 滚动位置缓存 ——
+    _readScrollRatio(sessionId) {
+      if (!sessionId) return null
+      try {
+        const raw = localStorage.getItem(SCROLL_POS_PREFIX + sessionId)
+        if (!raw) return null
+        const entry = JSON.parse(raw)
+        return typeof entry.r === 'number' ? entry.r : null
+      } catch (e) {
+        return null
+      }
+    },
+
+    // 记录当前会话的滚动位置（比例，抗内容增减）。
+    // 停在底部 → 删缓存（默认行为就是滑到底，不需要记）。
+    _saveScrollPos(sessionId = this.currentSessionId) {
+      const container = this.$refs.messagesContainer
+      if (!sessionId || !container) return
+      const max = container.scrollHeight - container.clientHeight
+      const key = SCROLL_POS_PREFIX + sessionId
+      try {
+        if (max <= 0 || this.isAtBottom()) {
+          localStorage.removeItem(key)
+          return
+        }
+        localStorage.setItem(key, JSON.stringify({ r: container.scrollTop / max, ts: Date.now() }))
+        this._pruneScrollCache()
+      } catch (e) { /* 隐私模式 / 配额满：忽略，缓存不是关键路径 */ }
+    },
+
+    // 清缓存：先按 TTL 清过期的，再按 ts 从新到旧保留最近 SCROLL_CACHE_MAX 个
+    _pruneScrollCache() {
+      const now = Date.now()
+      const items = []
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i)
+        if (!key || !key.startsWith(SCROLL_POS_PREFIX)) continue
+        let ts = 0
+        try { ts = JSON.parse(localStorage.getItem(key)).ts || 0 } catch (e) { ts = 0 }
+        items.push({ key, ts })
+      }
+      items.sort((a, b) => b.ts - a.ts)
+      items.forEach((item, index) => {
+        if (index >= SCROLL_CACHE_MAX || now - item.ts > SCROLL_CACHE_TTL_MS) {
+          localStorage.removeItem(item.key)
+        }
+      })
+    },
+
+    _scheduleSaveScrollPos() {
+      // 锁定 sessionId：600ms 内用户可能已经切走了，那时容器里是别人的内容
+      const sid = this.currentSessionId
+      if (this._saveScrollTimer) clearTimeout(this._saveScrollTimer)
+      this._saveScrollTimer = setTimeout(() => {
+        this._saveScrollTimer = null
+        if (sid === this.currentSessionId) this._saveScrollPos(sid)
+      }, SCROLL_SAVE_DEBOUNCE_MS)
+    },
+
+    // 内容异步变高（图片解码 / 字体 / 图表渲染）后直接贴底。
+    // 只在用户没接管（_userScrolledAway=false）且没有动画在跑时调用。
+    _snapToBottom(container) {
+      const distance = container.scrollHeight - container.scrollTop - container.clientHeight
+      if (distance <= 0) return
+      this._cancelRaf()
+      // 程序化贴底自产的 scroll 事件会被 handleScrollEvent 当成「用户意图」；
+      // 而图片是连着加载的，此刻下一张可能已把内容撑高 → isAtBottom() 兜底失效
+      // → _userScrolledAway 被误置 true → 后续图片不再跟随。吞掉这一次自产事件。
+      this._snapScrollInFlight = true
+      container.scrollTop = container.scrollHeight
+      requestAnimationFrame(() => { this._snapScrollInFlight = false })
     },
 
     // —— ramp profile（双阶段）——
@@ -360,7 +495,7 @@ export default {
         easing: 'linear',
         onComplete: () => {
           if (this.scrollMode !== 'ramping') return
-          // P2：加速到真正底部（重新 snapshot 距离）
+          // P2：加速到真正底部（目标动态求值，动画期间图片加载撑高也能追平）
           // easeOutCubic：slow start, fast end——从 P1 的匀速平滑加速到 snappy
           const remaining = (container.scrollHeight - container.clientHeight) - container.scrollTop
           if (remaining <= 0) {
@@ -370,7 +505,7 @@ export default {
           this._runRaf({
             container,
             startTop: container.scrollTop,
-            targetTop: container.scrollTop + remaining,
+            targetTop: (c) => c.scrollHeight - c.clientHeight,
             duration: RAMP_PHASE2_MS,
             easing: 'easeOutCubic',
             onComplete: () => {
@@ -390,7 +525,7 @@ export default {
       this._runRaf({
         container,
         startTop: container.scrollTop,
-        targetTop: container.scrollTop + distance,
+        targetTop: (c) => c.scrollHeight - c.clientHeight,
         duration: LOCKED_FOLLOW_MS,
         easing: 'easeOutCubic',
         onComplete: () => { this._setMode('locked') }
@@ -407,7 +542,11 @@ export default {
     // 1. scroll 事件：可能是我们自己 RAF 产生的，也可能是用户 wheel 浏览器滚动引发的
     //    区分方式：isAutoScrolling=true 时是我们自己的 scroll，吞掉；否则走 _handleUserIntent
     handleScrollEvent() {
+      // 任何滚动都记一次当前位置（含我们自己的动画滚动——那也代表用户最终看到的位置）
+      this._scheduleSaveScrollPos()
       if (this.isAutoScrolling) return
+      // 自己贴底产生的那一次 scroll，不是用户意图
+      if (this._snapScrollInFlight) return
       this._handleUserIntent()
       // 用户滚回底部（含 50px 容差）→ 清掉「已离开跟随」标记，watcher 恢复接管
       if (this.isAtBottom()) {
@@ -477,6 +616,13 @@ export default {
           }
           return
         }
+        // 该会话的入场还没做（会话切了，消息这时候才到位）→
+        // 走入场（有位置缓存就滑回上次位置，否则滑到最新处），不走普通跟随
+        if (this._pendingEntry) {
+          this._pendingEntry = false
+          this.$nextTick(() => this._enterConversation())
+          return
+        }
         // ramping / entry：让当前动画接管，watcher 不动
         if (this.scrollMode === 'ramping' || this.scrollMode === 'entry') return
         // 用户已主动离开跟随：locked 让出，idle 也不接管
@@ -512,6 +658,8 @@ export default {
         // ——发新消息/重新生成 就是"用户想跟"的强信号，清掉 _userScrolledAway
         //   否则沿用旧 flag 会让首段 locked follow 被吞，跟不上
         this._userScrolledAway = false
+        // 流式接管：不该再去做入场（恢复上次位置会跟流式抢）
+        this._pendingEntry = false
         this.$nextTick(() => {
           this._setMode('ramping')
           this._startRamp()
@@ -529,14 +677,16 @@ export default {
     },
     currentSessionId(newVal, oldVal) {
       if (newVal && newVal !== oldVal) {
-        // 会话切换触发 entry 平滑入场（兜底；App.vue 也可能已经触发过）
-        this.$nextTick(() => {
-          if (this.messages.length > 0) {
-            this._cancelRaf()
-            this._setMode('entry')
-            this._startEntry()
-          }
-        })
+        // 离开上一个会话前，把它当时的位置记下来（此刻 DOM 里还是旧会话的内容）
+        if (oldVal) this._saveScrollPos(oldVal)
+        // `_userScrolledAway` 描述的是「上一个会话」的滚动意图，绝不能跨会话泄漏：
+        // 否则旧会话里滚上去留下的 true 会让新会话的图片加载 / 内容变高
+        // 全被 ResizeObserver 挡掉（卡在半路）。切会话 = 明确的"带我去新会话"意图。
+        this._userScrolledAway = false
+        this._cancelRaf()
+        // 入场推迟到「属于新会话的消息到位」那一刻（messages watcher）；
+        // 这里 App.vue 往往还没 fetch 完，对着旧内容算位置会滑错地方
+        this._pendingEntry = true
       }
     }
   },
@@ -556,34 +706,52 @@ export default {
       container.addEventListener('wheel', this.handleUserInput, { passive: true })
       container.addEventListener('touchstart', this.handleUserInput, { passive: true })
 
-      // 监听容器尺寸变化（图片/异步内容加载会让容器变高），
-      // 如果用户在底部，就直接跟到新底部，避免卡在"图片还没加载时算出的旧底部"。
-      // ramping / entry 阶段暂停：不要 yank 节奏。
+      // 监听「内容」高度变化（图片 / mermaid / 异步渲染加载完成后撑高文档），
+      // 用户没接管就一直贴到新底部，避免卡在"图片还没加载时算出的旧底部"。
+      // 必须观察 .messages-column（高度 = 内容高度）而不是 .messages-container：
+      // 后者 flex:1，高度由布局决定，图片加载根本不会让它变尺寸 → 回调永不触发。
       this.resizeObserver = new ResizeObserver(() => {
         const c = this.$refs.messagesContainer
         if (!c) return
-        if (this.scrollMode === 'ramping' || this.scrollMode === 'entry') return
-        if (!this.isAtBottom()) return
-        if (this.rafId) {
-          cancelAnimationFrame(this.rafId)
-          this.rafId = null
+        // 用户已主动滚开：绝不抢控制权
+        if (this._userScrolledAway) return
+        // entry / ramping 动画自己的目标就是动态求值的，让它接管，别打架
+        if (this.scrollMode === 'entry' || this.scrollMode === 'ramping') return
+        // locked（流式中）：内容变高后 watcher 可能已不再触发，这里补一次 snappy 跟随。
+        // 但流式期间这里几乎每帧都会被调用 —— 已经在跟随动画里就啥都别做：
+        // 那个动画的 targetTop 是动态求值的，自己就会吸收掉这点增量；
+        // 若在此 cancel + 重启，每帧都从 t=0 重新开始，跟随会彻底卡住。
+        if (this.scrollMode === 'locked') {
+          if (!this.isAutoScrolling) this._scheduleLockedFollow()
+          return
         }
-        this.isAutoScrolling = false
-        c.scrollTop = c.scrollHeight
+        this._snapToBottom(c)
       })
-      this.resizeObserver.observe(container)
+      const column = this.$refs.messagesColumn
+      if (column) this.resizeObserver.observe(column)
 
-      // 初次挂载：若已经有当前会话+消息，触发 entry 平滑入场
-      // （覆盖页面刷新、首次进入等场景；App.vue 也会通过 scrollToBottom(true) 触发一次）
+      // 初次挂载：有会话就入场（有位置缓存滑回上次位置，否则滑到最新处）。
+      // 消息还没到位就先挂 pending，等 messages watcher 拿到内容再入场。
       this.$nextTick(() => {
-        if (this.currentSessionId && this.messages.length > 0) {
-          this._setMode('entry')
-          this._startEntry()
+        if (!this.currentSessionId) return
+        if (this.messages.length > 0) {
+          this._enterConversation()
+        } else {
+          this._pendingEntry = true
         }
       })
+
+      // 顺手清一遍过期位置缓存（TTL / 条数）
+      this._pruneScrollCache()
     }
   },
   beforeUnmount() {
+    // 组件卸载（F5 / 关窗）前把当前位置落盘，下次进来才能滑回原处
+    if (this._saveScrollTimer) {
+      clearTimeout(this._saveScrollTimer)
+      this._saveScrollTimer = null
+    }
+    this._saveScrollPos()
     const container = this.$refs.messagesContainer
     if (container) {
       container.removeEventListener('scroll', this.handleScrollEvent)

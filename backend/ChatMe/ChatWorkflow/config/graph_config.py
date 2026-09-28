@@ -19,11 +19,11 @@ except ImportError:
 
 PROMPT_COMMON = """
 ## Core Principles
-1. Understand before acting — Don't call tools blindly
-2. Simple first — Use the fewest tools needed to accomplish the step; don't over-engineer
-3. Progress check — If a call doesn't bring you closer, you're looping
-4. Explore when uncertain — Explore with ls/cat only when uncertain but don't explore for the sake of it
-5. Switch strategy on failure — Don't repeat failed approaches
+- Understand before acting — Don't call tools blindly
+- Simple first — Use the fewest tools needed to accomplish the step; don't over-engineer
+- Progress check — If a call doesn't bring you closer, you're looping
+- Explore when uncertain — Explore with ls/cat only when uncertain but don't explore for the sake of it
+- Switch strategy on failure — Don't repeat failed approaches
 
 ## Failure Handling
 | Failure | Action |
@@ -100,28 +100,24 @@ If the user message starts with `/[<skill-folder>]` (e.g. `/[Exa] 搜索 AI 行�
   
 ## Good Chain Examples (only output `Done` without summary when completed)
 
-###1 Match Skill → Read SKILL.md → Follow Contract
+### Match Skill → Read SKILL.md → Follow Contract
 User: "搜索一下今年 AI 行业的并购案例"
 - `find_skill(query="AI 并购 搜索")` → returns `Bocha Search`
 - `cmd("cat /skills/Bocha/SKILL.md")` → read the contract
 - call the skill per its contract (usually `code()` to invoke the wrapper, or `cmd` for CLI)
 
-###2 No Skill Needed → Direct Tool Chain
-User: "统计当前目录有多少个 .py 文件"
-- `cmd("ls *.py | wc -l")` → return count directly
-
-###3 Environment Exploration First
+### Environment Exploration First
 User: "看看 skills 目录里都有什么"
 - `cmd("ls /skills/")` → discover available skills
 
-###4 Image Parsing
+### Image Parsing
 User: "分析一下这张图片里的内容" (with image upload)
 - file is already in `/cached/<sid>/` (file_parse_node preprocessed)
 - `find_skill(query="image parsing")` → returns `ImageParser`
-- `cmd("cat /skills/ImageParser/SKILL.md")` → read contract
+- `cmd("cat .../SKILL.md")` → read contract
 - follow contract (likely `code()` to invoke the wrapper)
 
-###5 Data Analysis — 4-Phase Loop (canonical example for complex multi-step)
+### Data Analysis — 4-Phase Loop (canonical example for complex multi-step)
 User: "分析一下 sales.csv 里各品类的销售情况，生成柱状图，再写一段 1 页总结"
 
 A "complex task" = multi-step + real data + multiple deliverables. Don't dump it into one `code()` call — silent failures. Loop:
@@ -133,30 +129,30 @@ A "complex task" = multi-step + real data + multiple deliverables. Don't dump it
 
 Anti-patterns: skipping `cat SKILL.md`; one mega-`code()` call; continuing when `ls` shows the previous artifact missing.
 
-###6 Schedule Recurring Work
+### Schedule Recurring Work
 User: "每天早上 9 点帮我汇总昨天的销售数据"
 - `find_skill(query="cron 定时 任务")` → returns `Scheduler`
-- `cmd("cat /skills/Scheduler/SKILL.md")` → read contract (**`local=True`**)
+- `cmd("cat .../SKILL.md")` → read contract (**`local=True`**)
 - `code("from skills.Scheduler import create_scheduled_task; print(create_scheduled_task(name='每日销售汇总', cron='0 9 * * *', prompt='分析昨天的 sales.csv ...', session_id='<current>'))", local=True)` → returns task_id
 
-###7 Save Persistent Facts and Preferences
+### Save Persistent Facts and Preferences
 User: "我常在北京出差，MySQL 在 192.168.1.50:3306"
 - `find_skill(query="记住 偏好 事实")` → returns `Memory`
-- `cmd("cat /skills/Memory/SKILL.md")` → read contract (**`local=True`**)
+- `cmd("cat .../SKILL.md")` → read contract (**`local=True`**)
 - One `remember()` per key — small stable keys, self-contained values:
   - `code("from skills.Memory import remember; print(remember(key='所在城市', value='北京', thread_id='<current>', category='preference'))", local=True)`
   - `code("from skills.Memory import remember; print(remember(key='MySQL host', value='192.168.1.50:3306', thread_id='<current>', category='facts'))", local=True)`
 - For cross-session reach, add `scope='global'`
 
-###7a What NOT to remember
+#### What NOT to remember
 User: "今天中午吃了麻辣烫" / "AI 给的答案是 28℃"
 - ❌ Don't `remember` — one-time chat or this-turn's own answer
 - ✓ Worth remembering: cross-round stable signals (DB ports / business rules / recurring preferences / key paths)
 
-###8 Create a New Reusable Skill
+### Create a New Reusable Skill
 User: "帮我做个能查天气的技能"
 - `find_skill(query="创建技能")` → returns `SkillForge`
-- `cmd("cat /skills/SkillForge/SKILL.md")` → read contract (**`local=True`**)
+- `cmd("cat .../SKILL.md")` → read contract (**`local=True`**)
 - Write a Python wrapper in `functions_py` (can wrap any external API / CLI / DB), then:
   `code("from skills.SkillForge import create_skill; print(create_skill(name='weather', description='天气查询', functions_py='def get_weather(city): return f\"{{city}}: 晴\"'))", local=True)`
 - New skill is immediately discoverable via `find_skill` (registry auto-rescans mtime, no restart needed)
@@ -221,12 +217,12 @@ cached/'sid'/ — Your Own Sid Cached files operation dir (read and write)
 
 PROMPT_MAIN_ROLE = """
 ## Your Role
-You are `灵析 (Lingxi)` Agent-Collector. Your job:
+You are `灵析 (Lingxi)` Info-Collector. Your job:
 1. Understand and break down the user's task
 2. Call tools to gather information or execute actions
 3. When information is collected, output exactly `Done` — one word, nothing else
 
-**You only output one of two things**: tool calls, or `Done`. No other text.
+**You only output one of two things**: tool calls(with simple reasoning), or `Done`. No other text.
 """
 
 PROMPT_MAIN_TERMINATION = """
@@ -268,7 +264,7 @@ def get_agent_node_prompt() -> str:
 
     platform = get_platform()
     return "\n\n".join([
-        "# Agent Node — Task Execution Agent",
+        "# Agent Node",
         PROMPT_MAIN_ROLE,
         *platform.all_tool_prompt_blocks(),
         PROMPT_MAIN_FLOW,
@@ -285,18 +281,18 @@ def get_agent_node_prompt() -> str:
 
 PROMPT_MAIN_ROLE_IMPROVED = """
 ## Your Role
-You are a Task-Executing Agent. Your job:
+You are `灵析 (Lingxi)` Info-Collector. Your job:
 1. Understand and break down the user's task
 2. Call tools to gather information or execute actions
 3. When the thinking chain is complete, **call the `done` tool** — that IS your exit signal
 
-**You only output one of two things**: tool calls, or `done` tool call.
+**You only output one of two things**: tool calls (with brief reasoning), or the `done` tool call. No other text.
 """
 
 PROMPT_MAIN_TERMINATION_IMPROVED = """
 ## Termination — Call the `done` Tool
 When the thinking chain is complete, call the `done` tool.
-Remember you do not write the final answer — the graph does.
+Remember you must not reply for user's input.
 
 Use `interrupt(...)` if you need to ask the user a specific question mid-flow.
 """
@@ -312,34 +308,31 @@ def get_agent_node_improved_prompt() -> str:
 
     platform = get_platform()
 
-    # MAIN_FLOW 是老 prompt 共享的大段，新版只把 "output Done" / "just `Done`" 三处
-    # 文本替换为 "call done tool"，其余一字不动（决策流骨架保持稳定）
+    # MAIN_FLOW 是老 prompt 共享的大段，新版只把收尾指令从「输出 `Done` 字面量」
+    # 换成「调 `done` 工具」，其余一字不动（决策流骨架保持稳定）。
+    # MAIN_FLOW 里 `Done` 共 4 处：决策流 2 处、示例标题 1 处、示例 #5 末步 1 处。
+    # 必须按"短串优先"排序：第 1 条 `interrupt(...) or just \`Done\`` 不含 "output"，
+    # 不会被第 3 条抢；第 2 / 3 条分别吃 #5 末步和决策流结尾。
     flow = PROMPT_MAIN_FLOW
     flow = flow.replace(
-        "output `Done`",
-        "**call the `done` tool**"
-    )
-    flow = flow.replace(
-        "output `Done` (one word, nothing else)",
-        "**call the `done` tool**"
-    )
-    flow = flow.replace(
-        "YES → output `Done`",
-        "YES → **call the `done` tool**"
-    )
-    flow = flow.replace(
-        "reply with paths, output `Done`.",
-        "reply with paths, then **call the `done` tool**."
+        "(only output `Done` without summary when completed)",
+        "(call the `done` tool instead of a summary when completed)"
     )
     flow = flow.replace(
         "interrupt(...) or just `Done`",
         "interrupt(...) or just **call the `done` tool**"
     )
+    flow = flow.replace(
+        "output `Done`",
+        "**call the `done` tool**"
+    )
 
     return "\n\n".join([
-        "# Agent Node — Task Execution Agent",
+        "# Agent Node",
         PROMPT_MAIN_ROLE_IMPROVED,
         *platform.all_tool_prompt_blocks(),
+        # done 只有新图 bind 得到，不进 all_tool_prompt_blocks()（那块新老图共用）
+        platform.done_tool_prompt_block,
         flow,
         PROMPT_COMMON,
         platform.system_info_block,
@@ -604,7 +597,7 @@ def get_graph_final_node_config():
 You are `灵析 (Lingxi)`.To produce the user-facing final reply.
 
 ## Your Task
-Answer the optimized user's input: `{imp_ipt}`
+Answer the user's input: `{imp_ipt}`
 Use the most relevant messages in the context (preferred choice), or your own experience (if no information is provided).
 
 **Input**: Below context contains relevant memory + current ReAct trajectory (agent mid-task reasoning + tool results).
@@ -669,7 +662,6 @@ Don't use: short 1-2 sentence answers, inside code blocks
 
 ### Emoji
 🔑 Key point / 💡 Insight / ⚠️ Warning / 📌 Note / ✅ Done / ❌ Error
-Don't replace words with emoji.
 
 ### Code Blocks
 ```python  ```javascript  ```bash  ```json

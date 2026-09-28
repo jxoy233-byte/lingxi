@@ -1,6 +1,6 @@
 ---
 name: tavily
-description: 快速实时网页搜索与答案摘要，适合最新信息、一般查询和时效性任务。默认少量结果（≤5 条），信息不足再调关键词/角度重搜，少量多次优于单次多量。
+description: 快速实时网页搜索 + 答案摘要。适合最新信息、一般查询、时效性任务
 mount: ro
 aliases: [Tavily, news, latest, realtime, web_search, search]
 module: skills.Tavily

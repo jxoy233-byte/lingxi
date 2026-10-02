@@ -316,7 +316,7 @@ export default {
       default: () => []
     }
   },
-  emits: ['send', 'files-selected-need-session', 'update:quote', 'remove-queue-item', 'clear-queue', 'front-action', 'chat-drag-state'],
+  emits: ['send', 'files-selected-need-session', 'update:quote', 'remove-queue-item', 'clear-queue', 'front-action', 'chat-drag-state', 'unknown-slash-command'],
   data() {
     return {
       inputText: '',
@@ -331,6 +331,9 @@ export default {
       isUploadQueueProcessing: false,  // 队列是否正在处理中
       // 会话 ID（优先使用 prop，其次使用 localStorage）
       currentSessionId: null,
+      // 上一次提示过的无效 slash 前缀（如 '/[Excle] '）：同一条前缀只提示一次，
+      // 后面继续打字会反复命中同一 regex，靠它挡住提示风暴
+      _lastUnknownSlashKey: '',
       // Slash 命令面板状态：
       // - visible: 当前是否应该显示面板
       // - query: `/` 后面用户已输入的过滤文本（不含 `/` 也不含 `[`）
@@ -802,13 +805,36 @@ export default {
      * 用户手敲 / 粘贴出完整的 `/[xxx] ` 或 `/xxx ` 前缀时也收编成 chip，
      * 保证输入框里永远不出现 `/[xxx]` 原文。
      * 只收编 slashCommands 里的已知技能名，避免把 "/usr/bin 下的文件" 这类正常文本吃掉。
+     *
+     * v0.3.8：**名字不存在时不再静默放行**。手打 `/[Excle] ` 过去的行为是
+     * 原文留在输入框里、面板已经因为敲了空格而关掉，用户看着像「命令生效了」，
+     * 实际发出去的是一段 AI 读不懂的裸文本。现在提示一次；同一条前缀只提示一次
+     * （继续往后打字 input 事件会反复命中，靠 _lastUnknownSlashKey 去重）。
      */
     extractTypedSlashCommand() {
       if (this.activeSlashCommand) return
       const m = this.inputText.match(/^\/(?:\[([\w-]+)\]|([\w-]+))[ \t]/)
-      if (!m) return
-      const known = this.slashCommands.find(c => c.name === (m[1] || m[2]))
-      if (!known) return
+      if (!m) {
+        this._lastUnknownSlashKey = ''
+        return
+      }
+      const name = m[1] || m[2]
+      const known = this.slashCommands.find(c => c.name === name)
+      if (!known) {
+        if (this._lastUnknownSlashKey !== m[0]) {
+          this._lastUnknownSlashKey = m[0]
+          this.$emit('unknown-slash-command', {
+            name,
+            // 面板「无匹配」已经暗示过不确定了，这里只给最接近的几个候选当纠错提示
+            suggestions: this.filteredSlashCommands
+              .map(c => c.name)
+              .filter(n => n.toLowerCase().includes(name.toLowerCase().slice(0, 2)))
+              .slice(0, 3)
+          })
+        }
+        return
+      }
+      this._lastUnknownSlashKey = ''
 
       const ta = this.$refs.textarea
       const caret = ta ? ta.selectionStart : 0
@@ -1536,6 +1562,7 @@ export default {
     clearInput() {
       this.inputText = ''
       this.activeSlashCommand = null
+      this._lastUnknownSlashKey = ''
       this.closeSlashPalette()
       this.clearFiles()
       // 清理引用状态

@@ -72,6 +72,8 @@
           :submitting-tool-decision="submittingToolDecision"
           :withdrawing="_withdrawInFlight"
           :action-busy="sessionActionBusy"
+          :slash-command-names="slashCommandNames"
+          :slash-commands-ready="skillsLoaded"
           @tool-decide="onToolDecision"
           @restore="restoreCheckpoint"
           @restream="handleRestream"
@@ -98,6 +100,7 @@
           @clear-queue="onClearQueue"
           @files-selected-need-session="handleFilesSelectedNeedSession"
           @chat-drag-state="onChatDragState"
+          @unknown-slash-command="onUnknownSlashCommand"
           v-model:quote="currentQuote"
         />
 
@@ -599,6 +602,10 @@ export default {
       // 动态 skill 列表（从 /chat/skills 拉的），每个含 {name, description, lazy}。
       // 由 computed `slashCommands` 与 staticActionCommands 拼接暴露给 HelpDialog。
       dynamicSkills: [],
+      // dynamicSkills 是否已成功拉过一轮。false 期间**不拿它做任何有效性判定**：
+      // 冷启动首屏历史消息会先于 fetchSkills 返回渲染，那一瞬把 /[WordEditor]
+      // 判成「未知命令」会闪一下反向的错误样式，比不校验更难看。
+      skillsLoaded: false,
       // 工具调用级别的内嵌审批：标记具体 AI 消息 + tool call，让 MessageItem 高亮该 tool 并渲染内嵌按钮
       pendingToolApproval: null,  // { messageIndex, toolIndex, command, action, sessionId }
       submittingToolDecision: false,
@@ -1038,6 +1045,13 @@ export default {
         }))
       ]
     },
+    /**
+     * slash 命令名清单（给 MessageItem 判 `/[xxx]` pill 有效性用）。
+     * 直接由 slashCommands 派生，不再单独维护一份 —— 少一份副本就少一处走样。
+     */
+    slashCommandNames() {
+      return this.slashCommands.map(c => c.name)
+    },
   },
   methods: {
     /**
@@ -1086,6 +1100,7 @@ export default {
           const raw = Array.isArray(data?.skills) ? data.skills : []
           // 后端已过滤 lazy=true，这里再守一层防止 schema 变动
           this.dynamicSkills = raw.filter(s => s && typeof s.name === 'string' && s.name && !s.lazy)
+          this.skillsLoaded = true
         } catch (error) {
           console.warn('[App] fetchSkills 失败，维持当前动态列表:', error?.message || error)
         } finally {
@@ -2632,6 +2647,22 @@ export default {
         default:
           console.warn('[runFrontAction] 未知的前端动作命令:', cmd.name)
       }
+    },
+
+    /**
+     * 输入框里手打了一个不存在的 slash 命令（`/[Excle] ` / `/Excle `）。
+     * MessageInput 只收编 slashCommands 里的已知名，未知的原文留在输入框继续当普通文本 ——
+     * 这里补一次提示，免得用户敲完空格面板一关，以为命令生效了。
+     * 提示里带上最接近的几个候选名字，让「拼错」和「不存在」两件事都能立刻定位。
+     */
+    onUnknownSlashCommand({ name, suggestions = [] }) {
+      if (!name) return
+      this.showToast(
+        `未知命令 /[${name}]`,
+        suggestions.length
+          ? `没有这个命令。相近的有：${suggestions.map(s => `/${s}`).join('  ')}。`
+          : '没有这个命令，已按普通文本保留（不会作为 skill 调用）。'
+      )
     },
 
     /**

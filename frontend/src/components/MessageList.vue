@@ -28,6 +28,8 @@
         :submitting-tool-decision="submittingToolDecision"
         :can-withdraw="canWithdrawFor(index)"
         :action-busy="actionBusy"
+        :slash-command-names="slashCommandNames"
+        :slash-commands-ready="slashCommandsReady"
         @restore="$emit('restore', $event)"
         @restream="(...args) => $emit('restream', ...args)"
         @open-link="$emit('open-link', $event)"
@@ -130,6 +132,16 @@ export default {
     actionBusy: {
       // 会话级破坏性操作互斥锁（App.vue sessionActionBusy）：中断 / 回溯 / 重新生成 / 重新对话
       // 任一在执行期间，这几个按钮全部 disabled
+      type: Boolean,
+      default: false
+    },
+    slashCommandNames: {
+      // 透传给 MessageItem：`/[xxx]` pill 的有效性判定清单（见 MessageItem 同名 prop）
+      type: Array,
+      default: () => []
+    },
+    slashCommandsReady: {
+      // 透传给 MessageItem：skill 列表是否已就位，未就位时不判定有效性
       type: Boolean,
       default: false
     },

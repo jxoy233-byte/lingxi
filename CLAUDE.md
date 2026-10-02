@@ -242,6 +242,8 @@ docker-compose up -d redis       # 端口 48211，密码 123456
 - 传递依赖升为直接依赖（`pyproject.toml`）：`pymysql` / `psycopg` / `pymongo`（宿主降级路径要用跨库只读查询）+ `pypdf` / `pypdfium2`（原本是 docling / unstructured 的传递依赖，装在 venv 里但从未声明，上游哪天换掉 PDF 后端 `uv sync` 就直接卸载，而报错现场在 docling）。**⚠️ 不要换 PyMuPDF**：AGPL-3.0 会污染 Electron 分发
 - Electron 健康检测语义收窄：5xx / 4xx 是「后端活着但业务出错」，不能当存活信号（否则纯业务错误弹「后端服务已断开连接」banner，且点「重新连接」也治不好）；失败计数重置必须写在状态早退**之前**，否则「连续 N 次失败」被悄悄降级成「累计第 N 次失败」，表现为 banner 闪一下又恢复
 - `impIpt` 身份判定从 `is` 改为 `messages[i].id == imp_ipt.id`（LangGraph 反序列化后是等价不同对象）；`imp_ipt` / `final_node` 的 SSE 增量补 `source` 字段，前端据此区分「理解意图阶段」与「正式回复阶段」
+- `/[xxx]` pill 改为**按命令清单校验**（`App.vue slashCommands` → `MessageList` → `MessageItem`），不在清单里就**原样保留文本、不 pill 化**；判定 case-insensitive，skill 未拉回（`skillsLoaded=false`）时不判定。**Why**：pill 是「这是个真命令」的承诺，拼错的 `/[Excle]` 跟 `/[WordEditor]` 长得一样等于替错误背书，用户以为命令生效了
+- 输入框手打未知命令不再静默：`extractTypedSlashCommand` emit `unknown-slash-command` → toast 提示 + 列相近候选（同一前缀只提示一次）
 
 **v0.3.7**
 - WordEditor 段内多 run 样式 `runs=[{text,...format_kwargs}]` + `add_markdown()`（自写零依赖 parser 在 `markdown.py`）

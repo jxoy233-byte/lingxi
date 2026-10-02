@@ -694,6 +694,20 @@ export default {
       // 任一在执行期间全部 disabled —— 这四个都只跑一次就对，连点是状态错位而不是「多跑一遍」
       type: Boolean,
       default: false
+    },
+    slashCommandNames: {
+      // 当前可用的 slash 命令名（App.vue slashCommands = 静态 action + 动态 skill）。
+      // `/[xxx]` 只有命中这份清单才渲染成 pill —— pill 等于「这是个真命令」的视觉承诺，
+      // 拼错的 /[Excle] 跟 /[WordEditor] 长得一模一样就等于这个承诺作废了。
+      type: Array,
+      default: () => []
+    },
+    slashCommandsReady: {
+      // skill 列表是否已从 /chat/skills 回来。false 时**不判定有效性**、照旧全部 pill 化：
+      // 冷启动首屏历史消息会在 fetchSkills 返回前先渲染，那一瞬间把 WordEditor 误判成
+      // 未知命令会闪一下「该 pill 不该在」的反向闪烁，比不校验更难看。
+      type: Boolean,
+      default: false
     }
   },
   emits: ['restore', 'restream', 'open-link', 'preview-file', 'interrupt', 'resume', 'restart-session', 'quote', 'tool-decide', 'withdraw', 'focus-doc-preview'],
@@ -759,6 +773,14 @@ export default {
     if (this._resizeTimer) clearTimeout(this._resizeTimer)
   },
   computed: {
+    /**
+     * 已知 slash 命令名（小写）集合，供 `/[xxx]` pill 有效性判定。
+     * 大小写不敏感：面板过滤本身是 case-insensitive 的，用户敲 `/[wordeditor]`
+     * 能选中 WordEditor，那它就不该在气泡里被判成「未知」。
+     */
+    _knownSlashNames() {
+      return new Set(this.slashCommandNames.map(n => String(n).toLowerCase()))
+    },
     /**
      * 是否展示 metrics 指标条：仅 AI 消息 + 非 error + 非中断 + 有任一指标
      * 流式中（streaming=true）也会展示，让数字随事件跳
@@ -1542,22 +1564,42 @@ export default {
     },
 
     /**
+     * `/[xxx]` → pill chip 替身（占位符路径用）/ pill HTML（HTML 路径用）。
+     *
+     * 有效性判定：名字必须命中 `slashCommandNames`（静态 action + 动态 skill）。
+     * 未知名字**原样保留 `/[xxx]` 文本**、不 pill 化 —— 用户手打错命令（`/[Excle]`）
+     * 或 AI 幻觉出一个不存在的 skill 时，气泡里得看得出「这不是个真命令」，
+     * 否则 pill 的高亮就是在替错误背书，用户只会以为命令发出去了。
+     *
+     * slashCommandsReady=false（skill 还没拉回来）时一律 pill 化，见 prop 注释。
+     */
+    _slashPillFor(name) {
+      const valid = !this.slashCommandsReady ||
+        this._knownSlashNames.has(String(name).toLowerCase())
+      if (!valid) return null
+      return `<span class="slash-pill" data-skill="${name}" title="/[${name}]">${name}</span>`
+    },
+
+    /**
      * 把文本里的 `/[<skill-name>]` 渲染成 Codex 风的 pill chip。
      * 用占位符 + escapeHtml 的模式：先把 `/[xxx]` 替成不含 HTML 字符的占位符，
      * escapeHtml（占位符没特殊字符，原样存活），再把占位符换成真正的 pill HTML，
      * 这样既避免 XSS（pill 之外的字符都被 escapeHtml 转义过）又能在 v-html 里渲染。
+     *
+     * 无效命令不进占位符流程：它就当普通文本走 escapeHtml（`/` `[` `]` 都不是
+     * HTML 特殊字符，原样存活），用户能在气泡里直接看到自己敲错的原文。
      */
     renderSlashPills(text) {
       if (!text) return ''
       const PLACEHOLDER_RE = /__SLASH_PILL_([\w-]+)__/g
       const withPlaceholder = text.replace(
         /\/\[([\w-]+)\]/g,
-        (_, name) => `__SLASH_PILL_${name}__`
+        (whole, name) => (this._slashPillFor(name) ? `__SLASH_PILL_${name}__` : whole)
       )
       const escaped = this.escapeHtml(withPlaceholder)
       return escaped.replace(
         PLACEHOLDER_RE,
-        (_, name) => `<span class="slash-pill" data-skill="${name}" title="/[${name}]">${name}</span>`
+        (_, name) => this._slashPillFor(name)
       )
     },
 
@@ -1566,12 +1608,15 @@ export default {
      * 中 `/`, `[`, `]` 不是 HTML 特殊字符，所以可以直接 regex replace。
      * 应用场景：marked() 之后的 HTML（含 AI 回复、quote 块、用户正文），
      * 在 sanitizeHtml 之前调用。
+     *
+     * ⚠️ 无效命令走「原样返回 whole」而不是删掉——`/[Excle]` 里没有 HTML 特殊字符，
+     * 留着就是给用户看的拼写证据。
      */
     renderSlashPillsInHtml(html) {
       if (!html) return ''
       return html.replace(
         /\/\[([\w-]+)\]/g,
-        (_, name) => `<span class="slash-pill" data-skill="${name}" title="/[${name}]">${name}</span>`
+        (whole, name) => this._slashPillFor(name) || whole
       )
     },
 

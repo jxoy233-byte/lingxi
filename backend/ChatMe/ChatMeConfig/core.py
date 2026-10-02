@@ -133,7 +133,7 @@ class ChatMeConfig:
         default_config = {
             "app": {
                 "name": "ChatMe",
-                "version": "v0.3.5",
+                "version": "v0.3.8",
                 "description": "ChatMe LangGraph Workflow",
                 "host": "127.0.0.1",
                 "port": 38211,
@@ -158,9 +158,10 @@ class ChatMeConfig:
             },
             "permissions": {
                 "approval_policy": "default",
-                # 5 个核心 skill 的预批准（per-skill pattern，imp= 子集匹配）：
-                # 用户首次启动时不需要为 Tavily / Exa / DataAnalysis / ImageParser /
-                # Memory 的常用调用再走一遍审批 UI。详见
+                # 9 个核心 skill 的预批准（per-skill pattern，imp= 子集匹配）：
+                # 用户首次启动时不需要为 Tavily / Exa / Bocha / WebSearch /
+                # DataAnalysis / ImageParser / Memory / WordEditor / ExcelEditor
+                # 的常用调用再走一遍审批 UI。详见
                 # ChatMe/ChatWorkflow/mcps/permissions/core.py:_match_code_fp_pattern。
                 "approved_commands": [
                     {
@@ -189,6 +190,26 @@ class ChatMeConfig:
                     {
                         "pattern": "code_fp:lang=python|imp=DataAnalysis",
                         "reason": "DataAnalysis skill — 全部调用预批准（含 sandbox + local）",
+                        "scope": "global",
+                    },
+                    {
+                        "pattern": "code_fp:lang=python|imp=WordEditor",
+                        "reason": "WordEditor skill — 全部调用预批准（含 sandbox + local）",
+                        "scope": "global",
+                    },
+                    {
+                        "pattern": "code_fp:lang=python|imp=ExcelEditor",
+                        "reason": "ExcelEditor skill — 全部调用预批准（含 sandbox + local）",
+                        "scope": "global",
+                    },
+                    {
+                        "pattern": "code_fp:lang=python|imp=Bocha",
+                        "reason": "Bocha 搜索 skill — 全部调用预批准（含 sandbox + local）",
+                        "scope": "global",
+                    },
+                    {
+                        "pattern": "code_fp:lang=python|imp=WebSearch",
+                        "reason": "WebSearch 搜索 skill — 全部调用预批准（含 sandbox + local）",
                         "scope": "global",
                     },
                 ],
@@ -433,10 +454,12 @@ class ChatMeConfig:
     def get_model_vl_config(self) -> dict:
         """获取 VL 模型配置
 
-        local 字段语义（vl.local 默认 True）：
-        - True  ：走独立 VL provider（默认 Qwen3-VL-2B 本地模型）
+        local 字段语义（**vl.local 默认 False**）：
+        - True  ：走独立 VL provider（默认 Qwen3-VL-2B 本地模型，约 2GB，需显式开启）
         - False ：fallback 到主模型（llm_providers 链中第一个有效项），与主用 LLM 共用
                   api_key / base_url / model_name；适用于"不想额外配 VL、让主模型兼职看图"的场景
+
+        字段缺失按 False 处理（见下方 else 分支注释）：不主动下载 Qwen3-VL。
         """
         self._load()
 

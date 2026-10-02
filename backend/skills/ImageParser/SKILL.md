@@ -2,7 +2,7 @@
 name: image_parser
 description: 使用 VL 模型解析截图、照片、文档图片、URL 和 base64 图片
 mount: ro
-aliases: [ImageParser, OCR, screenshot, parse_image, vision, photo]
+aliases: [ImageParser, OCR, screenshot, parse_image, vision, photo, 图片, 截图, 照片, 识图]
 module: skills.ImageParser
 ---
 

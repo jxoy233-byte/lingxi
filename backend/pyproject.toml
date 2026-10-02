@@ -1,6 +1,6 @@
 [project]
 name = "ChatMe"
-version = "0.3.5"
+version = "0.3.8"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -54,6 +54,17 @@ dependencies = [
     "xlrd>=2.0.2",
     "xyzservices>=2026.3.0",
     "pyyaml>=6.0.3",
+    # 数据库驱动。sandbox/requirements.txt 一直有，宿主漏了 —— uv sync 会当多余包卸载。
+    # DataAnalysis 的跨库只读查询在宿主降级路径（沙盒池未初始化时）要用。
+    "pymysql>=1.1.0",
+    "psycopg[binary]>=3.2.0",
+    "pymongo>=4.10.0",
+    # PDF 处理。pypdf / pypdfium2 原本是 docling / unstructured-client 的传递依赖，
+    # 装在 .venv 里但从未声明 —— 上游哪天换掉 PDF 后端，uv sync 会直接卸载它们，
+    # 而报错现场在 docling、真正原因在这里。显式声明把「碰巧在」变成「有意要」。
+    # ⚠️ 不要换 PyMuPDF(fitZ)：AGPL-3.0，会污染 Electron 桌面端分发。
+    "pypdf>=6.0",
+    "pypdfium2>=5.0",
 ]
 
 [project.scripts]

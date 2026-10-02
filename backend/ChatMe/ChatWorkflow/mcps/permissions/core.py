@@ -734,7 +734,7 @@ class PermissionedToolNode(ToolNode):
     继承 ToolNode 的全部原生行为：并行执行 / Command 返回 / state 注入 / 错误处理等。
     用法与官方一致：
 
-        tool_execution_node = PermissionedToolNode(tools=self.tools)
+        tool_execution_node = PermissionedToolNode(tools=self.tools_with_done)
 
     [TODO] 并行 batch gate：当前 N 个并行 tool_call 各走一次 `interrupt()`，LangGraph
     `scratchpad.resume` 单值只能 consume idx=0，后续 idx 再抛 GraphInterrupt → 用户

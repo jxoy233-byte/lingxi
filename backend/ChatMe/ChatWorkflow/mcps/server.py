@@ -135,7 +135,7 @@ def code(
     local: Annotated[bool, "Set True to bypass sandbox and run on host. Default False (sandbox)."] = False,
 ) -> Optional[str]:
     """
-    Execute code (sandbox by default; sandbox exposes /skills (read-only) and /cached (read-write)).
+    Execute code (sandbox by default; only skills/ and cached/ are exposed).
     Set `local=True` to run on host.
     """
     session_id = current_session_id.get()
@@ -251,8 +251,6 @@ def done() -> str:
     """Mark your thinking chain as complete
 
     Call `done` when the reasoning is finished: info collected, task complete, stuck, casual chat, or out of scope.
-
-    Use `interrupt(...)` instead when you need to ask the user a specific question mid-flow.
     """
     session_id = current_session_id.get()
     logger.debug(f"会话 {session_id} 触发 done（思维链结束标记）")

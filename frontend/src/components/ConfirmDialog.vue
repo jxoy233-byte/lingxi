@@ -1,8 +1,7 @@
 <template>
   <transition name="modal">
     <div v-if="visible" class="modal-overlay" @click="handleCancel">
-      <div class="modal-container" @click.stop>
-        <div class="modal-icon-wrap">
+      <div class="modal-container" @click.stop>        <div class="modal-icon-wrap">
           <div class="modal-icon">
             <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
               <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
@@ -15,11 +14,11 @@
           <p class="modal-message">{{ message }}</p>
         </div>
         <div class="modal-footer">
-          <button ref="cancelBtn" class="btn-cancel" @click="handleCancel">
+          <button ref="cancelBtn" class="btn-cancel" :disabled="busy" @click="handleCancel">
             {{ cancelText }}
           </button>
-          <button class="btn-confirm" @click="handleConfirm">
-            {{ confirmText }}
+          <button class="btn-confirm" :disabled="busy" @click="handleConfirm">
+            {{ busy ? '处理中…' : confirmText }}
           </button>
         </div>
       </div>
@@ -50,6 +49,12 @@ export default {
     cancelText: {
       type: String,
       default: '取消'
+    },
+    busy: {
+      // 确认动作执行中：禁用两个按钮 + 「确定」显示「处理中…」。
+      // 防连点 —— 回溯这类破坏性操作连点两次会 retarget 两次，messages 可能闪回旧态
+      type: Boolean,
+      default: false
     }
   },
   emits: ['confirm', 'cancel'],
@@ -73,9 +78,11 @@ export default {
   },
   methods: {
     handleConfirm() {
+      if (this.busy) return
       this.$emit('confirm')
     },
     handleCancel() {
+      if (this.busy) return
       this.$emit('cancel')
     },
     /**
@@ -85,6 +92,8 @@ export default {
      */
     handleKeydown(e) {
       if (!this.visible) return
+      // busy 期间屏蔽 Esc / Enter：Esc 会把弹窗关掉但请求还在跑，Enter 会重复触发 confirm
+      if (this.busy) return
       if (e.key === 'Escape') {
         e.preventDefault()
         this.handleCancel()
@@ -214,6 +223,24 @@ export default {
 
 .btn-confirm:active {
   transform: translateY(0);
+  box-shadow: none;
+}
+
+/* busy：破坏性操作执行中，按钮全灭并去掉 hover 反馈（:hover 要一起写，
+   否则 disabled 元素仍会亮起 hover 底色，看起来还能点） */
+.btn-cancel:disabled,
+.btn-confirm:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.btn-cancel:disabled:hover {
+  background-color: var(--bg-secondary);
+}
+
+.btn-confirm:disabled:hover {
+  background-color: #ef4444;
+  transform: none;
   box-shadow: none;
 }
 

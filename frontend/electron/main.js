@@ -123,9 +123,14 @@ let servicesReady = false
 // 双信号合并健康状态机，避免 banner 在「后端还在」时闪烁：
 //   1. /health 探测（runHealthCheck）：5s 间隔，连续失败 ≥ HEALTH_FAILURE_THRESHOLD=2 → 失败信号
 //   2. API 调用结果（recordApiCall）：protocol.handle API 分支调用，
-//      5s 窗口内 ≥ API_FAILURE_THRESHOLD=3 次失败 → 失败信号
-// 任一成功信号（/health 探测成功 / API 调用 2xx-4xx）→ 立即推 true + 重置所有失败计数
+//      5s 窗口内 ≥ API_FAILURE_THRESHOLD=3 次连不上 → 失败信号
+// 任一成功信号（/health 探测成功 / API 调用拿到响应）→ 立即推 true + 重置所有失败计数
 // 任一失败信号达阈值 → 推 false
+//
+// ⚠️ 两个信号都只回答「进程还在不在」，不回答「业务对不对」：
+// 5xx 是后端**活着**但业务出错（LLM 401 / 上游 529），拿它当存活信号会让
+// 纯业务错误弹「后端服务已断开连接」banner —— 语义完全对不上，且点了「重新连接」
+// 也治不好。业务错误由各自 error 分支呈现，不走这里。
 //
 // 为什么不用单信号：
 //   - 单用 /health 探测：5s 间隔下阈值 2 = 10s 才推 false，user 操作撞窗口期（重启 / 端口抖动）
@@ -136,7 +141,7 @@ let servicesReady = false
 //     两个信号都失败 → 真挂了；任一信号成功 → 后端在
 //
 // 静态资源 /static/* 不计 API 调用（hash 资源失败可能是路径错，不一定后端挂）。
-// 只对 /chat/* + /admin/* 计数（user 原话：「包含左侧的会话列表也都显示了403问题
+// 只对 /chat/* + /admin/* + /api/* 计数（user 原话：「包含左侧的会话列表也都显示了403问题
 // 或者admin/config 403 才闪烁啊」——即业务端点失败才触发）。
 
 let healthMonitorInterval = null
@@ -174,17 +179,25 @@ function stopHealthMonitor() {
 /**
  * 共享 IPC 推送入口：只在状态翻转时推，避免事件风暴。
  * 任一信号（health-probe / api-call）触发都共用同一套状态机。
- * 推 true 时清空所有失败计数；推 false 不动计数（让 caller 自己决定阈值）。
+ * 推 false 不动计数（让 caller 自己决定阈值）。
+ *
+ * ⚠️ 计数器重置必须在「状态早退」**之前**，不能放后面：
+ * 稳态下 lastBackendHealth 恒为 true，若重置写在 `if (last === healthy) return`
+ * 之后，每次探测成功都在第一行就返回了 → consecutiveHealthFailures 永不清零。
+ * 后果是 HEALTH_FAILURE_THRESHOLD 宣称的「连续 N 次失败」被悄悄降级成
+ * 「累计第 N 次失败」：t=0 抖动一次（计数 1）→ 恢复正常（计数不清）→
+ * 15 分钟后抖动第二次 → 凑够 2 弹 banner，而后端全程健康。
+ * 表现为「后端服务已连接 → banner 闪一下 → 又恢复」，用户视角完全无法理解。
+ * 「探测成功」本身就说明此前的失败已过期，与状态是否翻转无关。
  */
 function pushBackendHealth(healthy, source) {
-  if (lastBackendHealth === healthy) return
-  lastBackendHealth = healthy
   if (healthy) {
-    // 重置所有失败信号：状态翻 true → 后端肯定能响应，之前的计数都过期
     consecutiveHealthFailures = 0
     apiFailureCount = 0
     apiFailureWindowStart = Date.now()
   }
+  if (lastBackendHealth === healthy) return
+  lastBackendHealth = healthy
   console.log(`[health] changed: backend=${healthy} (source=${source})`)
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('backend-health-changed', { backend: healthy })
@@ -212,16 +225,22 @@ async function runHealthCheck() {
 }
 
 /**
- * API 调用结果记录：成功立即推 true；失败累加窗口计数，达阈值推 false。
+ * API 调用结果记录：拿到响应立即推 true；连不上累加窗口计数，达阈值推 false。
  * 5s 窗口外重置计数（避免一次重启后累积的旧失败污染下一次判定）。
  *
- * 判定语义：
+ * 判定语义（reachability，不是 correctness）：
  *   - net.fetch reject（ECONNREFUSED / ENOTFOUND / 超时）→ 失败
- *   - upstream.status 2xx-4xx → 成功（4xx 是业务错误如 404 / 422，后端在响应）
- *   - upstream.status 5xx → 失败（后端崩了 / 抛异常）
+ *   - 拿到任何 upstream 响应（2xx / 4xx / 5xx）→ 成功，后端进程活着
+ *
+ * ⚠️ 5xx 不再算失败：banner 的语义是「后端服务已断开连接，部分功能不可用」，
+ * 而 5xx 恰恰证明后端**连接正常**、只是这个业务请求处理失败。
+ * 把两者混为一谈会让 LLM key 失效 / 上游 529 这类纯业务错误弹「后端断开」banner，
+ * 用户去点「重新连接」——重连后照样 401，白折腾。
+ * 业务错误由各自的 error 分支呈现（SettingsDialog 报错框 / SSE error 事件），
+ * 不该由连接状态 banner 背锅。进程存活判定交给 /health 探测，那才是准的。
  */
-function recordApiCall(success) {
-  if (success) {
+function recordApiCall(reachable) {
+  if (reachable) {
     pushBackendHealth(true, 'api-call')
     return
   }
@@ -461,7 +480,7 @@ function registerFileProtocolInterceptor() {
       // 流式响应（SSE）的请求体也会被丢。
       // SSE 响应（text/event-stream）需要 duplex: 'half' 才能正确转发流式请求体；
       // 同时显式重建 Response 把 body stream 透传，避免 protocol.handle buffer。
-      if (apiPathname.startsWith('/chat/') || apiPathname.startsWith('/static/') || apiPathname.startsWith('/admin/')) {
+      if (apiPathname.startsWith('/chat/') || apiPathname.startsWith('/static/') || apiPathname.startsWith('/admin/') || apiPathname.startsWith('/api/')) {
         const backendUrl = `${config.backend.apiUrl}${apiPathname}${url.search}`
         writeMainLog(`[req ${reqId}] BRANCH=api ${request.method} → ${backendUrl}`)
 
@@ -473,7 +492,7 @@ function registerFileProtocolInterceptor() {
 
         // 是否业务 API 调用（影响 banner 健康状态判定）
         // /chat/* + /admin/* 计入；/static/* 不计（静态资源 hash 路径错可能是业务问题不是后端挂）
-        const isBusinessApi = apiPathname.startsWith('/chat/') || apiPathname.startsWith('/admin/')
+        const isBusinessApi = apiPathname.startsWith('/chat/') || apiPathname.startsWith('/admin/') || apiPathname.startsWith('/api/')
 
         // 兜底：net.fetch reject（ECONNREFUSED / ENOTFOUND / 监听中但未响应）时，
         // Electron protocol.handle 默认行为是返回 403 Forbidden，跟我们想表达的
@@ -500,10 +519,11 @@ function registerFileProtocolInterceptor() {
           )
         }
 
-        // upstream 拿到了：2xx-4xx 算成功（4xx 是业务错误，后端在响应），5xx 算失败
-        // SSE 流（200 + text/event-stream）也走这里，upstream.status=200 算成功
+        // 拿到 upstream 响应 = 后端连接正常（不论 2xx / 4xx / 5xx）。
+        // 只在这里把「可达」记为成功信号；失败信号只有上面的 net.fetch reject。
+        // SSE 流（200 + text/event-stream）也走这里，status=200 同样算可达。
         if (isBusinessApi) {
-          recordApiCall(upstream.status < 500)
+          recordApiCall(true)
         }
 
         writeMainLog(`[req ${reqId}] API_RESP status=${upstream.status} ${backendUrl}`)

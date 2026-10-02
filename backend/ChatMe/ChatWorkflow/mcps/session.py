@@ -13,8 +13,6 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from langchain_mcp_adapters.tools import load_mcp_tools
 
-from .tools.deprecated import sub_agent
-
 _mcp_session: Optional[ClientSession] = None
 _mcp_session_task: Optional[asyncio.Task] = None
 _mcp_session_ready: Optional[asyncio.Event] = None
@@ -62,8 +60,6 @@ async def init_mcp(tool_interceptors: list = None) -> None:
         _mcp_session,
         tool_interceptors=_tool_interceptors,
     )
-    # DEPRECATED: sub_agent 已废弃，prompt 不再向 LLM 暴露；保留注册仅为兼容潜在遗留调用
-    tools.append(sub_agent)
     _mcp_tools_cache = tools
 
 
@@ -81,18 +77,11 @@ async def shutdown_mcp() -> None:
     _mcp_session_ready = None
 
 
-def get_mcp_tools(include_done: bool = False) -> List[Any]:
-    """返回已初始化的 MCP tools 列表(懒加载)
+def get_mcp_tools() -> List[Any]:
+    """返回已初始化的 MCP tools 列表(懒加载,含 `done` 思维链结束标记工具)
 
-    Args:
-        include_done: False（默认）→ 返回不含 `done` 的工具集（旧 graph 用）
-                      True → 返回含 `done` 的工具集（新 graph `_create_graph_improved` 用）
-
-    `done` 是 v0.1.x+ 新增的思维链结束标记工具，旧 graph 不暴露。
-    `sub_agent`（deprecated）始终包含（无害，prompt 已不暴露）。
+    `done` 由 agent_node 用作思维链收尾信号,与其它工具一并 bind。
     """
     if _mcp_tools_cache is None:
         raise RuntimeError("MCP tools not initialized yet; call init_mcp() first")
-    if include_done:
-        return _mcp_tools_cache
-    return [t for t in _mcp_tools_cache if getattr(t, "name", None) != "done"]
+    return _mcp_tools_cache

@@ -170,12 +170,11 @@ Parameters:
     def done_tool_prompt_block(self) -> str:
         """### done 章节——跨平台一致，base 默认提供。
 
-        done 是新 graph（_create_graph_improved）的思维链收尾信号，作用域与 shell /
-        沙盒无关，任何平台 prompt 完全相同。子类无需覆盖。
+        done 是图工作流的思维链收尾信号，作用域与 shell / 沙盒无关，
+        任何平台 prompt 完全相同。子类无需覆盖。
 
-        ⚠️ 它**不在 all_tool_prompt_blocks() 里**：那块列表新老图共用，而老图
-        （get_mcp_tools(include_done=False)）bind 不到 done，拼进去会让老图 LLM
-        去调一个不存在的工具。新图由 get_agent_node_improved_prompt() 单独拼。
+        ⚠️ 它**不在 all_tool_prompt_blocks() 里**：由
+        get_agent_node_improved_prompt() 单独拼进去。
         """
         return """### done — Chain Termination
 Use when: The thinking chain is complete — task done, stuck, casual chat, or out of scope.

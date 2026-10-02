@@ -18,9 +18,9 @@ from langgraph.checkpoint.redis import AsyncRedisSaver
 from langgraph.types import Send, interrupt
 
 from . import llm_factory
-from .config.graph_config import get_agent_node_config, get_graph_final_node_config, \
+from .config.graph_config import get_graph_final_node_config, \
     get_imp_ipt_config, get_history_summary_node_config, get_llm_memory_config, get_model_vl_config, \
-    get_should_end_node_config, get_react_compact_config, get_agent_node_improved_config
+    get_react_compact_config, get_agent_node_improved_config
 from .config.models import ChatStateCore2, AIMessageType, FileParseState
 from .Memory.core import MemoryManager
 from .mcps.session import init_mcp, shutdown_mcp, get_mcp_tools
@@ -81,11 +81,11 @@ class ChatWorkflow:
             self.logger.info(f"[启动 sweep] 已 merge {swept} 个残留 thinking_chain 临时文件")
 
         self._final_system_template = None
-        # llm_core / agent_llm / summary_llm / react_compact_llm / llm_imp_ipt /
-        # should_end_llm / llm_imp_ipt_vl / agent_llm_with_done 全部改为
+        # llm_core / agent_llm_with_done / summary_llm / react_compact_llm /
+        # llm_imp_ipt / llm_imp_ipt_vl 全部改为
         # @property（懒加载 + llm_factory cache），不在 __init__ 预构造。
 
-        self.tools = None
+        self.tools_with_done = None
         self.graph = None
         self.graph_process_files = None
         self.checkpointer = None
@@ -126,12 +126,9 @@ class ChatWorkflow:
         return f"[工具参数错误] {tool_name} 缺少必需参数: {param_list}，请检查格式后重试"
 
     async def init_mcps(self):
-        # 走模块级共享 singleton（sub_agent 也复用同一 client / tools）
         await init_mcp(tool_interceptors=[_inject_session_header])
-        # 老 graph（_create_graph_core2）用的工具集：不暴露 done
-        self.tools = get_mcp_tools(include_done=False)
-        # 新 graph（_create_graph_improved）用的工具集：含 done tool
-        self.tools_with_done = get_mcp_tools(include_done=True)
+        # 工具集含 done tool（agent_node 的思维链收尾信号）
+        self.tools_with_done = get_mcp_tools()
 
     async def init_memory_manager(self):
         llm_memory_config, llm_memory_prompt = get_llm_memory_config()
@@ -142,8 +139,8 @@ class ChatWorkflow:
         v0.3.x 改造：不再启动期构造 ChatOpenAI，改为懒加载（llm_factory）。
 
         启动期只持有 LCEL prompt（启动期定一次，不会随 config 变化）。
-        5 个 LLM 角色（llm_core / agent_llm / summary_llm / react_compact_llm /
-        llm_imp_ipt / should_end_llm）共享同一个 ChatOpenAI 实例（连接三元组相同），
+        5 个 LLM 角色（llm_core / agent_llm_with_done / summary_llm /
+        react_compact_llm / llm_imp_ipt）共享同一个 ChatOpenAI 实例（连接三元组相同），
         实例通过 llm_factory.get_llm("main") 懒加载，按 (api_key_fp, base_url,
         model_name) 缓存；config 改了 → cache 自动失效 → 下次调用 new。
 
@@ -153,13 +150,7 @@ class ChatWorkflow:
         _, system_prompt = get_graph_final_node_config()
         self._final_system_template = system_prompt
 
-        # agent_node prompt（老 graph）
-        _, agent_prompt = get_agent_node_config()
-        self._agent_prompt = ChatPromptTemplate.from_messages(
-            [("system", agent_prompt), MessagesPlaceholder("messages")]
-        )
-
-        # agent_node prompt（新 graph，含 done tool）
+        # agent_node prompt（含 done tool）
         _, agent_improved_prompt = get_agent_node_improved_config()
         self._agent_improved_prompt = ChatPromptTemplate.from_messages(
             [("system", agent_improved_prompt), MessagesPlaceholder("messages")]
@@ -183,19 +174,13 @@ class ChatWorkflow:
             [("system", imp_ipt_llm_prompt), MessagesPlaceholder("messages")]
         )
 
-        # should_end_llm prompt
-        _, should_end_prompt_content = get_should_end_node_config()
-        self._should_end_prompt = ChatPromptTemplate.from_messages(
-            [("system", should_end_prompt_content), MessagesPlaceholder("messages")]
-        )
-
         # VL：当前用法是直接 ainvoke([file_msg]) 不套 prompt，prompt 字段先存住备用
         _, imp_ipt_vl_llm_prompt = get_model_vl_config()
         self._imp_ipt_vl_prompt = imp_ipt_vl_llm_prompt
 
-    # === 5 个 LLM 角色 + VL 全部走 property（懒加载 + cache）===
+    # === LLM 角色 + VL 全部走 property（懒加载 + cache）===
     # 每次访问：cache hit 直接返 ChatOpenAI（~0 耗时）；cache miss → new + 缓存
-    # bind_tools(self.tools) / LCEL prompt | 每次访问重新组合（O(microseconds)，
+    # bind_tools(self.tools_with_done) / LCEL prompt | 每次访问重新组合（O(microseconds)，
     # 远小于 LLM 调用耗时）；组合返回的对象不可缓存（与 tools 列表关联）
 
     @property
@@ -204,13 +189,8 @@ class ChatWorkflow:
         return llm_factory.get_llm("main")
 
     @property
-    def agent_llm(self):
-        """老 graph agent_node 用：prompt | ChatOpenAI.bind_tools(self.tools)。"""
-        return self._agent_prompt | llm_factory.get_llm("main").bind_tools(self.tools)
-
-    @property
     def agent_llm_with_done(self):
-        """新 graph agent_node 用：prompt | ChatOpenAI.bind_tools(self.tools_with_done)。"""
+        """agent_node 用：prompt | ChatOpenAI.bind_tools(self.tools_with_done)。"""
         return self._agent_improved_prompt | llm_factory.get_llm("main").bind_tools(self.tools_with_done)
 
     @property
@@ -224,10 +204,6 @@ class ChatWorkflow:
     @property
     def llm_imp_ipt(self):
         return self._imp_ipt_prompt | llm_factory.get_llm("main")
-
-    @property
-    def should_end_llm(self):
-        return self._should_end_prompt | llm_factory.get_llm("main")
 
     @property
     def llm_imp_ipt_vl(self):
@@ -288,7 +264,6 @@ class ChatWorkflow:
         await self.init_llms()
 
         self.graph = await self._create_graph_improved()
-        # self.graph = await self._create_graph_core2()
         self.graph_process_files = await self._create_graph_process_files()
 
     def _parse_content_to_tool_calls(self, ai_message: AIMessage):
@@ -480,6 +455,11 @@ class ChatWorkflow:
         input_msg = []
         for msg in reversed(messages):  # 首轮对话也兼容，无之前对话的summary就遍历完
             if isinstance(msg, HumanMessage):
+                if msg.additional_kwargs.get("imp_ipt"):
+                    # imp_ipt 是本轮 optimize 的产物、不是用户新输入。跳过但不 break——
+                    # 它前面紧挨着的才是用户真正的输入（首轮 / 中断后无 AI 消息时尤其明显：
+                    # 此时尾巴是 [user, imp_ipt]，不过滤会把优化结果再喂回 llm_imp_ipt）
+                    continue
                 if "is_file" in msg.additional_kwargs and msg.additional_kwargs.get("is_file"):
                     break
             else:
@@ -657,6 +637,51 @@ class ChatWorkflow:
                         pending_tool_indices = []
 
         return loops
+
+    @staticmethod
+    def _is_context_worthy(msg: BaseMessage) -> bool:
+        """
+        该消息是否值得进 context（agent / final_node 的 LLM 输入）。
+
+        AIMessage 必须带 tool_calls 才有信息量：agent_node 在决策层被要求「要么调工具、
+        要么调 done」，此时输出的纯文本 content 是一份**没被采纳的最终回复草稿**
+        （retry warning 就是为拦截它而注入的）。它对 ReAct 决策是噪声，且会误导下游——
+        实测 final_node 看到 context 里已有一份完整草稿时，会误判「本轮已答完」而反问用户
+        想看什么。所以这类 AIMessage 一律不进 context。
+
+        其余消息类型（SystemMessage / HumanMessage / ToolMessage）照旧进。
+        """
+        if isinstance(msg, AIMessage):
+            return bool(getattr(msg, "tool_calls", None))
+        return True
+
+    @staticmethod
+    def _collect_draft_ai_removals(messages: List[BaseMessage]) -> List[RemoveMessage]:
+        """
+        找出 state["messages"] 里的「未采纳回复草稿」，返回对应的 RemoveMessage。
+
+        判据与 _is_context_worthy 同源（type=REASONING 且无 tool_calls），但作用在 messages 上：
+        不删的话前端 F5 刷新会把草稿当思考文本渲染进折叠的思考面板
+        （get_conversation 的 REASONING 分支 → App.vue 拼进 aiTurn.reasoning）。
+
+        为什么放在 final_node 而不是 agent_node / context_assembly_node：
+          - final_node 是本轮唯一收口，retry 路径和 give-up 路径都必然经过，一处覆盖两种情况
+          - agent_node 里删会连带坏掉 _get_current_round_conversation_cycling 的循环边界锚点
+            （倒序扫描靠 type=REASONING 的 AIMessage 停），以及 route_agent_output 的路由判据
+          - context_assembly_node 只在 done-cycle 分支才 return messages，为清理草稿新增一条
+            常规分支反而绕路；give-up 路径根本不经过它
+
+        ⚠️ 必须限定 type == REASONING：final_node 的正式回复是 type=SUMMARY 的 AIMessage，
+        同样没有 tool_calls，不加限定会把整段历史对话连同本轮回复一起抹掉。
+        """
+        return [
+            RemoveMessage(id=msg.id)
+            for msg in (messages or [])
+            if isinstance(msg, AIMessage)
+            and msg.id
+            and not getattr(msg, "tool_calls", None)
+            and msg.additional_kwargs.get("type") == AIMessageType.REASONING.value
+        ]
 
     @staticmethod
     def _build_compaction_draft(
@@ -935,494 +960,9 @@ class ChatWorkflow:
         return workflow.compile()
 
 
-    async def _create_graph_core2(self):
-        """
-        工程化图工作流对象:
-        usr_input -> input_parse -> context_assembly
-        -> agent_node -> tool_node --↗
-                   ↘--> final_node
-        """
-        TOOL_CALL_TIMES = 50
-        RETRY_TIMES = 3
-
-        # ReAct 流程压缩节拍：4 阶段循环
-        #   阶段 1 检测：tool_call_times >= DETECTION_MIN_ROUNDS（默认 4）且
-        #     最近 4 轮的 chars >= MIN_CHARS（默认 10000）
-        #   阶段 2 压缩：同步 await LLM，结果存 state（不立即替换）
-        #   阶段 3 等待：等 REPLACE_AFTER（默认 2）轮 tool_calls，
-        #     agent 继续用旧 context 推进（不打断工作流）
-        #   阶段 4 替换：tool_call_times 达到 replace_at 时重组 context =
-        #     memory + imp_ipt + summary + 最近 KEEP_LOOPS（默认 2）轮原文；
-        #     清 pending 字段后回到阶段 1 重新检测（循环）
-        REACT_KEEP_LOOPS = 2
-        REACT_COMPACT_DETECTION_MIN_ROUNDS = 5
-        # 10000 → ≤4096 tokens
-        REACT_COMPACT_MIN_CHARS = 10000
-
-
-        workflow = StateGraph(ChatStateCore2)
-
-        @node_guard("input_parse_node", logger=self.logger)
-        async def input_parse_node(state: ChatStateCore2, config: RunnableConfig):
-            """
-            输入预处理节点
-            """
-            thread_id = config["configurable"]["thread_id"]
-
-            input_msg = []
-            messages = list(state["messages"])
-
-            processed_files = await self.graph_process_files.ainvoke({"messages": messages})
-
-            files_input: HumanMessage = processed_files["combined_result"]
-
-            user_input: List[HumanMessage] = await self._get_current_round_conversation_except_files( messages)
-            # history_messages = await self._get_validate_history_message(messages,2)
-            history_memory: SystemMessage = self.memory_manager.read_layered_context(thread_id)
-
-            # 如果在这里中断时，续接时注入的中断原因 SystemMessage 需要加到 input_msg 最前面，否则 LLM 看不到
-            for msg in messages:
-                if isinstance(msg, SystemMessage) and "中断" in msg.content:
-                    input_msg.insert(0, msg)
-                    break
-
-            input_msg.append(history_memory)
-            # input_msg.extend(history_messages)
-            input_msg.append(files_input)
-            input_msg.extend(user_input)
-            self.logger.debug(f"会话 {thread_id} 文件输入:{files_input}")
-            self.logger.debug(f"会话 {thread_id} 用户输入:{user_input}")
-
-            imp_ipt_chunks = []
-            interrupt_check_interval = 4
-            interrupt_check_counter = 0
-            async for chunk in self.llm_imp_ipt.astream({"messages": input_msg}):
-                imp_ipt_chunks.append(chunk)
-                interrupt_check_counter += 1
-                if interrupt_check_counter >= interrupt_check_interval:
-                    interrupt_check_counter = 0
-                    await self.check_and_trigger_interrupt(thread_id)
-            imp_ipt = self._merge_chunks(imp_ipt_chunks)
-
-            imp_ipt = filter_thinking_content(imp_ipt)
-
-            imp_ipt_content = imp_ipt.content
-            imp_ipt_additional_kwargs = imp_ipt.additional_kwargs
-            imp_ipt_id = imp_ipt.id
-            imp_ipt_response_metadata = imp_ipt.response_metadata
-
-            imp_ipt = HumanMessage(
-                content=imp_ipt_content,
-                additional_kwargs={
-                    **imp_ipt_additional_kwargs,
-                    "imp_ipt": True,
-                },
-                id=imp_ipt_id,
-                response_metadata=imp_ipt_response_metadata,
-            )
-
-            self._write_thinking(thread_id, f"--------------------------------------------")
-            # 思维链日志：imp_ipt 单独输出（input_parse_node 优化后的本轮用户意图）
-            self._write_thinking(thread_id, f"[imp_ipt]:\n{format_thinking_chain([imp_ipt])}")
-
-            return {
-                "imp_ipt": imp_ipt,
-                "context": [],
-                "memory_user_message": imp_ipt_content,
-                "memory_tool_results": [],
-                "memory_tool_calls": [],
-                "memory_ai_response": None,
-                "tool_call_times": 0,
-                "should_end_retry_times": 0,
-                "context_summary_text": "",
-                "last_compact_at_tool_calls": 0,
-            }
-
-        @node_guard("context_assembly_node", logger=self.logger)
-        async def context_assembly_node(state: ChatStateCore2, config: RunnableConfig):
-            thread_id = config["configurable"]["thread_id"]
-
-            context = []
-            tool_results = state["memory_tool_results"] if state["memory_tool_results"] else []
-
-            if not state["context"]:
-                # 新会话：组装 memory + imp_ipt，逐条打印（不一次性 dump 整段 context）
-                memory_message :SystemMessage = self.memory_manager.read_layered_context(thread_id)
-                context.append(memory_message)
-                self._write_thinking(thread_id, f"[react_context] +memory:\n{format_thinking_chain([memory_message])}")
-
-                imp_ipt_msg: HumanMessage = state["imp_ipt"]
-                context.append(imp_ipt_msg)
-                self._write_thinking(thread_id, f"[react_context] +imp_ipt:\n{format_thinking_chain([imp_ipt_msg])}")
-            else:
-                # 续接：state["context"] 已存在（之前已逐条打印过），只打印新增的 cycle_msg
-                context = state["context"]
-
-                cycle_msg = await self._get_current_round_conversation_cycling(state["messages"])
-                for msg in cycle_msg:
-                    context.append(msg)
-                    # 逐条打印：随着 context 更新，每条 AIMessage / ToolMessage / HumanMessage 单独写入一行
-                    self._write_thinking(thread_id, f"[react_context] +msg:\n{format_thinking_chain([msg])}")
-
-                    if isinstance(msg, ToolMessage):
-                        content_string = get_message_content_string(msg)
-                        tool_results.append(content_string)
-
-            # 不再一次性 dump 整个 context（已逐条打印）
-
-            # ✨ ReAct 流程压缩（4 阶段循环）：
-            #   阶段 4：替换 pending 的压缩摘要 → 清 pending → 更新 last_compact_at
-            #   阶段 1+2：检测 → 同步 LLM 压缩 → 存 pending（不立即替换）
-            #   阶段 3：什么都不做（agent 继续用旧 context 推进，x 轮不打扰）
-            # 阶段 4 完成后回到阶段 1 重启循环
-            tool_call_times = state.get("tool_call_times", 0)
-            last_compact_at = state.get("last_compact_at_tool_calls", 0)
-            pending_summary = state.get("pending_compaction_summary")
-            pending_replace_at = state.get("pending_compaction_replace_at")
-
-            updates: Dict[str, Any] = {
-                "context": context,
-                "memory_tool_results": tool_results,
-            }
-
-            # ============ 阶段 4：替换 pending 压缩 ============
-            # ⚠️ 触发条件用「当前完整 loop 数 ≥ pending_replace_at」,不依赖 tool_call_times:
-            # 并行调 1-3 个工具会让 tool_call_times 一次 +1~3,导致 "+2" 不稳定等价于"等 2 轮"。
-            # loop 数版本无论并行多少次都稳定:等 N 个新完整 AIMessage+ToolMessages pair 才替换。
-            if (
-                pending_summary is not None
-                and pending_replace_at is not None
-            ):
-                current_complete_loops = self._find_complete_tool_loops(context)
-                if len(current_complete_loops) >= pending_replace_at:
-                    complete_loops = current_complete_loops
-                    keep_loops = (
-                        complete_loops[-REACT_KEEP_LOOPS:]
-                        if len(complete_loops) >= REACT_KEEP_LOOPS
-                        else complete_loops
-                    )
-                    new_context = self._build_compaction_draft(context, pending_summary, keep_loops)
-                    if new_context is not None:
-                        self._write_thinking(
-                            thread_id,
-                            f"[react_context_after_compact]: "
-                            f"compact_loops={len(complete_loops) - len(keep_loops)}, "
-                            f"keep_loops={len(keep_loops)}, "
-                            f"replace_after={REACT_KEEP_LOOPS}\n"
-                            f"{format_thinking_chain(new_context)}"
-                        )
-                        updates["context"] = new_context
-                        updates["last_compact_at_tool_calls"] = tool_call_times
-                        updates["last_compacted_loops_count"] = len(complete_loops) - len(keep_loops)
-                        updates["pending_compaction_summary"] = None
-                        updates["pending_compaction_replace_at"] = None
-                        updates["context_summary_text"] = pending_summary
-                        # 更新 last_compact_at 后重新计算上下文，供阶段 1 使用
-                        last_compact_at = tool_call_times
-                        context = new_context
-
-            # ============ 阶段 1+2：检测 + 触发后台 LLM 压缩 ============
-            # 仅在无 pending 时触发（一次只跑一个压缩周期，避免堆积）
-            # 后台 LLM 调用的 5-10s 不阻塞主工作流推进（asyncio.create_task）
-            if updates.get("pending_compaction_summary") is None and pending_summary is None:
-                # 优先消费已完成的后台任务结果（之前 iteration 触发的后台压缩）
-                if thread_id in self._background_compaction_results:
-                    s_new = self._background_compaction_results.pop(thread_id)
-                    if s_new is not None:
-                        updates["pending_compaction_summary"] = s_new
-                        # ⚠️ 替换阈值用当前完整 loop 数 + REACT_KEEP_LOOPS,
-                        # 不基于 tool_call_times (并行调用会一次 +1~3 不稳定)
-                        current_complete_loops_for_replace = self._find_complete_tool_loops(context)
-                        updates["pending_compaction_replace_at"] = (
-                            len(current_complete_loops_for_replace) + REACT_KEEP_LOOPS
-                        )
-                elif thread_id not in self._background_compaction_tasks:
-                    # 无 running 任务 → 阶段 1 检测
-                    complete_loops = self._find_complete_tool_loops(context)
-                    if len(complete_loops) >= REACT_COMPACT_DETECTION_MIN_ROUNDS:
-                        recent_n = complete_loops[-REACT_COMPACT_DETECTION_MIN_ROUNDS:]
-                        recent_n_indices = {idx for loop in recent_n for idx in loop}
-                        recent_n_msgs = [m for i, m in enumerate(context) if i in recent_n_indices]
-                        recent_chars = self._content_chars(recent_n_msgs)
-                    else:
-                        recent_chars = 0
-
-                    if self._should_detect_compact(
-                        tool_call_times=tool_call_times,
-                        last_compact_at=last_compact_at,
-                        has_pending_compaction=False,
-                        recent_chars=recent_chars,
-                        min_chars=REACT_COMPACT_MIN_CHARS,
-                        detection_min_rounds=REACT_COMPACT_DETECTION_MIN_ROUNDS,
-                        complete_loop_count=len(complete_loops),
-                    ):
-                        keep_loops = (
-                            complete_loops[-REACT_KEEP_LOOPS:]
-                            if len(complete_loops) >= REACT_KEEP_LOOPS
-                            else complete_loops
-                        )
-                        keep_indices = {idx for loop in keep_loops for idx in loop}
-                        compact_context = [
-                            msg for i, msg in enumerate(context)
-                            if i not in keep_indices
-                        ]
-
-                        # 阶段 2：触发后台 LLM 压缩（asyncio.create_task 不阻塞当前 iteration）
-                        task = asyncio.create_task(
-                            self._background_compact_react(thread_id, compact_context)
-                        )
-                        self._background_compaction_tasks[thread_id] = task
-
-            return updates
-
-        @node_guard("agent_node", logger=self.logger)
-        async def agent_node(state: ChatStateCore2, config: RunnableConfig):
-            """AI 代理节点，处理用户消息并决定是否调用工具"""
-            thread_id = config["configurable"]["thread_id"]
-            await self.check_and_trigger_interrupt(thread_id)
-
-            input_msg = state["context"]
-
-            if state["memory_tool_calls"]:
-                tool_calls = state["memory_tool_calls"]
-            else:
-                tool_calls = []
-
-            tool_call_times = state["tool_call_times"]
-
-            if tool_call_times >= TOOL_CALL_TIMES:
-                interrupt_msg = SystemMessage(content=f"已超过{TOOL_CALL_TIMES}次调用工具次数，请停止工具调用提前结束对话")
-                input_msg.append(interrupt_msg)
-
-            response_chunks = []
-            # agent_node 输出可能含 tool_calls，中段 interrupt 检查不能打断正常 tool 决策：
-            # 8 chunks 间隔对应 ~160 tokens，对 agent 决策流（通常 200-500 tokens 总长）
-            # 足够在 1-2s 内感知中断，又不会在单次决策里反复打断。
-            interrupt_check_interval = 4
-            interrupt_check_counter = 0
-            async for chunk in self.agent_llm.astream({"messages": input_msg}):
-                response_chunks.append(chunk)
-                interrupt_check_counter += 1
-                if interrupt_check_counter >= interrupt_check_interval:
-                    interrupt_check_counter = 0
-                    await self.check_and_trigger_interrupt(thread_id)
-            response = self._merge_chunks(response_chunks)
-
-            # 符合ToolNode节点的AIMessage(REASONING)
-            # ⚠️ 必须先 parse 再 filter：M3 偶发只把 tool_call 序列化到 content、不填结构化 tool_calls 字段
-            # （如 `<tool_calls>[{"name":"done","args":{}}]</tool_calls>`），filter 第 5 条会把整段剥掉
-            # → parse 拿空 content → 走 `if not raw_content: return ai_message` 兜底 → tool_calls=[] →
-            # agent_no_tool_call_retries 注入 SysMsg，最多 3 次后才强制 final_node（实测「你好」轻量对话
-            # 也会触发 2 次空转，浪费 4-6s）。调换顺序后：parse 拿完整 content 提取 tool_calls + 清掉
-            # <tool_calls> 文本块 → filter 后 content 干净（清思考标签 / 孤立 debris / 方括号包装）。
-            format_response = self._parse_content_to_tool_calls(response)
-            format_response = filter_thinking_content(format_response)
-
-            # 思维链日志：agent_node 输出（带 tool_calls 的 AIMessage）
-            self._write_thinking(thread_id, f"[agent_node_out]:\n{format_thinking_chain([format_response])}")
-
-            counts = 0
-
-            # 验证工具调用
-            for tool_call in format_response.tool_calls:
-                tool_name = tool_call.get("name", "")
-                args = tool_call.get("args", {})
-
-                # todo
-                # if tool_call not in tools:
-                #     self.logger.warning(f"没有工具: {tool_call}")
-
-                # code 必须有 code 参数
-                if tool_name == "code" and "code" not in args:
-                    warning_results = self._generate_tool_param_warning("code", ["code"])
-                    tool_call["args"]["code"] = warning_results
-                    self.logger.warning(f"code 缺少 code 参数: {args}")
-
-                # cmd 必须有 command 参数
-                if tool_name == "cmd" and "command" not in args:
-                    warning_results = self._generate_tool_param_warning("cmd", ["command"])
-                    tool_call["args"]["command"] = warning_results
-                    self.logger.warning(f"cmd 缺少 command 参数: {args}")
-
-                # ctime 保底：ctime 不接受任何参数。
-                if tool_name == "ctime":
-                    extra = dict(args)
-                    if extra:
-                        self.logger.warning(f"ctime 不应有任何参数，已清空: extra={extra}")
-                        tool_call["args"] = {}
-
-                # 不再注入 session_id 到 args（sid 走 X-Session-Id header 透传；
-                # 注入 args 会污染 tool_call 历史，让 LLM 误以为 cmd/code 接受 session_id）
-                tool_calls.append(tool_call)
-
-                counts += 1
-
-            tool_call_times += counts
-
-            return {
-                "messages": [format_response],
-                "tool_call_times": tool_call_times,
-                "memory_tool_calls": tool_calls,
-            }
-
-        tool_execution_node = PermissionedToolNode(tools=self.tools)  # 官方 ToolNode 子类，权限审批走 awrap_tool_call hook
-
-        @node_guard("should_end_node", logger=self.logger)
-        async def should_end_node(state: ChatStateCore2, config: RunnableConfig):
-            thread_id = config["configurable"]["thread_id"]
-            await self.check_and_trigger_interrupt(thread_id)
-
-            context = state["context"]
-
-            last_message = state["messages"][-1]
-            response = await self.should_end_llm.ainvoke({"messages": [last_message]})
-            content = str(response.content)
-
-            # 思维链日志：should_end 单独输出（决策点）
-            self._write_thinking(thread_id, f"[should_end_in]:\n{format_thinking_chain([last_message])}")
-
-            decision = "end"
-            if "retry" in content or "RETRY" in content:
-                decision = "retry"
-
-            retry_times = state.get("should_end_retry_times", 0) or 0
-
-            if decision == "retry":
-                retry_times += 1
-                if retry_times >= RETRY_TIMES:
-                    # 超过3次强制结束，清理验证相关 SystemMessage 后跳 final_node
-                    cleaned_context = [msg for msg in context if not (
-                        isinstance(msg, SystemMessage) and "[Warning]" in msg.content
-                    )]
-                    return {"should_end_decision": "end", "should_end_retry_times": retry_times, "context": cleaned_context}
-                retry_msg = SystemMessage(content="[Warning] 重新检查一下RE-ACT思维链")
-                context.append(retry_msg)
-                return {"should_end_decision": decision, "should_end_retry_times": retry_times, "context": context, "messages": [retry_msg]}
-
-            cleaned_context = [msg for msg in context if not (
-                isinstance(msg, SystemMessage) and "[Warning]" in msg.content
-            )]
-            return {"should_end_decision": decision, "should_end_retry_times": 0, "context": cleaned_context}
-
-        @node_guard("final_node", logger=self.logger)
-        async def final_node(state: ChatStateCore2, config: RunnableConfig):
-            thread_id = config["configurable"]["thread_id"]
-
-            self.logger.debug(f"会话 {thread_id} 思维链打回重试次数 {state["should_end_retry_times"]}")
-
-            await self.check_and_trigger_interrupt(thread_id)
-
-            # imp_ipt 在 system 层独占最高注意力位；{imp_ipt} 占位由 _final_system_template.format() 注入。
-            context = list(state["context"])
-
-            # 思维链日志：final_node 输入 context（imp_ipt 被 pop 之前的完整 context）
-            self._write_thinking(thread_id, f"[final_node_in_context]:\n{format_thinking_chain(context)}")
-
-            imp_ipt_idx = self._find_imp_ipt_idx(context)
-            if imp_ipt_idx is not None:
-                context.pop(imp_ipt_idx)
-
-            imp_ipt_msg: HumanMessage = state["imp_ipt"]
-            # 防止占位符出错
-            escaped_imp_ipt = imp_ipt_msg.content.replace("{", "{{").replace("}", "}}")
-            system_prompt = self._final_system_template.format(imp_ipt=escaped_imp_ipt)
-
-            response_chunks = []
-            interrupt_check_interval = 8
-            interrupt_check_counter = 0
-            final_messages = [
-                SystemMessage(content=system_prompt),
-                *context,
-                HumanMessage(content="请生成回复"),
-            ]
-            async for chunk in self.llm_core.astream(final_messages):
-                response_chunks.append(chunk)
-                interrupt_check_counter += 1
-                if interrupt_check_counter >= interrupt_check_interval:
-                    interrupt_check_counter = 0
-                    await self.check_and_trigger_interrupt(thread_id)
-            response = self._merge_chunks(response_chunks)
-
-            response = filter_thinking_content( response)
-
-            # 思维链日志：final_node 输出（最终回复）
-            self._write_thinking(thread_id, f"[final_node_out]:\n{format_thinking_chain([response])}")
-            self._write_thinking(thread_id, f"--------------------------------------------")
-
-            self.logger.debug(f"会话 {thread_id} 最终回复: {response}")
-
-            # AIMessage字段支持解包复制
-            response_dict = dict(response)
-            response_dict["additional_kwargs"] = {**response.additional_kwargs, "type": AIMessageType.SUMMARY.value}
-
-            response_better = AIMessage(**response_dict)
-
-            # 提取AI回复内容用于memory
-            memory_ai_response = get_message_content_string(response_better)
-
-            return {
-                "messages": [response_better],
-                "memory_ai_response": memory_ai_response,
-            }
-
-        workflow.add_node("input_parse_node", input_parse_node)
-        workflow.add_node("context_assembly_node", context_assembly_node)
-        workflow.add_node("agent_node", agent_node)
-        workflow.add_node("tool_execution_node", tool_execution_node)
-        workflow.add_node("should_end_node", should_end_node)
-        workflow.add_node("final_node", final_node)
-
-        def route_agent_output(state: ChatStateCore2) -> str:
-            """根据代理输出决定下一步"""
-            last_message = state["messages"][-1]
-            has_tool_calls = (
-                isinstance(last_message, AIMessage)
-                and hasattr(last_message, "tool_calls")
-                and bool(last_message.tool_calls)
-            )
-            decision = "tool_execution_node" if has_tool_calls else "should_end_node"
-            return decision
-
-        def route_should_end(state: ChatStateCore2) -> str:
-            """should_end_node 返回 end 则去 final_node，返回 retry 则回 context_assembly_node"""
-            decision = state.get("should_end_decision", "end")
-            next_node = "context_assembly_node" if decision == "retry" else "final_node"
-            return next_node
-
-        workflow.set_entry_point("input_parse_node")
-        workflow.add_edge("input_parse_node", "context_assembly_node")
-
-        workflow.add_edge("context_assembly_node", "agent_node")
-
-        workflow.add_conditional_edges("agent_node",
-            route_agent_output,
-            {
-                "tool_execution_node": "tool_execution_node",
-                "should_end_node": "should_end_node",
-            }
-        )
-
-        workflow.add_edge("tool_execution_node", "context_assembly_node")
-
-        workflow.add_conditional_edges("should_end_node",
-            route_should_end,
-            {
-                "final_node": "final_node",
-                "context_assembly_node": "context_assembly_node",
-            }
-        )
-
-        workflow.add_edge("final_node", END)
-
-        return workflow.compile(checkpointer=self.checkpointer)
-    
     async def _create_graph_improved(self):
         """
-        改进版图工作流对象（vs _create_graph_core2）：
-        - 去掉了 should_end_node（agent 无 tool_calls → 直进 final_node）
-        - 后续会加 done tool + final_quality_check_node（占位）
-
-        工程化图工作流对象:
+        图工作流对象:
         usr_input -> input_parse -> context_assembly
         -> agent_node -> tool_node --↗
                    ↘--> final_node
@@ -1511,6 +1051,7 @@ class ChatWorkflow:
             self._write_thinking(thread_id, f"[imp_ipt]:\n{format_thinking_chain([imp_ipt])}")
 
             return {
+                "messages": [imp_ipt],
                 "imp_ipt": imp_ipt,
                 "context": [],
                 "memory_user_message": imp_ipt_content,
@@ -1572,7 +1113,14 @@ class ChatWorkflow:
                         f"(AIMessage with done tool_call): {cycle_msg}"
                     )
                 else:
+                    skipped_drafts = 0
                     for msg in cycle_msg:
+                        # 无 tool_calls 的 AIMessage 是 agent 的「未采纳回复草稿」，不进 context
+                        if not self._is_context_worthy(msg):
+                            # 只记条数不记正文：正文已在 [agent_node_out] 全量打过，
+                            # format_thinking_chain 不带 id，重复打印无法区分且白占日志体积
+                            skipped_drafts += 1
+                            continue
                         context.append(msg)
                         # 逐条打印：随着 context 更新，每条 AIMessage / ToolMessage / HumanMessage 单独写入一行
                         self._write_thinking(thread_id, f"[react_context] +msg:\n{format_thinking_chain([msg])}")
@@ -1580,6 +1128,13 @@ class ChatWorkflow:
                         if isinstance(msg, ToolMessage):
                             content_string = get_message_content_string(msg)
                             tool_results.append(content_string)
+
+                    if skipped_drafts:
+                        self._write_thinking(
+                            thread_id,
+                            f"[react_context] skip {skipped_drafts} draft AIMessage(s) "
+                            f"(type=REASONING, no tool_calls)"
+                        )
 
                     updates["context"] = context
                     updates["memory_tool_results"] = tool_results
@@ -1988,8 +1543,17 @@ class ChatWorkflow:
             # 提取AI回复内容用于memory
             memory_ai_response = get_message_content_string(response_better)
 
+            # 清理本轮 agent 写的「未采纳回复草稿」（type=REASONING 且无 tool_calls）：
+            draft_removals = self._collect_draft_ai_removals(state["messages"])
+            if draft_removals:
+                self._write_thinking(
+                    thread_id,
+                    f"[final_node_cleanup]: remove {len(draft_removals)} draft AIMessage(s) "
+                    f"(type=REASONING, no tool_calls): {[rm.id for rm in draft_removals]}"
+                )
+
             return {
-                "messages": [response_better],
+                "messages": [*draft_removals, response_better],
                 "memory_ai_response": memory_ai_response,
             }
 

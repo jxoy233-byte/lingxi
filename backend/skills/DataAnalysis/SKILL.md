@@ -2,7 +2,7 @@
 name: data_analysis
 description: 数据分析与可视化：表格 / CSV 处理、统计图表、可视化报告生成、数据库只读查询
 mount: rw
-aliases: [DataAnalysis, pandas, numpy, matplotlib, chart, visualization, SQL, MySQL, MongoDB, database, CSV, plot]
+aliases: [DataAnalysis, pandas, numpy, matplotlib, chart, visualization, SQL, MySQL, SQLite, PostgreSQL, MongoDB, database, CSV, plot]
 module: skills.DataAnalysis
 ---
 

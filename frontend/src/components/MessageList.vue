@@ -27,6 +27,7 @@
         :pending-tool-approval="pendingToolApproval"
         :submitting-tool-decision="submittingToolDecision"
         :can-withdraw="canWithdrawFor(index)"
+        :action-busy="actionBusy"
         @restore="$emit('restore', $event)"
         @restream="(...args) => $emit('restream', ...args)"
         @open-link="$emit('open-link', $event)"
@@ -37,6 +38,7 @@
         @quote="$emit('quote', $event)"
         @tool-decide="(decision) => $emit('tool-decide', decision)"
         @withdraw="$emit('withdraw', $event)"
+        @focus-doc-preview="$emit('focus-doc-preview', $event)"
       />
 
       <div v-if="isLoading" class="loading-message" :class="{ 'interrupted': isInterrupted && isInterruptedSessionId === currentSessionId }">
@@ -119,9 +121,21 @@ export default {
       type: Boolean,
       default: false
     },
+    withdrawing: {
+      // 撤回执行中：↶ 按钮全部禁用（撤回要跑 POST /backtrack + GET /conversation，
+      // 期间界面无 loading 态，不禁掉会让人以为没点上而反复点）
+      type: Boolean,
+      default: false
+    },
+    actionBusy: {
+      // 会话级破坏性操作互斥锁（App.vue sessionActionBusy）：中断 / 回溯 / 重新生成 / 重新对话
+      // 任一在执行期间，这几个按钮全部 disabled
+      type: Boolean,
+      default: false
+    },
   },
   emits: [
-    'restore', 'restream', 'open-link', 'preview-file', 'interrupt', 'resume', 'restart-session', 'quote', 'tool-decide', 'withdraw', 'insert-suggestion',
+    'restore', 'restream', 'open-link', 'preview-file', 'interrupt', 'resume', 'restart-session', 'quote', 'tool-decide', 'withdraw', 'insert-suggestion', 'focus-doc-preview',
   ],
   data() {
     return {
@@ -152,6 +166,14 @@ export default {
     }
   },
   computed: {
+    /**
+     * 当前会话是否正卡在工具审批上。
+     * `pendingToolApproval` 是全局 singleton，别的会话待审时不能算到当前会话头上。
+     */
+    isApprovalPending() {
+      return !!this.pendingToolApproval
+        && this.pendingToolApproval.sessionId === this.currentSessionId
+    },
     // 将消息列表直接传递给 MessageItem，不拆分
     // MessageItem 内部会处理文件消息和文本消息的显示
     flattenedMessages() {
@@ -194,6 +216,7 @@ export default {
     // 必须存在「上一轮 AI 消息」且其 checkpointId/last_checkpoint_id 非空
     // （首条用户消息前面没有 AI，回溯无目标 → 禁用）
     canWithdrawFor(index) {
+      if (this.withdrawing) return false
       const flattened = this.flattenedMessages
       const msg = flattened[index]
       if (!msg || msg.role !== 'user') return false
@@ -623,6 +646,12 @@ export default {
           this.$nextTick(() => this._enterConversation())
           return
         }
+        // 待审批期间冻结自动跟随（放在 _pendingEntry 之后：切进一个「正卡在审批」的会话
+        // 仍要走入场，否则 _pendingEntry 不会被消费掉，会误触发到下一次消息变化上）。
+        // permission_request 会往 tool call 行里塞一整块审批 UI（比原来的 placeholder 高很多），
+        // 跟着贴底会把用户正要看的审批按钮顶出视野；审批期间又不会有新内容，
+        // 继续跟纯属噪声。等 onToolDecision 解决后 isApprovalPending 翻 false，自动恢复跟随。
+        if (this.isApprovalPending) return
         // ramping / entry：让当前动画接管，watcher 不动
         if (this.scrollMode === 'ramping' || this.scrollMode === 'entry') return
         // 用户已主动离开跟随：locked 让出，idle 也不接管
@@ -674,6 +703,19 @@ export default {
           this._setMode('idle')
         }
       }
+    },
+    /**
+     * 审批挂起 → 恢复：一次性把审批 UI 滚进视野，然后就冻住不动。
+     *
+     * 为什么要这一下：审批 UI 是插在最后一个 tool call 行里的，位置通常在折叠的思考面板
+     * 深处，不滚过去用户根本不知道系统在等他决策。滚完之后必须冻住（messages watcher 里
+     * 的 isApprovalPending 早退），否则 locked 模式会继续追底，把审批按钮顶出视野。
+     */
+    isApprovalPending(newVal) {
+      if (!newVal) return
+      this._cancelRaf()
+      this._setMode('idle')
+      this.$nextTick(() => this.scrollToBottom({ force: true }))
     },
     currentSessionId(newVal, oldVal) {
       if (newVal && newVal !== oldVal) {

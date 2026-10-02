@@ -98,7 +98,7 @@ docker-compose build sandbox
 {
   "app": {
     "name": "ChatMe",
-    "version": "v0.3.5",
+    "version": "v0.3.8",
     "host": "127.0.0.1",
     "port": 38211
   },
@@ -207,11 +207,13 @@ MCP 服务器（`mcps/server.py`，FastMCP 3.x，stdio transport）暴露以下�
 | ----------- | ------------------------------------------------------------------- |
 | `code`      | Docker 沙盒执行 Python / Node.js（`local=True` 降级本机）；执行前弹审批，按 fingerprint 永久批准 |
 | `cmd`       | Docker 沙盒执行白名单内 shell 命令；带危险命令检测 + 审批                       |
-| `find_skill`| 动态发现 skills（`mode='match'` top 3 / `mode='list'` 全索引）              |
+| `find_skill`| 动态发现 skills（`mode='match'` top 3 / `mode='list'` 全索引；中英混排 query 走 CJK bigram + 拉丁词匹配） |
 | `interrupt` | 中断当前对话                                                              |
 | `ctime`     | 获取当前日期时间                                                            |
 
 > **stdio transport**：MCP 由 `chatme_main` 自动 fork 作为子进程；`session_id` 客户端 interceptor 从 LangGraph runtime 的 `thread_id` 自动注入。MCP session 为长生命周期（子进程 + `ClientSession` 常驻复用）。
+
+> **`match` 模式**把 skill 的 `name` / `description` / 正文摘要 / `aliases` 合成语料打分，名字和别名命中额外加权——**新增 skill 务必写够 aliases，中英文都要**。`lazy: true` 的 skill（如 `DataAnalysis/database`）不参与匹配，只能从父 SKILL.md 读到。
 
 > **未知工具名兜底**：LLM 调到未注册的工具时 `PermissionedToolNode` 不崩，走 LangGraph `ToolNode._validate_tool_call` 返回错误 `ToolMessage` 让模型重试。
 
@@ -237,8 +239,8 @@ MCP 服务器（`mcps/server.py`，FastMCP 3.x，stdio transport）暴露以下�
 ```bash
 cd backend
 uv build --wheel
-# 输出: dist/ChatMe-0.3.5-py3-none-any.whl
-uv pip install dist/ChatMe-0.3.5-py3-none-any.whl
+# 输出: dist/ChatMe-0.3.8-py3-none-any.whl
+uv pip install dist/ChatMe-0.3.8-py3-none-any.whl
 # 安装后 chatme_main 和 chatme_mcp 命令全局可用
 ```
 
@@ -256,7 +258,7 @@ npm run electron:build:mac      # macOS arm64 + x64（DMG + ZIP）
 npm run electron:build:win      # Windows NSIS（x64）
 ```
 
-应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.3.5）在 `frontend/electron/electron.config.js` 中配置。**输出位置**：`../release/electron-builder/`，包含 `灵析.app` / `灵析-0.3.5-arm64.dmg` / `灵析-0.3.5.dmg` / `灵析 Setup 0.3.5.exe`。
+应用信息（应用名「灵析」、identifier `com.chatme.app`、版本 0.3.8）在 `frontend/electron/electron.config.js` 中配置。**输出位置**：`../release/electron-builder/`，包含 `灵析.app` / `灵析-0.3.8-arm64.dmg` / `灵析-0.3.8.dmg` / `灵析 Setup 0.3.8.exe`。
 
 ## 开发注意事项
 

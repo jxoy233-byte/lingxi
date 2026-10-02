@@ -69,9 +69,9 @@
         <button @click="downloadFile">下载完整文件</button>
       </div>
 
-      <div v-if="isRenderableFile && !isEditing" class="render-tabs">
-        <button :class="['tab-btn', { active: viewTab === 'raw' }]" @click="viewTab = 'raw'">原文</button>
-        <button :class="['tab-btn', { active: viewTab === 'rendered' }]" @click="viewTab = 'rendered'">渲染效果</button>
+      <div v-if="isRenderableFile && !isEditing" class="preview-tabs">
+        <button :class="['preview-tab-btn', { active: viewTab === 'raw' }]" @click="viewTab = 'raw'">原文</button>
+        <button :class="['preview-tab-btn', { active: viewTab === 'rendered' }]" @click="viewTab = 'rendered'">渲染效果</button>
         <span class="zoom-controls" v-if="viewTab === 'rendered' && isMermaidFile">
           <button class="zoom-btn" @click="mermaidZoomScale = Math.max(0.3, mermaidZoomScale - 0.1)" title="缩小">−</button>
           <span class="zoom-label">{{ Math.round(mermaidZoomScale * 100) }}%</span>
@@ -87,6 +87,23 @@
       </div>
       <div v-else-if="isImageFile" class="content-body image-preview">
         <img :src="tab.url" :alt="tab.name" />
+      </div>
+      <!-- v0.3.7 —— .docx / .xlsx 复用 ToolDocPreview（mammoth / SheetJS 渲染 + 编辑）
+           与 AI 工具调用共用同一组件，UX 一致。
+           chrome='minimal' 剥 panel 边框（TabPane 已有自己的 toolbar / 文件树侧栏）。
+           v0.3.8：tab.docVersion 每次 tool_call_result +1 → 重 fetch 一次，
+           AI 每写完一段面板内容就多一段（不做打字机揭示，不显示任何状态）。
+           tab.isStreaming 只用于压掉「文件还没写出来」阶段的预期 404，不外露。 -->
+      <div v-else-if="isOfficeDoc" class="content-body content-body--office">
+        <ToolDocPreview
+          chrome="minimal"
+          :tool-name="tab.kind === 'office_docx' ? 'WordEditor' : 'ExcelEditor'"
+          :args="{}"
+          :version="tab.docVersion || 0"
+          :is-streaming="!!tab.isStreaming"
+          :session-id="effectiveSessionId"
+          :path="tab.url"
+        />
       </div>
       <div v-else-if="isHtmlFile" class="html-render-area">
         <iframe
@@ -128,6 +145,7 @@
 import { marked } from 'marked'
 import { sanitizeHtml, passthroughTrustedSvg } from '@/utils/sanitize.js'
 import { fetchTextPreview } from '@/utils/filePreview.js'
+import ToolDocPreview from './ToolDocPreview.vue'
 
 export default {
   name: 'FilePreviewTabPane',
@@ -137,6 +155,7 @@ export default {
     showFileTree: { type: Boolean, default: false }
   },
   emits: ['close-panel', 'toggle-file-tree', 'reload'],
+  components: { ToolDocPreview },
   data() {
     return {
       viewTab: 'rendered',
@@ -165,6 +184,18 @@ export default {
     },
     isImageFile() {
       return this.tab.kind === 'image' || ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'].includes(this.suffix)
+    },
+    isOfficeDoc() {
+      return this.tab.kind === 'office_docx' || this.tab.kind === 'office_xlsx'
+    },
+    /**
+     * v0.3.8 —— ToolDocPreview 保存要用的 sessionId。
+     * AI 写作 tab 的 tab.sessionId 绑的是「正在写这份文档的 session」
+     * （后台流式时用户可能已经切到别的会话），优先用它；用户手动开的文件没有这个
+     * 字段，退回组件收到的当前 sessionId。
+     */
+    effectiveSessionId() {
+      return this.tab.sessionId || this.sessionId
     },
     isRenderableFile() {
       return this.isMarkdownFile || this.isMermaidFile || this.isHtmlFile
@@ -313,7 +344,9 @@ export default {
 .file-info { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
 .file-icon { color: var(--button-bg); flex-shrink: 0; }
 .file-name { font-size: 14px; font-weight: 500; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.toolbar-actions { display: flex; gap: 2px; flex-shrink: 0; }
+.toolbar-actions { display: flex; gap: 2px; flex-shrink: 0; align-items: center; }
+/* v0.3.8：AI 正在写这份文档时不显示任何「写入中」状态 —— 面板内容自己会一段段长出来，
+   额外挂一个状态徽标只会让人以为卡住。tab.isStreaming 只传给 ToolDocPreview 压预期 404。 */
 .tool-btn { width: 32px; height: 32px; border: none; background: transparent; color: var(--text-secondary); border-radius: 6px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background 0.15s, color 0.15s; }
 .tool-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
 .tool-btn.active, .tool-btn-primary { background: var(--button-bg); color: #fff; }
@@ -325,6 +358,8 @@ export default {
 .truncation-notice { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; padding: 9px 12px; border: 1px solid #f59e0b; border-radius: 6px; color: #92400e; background: rgba(245, 158, 11, 0.12); font-size: 12px; }
 .truncation-notice button { flex-shrink: 0; border: none; background: transparent; color: var(--button-bg); cursor: pointer; font-weight: 500; }
 .content-body { font-size: 14px; line-height: 1.7; color: var(--text-primary); word-wrap: break-word; overflow-wrap: anywhere; min-height: 0; width: 100%; max-width: 100%; box-sizing: border-box; }
+/* office docx/xlsx：ToolDocPreview 自己管内部滚动，外层不要再套一层 overflow */
+.content-body--office { padding: 0; }
 .content-body.image-preview {
   /* flex 列布局 + align-items: center → 窄图水平居中；移除 max-height / justify-content: center
      → 长图按容器宽度渲染，溢出时由 .content-container 的 overflow-y: auto 自然滚动（不再被 70vh 截掉变迷你） */
@@ -367,9 +402,6 @@ export default {
 .content-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: var(--text-secondary); gap: 12px; }
 .content-empty svg { opacity: 0.3; }
 .content-empty p { font-size: 14px; margin: 0; }
-.render-tabs { display: flex; gap: 4px; padding-bottom: 12px; border-bottom: 1px solid var(--border-color); margin-bottom: 12px; flex-shrink: 0; }
-.render-tabs .tab-btn { padding: 5px 14px; border: 1px solid var(--border-color); background: var(--bg-secondary); color: var(--text-secondary); border-radius: 6px; cursor: pointer; font-size: 13px; }
-.render-tabs .tab-btn.active { background: var(--button-bg); color: white; border-color: var(--button-bg); }
 .zoom-controls { display: flex; align-items: center; gap: 4px; margin-left: auto; }
 .zoom-btn { width: 24px; height: 24px; border: 1px solid var(--border-color); background: var(--bg-secondary); color: var(--text-secondary); border-radius: 4px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
 .zoom-label { font-size: 12px; color: var(--text-secondary); min-width: 40px; text-align: center; }

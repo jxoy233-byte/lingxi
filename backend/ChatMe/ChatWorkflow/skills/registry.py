@@ -39,21 +39,62 @@ def _tokenize_for_search(text: str) -> set[str]:
     - ASCII 词按空格 / 标点切分（"code execution" → {"code", "execution"}）
     - 进一步按 `_` 和 camelCase 大写字母切分（"exa_search" → {"exa", "search"}）
       —— 这是为了函数名里出现的 search / image / parse 等子词能被 query 命中
+    - **中英边界切分**（"做成excel表" → {"做", "成", "表", "excel"}）
+      —— 真实 query 几乎全是中英混排，而上面的分隔符集合里没有 CJK，
+      "帮我生成一个Excel表格" 会被当成**一个**整词、latin 部分整个丢掉：
+      excel 不是 token → ExcelEditor 的 alias 永远命中不了。
+      症状是 find_skill 查 "excel" 能中、查 "做成excel表" 却返回 DataAnalysis。
+      静默失配比 0 命中更坏：0 命中会提示切 mode='list'，错命中不会，
+      模型拿着错误的 top-3 就走了 —— 这正是"有时候反应过来有时候没反应过来"。
     """
     tokens: set[str] = set()
     for word in re.split(r"[\s,.;:!?()\"'\-/]+", text.lower()):
         if not word:
             continue
-        # camelCase + underscore split
-        for sub in re.split(r"(?=[A-Z])|_+", word):
-            sub = sub.strip()
-            if sub:
-                tokens.add(sub)
+        # 中英边界切分：CJK 与 ASCII 字母数字的交界处断开
+        for seg in re.split(r"(?<=[一-鿿])(?=[a-z0-9])|(?<=[a-z0-9])(?=[一-鿿])", word):
+            if not seg:
+                continue
+            # camelCase + underscore split
+            for sub in re.split(r"(?=[A-Z])|_+", seg):
+                sub = sub.strip()
+                if sub:
+                    tokens.add(sub)
         # CJK char split
         for char in word:
             if '\u4e00' <= char <= '\u9fff':
                 tokens.add(char)
     return tokens
+
+
+def _search_signature(text: str) -> set[str]:
+    """高区分度的检索签名：拉丁词 + CJK bigram。
+
+    与 `_tokenize_for_search` 的区别是**丢弃 CJK 单字**。
+    单字在中文里几乎没有区分度：别名 `数据表` 拆成 {数,据}，query
+    "sqlite数据库" 同样含 {数,据} → ExcelEditor 靠噪声压过 data_analysis；
+    而 `创建技能` 拆成 {创,建,技,能} 撞上 "做个天气技能" 又是蒙对。
+    两种都是巧合，不是信号。bigram 才是词：`数据表`→{数据,据表}、
+    `创建技能`→{创建,建技,技能}，前者不撞 "数据库"，后者正确命中 "技能"。
+
+    单字仍留在 `_tokenize_for_search` 里参与基础打分（删了会改动既有权重），
+    这里只给高权重的别名层提供干净的比较空间。
+
+    ⚠️ bigram 必须**逐个别名**算，不能先把所有别名的 CJK 拼起来再切：
+    "…Excel表格 数据表…" 拼成 "表格数据表" 后，跨边界的 `格数` / `据表`
+    会成为根本不存在的伪词。
+    """
+    sig: set[str] = set()
+    for raw in text.split():
+        if not raw:
+            continue
+        sig |= {
+            t for t in _tokenize_for_search(raw)
+            if any(c.isascii() and c.isalnum() for c in t)
+        }
+        cjk = re.sub(r"[^一-鿿]", "", raw)
+        sig |= {cjk[i:i + 2] for i in range(len(cjk) - 1)}
+    return sig
 
 
 class SkillRegistry:
@@ -142,6 +183,7 @@ class SkillRegistry:
         query_tokens = _tokenize_for_search(query)
         if not query_tokens:
             return []
+        query_sig = _search_signature(query)
 
         scored: list[tuple[SkillManifest, int]] = []
         for skill in self._skills.values():
@@ -158,6 +200,17 @@ class SkillRegistry:
             token_hits = len(query_tokens & corpus_tokens)
             substring_bonus = 1 if query.lower() in corpus.lower() else 0
             score = token_hits * 2 + substring_bonus
+            # 名字 / 别名命中额外加权。
+            # Why：CJK 按字拆开后噪声极大 —— "做成excel表" 的 token 是
+            # {做,成,表,excel}，前三字在半数 skill 的中文 description 里都出现，
+            # 而 excel 只命中 1 个。按基础算法 ExcelEditor 拿 2 分，
+            # DataAnalysis 靠零散 CJK 字拿 8 分，Excel 被挤出 top-3。
+            # 别名是作者显式声明的"我叫什么名字"，信噪比远高于描述里的常用字。
+            # 用 _search_signature（拉丁词 + CJK bigram）比较，见其 docstring。
+            if query_sig & _search_signature(
+                f"{skill.name} {' '.join(skill.import_aliases)}"
+            ):
+                score += 6
             if score > 0:
                 scored.append((skill, score))
 

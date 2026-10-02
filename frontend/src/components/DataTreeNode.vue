@@ -26,12 +26,15 @@
         </svg>
       </span>
 
+      <!-- 文件夹：macOS 风格实心蓝，展开时前倾（比描边轮廓更容易一眼认出） -->
       <span class="dtn-icon">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path v-if="isExpanded" d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/>
-          <path v-else d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"
-                :style="{ fill: 'rgba(59, 130, 246, 0.08)' }"/>
+        <svg width="18" height="18" viewBox="0 0 24 24">
+          <path class="dtn-folder-back"
+                d="M2.5 6.5a2 2 0 0 1 2-2h4.2l1.8 2.2h9a2 2 0 0 1 2 2v9.8a2 2 0 0 1-2 2h-15a2 2 0 0 1-2-2z"/>
+          <path class="dtn-folder-front"
+                :d="isExpanded
+                  ? 'M2.5 9.5h19l-1.7 9.3a2 2 0 0 1-2 1.7H4.2a2 2 0 0 1-2-1.9z'
+                  : 'M2.5 9.5h19v9.5a2 2 0 0 1-2 2h-15a2 2 0 0 1-2-2z'"/>
         </svg>
       </span>
 
@@ -82,24 +85,29 @@
       ></span>
       <span class="dtn-caret dtn-caret--placeholder"></span>
 
-      <span class="dtn-icon dtn-icon--file" :class="'dtn-icon-' + iconKind">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path v-if="iconKind === 'image'" d="M3 5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5z"/>
-          <circle v-if="iconKind === 'image'" cx="9" cy="9" r="1.5" fill="currentColor"/>
-          <path v-if="iconKind === 'image'" d="M21 15l-5-5L5 21"/>
-          <path v-else-if="iconKind === 'data'"
-                d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-          <path v-else-if="iconKind === 'data'" d="M9 13h6M9 17h6M9 9h2"/>
-          <path v-else-if="iconKind === 'code'"
-                d="M16 18l6-6-6-6M8 6l-6 6 6 6"/>
-          <path v-else-if="iconKind === 'markdown'"
-                d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-          <path v-else-if="iconKind === 'markdown'" d="M8 13v4M12 13v4M16 13l-2 4M8 13l4 4M8 17l4-4"/>
-          <path v-else d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-          <polyline v-if="iconKind !== 'image' && iconKind !== 'code' && iconKind !== 'markdown'"
-                    points="14 2 14 8 20 8"/>
-          <line v-if="iconKind === 'code'" x1="2" y1="12" x2="6" y2="12"/>
+      <!-- 文件：彩色圆角徽章 + 真实扩展名小字（照抄 Windows / Adobe 的做法）。
+           抽象字形在这个尺寸下 16 种全糊成同一坨，印扩展名才有区分度：
+           PDF / DOCX / XLSX / PY / ZIP 一眼可辨，不用点开 title 猜。 -->
+      <span class="dtn-icon dtn-icon--file" :class="'dtn-icon-' + iconKind" :title="iconHint">
+        <svg width="18" height="18" viewBox="0 0 24 24">
+          <rect class="dtn-badge" x="1.25" y="1.25" width="21.5" height="21.5" rx="5.5"/>
+          <text
+            v-if="badgeText"
+            class="dtn-tag"
+            x="12"
+            y="12"
+            text-anchor="middle"
+            dominant-baseline="central"
+            :font-size="badgeSize"
+          >{{ badgeText }}</text>
+          <!-- 无扩展名 / 后缀未注册（Makefile、LICENSE、.foo）→ 画文档页字形。
+               这类文件没有可印的短标，印 "FILE" 既没信息量又跟文本徽章长得一样。 -->
+          <g v-else>
+            <path class="dtn-gl-doc"
+                  d="M7.3 4.5h5.6l3.8 3.9v10.7a1.3 1.3 0 0 1-1.3 1.3H7.3A1.3 1.3 0 0 1 6 19.1V5.8a1.3 1.3 0 0 1 1.3-1.3z"/>
+            <path class="dtn-gl-doc" d="M12.7 4.5v4.1h3.8"/>
+            <path class="dtn-gl" d="M8.9 12.4h6.3M8.9 15.3h6.3M8.9 18.2h3.5"/>
+          </g>
         </svg>
       </span>
 
@@ -168,6 +176,12 @@
  * - 目录：{ type: 'directory', name, path, children: [...] }
  * - 文件：{ type: 'file', name, path, size, modified_at }
  */
+/**
+ * 文件类型色 / 字形规则集中在 `utils/fileKind.js` —— 回收站树（TrashTreeNode）共用同一套，
+ * 避免两棵树各改各的、慢慢走样。
+ */
+import { resolveFileKind, fileKindHint, fileBadgeText, badgeFontSize } from '../utils/fileKind.js'
+
 export default {
   name: 'DataTreeNode',
   props: {
@@ -252,14 +266,19 @@ export default {
       })
     },
     iconKind() {
-      const name = (this.node.name || '').toLowerCase()
-      if (/\.(png|jpe?g|gif|webp|svg)$/.test(name)) return 'image'
-      if (/\.(csv|tsv|xlsx?)$/.test(name)) return 'data'
-      if (/\.(json)$/.test(name)) return 'data'
-      if (/\.(py|js|ts|jsx|tsx|vue|rs|go|java|c|cpp|h|hpp|rb|sh|bash)$/.test(name)) return 'code'
-      if (/\.(md|markdown)$/.test(name)) return 'markdown'
-      if (/\.mmd$/.test(name)) return 'markdown'
-      return 'text'
+      return resolveFileKind(this.node.name)
+    },
+    // 悬停提示补上中文类型标签——徽章上的短标只有几个字符，完整品类靠 title
+    iconHint() {
+      return fileKindHint(this.node.name)
+    },
+    badgeText() {
+      return fileBadgeText(this.node.name)
+    },
+    // 注意这是「值」不是「函数」——模板里直接 :font-size="badgeSize"，
+    // 写成 badgeFontSize(badgeText) 会去调用这个数字，render 直接抛错、整棵子树消失
+    badgeSize() {
+      return badgeFontSize(this.badgeText)
     }
   },
   watch: {
@@ -552,17 +571,58 @@ export default {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 16px;
+  /* 18px 而不是 16px：徽章里印了 4 字符短标（DOCX / XLSX），16px 下缩到 ~5px 高根本读不出来。
+     行高预算够：.dtn-row min-height 24 + 上下 padding 3 = 内容区 18px */
+  width: 18px;
+  height: 18px;
   flex-shrink: 0;
   color: var(--primary-color, #3b82f6);
 }
-.dtn-icon--file { color: var(--text-secondary, #6b7280); }
-.dtn-icon-image { color: #8b5cf6; }
-.dtn-icon-data { color: #10b981; }
-.dtn-icon-code { color: #f59e0b; }
-.dtn-icon-markdown { color: #6366f1; }
-.dtn-icon-text { color: #6b7280; }
+
+/* --- 文件夹（macOS 风格：后盖 + 前片，展开时前片前倾） --- */
+.dtn-folder-back { fill: var(--ft-folder-back, #93c5fd); }
+.dtn-folder-front { fill: var(--ft-folder-front, #3b82f6); }
+
+/* --- 文件徽章：实心底色 + 扩展名小字 ---
+   底色给大类，印真实扩展名给具体类型。字号按字符数分档（见 fileKind.js badgeFontSize），
+   4 字符档要靠 font-weight 700 + 负字距才不至于挤成一坨。 */
+.dtn-badge { fill: var(--dtn-fg, #6b7280); }
+.dtn-gl { fill: #fff; }
+.dtn-gl-doc {
+  fill: none;
+  stroke: #fff;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.dtn-tag {
+  fill: #fff;
+  font-family: -apple-system, 'Helvetica Neue', Arial, sans-serif;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  /* 关掉连字：大写短标不需要，也不会因为字体差异被合成 unexpected 形状 */
+  font-variant-ligatures: none;
+  text-rendering: geometricPrecision;
+  user-select: none;
+}
+
+.dtn-icon-sheet  { --dtn-fg: var(--ft-sheet); }
+.dtn-icon-table  { --dtn-fg: var(--ft-table); }
+.dtn-icon-docx   { --dtn-fg: var(--ft-docx); }
+.dtn-icon-pdf    { --dtn-fg: var(--ft-pdf); }
+.dtn-icon-markdown { --dtn-fg: var(--ft-markdown); }
+.dtn-icon-html   { --dtn-fg: var(--ft-html); }
+.dtn-icon-image  { --dtn-fg: var(--ft-image); }
+.dtn-icon-video  { --dtn-fg: var(--ft-video); }
+.dtn-icon-audio  { --dtn-fg: var(--ft-audio); }
+.dtn-icon-archive { --dtn-fg: var(--ft-archive); }
+.dtn-icon-font   { --dtn-fg: var(--ft-font); }
+.dtn-icon-json   { --dtn-fg: var(--ft-json); }
+.dtn-icon-code   { --dtn-fg: var(--ft-code); }
+.dtn-icon-binary { --dtn-fg: var(--ft-binary); }
+.dtn-icon-text   { --dtn-fg: var(--ft-text); }
+.dtn-icon-doc,
+.dtn-icon-other  { --dtn-fg: var(--ft-doc); }
 
 .dtn-name {
   flex: 1;

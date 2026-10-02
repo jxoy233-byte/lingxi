@@ -192,8 +192,37 @@
                「ToolMessage 的结果」在视觉上读作一个整体，而不是两块游离内容。
                分组序列由 thinkingBlocks 计算（见 script，按 toolCall.reasoningBefore 切分）。 -->
           <template v-for="(blk, bi) in thinkingBlocks" :key="bi">
-            <!-- 组头：这一段思考 -->
-            <div v-if="blk.type === 'reasoning'" class="reasoning-text">{{ blk.text }}</div>
+            <!-- imp_ipt：input_parse_node 对本轮用户输入的优化结果（思考的起点）
+                 语义上属于「输入侧的系统理解」，不是 AI 的一轮思考，
+                 所以不能跟 .reasoning-text 共用 ▸ 项目符号排版 —— 做成带左侧强调条的
+                 卡片，一眼能和下面的思考段分开（它是 thinkingBlocks 的固定第一块） -->
+            <div v-if="blk.type === 'impIpt'" class="imp-ipt-block">
+              <span class="imp-ipt-label">
+                <svg class="imp-ipt-icon" xmlns="http://www.w3.org/2000/svg" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+                  <circle cx="12" cy="12" r="8.5"/>
+                  <circle cx="12" cy="12" r="2.5"/>
+                </svg>理解意图
+              </span>{{ blk.text }}
+            </div>
+
+            <!-- 组头：这一段思考。
+                 v0.3.9 —— 单段思考超过 5 行自动折叠（只留 5 行 + 「展开」按钮），
+                 防止一轮长思考把下面的 tool 行顶出视野。是否溢出由 measureReasoningOverflow()
+                 实测 scrollHeight/clientHeight 得出（行数取决于渲染宽度，JS 猜不准），
+                 写在 data-reasoning-index 上供该方法反查。 -->
+            <div v-else-if="blk.type === 'reasoning'" class="reasoning-block">
+              <div
+                class="reasoning-text"
+                :class="{ 'reasoning-text--clamped': reasoningOverflow[bi] && !expandedReasonings[bi] }"
+                :data-reasoning-index="bi"
+              >{{ blk.text }}</div>
+              <button
+                v-if="reasoningOverflow[bi]"
+                type="button"
+                class="reasoning-toggle"
+                @click.stop="toggleReasoning(bi)"
+              >{{ reasoningToggleLabel(bi) }}</button>
+            </div>
 
             <!-- 组体：tool 调用 + 它的 ToolMessage 结果 -->
             <div
@@ -243,6 +272,27 @@
                   <span class="tool-result">{{ blk.tool.result }}</span>
                 </div>
               </div>
+
+              <!-- v0.3.8 —— WordEditor/ExcelEditor 预览改到右侧已有的 FilePreviewPanel。
+                   思考面板里只留这个紧凑指示器（点它把面板切到对应 tab），
+                   文档正文不内嵌 —— 内嵌会让 100 段的文档把思考面板撑爆，
+                   AIMessage 的思考段和 ToolMessage 的结果层级彻底看不清。 -->
+              <button
+                v-if="isWordEditorTool(blk.tool) || isExcelEditorTool(blk.tool)"
+                type="button"
+                class="tool-doc-indicator"
+                title="在右侧文件预览面板中打开"
+                @click.stop="$emit('focus-doc-preview', blk.tool)"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                  <polyline points="14 2 14 8 20 8"/>
+                </svg>
+                <span class="tool-doc-indicator-label">
+                  {{ isWordEditorTool(blk.tool) ? 'Word 文档' : 'Excel 表格' }}
+                </span>
+                <span class="tool-doc-indicator-hint">右侧面板</span>
+              </button>
 
               <!-- 内嵌审批 UI：仅当此 tool 是当前 pending 审批目标时渲染 -->
               <div
@@ -299,7 +349,7 @@
                   <textarea
                     v-model="feedbackText[blk.index]"
                     class="tool-feedback-textarea"
-                    placeholder="例如：用 Python sandbox；先列出将删除的文件再删；不要递归 ..."
+                    placeholder="告诉 AI 该怎么做，例如：用 Python sandbox 实现；先列出要删除的文件再删；不要递归 ..."
                     :disabled="submittingToolDecision"
                     rows="3"
                     @click.stop
@@ -321,6 +371,14 @@
               </div>
             </div>
           </template>
+
+          <!-- 上游重试提示：作为「思考过程中的一条信息」渲染，不是错误气泡。
+               放在 thinking 面板里、和 reasoning 并列，所以它不覆盖任何已有思考/正文；
+               重试成功后（stalledMs 归零 / 消息进入终态）自然消失，回到正常流式。 -->
+          <div v-if="retryNotice" class="retry-notice" :class="{ 'retry-notice--active': retryNotice.active }">
+            <span class="retry-notice-dot" :class="{ 'dot-active': retryNotice.active }"></span>
+            <span class="retry-notice-text">{{ retryNotice.text }}</span>
+          </div>
 
           <!-- ③ 空状态：reasoning / toolCalls / 中断原因都为空时给用户一个明确提示 -->
           <div
@@ -372,19 +430,22 @@
 
         <!-- 操作按钮组：AI 消息下方，hover 显示 -->
         <div v-if="message.role === 'ai'" class="action-buttons">
+          <!-- 中断是「逃生舱」：不参与 actionBusy 互斥锁，否则重新生成期间（isRestreaming）
+               唯一的停止手段会被自己锁死。防连点靠 App.vue handleInterrupt 的 _interruptInFlight 早退 ——
+               重复 POST /interrupt 只是重写同一个 redis hash，没有状态错位风险 -->
           <button v-if="message.streaming && hasReceivedInit && isLatestAiMessage && !isInterrupted" class="action-button interrupt-action" @click.stop="handleInterrupt" title="中断当前对话">
             <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <rect x="3" y="3" width="18" height="18" rx="2"/>
             </svg>
           </button>
           <template v-else>
-            <button v-if="canBacktrack" class="action-button" @click="handleRestore" title="回溯到此对话">
+            <button v-if="canBacktrack" class="action-button" :disabled="actionBusy" @click="handleRestore" title="回溯到此对话">
               <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="1 4 1 10 7 10"/>
                 <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
               </svg>
             </button>
-            <button v-if="canRestream" class="action-button" @click="handleRestream" title="重新生成">
+            <button v-if="canRestream" class="action-button" :disabled="actionBusy" @click="handleRestream" title="重新生成">
               <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M21 2v6h-6"/>
                 <path d="M3 12a9 9 0 0 1 15-6.7L21 8"/>
@@ -419,7 +480,7 @@
                 <polygon points="5 3 19 12 5 21 5 3"/>
               </svg>
             </button>
-            <button v-if="isInterruptionRelevant" class="action-button" @click="$emit('restart-session')" title="重新对话">
+            <button v-if="isInterruptionRelevant" class="action-button" :disabled="actionBusy" @click="$emit('restart-session')" title="重新对话">
               <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="23 4 23 10 17 10"/>
                 <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
@@ -462,6 +523,7 @@ import 'katex/dist/katex.min.css'
 import mermaid from 'mermaid'
 import FilePreviewModal from './FilePreviewModal.vue'
 import { sanitizeHtml } from '@/utils/sanitize.js'
+import { isWordEditorCall, isExcelEditorCall } from '@/utils/wordExcel.js'
 
 // 初始化 mermaid（可拖拽交互）
 mermaid.initialize({
@@ -470,6 +532,13 @@ mermaid.initialize({
   flowchart: { htmlLabels: true, curve: 'basis', useMaxWidth: false },
   securityLevel: 'loose',
 })
+
+// 工具审批 4 选项的**动作**序列（键盘 ←/→ 与数字键 1-4 共用）。
+// ⚠️ 第 3 项 'feedback' 是「展开反馈输入框」的**模式**标记，不是提交给后端的决策值：
+// 后端只认 'feedback:<text>'，把裸 'feedback' 当决策发出去会让 /permission/resume 返 400
+// → LangGraph 永远停在 interrupt() → 会话卡死（无任何 UI 提示）。
+// 提交前统一走 activateApprovalOption()，它把第 3 项拦下来转成 toggleFeedback()。
+const APPROVAL_OPTIONS = ['deny', 'this-time-only', 'feedback', 'approve']
 
 // 文本/代码类扩展名：双中括号 [[...]] 和 markdown 链接走「纯文本预览」分支
 // 不含 .md/.markdown（走 Markdown 渲染）、不含 .html/.htm（走 iframe）
@@ -619,9 +688,15 @@ export default {
       // 首条用户消息无前一轮可回溯，禁用。
       type: Boolean,
       default: false
+    },
+    actionBusy: {
+      // 会话级破坏性操作互斥锁（App.vue sessionActionBusy）：中断 / 回溯 / 重新生成 / 重新对话
+      // 任一在执行期间全部 disabled —— 这四个都只跑一次就对，连点是状态错位而不是「多跑一遍」
+      type: Boolean,
+      default: false
     }
   },
-  emits: ['restore', 'restream', 'open-link', 'preview-file', 'interrupt', 'resume', 'restart-session', 'quote', 'tool-decide', 'withdraw'],
+  emits: ['restore', 'restream', 'open-link', 'preview-file', 'interrupt', 'resume', 'restart-session', 'quote', 'tool-decide', 'withdraw', 'focus-doc-preview'],
   components: {
     FilePreviewModal
   },
@@ -648,7 +723,14 @@ export default {
       feedbackText: {},
       // 工具审批 4 按钮键盘高亮（deny=0 / once=1 / feedback=2 / approve=3）。
       // 每当此 tool 进入审批态时重置为 0（deny 默认），Enter 触发当前选项的 click。
-      approvalSelectedIndex: 0
+      approvalSelectedIndex: 0,
+      // v0.3.9 —— 思考段 5 行折叠：
+      //   reasoningOverflow[bi] = 该段是否超过 5 行（实测得出，见 measureReasoningOverflow）
+      //   reasoningLines[bi]    = 该段实际行数（用于「展开全部（N 行）」文案）
+      //   expandedReasonings[bi]= 用户是否手动展开（默认折叠）
+      reasoningOverflow: {},
+      reasoningLines: {},
+      expandedReasonings: {}
     }
   },
   mounted() {
@@ -661,10 +743,20 @@ export default {
     // 监听全局 mouseup，用于检测 AI 消息内的文本选区
     document.addEventListener('mouseup', this.handleTextSelection)
     document.addEventListener('selectionchange', this.handleSelectionChange)
+    // 思考段是否超 5 行取决于渲染宽度，窗口缩放要重新量一次
+    window.addEventListener('resize', this.handleWindowResize)
+    this.$nextTick(this.measureReasoningOverflow)
+  },
+  updated() {
+    // 每次 re-render 都要重量：流式增量、思考面板展开/折叠、tool 审批态变化
+    // 都会改变思考段的可见高度（见 measureReasoningOverflow 里的注释）。
+    this.measureReasoningOverflow()
   },
   beforeUnmount() {
     document.removeEventListener('mouseup', this.handleTextSelection)
     document.removeEventListener('selectionchange', this.handleSelectionChange)
+    window.removeEventListener('resize', this.handleWindowResize)
+    if (this._resizeTimer) clearTimeout(this._resizeTimer)
   },
   computed: {
     /**
@@ -895,6 +987,12 @@ export default {
       const tools = this.message.toolCalls || []
       const reasoning = this.message.reasoning || ''
       const blocks = []
+      // imp_ipt 固定排在最前：它是本轮一切思考的起点（系统对用户输入的优化结果），
+      // 排在 agent 推理之前才符合因果顺序。单独成块、带标题，不与 reasoning 混排。
+      const impIpt = (this.message.impIpt || '').trim()
+      if (impIpt) {
+        blocks.push({ type: 'impIpt', text: impIpt })
+      }
       let consumed = 0
       tools.forEach((tool, index) => {
         const raw = tool.reasoningBefore
@@ -910,13 +1008,43 @@ export default {
       return blocks
     },
     /**
+     * 上游重试提示（作为思考链里的一条信息，不覆盖任何已有内容）。
+     *
+     * 两种来源：
+     * 1. 进行中 —— message.stalledMs > 0（App.vue 的 startStreamTimer 每 250ms 写）：
+     *    上游静默超过阈值，正在原地重试。只报「已等待 Ns」，因为「第 N/5 次」
+     *    只有后端知道，前端不编。
+     * 2. 终态 —— message.retryExhausted：后端重试耗尽抛 TransientUpstreamError，
+     *    error 事件带 upstream_transient/retry_attempts，此时显示真实次数。
+     *
+     * 恢复后（下一个 SSE 事件到达 → stalledMs 归零 / 消息不再 streaming）自动消失，
+     * 界面回到正常流式，不需要额外清理逻辑。
+     */
+    retryNotice() {
+      if (this.message.retryExhausted) {
+        return {
+          active: false,
+          text: `上游繁忙，已自动重试 ${this.message.retryAttempts || '?'}/${this.message.retryMaxAttempts || '?'} 次仍失败`
+        }
+      }
+      if (this.message.stalledMs > 0) {
+        return {
+          active: true,
+          text: `上游繁忙，正在自动重试 · 已等待 ${Math.floor(this.message.stalledMs / 1000)}s`
+        }
+      }
+      return null
+    },
+    /**
      * thinking-body 是否真的有任何内容（reasoning / toolCalls / 中断原因）。
      * 全空时显示"暂无思考内容"占位，避免用户展开面板看到一片空白。
      */
     hasThinkingContent() {
       if (this.message.reasoning && this.message.reasoning.length > 0) return true
+      if (this.message.impIpt && this.message.impIpt.trim().length > 0) return true
       if (this.message.toolCalls && this.message.toolCalls.length > 0) return true
       if (this.message.additional_kwargs?.type === 'REASONING') return true
+      if (this.retryNotice) return true
       // 中断原因面板展开时也算有内容
       if (this.isInterruptionRelevant && this.interruptReasonExpanded) return true
       return false
@@ -1130,9 +1258,34 @@ export default {
           return `<a class="data-file-link" data-path="${isOssUrl ? '' : cleanPath}" data-oss-url="${isOssUrl ? cleanPath : ''}" data-name="${filename}">${filename}</a>`
         }
 
+        // v0.3.8 —— 其余有扩展名的文件类型（docx / xlsx / pdf / zip / pptx ...）：
+        // 前端不做直接渲染，但**不能**原样吐一坨 `[[cached/...]]` 原始文本给用户看。
+        // 渲染成高亮可点的文件名 → 点击打开右侧文件预览面板（docx/xlsx 走 mammoth/SheetJS
+        // 实时渲染，其余类型面板里给下载提示）。
+        if (!isOssUrl && /^[a-z0-9]{1,8}$/.test(ext)) {
+          return this._fileLinkHtml(cleanPath, filename)
+        }
+
         // 其他类型，返回原文本
         return match
       })
+    },
+
+    /**
+     * v0.3.8 —— 不可直接渲染的文件类型 → 高亮可点的文件名链接。
+     * 两条 `[[...]]` 语法和 markdown 链接语法共用，保证两种写法点起来一样。
+     * http(s) 走浏览器原生跳转（handleLinkClick 的 open-link 兜底）；
+     * 本地路径走 /static/ 静态服务，点开进右侧文件预览面板。
+     */
+    _fileLinkHtml(rawUrl, filename) {
+      const url = String(rawUrl || '')
+      const isHttp = /^https?:\/\//i.test(url)
+      if (isHttp) {
+        return `<a class="file-link" href="${url}" target="_blank" rel="noopener noreferrer">📎 ${filename}</a>`
+      }
+      // markdown 链接里可能写 /static/cached/x.docx，剥掉前缀避免 /static//static/
+      const p = url.replace(/^\/?(?:static\/)?/, '')
+      return `<a class="file-link" data-path="${p}" data-name="${filename}">📎 ${filename}</a>`
     },
 
     // 处理 markdown 链接中的 .md 文件，将其转换为可渲染的格式
@@ -1199,6 +1352,15 @@ export default {
               if (TEXT_FILE_EXTS.has(ext)) {
                 const filename = url.split('/').pop() || 'file'
                 result.push(`<a class="data-file-link" data-oss-url="${url}" data-name="${filename}">${filename}</a>`)
+                i = j
+                continue
+              }
+
+              // 其余有扩展名的类型（docx / xlsx / pdf / zip ...）——同 [[...]] 语法，
+              // 渲染成高亮可点的文件名，点开进文件预览面板
+              if (/^[a-z0-9]{1,8}$/.test(ext)) {
+                const filename = url.split('/').pop() || 'file'
+                result.push(this._fileLinkHtml(url, filename))
                 i = j
                 continue
               }
@@ -1975,6 +2137,12 @@ export default {
           const ossUrl = formatNode.dataset.ossUrl || href
           return { kind: 'link', open: `[${formatNode.dataset.name || formatNode.textContent}](`, close: ossUrl + ')', node: formatNode }
         }
+        // v0.3.8 .file-link：data-path 才是本地路径（href 只在外部链接时才有）
+        if (formatNode.classList && formatNode.classList.contains('file-link')) {
+          const target = href || formatNode.dataset.path || ''
+          const label = (formatNode.dataset.name || formatNode.textContent || '').replace(/^📎\s*/, '')
+          return { kind: 'link', open: `[${label}](`, close: target + ')', node: formatNode }
+        }
         return { kind: 'link', open: '[' + formatNode.textContent + '](', close: href + ')', node: formatNode }
       }
 
@@ -2210,6 +2378,20 @@ export default {
       const anchor = e.target.closest('a')
       if (!anchor) return
 
+      // v0.3.8 —— 不可直接渲染的文件类型（docx / xlsx / pdf ...）：
+      // 交给 App.vue 的 previewFile 分流到右侧文件预览面板（有 url 的先放行，
+      // 那是外链，由下面的 open-link 走 shell.openExternal）
+      if (anchor.classList.contains('file-link') && !anchor.getAttribute('href')) {
+        e.preventDefault()
+        const path = anchor.dataset.path
+        if (!path) return
+        this.$emit('preview-file', {
+          name: anchor.dataset.name || path.split('/').pop() || '文件',
+          url: `/static/${path}`
+        })
+        return
+      }
+
       // 检查是否是 MD 或数据文件链接
       if (anchor.classList.contains('md-file-link') || anchor.classList.contains('data-file-link')) {
         e.preventDefault()
@@ -2315,6 +2497,64 @@ export default {
     toggleThinking() {
       this.thinkingCollapsed = !this.thinkingCollapsed
     },
+    /**
+     * v0.3.9 —— 实测每个思考段是否超过 5 行。
+     *
+     * 为什么必须实测：换行由渲染宽度决定，同一段文字在宽窗口 3 行、窄窗口 8 行，
+     * 任何按字符数 / 换行符数的估算都会判错。clamp 后的元素 scrollHeight 是全文高度、
+     * clientHeight 是 5 行高度，两者比较即溢出量（line-clamp 的标准探测法）。
+     *
+     * 三个必须绕开的坑：
+     * ① 思考面板整体折叠时 thinking-body 是 display:none，clientHeight === 0，
+     *    这时量出来永远是「没溢出」→ 保留旧值，等下次 updated（面板展开时）再量。
+     * ② 展开态不能再量 —— 去掉 clamp 后 scrollHeight === clientHeight，
+     *    会误判成没溢出 → 按钮消失 → 又折回去，无限抖动。展开态直接判 true。
+     * ③ 只在值真的变了时才写回 reactive 数据：写回会触发 re-render → 再次 updated，
+     *    无脑赋值就是死循环。
+     */
+    measureReasoningOverflow() {
+      if (!this.$el || typeof this.$el.querySelectorAll !== 'function') return
+      const nodes = this.$el.querySelectorAll('[data-reasoning-index]')
+      if (!nodes.length) return
+      const prevOverflow = this.reasoningOverflow
+      const prevLines = this.reasoningLines
+      const nextOverflow = { ...prevOverflow }
+      const nextLines = { ...prevLines }
+      let changed = false
+      nodes.forEach((el) => {
+        const bi = Number(el.dataset.reasoningIndex)
+        if (Number.isNaN(bi)) return
+        // ② 展开态：必然原本就超 5 行，保持 true 且不再测量
+        if (this.expandedReasonings[bi]) {
+          if (nextOverflow[bi] !== true) { nextOverflow[bi] = true; changed = true }
+          return
+        }
+        // ① 不可测量（面板折叠 / 未渲染）：保留旧值
+        if (!el.clientHeight) return
+        const overflow = el.scrollHeight > el.clientHeight + 1
+        // 实际行数 = 全文高度 / 行高（font-size 固定 → line-height 解析出来是 px）
+        const lh = parseFloat(window.getComputedStyle(el).lineHeight)
+        const lines = lh > 0 ? Math.max(5, Math.round(el.scrollHeight / lh)) : 0
+        if (!!nextOverflow[bi] !== overflow) { nextOverflow[bi] = overflow; changed = true }
+        if (nextLines[bi] !== lines) { nextLines[bi] = lines; changed = true }
+      })
+      // ③ 有变化才写回，避免 updated → 写数据 → updated 的自激循环
+      if (!changed) return
+      this.reasoningOverflow = nextOverflow
+      this.reasoningLines = nextLines
+    },
+    reasoningToggleLabel(bi) {
+      if (this.expandedReasonings[bi]) return '收起思考'
+      const lines = this.reasoningLines[bi]
+      return lines > 5 ? `展开全部思考（约 ${lines} 行）` : '展开全部思考'
+    },
+    toggleReasoning(bi) {
+      this.expandedReasonings = { ...this.expandedReasonings, [bi]: !this.expandedReasonings[bi] }
+    },
+    handleWindowResize() {
+      if (this._resizeTimer) clearTimeout(this._resizeTimer)
+      this._resizeTimer = setTimeout(this.measureReasoningOverflow, 150)
+    },
     toggleInterruptReason() {
       this.interruptReasonExpanded = !this.interruptReasonExpanded
     },
@@ -2388,6 +2628,11 @@ export default {
      * 监听挂在 .tool-inline-approval 容器 div 上（带 tabindex=-1），用户焦点进入
      * approval 区后所有键盘事件在这里处理。submittingToolDecision 期间禁用避免
      * 双发。focusApproval() 在审批出现时把焦点抢过来（无需用户先 Tab）。
+     *
+     * ⚠️ 第 3 项「告诉 AI 怎么做」是**模式**不是决策值：键盘选中后必须走
+     * activateApprovalOption → toggleFeedback 展开输入框，绝不能把字符串
+     * 'feedback' 当决策提交（后端只认 'feedback:<text>'，裸 feedback 会被
+     * /permission/resume 400 拒掉 → LangGraph 永远停在 interrupt() → 会话卡死）。
      */
     handleApprovalKeydown(e, toolIndex) {
       if (this.submittingToolDecision) return
@@ -2396,7 +2641,7 @@ export default {
       if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable)) {
         return
       }
-      const opts = ['deny', 'this-time-only', 'feedback', 'approve']
+      const opts = APPROVAL_OPTIONS
       if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
         e.preventDefault()
         this.setApprovalIndex((this.approvalSelectedIndex + opts.length - 1) % opts.length)
@@ -2408,13 +2653,26 @@ export default {
         this.emitToolDecision('deny')
       } else if (e.key === 'Enter' && !e.isComposing) {
         e.preventDefault()
-        this.emitToolDecision(opts[this.approvalSelectedIndex])
+        this.activateApprovalOption(this.approvalSelectedIndex, toolIndex)
       } else if (/^[1-4]$/.test(e.key)) {
         e.preventDefault()
         // 数字键直接触发，不必再按 Enter（Codex 风「一键到位」）
-        this.setApprovalIndex(Number(e.key) - 1)
-        this.emitToolDecision(opts[Number(e.key) - 1])
+        const idx = Number(e.key) - 1
+        this.setApprovalIndex(idx)
+        this.activateApprovalOption(idx, toolIndex)
       }
+    },
+    /**
+     * 键盘选中第 idx 项后的动作：
+     *   - 2（告诉 AI 怎么做）→ 展开反馈输入框，**不**提交决策
+     *   - 其余三项 → 直接提交决策
+     */
+    activateApprovalOption(idx, toolIndex) {
+      if (APPROVAL_OPTIONS[idx] === 'feedback') {
+        this.toggleFeedback(toolIndex)
+        return
+      }
+      this.emitToolDecision(APPROVAL_OPTIONS[idx])
     },
     /**
      * 反馈 textarea 的 keydown：
@@ -2438,7 +2696,8 @@ export default {
       // Shift+Enter: 不拦，让 textarea 走原生换行
     },
     /**
-     * 「告诉 AI 怎么做」按钮：展开反馈 textarea
+     * 「告诉 AI 怎么做」按钮：展开反馈 textarea 并把焦点送进去
+     * （点击路径 + 键盘路径共用；键盘用户展开后可直接打字，不用再 Tab 一次）
      */
     toggleFeedback(toolIndex) {
       this.feedbackExpanded = {
@@ -2446,9 +2705,14 @@ export default {
         [toolIndex]: true,
       }
       // 第一次展开时预填空字符串（v-model 需要初始 key）
+      // —— 保持空：引导语走 placeholder 底板，不往用户输入框里塞替他写好的一句话
       if (!(toolIndex in this.feedbackText)) {
         this.feedbackText = { ...this.feedbackText, [toolIndex]: '' }
       }
+      this.$nextTick(() => {
+        const ta = this.$el ? this.$el.querySelector('.tool-feedback-textarea') : null
+        if (ta && ta.focus) ta.focus()
+      })
     },
     /**
      * 反馈模式「取消」：回到 4 选项默认视图，清空已写文本
@@ -2514,6 +2778,14 @@ export default {
       if (lines.length <= 1) return truncate(first, 90)
       return `${truncate(first, 70)} · ${lines.length} 行`
     },
+    /**
+     * v0.3.8 —— Word/Excel skill 检测 helper。
+     * 复用 @/utils/wordExcel.js 的纯函数（防止正则 drift）。
+     * 文档正文渲染移到右侧已有的 FilePreviewPanel（作为「写作 tab」），
+     * 这里只判断「这个 tool 是不是写文档的」来决定是否显示指示器。
+     */
+    isWordEditorTool(tool) { return isWordEditorCall(tool || {}) },
+    isExcelEditorTool(tool) { return isExcelEditorCall(tool || {}) },
     filterInternalArgs(args, toolName = '') {
       if (!args || typeof args !== 'object') return {}
       const filtered = { ...args }
@@ -3269,6 +3541,16 @@ export default {
   color: var(--text-primary);
 }
 
+/* 破坏性操作互斥锁期间：按钮变灰且不再响应 hover
+   （:hover 要一起写，否则 disabled 元素仍会亮起 hover 底色，看起来还能点） */
+.action-button:disabled,
+.action-button:disabled:hover {
+  background: transparent;
+  color: var(--text-tertiary);
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .action-button.copy-success,
 .action-button.copy-success:hover {
   background: transparent;
@@ -3742,14 +4024,8 @@ export default {
    ① tool 行不再有自己的左边框 / padding-left / margin-left，跟 reasoning 段一起平级排在
       thinking-section 的 3px 主竖条下；层级只靠 chevron + 行内左缩进表达
    ② 待审批 / 中断态仅用淡色背景，不再叠左竖条 —— 整组只允许『外层 3px 主竖条』这一条边框 */
-.tool-call-item {
-  border: none;
-  border-radius: 4px;
-  background: transparent;
-  padding: 0;
-  margin: 0 0 2px;
-  transition: background 0.15s;
-}
+/* v0.3.8 —— .tool-call-item / .reasoning-text 的层级样式已移到文件下方
+   （紧邻 .reasoning-text 一段，避免被前面的旧注释误导）。此处只留状态色。 */
 
 /* 待审批的 tool call：淡琥珀底，不加左边框（避免跟外层 3px 主竖条视觉打架） */
 .tool-call-item.awaiting-approval {
@@ -3776,7 +4052,7 @@ export default {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 8px 4px 4px;
+  padding: 4px 8px 4px 18px;
   background: transparent;
   color: var(--text-secondary);
   border-radius: 4px;
@@ -3859,8 +4135,9 @@ export default {
 
 /* v0.3.4 —— 展开态容器：args + result 都在 tool 行内部，靠行内左缩进表示从属关系。
    整组只允许外层 thinking-section 的 3px 主竖条这一条边框 —— tool 内部不再画第二条线。 */
+/* ToolMessage 层：args / result 比 tool 行再缩进一级（36px），形成三级阶梯 */
 .tool-detail {
-  padding: 2px 0 8px 22px;
+  padding: 2px 0 8px 36px;
   margin: 0;
 }
 
@@ -3883,7 +4160,7 @@ export default {
   display: flex;
   align-items: flex-start;
   gap: 6px;
-  padding: 2px 0 0 22px;
+  padding: 2px 0 0 36px;
   margin: 0;
 }
 
@@ -3895,9 +4172,9 @@ export default {
 .tool-result-connector {
   flex-shrink: 0;
   color: var(--text-secondary);
-  opacity: 0.55;
+  opacity: 0.85;
   font-size: 11.5px;
-  line-height: 1.55;
+  line-height: 1.6;
   user-select: none;
 }
 
@@ -3906,24 +4183,68 @@ export default {
   flex: 1;
   min-width: 0;
   font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
-  font-size: 11.5px;
-  line-height: 1.55;
+  line-height: 1.6;
   color: var(--text-tool-args);
   white-space: pre-wrap;
   word-break: break-word;
 }
 
+/* 展开态全文：工具结果是本轮唯一的「硬证据」——比 agent 那段叙述性 reasoning 更该
+   读得清，所以提到 --text-primary（与正文同级）+0.5px。层级刻意反过来：
+   reasoning 是 AI 的自述（次要），result 是实际发生的事（主要）。 */
 .tool-result {
+  font-size: 12px;
+  color: var(--text-primary);
   max-height: 320px;
   overflow-y: auto;
 }
 
+/* v0.3.8 —— Word/Excel 文档指示器：文档正文已移到右侧「写作面板」抽屉，
+   思考面板里只留这一行小胶囊（点它聚焦到面板对应 tab）。
+   放在 tool-result-line 之后 / tool-detail 之前，与 args+result 同一个缩进层级。 */
+.tool-doc-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 2px 36px;
+  padding: 3px 9px;
+  border: 1px solid color-mix(in srgb, var(--button-bg) 22%, transparent);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--button-bg) 7%, transparent);
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.tool-doc-indicator:hover {
+  background: color-mix(in srgb, var(--button-bg) 13%, transparent);
+  border-color: color-mix(in srgb, var(--button-bg) 35%, transparent);
+  color: var(--text-primary);
+}
+
+.tool-doc-indicator > svg {
+  flex-shrink: 0;
+  color: var(--button-bg);
+}
+
+.tool-doc-indicator-label {
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.tool-doc-indicator-hint {
+  font-size: 10.5px;
+  opacity: 0.8;
+}
+
 /* 折叠态单行摘要：超长省略号截断，不换行 */
 .tool-result-summary {
+  font-size: 11.5px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  opacity: 0.8;
 }
 
 /* v0.3.4 —— 内嵌审批 UI：CC 风格横排 prompt，去所有外层边框 / 左竖条，留行内左缩进 + 琥珀色文本 */
@@ -4136,6 +4457,69 @@ export default {
    reasoning 是「一组」的开头：它后面紧跟这批 tool_calls（组内间距紧），
    上一组结束时留出更大间距把它和上一组分开 —— 靠间距表达分组，不靠边框。
    纯文本、不加边框 / 左缩进 / 底色，整组只允许外层 thinking-section 的 3px 主竖条一条边框。 */
+/* v0.3.8 —— AIMessage / ToolMessage 层级重做。
+   改前：reasoning 段和 tool 行都是 thinking-section 的平级直接子节点，
+        缩进完全一致（都是 0），视觉上是一坨分不清先后。
+   改后：用「缩进 + 连接符」表达三层，不加任何新边框（整组仍只有
+        thinking-section 那一条 3px 主竖条）：
+
+     │  ▸ 我先写好报告的框架         ← AIMessage 叙事（reasoning，缩进 0）
+     │   └ code  WordEditor          ← AIMessage 发出的 tool_call（缩进 16px）
+     │       ⎿ ✓ Saved               ← ToolMessage 结果（缩进 32px）
+
+   ▸ 用 --thinking-accent 着色 + 半透明，暗示「这是 AI 自己想的」；
+   └ 用 --text-secondary + 更低透明度，暗示「这是 AI 做的，不是想的」；
+   ⎿ 保持原样（ToolMessage 的既有约定）。 */
+
+/* AIMessage 叙事层：reasoning 段落 */
+/* imp_ipt 块：思考面板的第一块。和 reasoning-text 保持同一套排版（16px 缩进、
+   同样的字号/行高/▸ 标记），只把标题做成一条弱化的灰色前缀，让用户能认出
+   「这段是系统对输入的优化结果」而不是「这是 AI 又想了一段」——刻意不加边框 /
+   底色 / 强调色，避免它在思考流里跳出来抢戏。 */
+/* 意图识别块（imp_ipt）
+   和 .reasoning-text 的区别是刻意的：reasoning 是 AI 的一轮思考，用 ▸ 挂在它触发的
+   tool 行上方；imp_ipt 是系统在动手之前对用户输入的理解，属于「输入侧」，
+   没有任何工具跟它对应 —— 沿用 ▸ 会让人误读成「这一段思考触发了下面那个工具」。
+   所以改成卡片：左侧强调条 + 浅底 + 实心药丸标签，与 ▸ 列表在形状上就分得开。 */
+.imp-ipt-block {
+  position: relative;
+  margin: 2px 0 12px;
+  padding: 8px 12px 8px 13px;
+  border-radius: 5px;
+  background: var(--bg-secondary);
+  border-left: 2px solid var(--thinking-accent);
+  font-size: 12.5px;
+  line-height: 1.75;
+  /* 比 reasoning 的 --text-secondary 强一档：它是结论性的「本轮要干什么」，
+     而 reasoning 是过程性文字，本来就该弱一点 */
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.imp-ipt-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 8px;
+  padding: 1px 7px;
+  border-radius: 3px;
+  background: var(--thinking-accent);
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1.6;
+  letter-spacing: 0.2px;
+  vertical-align: 1px;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.imp-ipt-icon {
+  flex-shrink: 0;
+  opacity: 0.9;
+}
+
 .reasoning-text {
   font-size: 12.5px;
   color: var(--text-secondary);
@@ -4145,8 +4529,73 @@ export default {
   max-height: none;
   overflow-y: visible;
   opacity: 1;
-  padding: 0;
+  padding: 0 0 0 16px;
   margin: 10px 0 4px;
+  position: relative;
+}
+
+/* ▸ 标记：把 reasoning 段和它下面的 tool 行挂成一组 */
+.reasoning-text::before {
+  content: '▸';
+  position: absolute;
+  left: 2px;
+  top: 0;
+  color: var(--thinking-accent);
+  opacity: 0.75;
+  font-size: 11px;
+}
+
+/* v0.3.9 —— 单段思考超过 5 行时的折叠态。
+   5 行是「看得见开头、看不见结论」的量：再长用户就知道该展开了。
+   line-clamp 必须配 -webkit-box + -webkit-box-orient，
+   它只改渲染不删 DOM，所以 .reasoning-text::before 的 ▸ 标记照常留在第一行。 */
+.reasoning-text--clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 5;
+  overflow: hidden;
+}
+
+/* 「展开全部思考」按钮：跟用户消息的 .collapse-toggle 同一套字面按钮样式，
+   不加边框不抢戏 —— 折叠是默认行为，展开是用户主动的例外。 */
+.reasoning-toggle {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  padding: 0 0 0 16px;
+  cursor: pointer;
+  line-height: 1.6;
+  display: block;
+}
+
+.reasoning-toggle:hover {
+  color: var(--text-primary);
+}
+
+/* ToolMessage 层：tool_call 行整体缩进到 reasoning 之下 */
+.tool-call-item {
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  padding: 0;
+  margin: 0 0 2px;
+  position: relative;
+  transition: background 0.15s;
+}
+
+/* └ 挂接符：把 tool 行挂到它触发的那段 reasoning 之下 */
+.tool-call-item::before {
+  content: '└';
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  color: var(--text-secondary);
+  opacity: 0.4;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  pointer-events: none;
 }
 
 /* 空状态：reasoning / toolCalls / 中断原因都为空时显示 */
@@ -4157,6 +4606,36 @@ export default {
   padding: 4px 0;
   opacity: 1;
 }
+
+/* 上游重试提示：思考链里的一条信息（琥珀色 = 警告但非错误）。
+   刻意不用 message-error-box 的红——这不是失败，是「正在自己 recover」。 */
+.retry-notice {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--accent-amber, #d97706);
+  padding: 4px 0;
+}
+.retry-notice--active { opacity: 1; }
+.retry-notice-dot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-amber, #d97706);
+  opacity: 0.55;
+}
+.retry-notice-dot.dot-active {
+  opacity: 1;
+  animation: retry-pulse 1.2s ease-in-out infinite;
+}
+@keyframes retry-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.35; transform: scale(0.75); }
+}
+.retry-notice-text { flex: 1; word-break: break-word; }
 
 /* 中断原因提示：红色徽章，引用 token */
 .interrupt-reason-hint {
@@ -4208,6 +4687,29 @@ export default {
 .message-text :deep(.data-file-link:hover) {
   background: var(--bg-hover);
   text-decoration: underline;
+}
+
+/* v0.3.8 —— 不可直接渲染的文件（docx / xlsx / pdf / zip ...）：
+   比上面两种链接更「重」一点 —— 加浅底 + 淡边框，因为用户预期点它会**打开一个面板**
+   而不是就地看内容，点之前就该看得出来它是个可点的产物。 */
+.message-text :deep(.file-link) {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--button-bg);
+  text-decoration: none;
+  cursor: pointer;
+  padding: 2px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  background: var(--bg-secondary);
+  font-size: 0.92em;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.message-text :deep(.file-link:hover) {
+  background: var(--bg-hover);
+  border-color: var(--button-bg);
 }
 
 .file-render-block .markdown-image {

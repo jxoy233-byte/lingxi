@@ -52,16 +52,10 @@
       <main class="chat-area">
         <ChatHeader
           :has-session="!!currentSessionId"
-          :word-drawer-available="!!_wordDrawer.filePath"
-          :excel-drawer-available="!!_excelDrawer.filePath"
-          :word-drawer-open="_wordDrawer.visible"
-          :excel-drawer-open="_excelDrawer.visible"
           @open-settings="settingsVisible = true"
           @open-setup="setupVisible = true"
           @toggle-checkpoints="toggleCheckpoints"
           @toggle-sidebar="toggleMobileSidebar"
-          @toggle-word-drawer="toggleWordDrawer"
-          @toggle-excel-drawer="toggleExcelDrawer"
           @refresh="refreshPage"
         />
 
@@ -76,6 +70,8 @@
           :pending-interrupt-session-id="_pendingInterruptSessionId"
           :pending-tool-approval="pendingToolApproval"
           :submitting-tool-decision="submittingToolDecision"
+          :withdrawing="_withdrawInFlight"
+          :action-busy="sessionActionBusy"
           @tool-decide="onToolDecision"
           @restore="restoreCheckpoint"
           @restream="handleRestream"
@@ -86,6 +82,7 @@
           @restart-session="restartConversation"
           @quote="handleQuote"
           @withdraw="handleWithdraw"
+          @focus-doc-preview="focusDocPreviewTab"
           @insert-suggestion="handleInsertSuggestion"
         />
 
@@ -166,36 +163,11 @@
         :tabs="filePreviewTabs"
         :active-tab-id="activeFilePreviewTabId"
         :session-id="currentSessionId"
-        @close="showFilePreview = false"
+        @close="closeFilePreviewPanel"
         @activate-tab="activateFilePreviewTab"
         @close-tab="closeFilePreviewTab"
         @reload="reloadPreview"
         @file-select="onDataAnalysisFileClick"
-      />
-
-      <!-- 点击空白区域关闭文件预览面板 -->
-      <div
-        v-if="showFilePreview"
-        class="file-preview-overlay"
-        @click="showFilePreview = false"
-      />
-
-      <!-- v0.3.4 —— WordEditor 实时预览抽屉（AI 调 WordDoc.create/open 时自动弹出） -->
-      <WordDocDrawer
-        :visible="_wordDrawer.visible"
-        :file-path="_wordDrawer.filePath"
-        :version="_wordDrawer.version"
-        :is-streaming="_wordDrawer.isStreaming"
-        @close="_wordDrawer.visible = false"
-      />
-
-      <!-- v0.3.4 —— ExcelEditor 实时预览抽屉（手动打开：AI 写入时只跟踪不弹出） -->
-      <ExcelDocDrawer
-        :visible="_excelDrawer.visible"
-        :file-path="_excelDrawer.filePath"
-        :version="_excelDrawer.version"
-        :is-streaming="_excelDrawer.isStreaming"
-        @close="_excelDrawer.visible = false"
       />
 
       <!-- 点击空白区域关闭历史记录面板 -->
@@ -226,6 +198,7 @@
 
     <ConfirmDialog
       :visible="showRestoreConfirm"
+      :busy="_restoreInFlight"
       title="恢复历史版本"
       message="恢复到此版本后，之后的消息将被删除，确定要继续吗？"
       confirm-text="确定恢复"
@@ -437,8 +410,6 @@ import StartupLoadingView from './components/StartupLoadingView.vue'
 import CheckpointPanel from './components/CheckpointPanel.vue'
 import WebPreviewPanel from './components/WebPreviewPanel.vue'
 import FilePreviewPanel from './components/FilePreviewPanel.vue'
-import WordDocDrawer from './components/WordDocDrawer.vue'
-import ExcelDocDrawer from './components/ExcelDocDrawer.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import HelpDialog from './components/HelpDialog.vue'
 import ToastDialog from './components/ToastDialog.vue'
@@ -455,6 +426,13 @@ import {
   isOfficePreviewFile,
   truncateTextToBytes
 } from './utils/filePreview.js'
+import { isWordEditorCall, isExcelEditorCall, extractWordPath, extractExcelPath, normalizeDocPath, extractDocPathFromOutput } from './utils/wordExcel.js'
+
+// 上游静默多久后开始显示「已等待 Ns」。
+// 后端 node_guard 遇 529/5xx 会原地重试（5 次 × 8s = 最坏 40s），期间不发任何 SSE，
+// 界面看起来像卡死。阈值取 3s：正常流式间隔远小于此（token 是毫秒级到的），
+// 真正的上游停顿 / 重试才会越过线。
+const STALL_NOTICE_MS = 3000
 
 export default {
   name: 'App',
@@ -469,8 +447,6 @@ export default {
     CheckpointPanel,
     WebPreviewPanel,
     FilePreviewPanel,
-    WordDocDrawer,
-    ExcelDocDrawer,
     SettingsDialog,
     HelpDialog,
     ToastDialog,
@@ -539,6 +515,15 @@ export default {
       _pendingInterruptSessionId: null,  // 临时存储流式响应中的 session_id
       // handleWithdraw 等待 SSE interrupt 事件到达的 resolver（仅单 in-flight withdraw）
       _withdrawInterruptResolver: null,
+      // 撤回执行中：runBacktrack 全程置位，防重复点击并发跑两遍
+      // （_withdrawInterruptResolver 是单例字段，第二次 runBacktrack 会覆盖掉第一次的
+      //   resolver，第一次只能等自己 5s 超时 —— 两个 backtrack 交错，messages 可能闪回旧态）
+      _withdrawInFlight: false,
+      // 回溯执行中：覆盖 confirmRestore 的 POST /backtrack + GET /conversation 全程。
+      // ConfirmDialog 的「确定恢复」按钮和 CheckpointPanel 的 ↺ 都能重复触发（后者还能连按 Enter）
+      _restoreInFlight: false,
+      // 中断执行中：覆盖 POST /interrupt 那一小段
+      _interruptInFlight: false,
       isMobile: false,
       sidebarMobileOpen: false,
       interruptReason: '',  // 中断原因
@@ -586,16 +571,6 @@ export default {
       //   时间窗口 2s 内只允许一次 refetch + in-flight promise 复用，幂等。
       _lastSkillFetchAt: 0,
       _skillFetchInFlight: null,
-      // v0.3.4 —— WordEditor 写作抽屉：AI 调 WordDoc.create/open 时自动弹出右侧预览。
-      // - toolCallId 用于配对 tool_call_result（只刷新同一次调用的产物）
-      // - version 每次 +1 触发 WordDocDrawer 重新 fetch + mammoth 渲染
-      // - isStreaming=false 时抽屉保持打开（对标 CheckpointPanel，不自动关）
-      // - visible=false 时整个抽屉卸载，组件卸载前最后一次 version 仍生效（用于切回再看）
-      _wordDrawer: { visible: false, filePath: '', version: 0, isStreaming: false, toolCallId: null, rawPath: '' },
-      // v0.3.4 —— ExcelEditor 写作抽屉：与 WordDrawer 共用检测，但 visible 默认 false 不自动开。
-      // 用户点 ChatHeader 📊 按钮 → toggleExcelDrawer 翻 visible。
-      // AI 实时写入时抽屉仍然 update version（保证用户打开时是最新），但不抢视觉焦点。
-      _excelDrawer: { visible: false, filePath: '', version: 0, isStreaming: false, toolCallId: null, rawPath: '' },
       // 简洁提示弹窗（slash 命令前置条件不满足时用，例如「/backtrack 当前没有会话」）
       toast: { visible: false, title: '', message: '' },
       // 静态 action 命令清单（永远在前，不依赖后端）：
@@ -641,6 +616,7 @@ export default {
       _streamingMessages: new Map(),       // session_id -> 当前 messages 数组引用（与 this.messages 同源）
       _streamingMeta: new Map(),           // session_id -> { aiIndex, responseStartTime, userMessage, lastUserMessage }
       _streamTimers: new Map(),            // session_id -> setInterval id；本地读秒（每 250ms 重算 elapsedMs），让 SSE 事件间隙数字也能跳
+      _lastStreamActivity: new Map(),      // session_id -> 上次收到任意 SSE 事件的 Date.now()；用于上游静默读秒
       // —— 消息队列（per session 排队发送）——
       // session_id -> QueueEntry[]，FIFO 顺序；与后端 Redis db1 queue:{sid} 双向同步
       // QueueEntry: { message, quote, queued_at }（与后端 JSON 字段一致）
@@ -915,23 +891,31 @@ export default {
     helpVisible(visible) {
       if (visible && this.dynamicSkills.length === 0) this.fetchSkills()
     },
-    // v0.3.4 —— 写作抽屉的 streaming 状态跟随当前 session 的流式状态。
-    // _activeStreamingSessions.delete(sid) 触发时（done / error / interrupt 走完清理）→ drawer 退出"AI 正在写入"。
-    // deep:true 不需要 —— Set 引用变化由 Vue 响应式自动捕获。
-    '_activeStreamingSessions'(next, prev) {
-      if (next === prev) return
-      if (!this.currentSessionId) return
-      if (!next.has(this.currentSessionId)) {
-        this._markWordDrawerStreamingDone()
-        this._markExcelDrawerStreamingDone()
+    // v0.3.7 / v0.3.8 —— 流式 session 集合变化时：
+    //   1. 对"刚流式完 sid"做清理（_clearStreamingForSession 把该 session 的写作 tab
+    //      isStreaming 清 false）
+    //   2. 排队消息 drain（保留 v0.3.4 逻辑）
+    //
+    // ⚠️ 这两条**都是 belt-and-braces，不是主机制**。无点号字符串源在 Vue 里走
+    // `getter = () => publicThis[source]`（没有 deep），Set.delete() 不触发；
+    // 真正触发的是 `new Set(...)` 整体替换，而那时 oldValue 已经是原地 delete 过的
+    // 那个 Set —— 循环里找不到被移除的 sid。主机制是 `_endStreamingSession(sid)`
+    // 里的直接调用（见其注释）。真要从这个 watcher 拿「谁流完了」，必须自己存快照。
+    '_activeStreamingSessions': {
+      handler(newSet, oldSet) {
+        if (!oldSet) return
+        for (const sid of oldSet) {
+          if (newSet.has(sid)) continue
+          this._clearStreamingForSession(sid)
+          this._tryDrainQueue(sid)
+        }
       }
     },
-    // v0.3.4 —— 切会话时关闭 drawer：drawer 的 filePath 是相对当前 session 算的（_normalizeWordPath 用 sid），
-    // 切到另一 session 后原 drawer 指向的文件路径失效；且 drawer 打开期间被锁在旧 session 的视图上
-    // 会让用户看不到新 session 的写作状态。直接关掉最稳。
+    // v0.3.8 —— 写作预览已迁到 filePreviewTabs（复用 FilePreviewPanel），
+    // 切会话时不需要额外的面板状态重置；待 drain 的排队消息由下面的 watcher 处理。
     currentSessionId() {
-      this._wordDrawer = { visible: false, filePath: '', version: 0, isStreaming: false, toolCallId: null, rawPath: '' }
-      this._excelDrawer = { visible: false, filePath: '', version: 0, isStreaming: false, toolCallId: null, rawPath: '' }
+      // 无操作：写作预览已迁移到 filePreviewTabs（FilePreviewPanel），
+      // 切会话由 loadConversation 接管，无残留面板状态需要重置。
     },
     // 侧栏视图切换持久化（跨 F5 恢复）
     sidebarView(newVal) {
@@ -964,23 +948,6 @@ export default {
       },
       immediate: false
     },
-    // —— 消息队列：流式结束 → 触发 drain（用户切走则推迟） ——
-    // SSE done / error / interrupt 三处都已把 sid 从 _activeStreamingSessions 移除并 new Set() 整体替换，
-    // 这里的 watcher 会拿到 oldSet（移除前）和 newSet（移除后），用 oldSet - newSet 算出"刚流式完的 sid"。
-    // 行为：刚流式完的 sid 若队列非空 → 立即 drain（前提：用户在 sid 上）或推迟（用户不在 sid 上）。
-    // 不用在 15+ done 处理器里各自手写 drain 的原因：watcher 是统一触发点，加新 SSE 入口不必改这里。
-    '_activeStreamingSessions': {
-      handler(newSet, oldSet) {
-        if (!oldSet || oldSet === undefined) return
-        for (const sid of oldSet) {
-          if (newSet.has(sid)) continue
-          // sid 刚离开流式 → 检查是否有排队消息需要 drain
-          // 兜底：watcher 可能不触发（Vue 2 + Set 反应式），所以 done/error/interrupt handler
-          // 也显式调 _tryDrainQueue；watcher 是 belt-and-suspenders，双保险。
-          this._tryDrainQueue(sid)
-        }
-      }
-    },
     // 用户切会话时检查新会话是否有待 drain 的排队（覆盖 stream 结束时用户不在该 sid 的延迟场景）
     currentSessionId: {
       handler(newSid) {
@@ -993,6 +960,21 @@ export default {
     }
   },
   computed: {
+    /**
+     * 会话级「破坏性操作」互斥锁 —— 回溯 / 撤回 / 重新对话 在执行期间互锁。
+     *
+     * 这三个按钮各自都只跑一次就对了，连点的后果不是「多跑一遍」而是**状态错位**：
+     * 两次 POST /backtrack 会 retarget 到同一个 cid，中间的 GET /conversation 交错返回，
+     * messages 可能闪回旧态；isRestreaming 期间再点回溯更是会撞上 LATEST_POINTER 覆写竞态。
+     * 所以锁住整个按钮组，而不是只锁被点的那一个 —— 让用户明确感知「这一下已经生效了，在处理」。
+     *
+     * ⚠️ 中断按钮故意不在这个锁里：它是 isRestreaming 期间唯一的停止手段，
+     * 锁上等于「重新生成卡住时连取消都点不了」。中断的防连点由 handleInterrupt 自己的
+     * _interruptInFlight 早退兜住（重复 POST /interrupt 只是重写同一个 redis hash，无副作用）。
+     */
+    sessionActionBusy() {
+      return this._withdrawInFlight || this._restoreInFlight || this.isRestreaming
+    },
     /**
      * 当前会话的定时任务列表（侧栏 ConversationItem 用 scheduledTasksMap.get(id) 拿）
      * - 仍保留这个 computed 备用，部分老代码可能还在引用；侧栏已切到 Map 直查
@@ -1180,150 +1162,249 @@ export default {
       this.fetchSkills()
     },
     /**
-     * v0.3.4 —— WordEditor 实时预览抽屉检测。
-     * 与 SkillForge 模式对称：tool_call_name 阶段检测 + 提取路径，tool_call_result 阶段触发刷新。
+     * v0.3.7 —— SSE done/error/interrupt 后清理流式状态。
      *
-     * 检测：args.code 含 `from skills.WordEditor import` + `WordDoc.create/open(...)`。
-     * 路径：AI 在沙盒写 `/cached/X.docx` 或 `cached/X.docx`，规范化成 `/static/cached/{sid-or-flat}/X.docx`。
-     * 沙盒实际 mount 是 `/cached:rw` → host `backend/cached/`（flat，无 sid scoping）；
-     * 但为了让不同会话的同名文件不撞，前端 fetch URL 仍拼 sid（仅用于 URL，不影响实际落盘）。
+     * 只剩写作面板的 tab.isStreaming 要清（v0.3.8 去掉「写入中」显示后，
+     * toolCall 上的 _isStreaming 已无人读取，一并删了）。tab.isStreaming 从 true → false
+     * 的跳变就是打字机的触发信号，所以这一行不能少。
      */
-    _isWordEditorCall(data) {
-      if (data.type !== 'tool_call_name') return false
-      const name = data.content?.name
-      const args = data.content?.args || {}
-      if (name !== 'code') return false
-      const code = String(args.code || '')
-      return /from\s+skills\.WordEditor\s+import\b/i.test(code)
-        && /\bWordDoc\.(?:create|open)\s*\(/i.test(code)
+    _clearStreamingForSession(sid) {
+      if (!sid) return
+      for (const tab of this.filePreviewTabs) {
+        if (tab.isStreaming && tab.docSessionId === sid) {
+          tab.isStreaming = false
+        }
+      }
     },
     /**
-     * 把 AI 传给 WordDoc.create/open 的 sandbox 路径规范化成前端可 fetch 的 URL。
-     * 规则：
-     *   /cached/X.docx       → /static/cached/{sid?}/X.docx
-     *   cached/X.docx        → 同上
-     *   /work/X.docx         → 同上（遗留 docstring 容错，旧 SKILL.md 写的）
-     *   X.docx（裸）         → 同上
-     *   /work/sub/X.docx     → /static/cached/{sid?}/sub/X.docx
+     * v0.3.8 —— 结束一个 session 的流式状态（done / error / interrupt / 切会话 / 删会话）。
+     *
+     * ⚠️ `_clearStreamingForSession` 必须在这里**直接**调，不能指望上面
+     * `watch: { '_activeStreamingSessions' }` 兜底：那个 watcher 走的是 Vue 的
+     * 「无点号字符串源」分支 —— `getter = () => publicThis[source]`，**没有 deep**。
+     * 它只跟踪这一个属性的读取，而 `Set.delete()` 只碰 ITERATE_KEY，不触发。
+     * 真正让它跑起来的是后面的 `new Set(...)` 整体替换，而那时 oldValue 就是
+     * **刚刚被原地 delete 过的那个 Set** —— `for (const sid of oldSet)` 里已经没有
+     * 被移除的 sid，handler 什么也不做。
+     *
+     * 也就是说：对话结束了、`_activeStreamingSessions` 里 sid 没了，但写作面板的
+     * 「写入中…」琥珀徽标还挂着（同一行的 `_tryDrainQueue` 同理死掉，4 个 SSE 流
+     * 里只有第 4 个显式调了它）。
      */
-    _normalizeWordPath(raw, sid) {
-      let p = String(raw || '').replace(/^\/?(?:cached|work)\//, '').replace(/^cached\//, '')
-      if (!p) return null
-      // 裸文件名（无 /） → 加 sid 防跨会话冲突
-      if (sid && !p.includes('/')) {
-        p = `${sid}/${p}`
-      } else if (sid && !p.startsWith(`${sid}/`) && !p.startsWith('cached/')) {
-        // 子目录（如 sub/X.docx）：仍加 sid prefix，让 URL 唯一指向本会话产物
-        p = `${sid}/${p}`
-      }
-      return `/static/cached/${p}`
+    _endStreamingSession(sid) {
+      if (!sid) return
+      this._activeStreamingSessions.delete(sid)
+      this._clearStreamingForSession(sid)
+      this._activeStreamingSessions = new Set(this._activeStreamingSessions)
     },
-    _markWordDrawerPending(data) {
-      if (!this._isWordEditorCall(data)) return
-      const code = String(data.content?.args?.code || '')
-      const m = code.match(/\bWordDoc\.(?:create|open)\s*\(\s*["']([^"']+)["']/)
-      if (!m) return
-      const raw = m[1]
-      const norm = this._normalizeWordPath(raw, this.currentSessionId)
-      if (!norm) {
-        console.warn('[WordDrawer] 无法规范化路径:', raw)
+    /**
+     * v0.3.8 —— 思考面板里点 .tool-doc-indicator：把这份文档的预览 tab 切到前台并打开面板。
+     *
+     * 已有 tab → 复用；没有 tab（tab 被关过、或翻的是历史消息）→ 补开一个。
+     * 显式点击必须永远有反应，不能因为「tab 不存在」就静默什么都不做。
+     *
+     * markStreaming=false：翻历史消息点开 ≠ AI 现在正在写这份文档。挂了
+     * isStreaming 会让 reload 把「文件取不到」当预期 404 压掉，真坏了也不报错。
+     */
+    focusDocPreviewTab(toolCall) {
+      const sid = this.currentSessionId || ''
+      const url = normalizeDocPath(this._extractDocRawPath(toolCall?.args || {}, sid))
+      if (!url) return
+      const tab = this.filePreviewTabs.find(t => t.url === url)
+      if (tab) {
+        // 不动 tab.isStreaming：这份文档可能正在被写（isStreaming=true），
+        // 强行清成 false 会让 reload 把「文件还没写出来」的预期 404 当成真错误弹出来。
+        this.activeFilePreviewTabId = tab.id
+        this.showFilePreview = true
         return
       }
-      // 互斥：如果 Excel drawer 当前可见，先关掉 —— 两个 drawer 都从右侧滑入会重叠
-      const excelVisible = this._excelDrawer?.visible
-      this._wordDrawer = {
-        visible: true,
-        filePath: norm,
-        version: (this._wordDrawer?.version || 0) + 1,
-        isStreaming: true,
-        toolCallId: data.id,
-        rawPath: raw
-      }
-      if (excelVisible) {
-        this._excelDrawer = { ...this._excelDrawer, visible: false }
-      }
+      // 面板里还没有这份文档的 tab（tab 被关过、或翻的是历史消息）——
+      // 显式点了指示器就补开一个，不能静默什么都不做。
+      this._openDocPreviewTab(toolCall, sid, { markStreaming: false, forceActivate: true })
     },
     /**
-     * 收到 WordEditor 相关 tool_call_result 时 version++ 触发组件 reload。
-     * 用 toolCallId 配对（不靠 args，因为 args.code 不在 result 里）。
-     */
-    _maybeRefreshWordDrawerAfterResult(data) {
-      if (!this._wordDrawer || this._wordDrawer.toolCallId !== data.id) return
-      this._wordDrawer.version = (this._wordDrawer.version || 0) + 1
-    },
-    /**
-     * 整轮流结束（done / error / interrupt）→ drawer 退出"AI 正在写入"状态，保留可见。
-     */
-    _markWordDrawerStreamingDone() {
-      if (this._wordDrawer && this._wordDrawer.isStreaming) {
-        this._wordDrawer = { ...this._wordDrawer, isStreaming: false }
-      }
-    },
-    /**
-     * v0.3.4 —— ExcelEditor 实时预览检测。
-     * 与 WordEditor 完全对称的检测逻辑，唯一区别：_markExcelDrawerPending 不自动打开 drawer
-     * （_excelDrawer.visible 保持 false），用户需手动点 ChatHeader 📊 按钮才弹出。
+     * v0.3.8 —— 从 toolCall.args.code 里抽 WordEditor/ExcelEditor 的文档路径。
+     * 不是 Word/Excel 调用返回 null。
      *
-     * Why 手动打开：Excel 内容是数据表格，AI 一边生成时实时看每行没意义（用户看的是最终结构），
-     * 而自动弹出会和 Word drawer 撞视觉位 / 抢焦点。手动开关让用户决定何时展开。
+     * sessionId 必须传：AI 常写 f-string（f"/cached/{session_id}/build/报告.docx"），
+     * 解不出 sid 的字面量会被丢弃，没有 sessionId 就只能拿到扁平路径。
      */
-    _isExcelEditorCall(data) {
-      if (data.type !== 'tool_call_name') return false
-      const name = data.content?.name
-      const args = data.content?.args || {}
-      if (name !== 'code') return false
-      const code = String(args.code || '')
-      return /from\s+skills\.ExcelEditor\s+import\b/i.test(code)
-        && /\bExcelDoc\.(?:create|open)\s*\(/i.test(code)
+    _extractDocRawPath(args, sessionId = '') {
+      const tool = { name: 'code', args }
+      if (isWordEditorCall(tool)) return extractWordPath(tool, sessionId)
+      if (isExcelEditorCall(tool)) return extractExcelPath(tool, sessionId)
+      return null
     },
-    _markExcelDrawerPending(data) {
-      if (!this._isExcelEditorCall(data)) return
-      const code = String(data.content?.args?.code || '')
-      // 匹配 ExcelDoc.create/open/from_csv 的第一个字符串参数
-      const m = code.match(/\bExcelDoc\.(?:create|open|from_csv)\s*\(\s*["']([^"']+)["']/)
-      if (!m) return
-      const raw = m[1]
-      const norm = this._normalizeWordPath(raw, this.currentSessionId)   // 共用路径 normalize
-      if (!norm) {
-        console.warn('[ExcelDrawer] 无法规范化路径:', raw)
-        return
-      }
-      // 与 WordDrawer 唯一区别：visible 保持 false，让用户决定何时打开
-      this._excelDrawer = {
-        visible: false,
-        filePath: norm,
-        version: (this._excelDrawer?.version || 0) + 1,
-        isStreaming: true,
-        toolCallId: data.id,
-        rawPath: raw
-      }
+    /**
+     * 文件面板此刻是不是**真的开着**（用户正在用）。
+     *
+     * 不能只看 showFilePreview：FilePreviewPanel 是 `v-show="visible && tabs.length"`，
+     * 所以「showFilePreview=true 但 tab 全被关光」/「activeFilePreviewTabId 指向
+     * 一个已被 splice 掉的 tab」这两种情况下屏幕上什么都没有 —— 那时要当关着处理，
+     * 该激活还是激活，否则会出现「面板黑着、点了没反应」。
+     */
+    _isFilePreviewOpen() {
+      if (!this.showFilePreview || this.filePreviewTabs.length === 0) return false
+      return this.filePreviewTabs.some(t => t.id === this.activeFilePreviewTabId)
     },
-    _maybeRefreshExcelDrawerAfterResult(data) {
-      if (!this._excelDrawer || this._excelDrawer.toolCallId !== data.id) return
-      this._excelDrawer.version = (this._excelDrawer.version || 0) + 1
+    /**
+     * v0.3.8 —— WordEditor/ExcelEditor 调用开始（每次 tool_call_name 调一次）：
+     * 把文档作为 tab 推进 FilePreviewPanel。
+     *
+     * v0.3.7 把文档正文 inline 嵌进思考面板，结果 100 段的文档把 AIMessage /
+     * ToolMessage 的层级彻底冲垮 —— 改回右侧面板，思考面板只留指示器。
+     *
+     * 面板行为只有一条规则：**面板已经开着，就什么都别动。**
+     * 已经在看 A 就继续看 A，AI 写 B 只是 tab 条上多一个标签、内容在后台更新；
+     * 抢 active 会把用户正在读的文档顶掉（同一轮「写 A → 写 B → 再更新 A」必跳一次，
+     * 而且跳过去就回不来了：后续更新 A 时面板已开，按规则不动了）。
+     * 面板关着 → 打开并切到这份文档（否则弹出来是另一份，等于白弹）。
+     * 唯一例外是用户主动点思考面板的指示器（forceActivate），那是明确要看它。
+     *
+     * @param markStreaming  是否标记「AI 正在写这份文档」（翻历史消息手动点开时传 false）
+     * @param forceActivate  无条件切到这份文档（手动点指示器时用）
+     */
+    _openDocPreviewTab(toolCall, requestSessionId, { markStreaming = true, forceActivate = false } = {}) {
+      const args = toolCall?.args || {}
+      const sid = requestSessionId || this.currentSessionId || ''
+      const rawPath = this._extractDocRawPath(args, sid)
+      if (!rawPath) return
+      this._ensureDocTab({
+        rawPath,
+        isWord: isWordEditorCall({ name: 'code', args }),
+        requestSessionId,
+        activate: forceActivate || !this._isFilePreviewOpen(),
+        markStreaming,
+        // forceActivate = 用户自己点的指示器 → 这份 tab 是他要看的，
+        // 后面 tool_call_result 纠正路径时也不该把它当「猜测出来的」清掉
+        inferred: !forceActivate
+      })
     },
-    _markExcelDrawerStreamingDone() {
-      if (this._excelDrawer && this._excelDrawer.isStreaming) {
-        this._excelDrawer = { ...this._excelDrawer, isStreaming: false }
+    /**
+     * v0.3.8 —— 「这份文档的 tab 有没有？没有就建一个」。
+     * 写入开始（tool_call_name）和写入结束（tool_call_result）两条路径共用，
+     * 激活规则只写一份，避免两处漂移。
+     *
+     * 激活规则：**面板关着 → 弹出来并切到这份文档；面板开着但看的是另一份 → 不抢 active**
+     * （抢过去会把用户正在读的文档顶掉，而且跳过去就回不来：后续更新这份时面板已开，
+     * 按规则就不动了）。后台会话（用户已切到别的对话）一律不弹不改 active。
+     *
+     * inferred：路径是从 code 文本**猜**出来的（见 wordExcel.js 的候选队列）。
+     * 猜错时 tool_call_result 阶段会拿 stdout 里的真实路径来纠正并清掉这个 tab。
+     */
+    _ensureDocTab({ rawPath, isWord, requestSessionId, activate, markStreaming = false, inferred = false }) {
+      const url = normalizeDocPath(rawPath)
+      if (!url) return null
+      const isBackground = !!requestSessionId && requestSessionId !== this.currentSessionId
+      const shouldActivate = activate && !isBackground
+      const existing = this.filePreviewTabs.find(t => t.url === url)
+      if (existing) {
+        if (markStreaming) existing.isStreaming = true
+        if (requestSessionId) existing.docSessionId = requestSessionId
+        if (shouldActivate) {
+          this.activeFilePreviewTabId = existing.id
+          this.showFilePreview = true
+        }
+        return existing
       }
+      this.openFilePreviewTab({
+        file: { name: rawPath.split('/').pop() || rawPath },
+        url,
+        suffix: /\.xlsx$/i.test(rawPath) ? '.xlsx' : '.docx',
+        kind: isWord ? 'office_docx' : 'office_xlsx',
+        // 绑「正在写这份文档的 session」而不是当前查看的 session：后台流式时
+        // 原文编辑保存要写回正确的 session。
+        sessionId: requestSessionId || '',
+        activate: shouldActivate,
+        // ⚠️ 必须进初始对象，不能等 tab 建好再补：ToolDocPreview 挂载后第一件事就是
+        // fetch，那时候文件还不存在（tool_call_name 早于 tool_call_result），
+        // isStreaming=false 会把预期内的 404 报成「加载失败」横幅。
+        isStreaming: markStreaming,
+        docSessionId: requestSessionId || ''
+      })
+      // ⚠️ 必须回传**响应式代理**：openFilePreviewTab 是 async，但在 push 之前没有任何
+      // await，所以 push 已经同步发生；直接 find 拿到的就是 Proxy 里的那份。
+      // （调用方在 promise 回调里写 tab.isStreaming 的话，那个 raw 对象不过 set trap。）
+      const tab = this.filePreviewTabs.find(t => t.url === url)
+      if (tab) tab._inferred = inferred
+      return tab
     },
-    // ChatHeader 按钮触发：切换 Excel drawer 显隐（仅当 filePath 已跟踪时才有效）。
-// 互斥：开 Excel 时关 Word —— 两个 drawer 都从右侧滑入，重叠不可读。
-    toggleExcelDrawer() {
-      if (!this._excelDrawer?.filePath) return
-      const willOpen = !this._excelDrawer.visible
-      this._excelDrawer = { ...this._excelDrawer, visible: willOpen }
-      if (willOpen && this._wordDrawer?.visible) {
-        this._wordDrawer = { ...this._wordDrawer, visible: false }
+    /**
+     * v0.3.8 —— tool_call_result 阶段：bump 对应文档 tab 的 docVersion
+     * （触发 FilePreviewTabPane 里的 ToolDocPreview 重 fetch + 重新渲染）。
+     *
+     * 路径来源优先级：**stdout 里的真实路径 > 从 code 文本猜的路径**。
+     * stdout 是工具自己 print 的（WordEditor 惯例 `OK -> /cached/{sid}/X.docx`），
+     * 是唯一不会错的来源；而 code 文本只能靠正则猜（f-string 变量前缀 / os.path.join
+     * 都解不出来）。猜错时把 tool_call_name 阶段建出来的猜测 tab 清掉，
+     * 否则面板里会留一个永远 404 的僵尸 tab。
+     *
+     * 顺带在这里把 isStreaming 清掉 —— **这份文档的 tool_call_result 就是它写完的信号**，
+     * 不必等整轮 done。同一轮里写多份文档（A → B → 再更新 A）时，done 之前所有 tab 都还
+     * 挂着 isStreaming，N 份文档的写入态会互相重叠。改成 per-tool-call 生命周期后，
+     * N 份文档各自写完就各自解除。
+     *
+     * 面板此刻关着也照样弹：这是「AI 写了文档但面板没自动开」的最后一次兜底机会。
+     */
+    _bumpDocPreviewTab(toolCall, requestSessionId, output = '') {
+      const args = toolCall?.args || {}
+      const sid = requestSessionId || this.currentSessionId || ''
+      const outPath = extractDocPathFromOutput(output, sid)
+      const codePath = this._extractDocRawPath(args, sid)
+      const rawPath = outPath || codePath
+      if (!rawPath) return null
+      // 猜的路径和真实路径不是同一份 → 清掉猜测 tab（只清我们自己建的 inferred tab，
+      // 用户自己点开的 tab 一律不动）
+      if (outPath && codePath && normalizeDocPath(outPath) !== normalizeDocPath(codePath)) {
+        const guessed = this.filePreviewTabs.find(
+          t => t._inferred && normalizeDocPath(codePath) === t.url
+        )
+        if (guessed) this.closeFilePreviewTab(guessed.id)
       }
+      const tab = this._ensureDocTab({
+        rawPath,
+        isWord: isWordEditorCall({ name: 'code', args }),
+        requestSessionId,
+        activate: !this._isFilePreviewOpen(),
+        markStreaming: false
+      })
+      if (!tab) return null
+      tab.docVersion = (tab.docVersion || 0) + 1
+      tab.docSessionId = requestSessionId
+      tab.isStreaming = false
+      return tab
     },
-    toggleWordDrawer() {
-      if (!this._wordDrawer?.filePath) return
-      const willOpen = !this._wordDrawer.visible
-      this._wordDrawer = { ...this._wordDrawer, visible: willOpen }
-      if (willOpen && this._excelDrawer?.visible) {
-        this._excelDrawer = { ...this._excelDrawer, visible: false }
-      }
+    /**
+     * v0.3.8 —— tool_call_result：这份文档写完了，收尾（bump tab + 清两处 isStreaming）。
+     * SSE 的 tool_call_name / tool_call_result 各有 4 个 dispatch 块 × 2 分支，
+     * 共 14 处同样逻辑，收敛到这里。
+     *
+     * ⚠️ 判定必须用 **merge 后的 toolCall**（带 name + args），不能拿 data.content 判：
+     * `isWordEditorCall` 判的是 `{name:'code', args:{code}}`，而 tool_call_result 的
+     * data.content 是工具 stdout（字符串）—— 拿它去判恒为 false。原先 14 处都写成
+     * `isWordEditorCall(data.content || {})`，于是 `_bumpDocPreviewTab` 一次都没跑到，
+     * 三个症状同一个根因：
+     *   ① tab.docVersion 不 bump → 面板停在 tool_call_name 时那次 fetch 的 404
+     *      （那时文件还没写出来）→ 内容永远不重取
+     *   ② tab.isStreaming 不清 → 写作面板的流式态挂到整轮 done
+     *   ③ 面板内容不重取 → 停在旧内容上
+     */
+    _onDocToolResult(message, data, requestSessionId) {
+      const toolCalls = message?.toolCalls
+      if (!Array.isArray(toolCalls)) return
+      let tc = toolCalls.find(t => t.id === data.id)
+      // 与 mergeToolCallResult 对齐的第二级兜底：`code` 走审批 interrupt() → resume
+      // 之后 run_id 可能变，精确 id 匹配不上。匹配不上就等于这次写入的信号丢了 →
+      // docVersion 不 bump → 面板永久停在旧内容（WordEditor 默认走沙盒，
+      // 每次都要审批，这条路径很容易踩）。
+      if (!tc) tc = toolCalls.find(t => t._pendingApproval)
+      if (!tc) return
+      if (!isWordEditorCall(tc) && !isExcelEditorCall(tc)) return
+      tc._docVersion = (tc._docVersion || 0) + 1
+      // data.content = 工具 stdout（字符串）。它是「文件实际写到哪了」的权威来源，
+      // code 解析失败时靠它兜住（见 _bumpDocPreviewTab 的路径优先级）。
+      const output = data.content || tc.result || ''
+      this._bumpDocPreviewTab(tc, requestSessionId, output)
     },
     /**
      * 用户在 BootstrapView 上点「进入应用」：
@@ -1715,9 +1796,57 @@ export default {
         const cur = arr[aiIndex]
         if (cur) {
           cur.elapsedMs = Date.now() - startTs
+          // —— 待审批期间不报「上游静默」——
+          // permission_request 之后后端 LangGraph 停在 interrupt() 等用户决策，
+          // SSE 本来就不会再有数据，这段静默是**预期内**的。照样报「已等待 Ns」等于
+          // 在替用户的思考时间倒计时，还会和审批 UI 抢同一块视觉空间。
+          if (this._approvalPendingSessions.has(sessionId)) {
+            cur.stalledMs = 0
+            this._lastStreamActivity.set(sessionId, Date.now())
+            return
+          }
+          // —— 上游静默读秒（复用本 timer，不另开）——
+          // 后端 node_guard 遇到 529/5xx 会原地重试（最多 5 次 × 8s），期间 SSE 一个字节都不发，
+          // 界面看起来像卡死。这里按「距上次收到任何事件的静默时长」显示「已等待 Ns」，
+          // 让用户知道进程还活着。收到事件即重置（见 noteStreamActivity）。
+          // 只报静默秒数、不报「第 N/5 次」——尝试次数只有后端知道，编出来是骗用户。
+          const idleMs = Date.now() - (this._lastStreamActivity.get(sessionId) || startTs)
+          cur.stalledMs = idleMs >= STALL_NOTICE_MS ? idleMs : 0
         }
       }, 250)
       this._streamTimers.set(sessionId, timer)
+    },
+    /**
+     * 记录「上游重试耗尽」标记到本轮 AI 消息上。
+     *
+     * 后端 node_guard 判定 529/429/5xx/timeout 属瞬时错误 → 原地重试
+     * （5 次 × 8s），耗尽才抛 TransientUpstreamError；ChatService 把
+     * upstream_transient / retry_attempts 塞进 SSE error 事件。
+     *
+     * 前端只存标记，**不改 content、不动 error:true** —— 错误气泡照旧由
+     * 各 error 分支自己写。MessageItem.retryNotice 读这两个字段，在思考面板里
+     * 追加一条「已重试 N/M 次仍失败」，不覆盖任何已有思考 / 正文。
+     *
+     * 非上游瞬时错误（KeyError / 配置缺失等）不写标记，行为与改动前完全一致。
+     */
+    markRetryExhausted(sessionId, data) {
+      if (!data || !data.upstream_transient) return
+      const meta = this._streamingMeta.get(sessionId)
+      if (!meta) return
+      const arr = this._streamingMessages.get(sessionId)
+      if (!arr || meta.aiIndex < 0 || meta.aiIndex >= arr.length) return
+      const cur = arr[meta.aiIndex]
+      if (!cur) return
+      cur.retryExhausted = true
+      cur.retryAttempts = data.retry_attempts
+      cur.retryMaxAttempts = data.retry_max_attempts
+      cur.stalledMs = 0
+    },
+    /**
+     * 记录「刚收到一个 SSE 事件」——用于上游静默读秒。任何流式事件到达都应调用。
+     */
+    noteStreamActivity(sessionId) {
+      if (sessionId) this._lastStreamActivity.set(sessionId, Date.now())
     },
     /**
      * 清除本地读秒 timer。SSE 循环异常断开（abort / 网络断开）场景由 done/error/interrupt 三处兜底。
@@ -1728,6 +1857,8 @@ export default {
         clearInterval(timer)
         this._streamTimers.delete(sessionId)
       }
+      // 顺手清静默读秒的时间戳，避免 Map 无限增长（session 数无上限）
+      this._lastStreamActivity.delete(sessionId)
     },
     toggleSidebar() {
       this.sidebarCollapsed = !this.sidebarCollapsed
@@ -1784,6 +1915,10 @@ export default {
       if (!sessionId) {
         return
       }
+      // 连点保护：中断是一次性的，连点只是重复写同一个 redis hash，
+      // 但会让用户在「还没停」的窗口里反复以为没生效
+      if (this._interruptInFlight) return
+      this._interruptInFlight = true
       const url = `/chat/${sessionId}/interrupt`
       try {
         const response = await fetch(url, {
@@ -1796,6 +1931,8 @@ export default {
         }
       } catch (error) {
         console.error('中断请求异常:', error)
+      } finally {
+        this._interruptInFlight = false
       }
     },
     async handleResume(message = null) {
@@ -1847,6 +1984,7 @@ export default {
             role: 'ai',
             content: '',
             reasoning: '',
+            impIpt: '',
             toolCalls: [],
             thinkingDone: false,
             streaming: true,
@@ -1879,6 +2017,8 @@ export default {
         while (true) {
           const { done, value } = await reader.read()
           if (done) break
+          // 上游静默读秒：收到任何字节即视为「上游还活着」，重置计时
+          this.noteStreamActivity(requestSessionId)
           buffer += decoder.decode(value, { stream: true })
           // 用 indexOf + slice 替代 split('\n\n') + parts.pop()：
           // chunk 边界切到 \n\n 中间时，老写法 split 拆出半截 JSON 被 try/catch 吞掉，
@@ -1911,21 +2051,24 @@ export default {
                   } else if (data.type === 'reasoning') {
                     snap[meta.aiIndex] = {
                       ...snap[meta.aiIndex],
-                      reasoning: snap[meta.aiIndex].reasoning + data.content,
+                      ...this.reasoningDelta(snap[meta.aiIndex], data),
                       responseTime: this.currentResponseTime
                     }
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_name') {
                     snap[meta.aiIndex] = this.mergeToolCallStart(snap[meta.aiIndex], data)
                     snap[meta.aiIndex] = this._markSkillForgePending(snap[meta.aiIndex], data)
-                    this._markWordDrawerPending(data)
-                    this._markExcelDrawerPending(data)
+                    if (isWordEditorCall(data.content || {}) || isExcelEditorCall(data.content || {})) {
+                      const tc = snap[meta.aiIndex].toolCalls.find(t => t.id === data.id)
+                      if (tc) { tc._sessionId = requestSessionId; tc._docVersion = tc._docVersion || 0 }
+                      // v0.3.8 —— 推到右侧文件预览面板（写作 tab）
+                      this._openDocPreviewTab(tc, requestSessionId)
+                    }
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_result') {
                     snap[meta.aiIndex] = this.mergeToolCallResult(snap[meta.aiIndex], data)
                     this._maybeRefetchSkillsAfterResult(snap[meta.aiIndex], data)
-                    this._maybeRefreshWordDrawerAfterResult(data)
-                    this._maybeRefreshExcelDrawerAfterResult(data)
+                    this._onDocToolResult(snap[meta.aiIndex], data, requestSessionId)
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'done') {
                     this.stopResponseTimer()
@@ -1944,17 +2087,17 @@ export default {
                     }
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                     this.stopStreamTimer(requestSessionId)
-                    this._activeStreamingSessions.delete(requestSessionId)
+                    this._endStreamingSession(requestSessionId)
                     this._streamingMessages.delete(requestSessionId)
                     this._streamingMeta.delete(requestSessionId)
-                    this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-                    // 绿点：clean done 才标记（已计算 wasError）
+                                        // 绿点：clean done 才标记（已计算 wasError）
                     if (!wasError) this.markSessionCompleted(requestSessionId)
                     // 会话已切换：只 PUT 标题 + 同步侧栏，不调 get_conversation（避免并发 N 个 done 时反复重拉）
                     if (requestSessionId) {
                       await this.updateTitleOnly(requestSessionId, lastUserMessage)
                     }
                   } else if (data.type === 'error') {
+                    this.markRetryExhausted(requestSessionId, data)
                     this._sessionHadError.add(requestSessionId)
                     this.markSessionErrored(requestSessionId)
                     snap[meta.aiIndex] = {
@@ -1968,11 +2111,10 @@ export default {
                     }
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                     this.stopStreamTimer(requestSessionId)
-                    this._activeStreamingSessions.delete(requestSessionId)
+                    this._endStreamingSession(requestSessionId)
                     this._streamingMessages.delete(requestSessionId)
                     this._streamingMeta.delete(requestSessionId)
-                    this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-                    if (requestSessionId) {
+                                        if (requestSessionId) {
                       await this.updateTitleOnly(requestSessionId, lastUserMessage)
                     }
                   } else if (data.type === 'interrupt') {
@@ -1981,11 +2123,10 @@ export default {
                     snap[meta.aiIndex] = { ...snap[meta.aiIndex], streaming: false, interruptReason: reason }
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                     this.stopStreamTimer(requestSessionId)
-                    this._activeStreamingSessions.delete(requestSessionId)
+                    this._endStreamingSession(requestSessionId)
                     this._streamingMessages.delete(requestSessionId)
                     this._streamingMeta.delete(requestSessionId)
-                    this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-                    // 会话已切换：只 PUT 标题 + 同步侧栏，不调 get_conversation（避免并发 N 个 done 时反复重拉）
+                                        // 会话已切换：只 PUT 标题 + 同步侧栏，不调 get_conversation（避免并发 N 个 done 时反复重拉）
                     if (requestSessionId) {
                       await this.updateTitleOnly(requestSessionId, lastUserMessage)
                     }
@@ -2012,21 +2153,24 @@ export default {
               } else if (data.type === 'reasoning') {
                 this.messages[aiMessageIndex] = {
                   ...this.messages[aiMessageIndex],
-                  reasoning: this.messages[aiMessageIndex].reasoning + data.content,
+                  ...this.reasoningDelta(this.messages[aiMessageIndex], data),
                   responseTime: this.currentResponseTime
                 }
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_name') {
                 this.messages[aiMessageIndex] = this.mergeToolCallStart(this.messages[aiMessageIndex], data)
                 this.messages[aiMessageIndex] = this._markSkillForgePending(this.messages[aiMessageIndex], data)
-                this._markWordDrawerPending(data)
-                this._markExcelDrawerPending(data)
+                if (isWordEditorCall(data.content || {}) || isExcelEditorCall(data.content || {})) {
+                  const tc = this.messages[aiMessageIndex].toolCalls.find(t => t.id === data.id)
+                  if (tc) { tc._sessionId = requestSessionId; tc._docVersion = tc._docVersion || 0 }
+                  // v0.3.8 —— 推到右侧文件预览面板（写作 tab）
+                  this._openDocPreviewTab(tc, requestSessionId)
+                }
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_result') {
                 this.messages[aiMessageIndex] = this.mergeToolCallResult(this.messages[aiMessageIndex], data)
                 this._maybeRefetchSkillsAfterResult(this.messages[aiMessageIndex], data)
-                this._maybeRefreshWordDrawerAfterResult(data)
-                this._maybeRefreshExcelDrawerAfterResult(data)
+                this._onDocToolResult(this.messages[aiMessageIndex], data, requestSessionId)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'done') {
                 this.stopResponseTimer()
@@ -2045,13 +2189,13 @@ export default {
                 await this.updateTitleAndRefresh(this.currentSessionId, lastUserMessage)
                 // 清理快照
                 this.stopStreamTimer(requestSessionId)
-                this._activeStreamingSessions.delete(requestSessionId)
+                this._endStreamingSession(requestSessionId)
                 this._streamingMessages.delete(requestSessionId)
                 this._streamingMeta.delete(requestSessionId)
-                this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-                // 绿点：用户正在当前会话，无条件标记（用户在 done 时已经在看）
+                                // 绿点：用户正在当前会话，无条件标记（用户在 done 时已经在看）
                 this.markSessionCompleted(requestSessionId)
               } else if (data.type === 'error') {
+                this.markRetryExhausted(requestSessionId, data)
                 console.error('续接响应错误:', data.error)
                 this._sessionHadError.add(this.currentSessionId)
                 this.markSessionErrored(requestSessionId)
@@ -2070,11 +2214,10 @@ export default {
                 }
                 // 清理快照
                 this.stopStreamTimer(requestSessionId)
-                this._activeStreamingSessions.delete(requestSessionId)
+                this._endStreamingSession(requestSessionId)
                 this._streamingMessages.delete(requestSessionId)
                 this._streamingMeta.delete(requestSessionId)
-                this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-              } else if (data.type === 'interrupt') {
+                              } else if (data.type === 'interrupt') {
                 this.stopResponseTimer()
                 const reason = data.reason || '用户主动中断'
                 this.messages[aiMessageIndex] = { ...this.messages[aiMessageIndex], streaming: false, interruptReason: reason }
@@ -2084,11 +2227,10 @@ export default {
                 this.interruptReason = reason
                 // 清理快照
                 this.stopStreamTimer(requestSessionId)
-                this._activeStreamingSessions.delete(requestSessionId)
+                this._endStreamingSession(requestSessionId)
                 this._streamingMessages.delete(requestSessionId)
                 this._streamingMeta.delete(requestSessionId)
-                this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-              } else if (data.type === 'permission_request') {
+                              } else if (data.type === 'permission_request') {
                 this.handlePermissionRequest(data, requestSessionId)
               }
             } catch (e) {
@@ -2115,21 +2257,24 @@ export default {
                 } else if (data.type === 'reasoning') {
                   snap[meta.aiIndex] = {
                     ...snap[meta.aiIndex],
-                    reasoning: snap[meta.aiIndex].reasoning + data.content,
+                    ...this.reasoningDelta(snap[meta.aiIndex], data),
                     responseTime: this.currentResponseTime
                   }
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
                 } else if (data.type === 'tool_call_name') {
                   snap[meta.aiIndex] = this.mergeToolCallStart(snap[meta.aiIndex], data)
                   snap[meta.aiIndex] = this._markSkillForgePending(snap[meta.aiIndex], data)
-                  this._markWordDrawerPending(data)
-                  this._markExcelDrawerPending(data)
+                  if (isWordEditorCall(data.content || {}) || isExcelEditorCall(data.content || {})) {
+                    const tc = snap[meta.aiIndex].toolCalls.find(t => t.id === data.id)
+                    if (tc) { tc._sessionId = requestSessionId; tc._docVersion = tc._docVersion || 0 }
+                    // v0.3.8 —— 推到右侧文件预览面板（写作 tab）
+                    this._openDocPreviewTab(tc, requestSessionId)
+                  }
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
                 } else if (data.type === 'tool_call_result') {
                   snap[meta.aiIndex] = this.mergeToolCallResult(snap[meta.aiIndex], data)
                   this._maybeRefetchSkillsAfterResult(snap[meta.aiIndex], data)
-                  this._maybeRefreshWordDrawerAfterResult(data)
-                  this._maybeRefreshExcelDrawerAfterResult(data)
+                  this._onDocToolResult(snap[meta.aiIndex], data, requestSessionId)
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
                 } else if (data.type === 'done') {
                   this.stopResponseTimer()
@@ -2148,17 +2293,17 @@ export default {
                   }
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
                   this.stopStreamTimer(requestSessionId)
-                  this._activeStreamingSessions.delete(requestSessionId)
+                  this._endStreamingSession(requestSessionId)
                   this._streamingMessages.delete(requestSessionId)
                   this._streamingMeta.delete(requestSessionId)
-                  this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-                  // 绿点：clean done 才标记（buffer-tail sessionChanged 分支，已计算 wasError）
+                                    // 绿点：clean done 才标记（buffer-tail sessionChanged 分支，已计算 wasError）
                   if (!wasError) this.markSessionCompleted(requestSessionId)
                   // 会话已切换：只 PUT 标题 + 同步侧栏，不调 get_conversation
                   if (requestSessionId) {
                     await this.updateTitleOnly(requestSessionId, lastUserMessage)
                   }
                 } else if (data.type === 'error') {
+                  this.markRetryExhausted(requestSessionId, data)
                   this._sessionHadError.add(requestSessionId)
                   this.markSessionErrored(requestSessionId)
                   snap[meta.aiIndex] = {
@@ -2172,11 +2317,10 @@ export default {
                   }
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
                   this.stopStreamTimer(requestSessionId)
-                  this._activeStreamingSessions.delete(requestSessionId)
+                  this._endStreamingSession(requestSessionId)
                   this._streamingMessages.delete(requestSessionId)
                   this._streamingMeta.delete(requestSessionId)
-                  this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-                  if (requestSessionId) {
+                                    if (requestSessionId) {
                     await this.updateTitleOnly(requestSessionId, lastUserMessage)
                   }
                 } else if (data.type === 'permission_request') {
@@ -2186,21 +2330,24 @@ export default {
             } else if (data.type === 'reasoning') {
               this.messages[aiMessageIndex] = {
                 ...this.messages[aiMessageIndex],
-                reasoning: this.messages[aiMessageIndex].reasoning + data.content,
+                ...this.reasoningDelta(this.messages[aiMessageIndex], data),
                 responseTime: this.currentResponseTime
               }
               this.writeStreamMetrics(this.messages[aiMessageIndex], data)
             } else if (data.type === 'tool_call_name') {
               this.messages[aiMessageIndex] = this.mergeToolCallStart(this.messages[aiMessageIndex], data)
               this.messages[aiMessageIndex] = this._markSkillForgePending(this.messages[aiMessageIndex], data)
-              this._markWordDrawerPending(data)
-              this._markExcelDrawerPending(data)
+              if (isWordEditorCall(data.content || {}) || isExcelEditorCall(data.content || {})) {
+                const tc = this.messages[aiMessageIndex].toolCalls.find(t => t.id === data.id)
+                if (tc) { tc._sessionId = requestSessionId; tc._docVersion = tc._docVersion || 0 }
+                // v0.3.8 —— 推到右侧写作面板
+                this._openDocPreviewTab(tc, requestSessionId)
+              }
               this.writeStreamMetrics(this.messages[aiMessageIndex], data)
             } else if (data.type === 'tool_call_result') {
               this.messages[aiMessageIndex] = this.mergeToolCallResult(this.messages[aiMessageIndex], data)
               this._maybeRefetchSkillsAfterResult(this.messages[aiMessageIndex], data)
-              this._maybeRefreshWordDrawerAfterResult(data)
-              this._maybeRefreshExcelDrawerAfterResult(data)
+              this._onDocToolResult(this.messages[aiMessageIndex], data, requestSessionId)
               this.writeStreamMetrics(this.messages[aiMessageIndex], data)
             } else if (data.type === 'content') {
               this.messages[aiMessageIndex] = {
@@ -2225,11 +2372,10 @@ export default {
               this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               // 清理快照
               this.stopStreamTimer(requestSessionId)
-              this._activeStreamingSessions.delete(requestSessionId)
+              this._endStreamingSession(requestSessionId)
               this._streamingMessages.delete(requestSessionId)
               this._streamingMeta.delete(requestSessionId)
-              this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-              // 绿点：buffer-tail in-session done
+                            // 绿点：buffer-tail in-session done
               this.markSessionCompleted(requestSessionId)
             } else if (data.type === 'interrupt') {
               this.stopResponseTimer()
@@ -2241,11 +2387,10 @@ export default {
               this.interruptReason = reason
               // 清理快照
               this.stopStreamTimer(requestSessionId)
-              this._activeStreamingSessions.delete(requestSessionId)
+              this._endStreamingSession(requestSessionId)
               this._streamingMessages.delete(requestSessionId)
               this._streamingMeta.delete(requestSessionId)
-              this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-            } else if (data.type === 'permission_request') {
+                          } else if (data.type === 'permission_request') {
               this.handlePermissionRequest(data, requestSessionId)
             }
           } catch (e) {
@@ -2539,11 +2684,11 @@ export default {
     /**
      * 撤回用户消息：
      * 1. 找「此用户消息之前最近的 AI 消息」的 checkpointId 作为回溯目标
-     * 2. POST /interrupt → 让后台 workflow 立即停（astream 中段会 1-2s 内感知）
-     * 3. 等 SSE interrupt 事件到达（timeout 3s 兜底）→ astream 真的 raise GraphInterrupt
-     * 4. POST /backtrack → langgraph 指针回溯（CheckpointJanitor.retarget_to）
-     * 5. 拉 get_conversation → messages 数组刷新（这条用户消息和后面的 AI 都消失）
-     * 6. 把原 message.content 写到 MessageInput 输入框（files v1 不恢复）
+     * 2. 交给 runBacktrack 执行（两条分支见那里）：
+     *    · 流式输出中 → POST /interrupt → 等 SSE interrupt（5s 兜底）→ 回溯
+     *    · 非流式（上一轮已答完）→ 跳过握手直接回溯（没人会发 interrupt 事件，等也是白等）
+     * 3. 拉 get_conversation → messages 数组刷新（这条用户消息和后面的 AI 都消失）
+     * 4. 把原 message.content 写到 MessageInput 输入框（files v1 不恢复）
      *
      * /backtrack slash 命令复用同一个底层（runBacktrack），区别只是「找最近 AI 消息」
      * 而不是「找 userMessage 之前的 AI 消息」。
@@ -2579,53 +2724,21 @@ export default {
      * withdrawText 为 null 表示不回填输入框（slash 命令路径，撤回整轮对话但保留输入框当前内容）。
      */
     async runBacktrack({ sid, backtrackCid, withdrawText, withdrawSid }) {
+      // 重入保护：撤回期间按钮已禁用，这里兜底防 slash 命令 + 按钮点击同时打进来
+      if (this._withdrawInFlight) return
+      this._withdrawInFlight = true
       try {
-        // 2. 设置 SSE interrupt resolver（必须先于 POST /interrupt 注册：避免 race —
-        //    后端 astream 一旦感知到 Redis hash 就会立刻 yield interrupt 事件，
-        //    若 resolver 还没挂上、SSE handler 检查 this._withdrawInterruptResolver 为 null 就直接吞掉事件，
-        //    然后 handleWithdraw 在这干等 5s 超时 —— 撤回失败）。
-        let _interruptArrived
-        const _interruptPromise = new Promise((resolve, reject) => {
-          let done = false
-          const finish = (err) => {
-            if (done) return
-            done = true
-            clearTimeout(timer)
-            this._withdrawInterruptResolver = null
-            if (err) reject(err)
-            else resolve()
-          }
-          // timeout 5s 兜底：astream 卡在 tool_execution_node 太久（tool 执行慢）时强制继续 backtrack
-          const timer = setTimeout(() => finish(new Error('等 SSE interrupt 事件超时（5s）')), 5000)
-          // SSE interrupt handler 调用 resolver 时触发 resolve
-          this._withdrawInterruptResolver = () => finish()
-        })
-        _interruptArrived = _interruptPromise
-
-        // 3. POST /interrupt — fire-and-forget（不 await：触发 backtrack 的唯一信号是 SSE interrupt 事件，
-        //    不是这个 API 是否返回 200；写 Redis hash 是后端 astream 感知中断的前置条件，
-        //    但「hash 写完」≠「astream 已 raise GraphInterrupt」，
-        //    真正的状态权威在 SSE 事件上）。
-        fetch(`/chat/${sid}/interrupt`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ interrupt_reason: 'user_withdraw_message' })
-        }).catch(err => {
-          console.warn('[handleWithdraw] POST /interrupt 发送失败（不影响撤回，后端 SSE 也会兜底）:', err)
-        })
-
-        // 4. 等 SSE interrupt 事件真的到达 —— 这是触发 backtrack 的唯一信号
-        // 必须等 astream 真的 raise GraphInterrupt 否则:
-        //   - backtrack 清掉 interrupt:{sid} hash + retarget_to 覆写 LATEST_POINTER
-        //   - astream 继续跑完 → _save_round_checkpoint 写新 cid → LangGraph 自动覆盖 LATEST_POINTER
-        //   - 撤回失败：刷新看到完整本轮对话
-        try {
-          await _interruptArrived
-        } catch (e) {
-          console.warn('[handleWithdraw] SSE interrupt 未在 5s 内到达，强制 backtrack（astream 可能卡在 tool 执行）:', e.message)
+        // —— 分支判定：当前会话有没有正在跑的流式请求 ——
+        //   有  → 必须走「中断握手」：先让 astream 真的停下，再回溯（否则 astream 跑完会
+        //          用新 checkpoint 覆写 LATEST_POINTER，撤回失败）
+        //   没有 → 没人会发 SSE interrupt 事件，等下去只会白等满 5s 超时，直接回溯。
+        //          残留的 interrupt hash 无害：backtrack_state 开头自己 delete（后端 core.py）。
+        const streamLive = this.isLoading && this.currentSessionId === sid
+        if (streamLive) {
+          await this._awaitStreamInterrupt(sid)
         }
 
-        // 5. 回溯
+        // 1. 回溯（后端 backtrack_state：retarget_to 覆写 LATEST_POINTER + 删更新的 cid + memory 回滚）
         const btResp = await fetch(`/chat/${sid}/backtrack`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -2633,7 +2746,7 @@ export default {
         })
         if (!btResp.ok) throw new Error('回溯失败')
 
-        // 5. 拉新 conversation（这条 user message 和后续 AI/工具消息都消失）
+        // 2. 拉新 conversation（这条 user message 和后续 AI/工具消息都消失）
         const convResp = await fetch(`/chat/${sid}/conversation`)
         if (!convResp.ok) throw new Error('获取回溯后状态失败')
         const conv = await convResp.json()
@@ -2643,7 +2756,7 @@ export default {
         // 同步文件树 + 侧栏
         this.$refs.sidebar?.reloadFiles?.()
 
-        // 6. 把原消息文本回填到输入框 + 持久化到 localStorage（跨 F5 存活）
+        // 3. 把原消息文本回填到输入框 + 持久化到 localStorage（跨 F5 存活）
         //    loadConversation 时会检测 entry 自动 setInputText；用户发送 / 主动清空时清掉
         //    withdrawText === null 走 /backtrack 路径，不回填（输入框当前内容视为"还想保留"）
         const storageKey = withdrawSid || sid
@@ -2657,7 +2770,7 @@ export default {
           localStorage.removeItem(`chatme-withdraw-pending:${storageKey}`)
         }
 
-        // 5.5 【按后端响应同步中断状态】—— 与 handleRestream 模式一致
+        // 4. 【按后端响应同步中断状态】—— 与 handleRestream 模式一致
         //     防御 SSE 第二个 interrupt 事件在 handleWithdraw 重置后再次置 true：
         //     backtrack 已清掉 redis hash，后端 interrupted_info 反映权威状态
         if (conv.interrupted_info?.reason) {
@@ -2672,17 +2785,16 @@ export default {
           this.interruptReason = ''
         }
 
-        // 清掉流式相关状态（消息已变）
+        // 5. 清掉流式相关状态（消息已变）
         this.isLoading = false
         // _pendingQueue 是 Map<sid, QueueEntry[]>（见 data() 声明），
         // 切 session 时由 loadConversation 的 _loadQueueForSession 负责重拉；这里不能赋 [] 破坏类型
-        this._activeStreamingSessions.delete(sid)
+        this._endStreamingSession(sid)
         this._streamingMessages.delete(sid)
         this._streamingMeta.delete(sid)
-        this._activeStreamingSessions = new Set(this._activeStreamingSessions)
         this.cleanupLoadingState()
 
-        // 侧栏 sync（直接复用 step 5 的 conv，不再发一次 GET /conversation；
+        // 6. 侧栏 sync（直接复用 step 2 的 conv，不再发一次 GET /conversation；
         //     backtrack 已经带了 refresh 会话的效果，再刷一次纯属浪费）
         const sidebarConv = this.conversations.find(c => c.session_id === sid)
         if (sidebarConv && conv.title) {
@@ -2695,6 +2807,55 @@ export default {
         })
       } catch (err) {
         console.error('[runBacktrack] 回溯失败:', err)
+      } finally {
+        this._withdrawInFlight = false
+      }
+    },
+
+    /**
+     * 撤回时的「中断握手」—— 只在当前会话真有活跃 SSE 流时才需要（runBacktrack 分支判定后调用）。
+     *
+     * 为什么必须等 astream 真的停下：backtrack 会覆写 LangGraph 的 LATEST_POINTER，
+     * 若 astream 还在跑，它跑完时的 _save_round_checkpoint 会写新 cid 并**自动覆盖回** LATEST_POINTER，
+     * 撤回就失败了（刷新看到完整本轮对话）。
+     *
+     * 两条到达路径都算数：
+     *   - SSE `interrupt` 事件（后端 astream 感知到 interrupt hash 后 yield）
+     *   - SSE `done` 事件（点撤回的同一瞬间这一轮刚好收尾 —— 此时已无新 checkpoint 要写，
+     *     直接回溯是安全的；App.vue 的 done 分支也调 resolver）
+     * 5s 超时兜底：astream 卡在 tool_execution_node（工具执行慢）时强制继续 backtrack。
+     */
+    async _awaitStreamInterrupt(sid) {
+      // resolver 必须先于 POST /interrupt 注册：后端 astream 一旦感知到 Redis hash
+      // 就可能立刻 yield interrupt 事件，先发请求会让事件早于 resolver 到达被吞掉。
+      const arrived = new Promise((resolve, reject) => {
+        let done = false
+        const finish = (err) => {
+          if (done) return
+          done = true
+          clearTimeout(timer)
+          this._withdrawInterruptResolver = null
+          if (err) reject(err)
+          else resolve()
+        }
+        const timer = setTimeout(() => finish(new Error('等 SSE interrupt 事件超时（5s）')), 5000)
+        this._withdrawInterruptResolver = () => finish()
+      })
+
+      // fire-and-forget：触发回溯的唯一信号是 SSE 事件，不是这个 API 是否返回 200。
+      // 写 hash 是后端 astream 感知中断的前置条件，但「hash 写完」≠「astream 已 raise」。
+      fetch(`/chat/${sid}/interrupt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ interrupt_reason: 'user_withdraw_message' })
+      }).catch(err => {
+        console.warn('[runBacktrack] POST /interrupt 发送失败（不影响撤回，后端 SSE 也会兜底）:', err)
+      })
+
+      try {
+        await arrived
+      } catch (e) {
+        console.warn('[runBacktrack] SSE interrupt 未在 5s 内到达，强制 backtrack（astream 可能卡在 tool 执行）:', e.message)
       }
     },
     async previewFile(file) {
@@ -2716,6 +2877,16 @@ export default {
       }
 
       if (isOfficePreviewFile(file)) {
+        // v0.3.7 —— .docx / .xlsx 复用 ToolDocPreview（mammoth / SheetJS 渲染）
+        const suf = suffix || (file.suffix ? String(file.suffix).toLowerCase() : '')
+        if (suf === '.docx') {
+          await this.openFilePreviewTab({ file, url, suffix, kind: 'office_docx' })
+          return
+        }
+        if (suf === '.xlsx') {
+          await this.openFilePreviewTab({ file, url, suffix, kind: 'office_xlsx' })
+          return
+        }
         const content = '此文件类型暂不支持在线预览。\n\n文件名：' + (file.name || '未知') + '\n文件大小：' + (file.size_human || '未知') + '\n\n请下载后使用本地应用程序查看。'
         await this.openFilePreviewTab({ file, url, suffix, kind: 'unsupported', content })
         return
@@ -2749,7 +2920,11 @@ export default {
       let kind = 'text'
       if (isImagePreviewFile(fileNode)) kind = 'image'
       else if (isHtmlPreviewFile(fileNode)) kind = 'html'
-      else if (isOfficePreviewFile(fileNode)) kind = 'unsupported'
+      else if (isOfficePreviewFile(fileNode)) {
+        const suf = suffix || (fileNode.suffix ? String(fileNode.suffix).toLowerCase() : '')
+        if (suf === '.docx') kind = 'office_docx'
+        else if (suf === '.xlsx') kind = 'office_xlsx'
+      }
 
       const content = kind === 'unsupported'
         ? '此文件类型暂不支持在线预览。\n\n文件名：' + (fileNode.name || '未知') + '\n\n请下载后使用本地应用程序查看。'
@@ -2758,12 +2933,28 @@ export default {
     },
     // Sidebar @reload-files 兜底：当前 sidebar 内部已经自管数据，这里主要是占位
     onSidebarReloadFiles() { /* sidebar 内部已 fetch */ },
-    async openFilePreviewTab({ file, url = '', suffix = '', kind = 'text', content = '' }) {
-      const sourceKey = buildFilePreviewSourceKey(file, this.currentSessionId || '', url)
-      const existing = this.filePreviewTabs.find(tab => tab.sourceKey === sourceKey)
+    /**
+     * @param activate  是否把新 tab 设为 active 并弹出面板。
+     *   用户主动点开（文件树 / 预览指示器）传 true；AI 写文档时传 false，
+     *   免得新文档把用户正在看的另一份文档顶掉（面板已开着时尤其明显）。
+     * @param isStreaming / docSessionId  AI 写作 tab 的初始状态。必须在**建 tab 时**
+     *   就写进对象：组件挂载即 fetch，那时文件还不存在，靠 isStreaming 压掉预期 404；
+     *   事后再补就晚了一拍（见 _openDocPreviewTab 的注释）。
+     */
+    async openFilePreviewTab({ file, url = '', suffix = '', kind = 'text', content = '', sessionId = '', activate = true, isStreaming = false, docSessionId = '' }) {
+      const sourceKey = buildFilePreviewSourceKey(file, sessionId || this.currentSessionId || '', url)
+      let existing = this.filePreviewTabs.find(tab => tab.sourceKey === sourceKey)
+      // [v0.3.8] sourceKey 兜底：AI 写作 tab 的 sourceKey 走 url 兜底分支，
+      // 用户从文件树点同一个文件时 sourceKey 走 path 分支，两者对不上会开重复 tab。
+      // 这里再按 url 兜一次底。
+      if (!existing && url) {
+        existing = this.filePreviewTabs.find(tab => tab.url === url)
+      }
       if (existing) {
-        this.activeFilePreviewTabId = existing.id
-        this.showFilePreview = true
+        if (activate) {
+          this.activeFilePreviewTabId = existing.id
+          this.showFilePreview = true
+        }
         return existing
       }
 
@@ -2773,7 +2964,7 @@ export default {
       const tab = {
         id,
         sourceKey,
-        sessionId: this.currentSessionId || '',
+        sessionId: sessionId || this.currentSessionId || '',
         name: file.name || '文件预览',
         suffix: suffix || getFileSuffix(file),
         fileType: file.file_type || file.type || '',
@@ -2787,12 +2978,27 @@ export default {
         loading: false,
         error: '',
         truncated: initialText.truncated || (!!content && size > MAX_TEXT_PREVIEW_BYTES),
-        totalBytes: size || initialText.totalBytes
+        totalBytes: size || initialText.totalBytes,
+        // v0.3.8 —— AI 正在写这份文档（WordEditor/ExcelEditor）：
+        // docVersion 每次 tool_call_result +1 → ToolDocPreview 重 fetch 一次，
+        // 面板内容随之多一段；isStreaming 在 tool_call_result 时清 false。
+        // 用户手动打开的文件这两个字段保持 0/false，不受影响。
+        docVersion: 0,
+        isStreaming,
+        docSessionId
       }
 
       this.filePreviewTabs.push(tab)
-      this.activeFilePreviewTabId = id
-      this.showFilePreview = true
+      if (activate) {
+        this.activeFilePreviewTabId = id
+        this.showFilePreview = true
+      }
+      // ⚠️ 必须回传**响应式代理**而不是上面那个 raw 对象：raw 上写属性不过 Proxy 的
+      // set trap，不触发任何 effect。原先 return raw，调用方在 promise 回调里写
+      // `tab.isStreaming = true` 写的是 raw → 子组件拿到的永远是初值 false → 首次写新文档时
+      // 面板弹出后挂一个假的「加载失败: HTTP 404」（那时文件本来就不存在，
+      // 本该被 isStreaming 压掉）。
+      return this.filePreviewTabs.find(t => t.id === id)
 
       if (kind === 'text' && (url || !content)) {
         const shouldFetch = !content || size > MAX_TEXT_PREVIEW_BYTES
@@ -2805,6 +3011,18 @@ export default {
       if (!this.filePreviewTabs.some(tab => tab.id === tabId)) return
       this.activeFilePreviewTabId = tabId
       this.showFilePreview = true
+    },
+    /**
+     * 关闭文件预览面板的统一入口（面板 ✕ / tab 上的 ✕）。
+     * 全屏遮罩已删（见模板注释），关闭只剩这一条路径 + 删光最后一个 tab 时的隐式关闭。
+     *
+     * [v0.3.8] 只藏面板，**不**记住「用户关过」——原先的 `_docPanelUserDismissed`
+     * 会让同一份文档的续写再也弹不回来（用户关 → AI 接着写 → 面板永远不再出现，
+     * 看着像功能坏了）。现在只拦「同一次写入里的重复弹窗」这件事本身不存在：
+     * 每次 docx 工具调用只有一次 tool_call_name，天然就只弹一次。
+     */
+    closeFilePreviewPanel() {
+      this.showFilePreview = false
     },
     closeFilePreviewTab(tabId) {
       const index = this.filePreviewTabs.findIndex(tab => tab.id === tabId)
@@ -2819,12 +3037,40 @@ export default {
       }
       if (this.filePreviewTabs.length === 0) this.showFilePreview = false
     },
+    /**
+     * 清掉不属于 keepSessionId 的预览 tab（切会话用）。
+     * 目标会话自己写的文档 tab、正在后台流式的会话的 tab 都留着。
+     */
+    _clearFilePreviewTabsExcept(keepSessionId) {
+      for (const controller of this._previewLoadControllers.values()) controller.abort()
+      this._previewLoadControllers.clear()
+      const kept = this.filePreviewTabs.filter(t => t.sessionId === keepSessionId)
+      if (kept.length === this.filePreviewTabs.length) return
+      this.filePreviewTabs = kept
+      if (!kept.some(t => t.id === this.activeFilePreviewTabId)) {
+        this.activeFilePreviewTabId = kept.length ? kept[kept.length - 1].id : null
+      }
+      if (!kept.length) this.showFilePreview = false
+    },
     clearFilePreviewTabs() {
       for (const controller of this._previewLoadControllers.values()) controller.abort()
       this._previewLoadControllers.clear()
       this.filePreviewTabs = []
       this.activeFilePreviewTabId = null
       this.showFilePreview = false
+    },
+    /**
+     * v0.3.8 —— 只清掉属于某 session 的「AI 写作 tab」（docSessionId 匹配），
+     * 用户自己打开的文件预览 tab 不受影响。删会话时调用，避免面板留孤儿预览。
+     */
+    _closeDocPreviewTabsForSession(sessionId) {
+      const kept = this.filePreviewTabs.filter(t => t.docSessionId !== sessionId)
+      if (kept.length === this.filePreviewTabs.length) return
+      this.filePreviewTabs = kept
+      if (!kept.some(t => t.id === this.activeFilePreviewTabId)) {
+        this.activeFilePreviewTabId = kept.length ? kept[kept.length - 1].id : null
+        if (!kept.length) this.showFilePreview = false
+      }
     },
     async reloadPreview(tabId = this.activeFilePreviewTabId) {
       const tab = this.filePreviewTabs.find(item => item.id === tabId)
@@ -2892,6 +3138,8 @@ export default {
       }
     },
     async restoreCheckpoint(checkpointId) {
+      // 互斥锁：CheckpointPanel 的 ↺（还能连按 Enter）和 MessageItem 的回溯按钮共用这里
+      if (this.sessionActionBusy) return
       this.restoreTargetId = checkpointId
       this.showRestoreConfirm = true
     },
@@ -3215,8 +3463,7 @@ export default {
       //   - _activeStreamingSessions.delete 保留：approval 等待时 SSE 流已停，无新事件进入，
       //     不再走 sessionChanged 分支
       this.stopResponseTimer()
-      this._activeStreamingSessions.delete(requestSessionId)
-      this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+      this._endStreamingSession(requestSessionId)
     },
     async onToolDecision(decision) {
       // decision: 'approve' | 'this-time-only' | 'deny' | 'feedback:<text>'
@@ -3302,14 +3549,18 @@ export default {
           body: JSON.stringify({ decision }),
         })
         if (!decideResp.ok) {
-          throw new Error(`decide failed: ${decideResp.status}`)
+          const e = new Error(`decide failed: ${decideResp.status}`)
+          e.httpStatus = decideResp.status
+          throw e
         }
         // 第 2 步：触发 Command(resume=decision) 让 LangGraph 继续
         const resumeResp = await fetch(`/chat/${sessionId}/permission/resume`, {
           method: 'POST',
         })
         if (!resumeResp.ok) {
-          throw new Error(`resume failed: ${resumeResp.status}`)
+          const e = new Error(`resume failed: ${resumeResp.status}`)
+          e.httpStatus = resumeResp.status
+          throw e
         }
         // 清掉审批标记（tool_call_result 到达时也会清，这里先清掉按钮）
         this.pendingToolApproval = null
@@ -3323,11 +3574,23 @@ export default {
         await this.handlePermissionResumeStream(resumeResp)
       } catch (error) {
         console.error('tool decision resume error:', error)
-        this.pendingToolApproval = null
-        // 出错也清黄点（用户已经提交了决定 = 状态解除）
-        this.markSessionApprovalResolved(sessionId)
-        // 出错路径也要归还焦点（用户已经把决策交了 = 该回主输入流）
-        this.focusInput()
+        // ⚠️ 只有 404（后端已无 pending permission —— 图已经走过去了 / hash 过期）
+        // 才撤审批 UI。其余失败（400 决策非法 / 500 / 网络中断）说明
+        // **LangGraph 还停在 interrupt() 上**，此时撤掉 pendingToolApproval +
+        // 黄点 = 用户看不到待办、AI 也不会推进（死锁，只能刷新页面）。
+        // 所以保留审批 UI 让用户换个决策重试，并给一条可见提示。
+        if (error && error.httpStatus === 404) {
+          this.pendingToolApproval = null
+          this.markSessionApprovalResolved(sessionId)
+          this.focusInput()
+        } else {
+          this.showToast(
+            '审批提交失败',
+            error && error.httpStatus
+              ? `服务端返回 ${error.httpStatus}，AI 仍在等待你的决定 —— 请重新选择一项。`
+              : '网络异常，AI 仍在等待你的决定 —— 请重新选择一项。'
+          )
+        }
       } finally {
         this.submittingToolDecision = false
         // resume 流无论成功 / 异常都已结束，清掉 in-flight 标志恢复发送按钮
@@ -3393,6 +3656,8 @@ export default {
         while (true) {
           const { done, value } = await reader.read()
           if (done) break
+          // 上游静默读秒：收到任何字节即视为「上游还活着」，重置计时
+          this.noteStreamActivity(requestSessionId)
           buffer += decoder.decode(value, { stream: true })
           let idx
           while ((idx = buffer.indexOf('\n\n')) !== -1) {
@@ -3420,21 +3685,24 @@ export default {
                   } else if (data.type === 'reasoning') {
                     snap[meta.aiIndex] = {
                       ...snap[meta.aiIndex],
-                      reasoning: snap[meta.aiIndex].reasoning + data.content,
+                      ...this.reasoningDelta(snap[meta.aiIndex], data),
                       responseTime: this.currentResponseTime,
                     }
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_name') {
                     snap[meta.aiIndex] = this.mergeToolCallStart(snap[meta.aiIndex], data)
                     snap[meta.aiIndex] = this._markSkillForgePending(snap[meta.aiIndex], data)
-                    this._markWordDrawerPending(data)
-                    this._markExcelDrawerPending(data)
+                    if (isWordEditorCall(data.content || {}) || isExcelEditorCall(data.content || {})) {
+                      const tc = snap[meta.aiIndex].toolCalls.find(t => t.id === data.id)
+                      if (tc) { tc._sessionId = requestSessionId; tc._docVersion = tc._docVersion || 0 }
+                      // v0.3.8 —— 推到右侧文件预览面板（写作 tab）
+                      this._openDocPreviewTab(tc, requestSessionId)
+                    }
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_result') {
                     snap[meta.aiIndex] = this.mergeToolCallResult(snap[meta.aiIndex], data)
                     this._maybeRefetchSkillsAfterResult(snap[meta.aiIndex], data)
-                    this._maybeRefreshWordDrawerAfterResult(data)
-                    this._maybeRefreshExcelDrawerAfterResult(data)
+                    this._onDocToolResult(snap[meta.aiIndex], data, requestSessionId)
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'done') {
                     this.stopResponseTimer()
@@ -3453,17 +3721,17 @@ export default {
                     }
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                     this.stopStreamTimer(requestSessionId)
-                    this._activeStreamingSessions.delete(requestSessionId)
+                    this._endStreamingSession(requestSessionId)
                     this._streamingMessages.delete(requestSessionId)
                     this._streamingMeta.delete(requestSessionId)
-                    this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-                    // 绿点：clean done 才标记（已计算 wasError）
+                                        // 绿点：clean done 才标记（已计算 wasError）
                     if (!wasError) this.markSessionCompleted(requestSessionId)
                     // 已切走：仅更新侧栏标题，不重拉 messages（避免覆盖快照）
                     if (requestSessionId) {
                       await this.updateTitleOnly(requestSessionId, lastUserMessage)
                     }
                   } else if (data.type === 'error') {
+                    this.markRetryExhausted(requestSessionId, data)
                     this._sessionHadError.add(requestSessionId)
                     this.markSessionErrored(requestSessionId)
                     snap[meta.aiIndex] = {
@@ -3477,11 +3745,10 @@ export default {
                     }
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                     this.stopStreamTimer(requestSessionId)
-                    this._activeStreamingSessions.delete(requestSessionId)
+                    this._endStreamingSession(requestSessionId)
                     this._streamingMessages.delete(requestSessionId)
                     this._streamingMeta.delete(requestSessionId)
-                    this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-                    if (requestSessionId) {
+                                        if (requestSessionId) {
                       await this.updateTitleOnly(requestSessionId, lastUserMessage)
                     }
                   } else if (data.type === 'interrupt') {
@@ -3490,11 +3757,10 @@ export default {
                     snap[meta.aiIndex] = { ...snap[meta.aiIndex], streaming: false, interruptReason: reason }
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                     this.stopStreamTimer(requestSessionId)
-                    this._activeStreamingSessions.delete(requestSessionId)
+                    this._endStreamingSession(requestSessionId)
                     this._streamingMessages.delete(requestSessionId)
                     this._streamingMeta.delete(requestSessionId)
-                    this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-                    if (requestSessionId) {
+                                        if (requestSessionId) {
                       await this.updateTitleOnly(requestSessionId, lastUserMessage)
                     }
                   } else if (data.type === 'permission_request') {
@@ -3519,21 +3785,24 @@ export default {
               } else if (data.type === 'reasoning') {
                 this.messages[aiMessageIndex] = {
                   ...this.messages[aiMessageIndex],
-                  reasoning: (this.messages[aiMessageIndex].reasoning || '') + data.content,
+                  ...this.reasoningDelta(this.messages[aiMessageIndex], data),
                   responseTime: this.currentResponseTime,
                 }
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_name') {
                 this.messages[aiMessageIndex] = this.mergeToolCallStart(this.messages[aiMessageIndex], data)
                 this.messages[aiMessageIndex] = this._markSkillForgePending(this.messages[aiMessageIndex], data)
-                this._markWordDrawerPending(data)
-                this._markExcelDrawerPending(data)
+                if (isWordEditorCall(data.content || {}) || isExcelEditorCall(data.content || {})) {
+                  const tc = this.messages[aiMessageIndex].toolCalls.find(t => t.id === data.id)
+                  if (tc) { tc._sessionId = requestSessionId; tc._docVersion = tc._docVersion || 0 }
+                  // v0.3.8 —— 推到右侧文件预览面板（写作 tab）
+                  this._openDocPreviewTab(tc, requestSessionId)
+                }
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_result') {
                 this.messages[aiMessageIndex] = this.mergeToolCallResult(this.messages[aiMessageIndex], data)
                 this._maybeRefetchSkillsAfterResult(this.messages[aiMessageIndex], data)
-                this._maybeRefreshWordDrawerAfterResult(data)
-                this._maybeRefreshExcelDrawerAfterResult(data)
+                this._onDocToolResult(this.messages[aiMessageIndex], data, requestSessionId)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'done') {
                 this.stopResponseTimer()
@@ -3551,13 +3820,13 @@ export default {
                 // 当前会话：调 updateTitleAndRefresh（更新标题 + 刷侧栏）
                 await this.updateTitleAndRefresh(this.currentSessionId, lastUserMessage)
                 this.stopStreamTimer(requestSessionId)
-                this._activeStreamingSessions.delete(requestSessionId)
+                this._endStreamingSession(requestSessionId)
                 this._streamingMessages.delete(requestSessionId)
                 this._streamingMeta.delete(requestSessionId)
-                this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-                // 绿点：in-session done
+                                // 绿点：in-session done
                 this.markSessionCompleted(requestSessionId)
               } else if (data.type === 'error') {
+                this.markRetryExhausted(requestSessionId, data)
                 this.stopResponseTimer()
                 this.messages[aiMessageIndex] = {
                   ...this.messages[aiMessageIndex],
@@ -3576,11 +3845,10 @@ export default {
                   await this.updateTitleOnly(this.currentSessionId, lastUserMessage)
                 }
                 this.stopStreamTimer(requestSessionId)
-                this._activeStreamingSessions.delete(requestSessionId)
+                this._endStreamingSession(requestSessionId)
                 this._streamingMessages.delete(requestSessionId)
                 this._streamingMeta.delete(requestSessionId)
-                this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-              } else if (data.type === 'interrupt') {
+                              } else if (data.type === 'interrupt') {
                 this.stopResponseTimer()
                 const reason = data.reason || '用户主动中断'
                 this.messages[aiMessageIndex] = {
@@ -3594,11 +3862,10 @@ export default {
                 this.isInterruptedSessionId = data.session_id || this.currentSessionId || this._pendingInterruptSessionId
                 this.interruptReason = reason
                 this.stopStreamTimer(requestSessionId)
-                this._activeStreamingSessions.delete(requestSessionId)
+                this._endStreamingSession(requestSessionId)
                 this._streamingMessages.delete(requestSessionId)
                 this._streamingMeta.delete(requestSessionId)
-                this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-              } else if (data.type === 'permission_request') {
+                              } else if (data.type === 'permission_request') {
                 this.handlePermissionRequest(data, requestSessionId)
               }
             } catch (e) {
@@ -3627,21 +3894,24 @@ export default {
                 } else if (data.type === 'reasoning') {
                   snap[meta.aiIndex] = {
                     ...snap[meta.aiIndex],
-                    reasoning: snap[meta.aiIndex].reasoning + data.content,
+                    ...this.reasoningDelta(snap[meta.aiIndex], data),
                     responseTime: this.currentResponseTime,
                   }
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
                 } else if (data.type === 'tool_call_name') {
                   snap[meta.aiIndex] = this.mergeToolCallStart(snap[meta.aiIndex], data)
                   snap[meta.aiIndex] = this._markSkillForgePending(snap[meta.aiIndex], data)
-                  this._markWordDrawerPending(data)
-                  this._markExcelDrawerPending(data)
+                  if (isWordEditorCall(data.content || {}) || isExcelEditorCall(data.content || {})) {
+                    const tc = snap[meta.aiIndex].toolCalls.find(t => t.id === data.id)
+                    if (tc) { tc._sessionId = requestSessionId; tc._docVersion = tc._docVersion || 0 }
+                    // v0.3.8 —— 推到右侧文件预览面板（写作 tab）
+                    this._openDocPreviewTab(tc, requestSessionId)
+                  }
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
                 } else if (data.type === 'tool_call_result') {
                   snap[meta.aiIndex] = this.mergeToolCallResult(snap[meta.aiIndex], data)
                   this._maybeRefetchSkillsAfterResult(snap[meta.aiIndex], data)
-                  this._maybeRefreshWordDrawerAfterResult(data)
-                  this._maybeRefreshExcelDrawerAfterResult(data)
+                  this._onDocToolResult(snap[meta.aiIndex], data, requestSessionId)
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
                 } else if (data.type === 'done') {
                   this.stopResponseTimer()
@@ -3660,16 +3930,16 @@ export default {
                   }
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
                   this.stopStreamTimer(requestSessionId)
-                  this._activeStreamingSessions.delete(requestSessionId)
+                  this._endStreamingSession(requestSessionId)
                   this._streamingMessages.delete(requestSessionId)
                   this._streamingMeta.delete(requestSessionId)
-                  this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-                  // 绿点：buffer-tail sessionChanged done（已计算 wasError）
+                                    // 绿点：buffer-tail sessionChanged done（已计算 wasError）
                   if (!wasError) this.markSessionCompleted(requestSessionId)
                   if (requestSessionId) {
                     await this.updateTitleOnly(requestSessionId, lastUserMessage)
                   }
                 } else if (data.type === 'error') {
+                  this.markRetryExhausted(requestSessionId, data)
                   this._sessionHadError.add(requestSessionId)
                   this.markSessionErrored(requestSessionId)
                   snap[meta.aiIndex] = {
@@ -3683,11 +3953,10 @@ export default {
                   }
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
                   this.stopStreamTimer(requestSessionId)
-                  this._activeStreamingSessions.delete(requestSessionId)
+                  this._endStreamingSession(requestSessionId)
                   this._streamingMessages.delete(requestSessionId)
                   this._streamingMeta.delete(requestSessionId)
-                  this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-                  if (requestSessionId) {
+                                    if (requestSessionId) {
                     await this.updateTitleOnly(requestSessionId, lastUserMessage)
                   }
                 } else if (data.type === 'permission_request') {
@@ -3697,21 +3966,24 @@ export default {
             } else if (data.type === 'reasoning') {
               this.messages[aiMessageIndex] = {
                 ...this.messages[aiMessageIndex],
-                reasoning: (this.messages[aiMessageIndex].reasoning || '') + data.content,
+                ...this.reasoningDelta(this.messages[aiMessageIndex], data),
                 responseTime: this.currentResponseTime,
               }
               this.writeStreamMetrics(this.messages[aiMessageIndex], data)
             } else if (data.type === 'tool_call_name') {
               this.messages[aiMessageIndex] = this.mergeToolCallStart(this.messages[aiMessageIndex], data)
               this.messages[aiMessageIndex] = this._markSkillForgePending(this.messages[aiMessageIndex], data)
-              this._markWordDrawerPending(data)
-              this._markExcelDrawerPending(data)
+              if (isWordEditorCall(data.content || {}) || isExcelEditorCall(data.content || {})) {
+                const tc = this.messages[aiMessageIndex].toolCalls.find(t => t.id === data.id)
+                if (tc) { tc._sessionId = requestSessionId; tc._docVersion = tc._docVersion || 0 }
+                // v0.3.8 —— 推到右侧写作面板
+                this._openDocPreviewTab(tc, requestSessionId)
+              }
               this.writeStreamMetrics(this.messages[aiMessageIndex], data)
             } else if (data.type === 'tool_call_result') {
               this.messages[aiMessageIndex] = this.mergeToolCallResult(this.messages[aiMessageIndex], data)
               this._maybeRefetchSkillsAfterResult(this.messages[aiMessageIndex], data)
-              this._maybeRefreshWordDrawerAfterResult(data)
-              this._maybeRefreshExcelDrawerAfterResult(data)
+              this._onDocToolResult(this.messages[aiMessageIndex], data, requestSessionId)
               this.writeStreamMetrics(this.messages[aiMessageIndex], data)
             } else if (data.type === 'content') {
               this.messages[aiMessageIndex] = {
@@ -3736,11 +4008,10 @@ export default {
               this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               await this.updateTitleAndRefresh(this.currentSessionId, lastUserMessage)
               this.stopStreamTimer(requestSessionId)
-              this._activeStreamingSessions.delete(requestSessionId)
+              this._endStreamingSession(requestSessionId)
               this._streamingMessages.delete(requestSessionId)
               this._streamingMeta.delete(requestSessionId)
-              this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-              // 绿点：buffer-tail in-session done
+                            // 绿点：buffer-tail in-session done
               this.markSessionCompleted(requestSessionId)
             } else if (data.type === 'interrupt') {
               this.stopResponseTimer()
@@ -3756,11 +4027,10 @@ export default {
               this.isInterruptedSessionId = data.session_id || this.currentSessionId || this._pendingInterruptSessionId
               this.interruptReason = reason
               this.stopStreamTimer(requestSessionId)
-              this._activeStreamingSessions.delete(requestSessionId)
+              this._endStreamingSession(requestSessionId)
               this._streamingMessages.delete(requestSessionId)
               this._streamingMeta.delete(requestSessionId)
-              this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-            } else if (data.type === 'permission_request') {
+                          } else if (data.type === 'permission_request') {
               this.handlePermissionRequest(data, requestSessionId)
             }
           } catch (e) {
@@ -3785,8 +4055,11 @@ export default {
       this.isInterrupted = false
       this.isInterruptedSessionId = null
 
+      // try 块之前的 5 个 early return 都必须手动复位 isRestreaming —— 走不到末尾的 finally。
+      // 漏复位会让 sessionActionBusy 永久为 true，这组按钮全锁死到 F5。
       // 如果没有传入 aiMessage，直接返回
       if (!aiMessage) {
+        this.isRestreaming = false
         return
       }
 
@@ -3795,6 +4068,7 @@ export default {
         (msg, idx) => msg === aiMessage
       )
       if (aiIndex === -1) {
+        this.isRestreaming = false
         return
       }
 
@@ -3817,6 +4091,7 @@ export default {
         }
       }
       if (!restreamCheckpointId) {
+        this.isRestreaming = false
         return
       }
 
@@ -3887,6 +4162,7 @@ export default {
       }
 
       if (!userMessage) {
+        this.isRestreaming = false
         return
       }
 
@@ -3961,6 +4237,7 @@ export default {
           role: 'ai',
           content: '',
           reasoning: '',
+          impIpt: '',
           toolCalls: [],
           thinkingDone: false,
           streaming: true,
@@ -4007,6 +4284,8 @@ export default {
           const { done, value } = await reader.read()
           if (done) break
 
+          // 上游静默读秒：收到任何字节即视为「上游还活着」，重置计时
+          this.noteStreamActivity(sessionId)
           buffer += decoder.decode(value, { stream: true })
           // 用 indexOf + slice 替代 split('\n\n') + parts.pop()：
           // chunk 边界切到 \n\n 中间时，老写法 split 拆出半截 JSON 被 try/catch 吞掉，
@@ -4039,21 +4318,24 @@ export default {
                   } else if (data.type === 'reasoning') {
                     snap[meta.aiIndex] = {
                       ...snap[meta.aiIndex],
-                      reasoning: snap[meta.aiIndex].reasoning + data.content,
+                      ...this.reasoningDelta(snap[meta.aiIndex], data),
                       responseTime: this.currentResponseTime
                     }
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_name') {
                     snap[meta.aiIndex] = this.mergeToolCallStart(snap[meta.aiIndex], data)
                     snap[meta.aiIndex] = this._markSkillForgePending(snap[meta.aiIndex], data)
-                    this._markWordDrawerPending(data)
-                    this._markExcelDrawerPending(data)
+                    if (isWordEditorCall(data.content || {}) || isExcelEditorCall(data.content || {})) {
+                      const tc = snap[meta.aiIndex].toolCalls.find(t => t.id === data.id)
+                      if (tc) { tc._sessionId = requestSessionId; tc._docVersion = tc._docVersion || 0 }
+                      // v0.3.8 —— 推到右侧文件预览面板（写作 tab）
+                      this._openDocPreviewTab(tc, requestSessionId)
+                    }
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_result') {
                     snap[meta.aiIndex] = this.mergeToolCallResult(snap[meta.aiIndex], data)
                     this._maybeRefetchSkillsAfterResult(snap[meta.aiIndex], data)
-                    this._maybeRefreshWordDrawerAfterResult(data)
-                    this._maybeRefreshExcelDrawerAfterResult(data)
+                    this._onDocToolResult(snap[meta.aiIndex], data, requestSessionId)
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'done') {
                     this.stopResponseTimer()
@@ -4072,17 +4354,17 @@ export default {
                     }
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                     this.stopStreamTimer(requestSessionId)
-                    this._activeStreamingSessions.delete(requestSessionId)
+                    this._endStreamingSession(requestSessionId)
                     this._streamingMessages.delete(requestSessionId)
                     this._streamingMeta.delete(requestSessionId)
-                    this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-                    // 绿点：clean done 才标记（已计算 wasError）
+                                        // 绿点：clean done 才标记（已计算 wasError）
                     if (!wasError) this.markSessionCompleted(requestSessionId)
                     // 会话已切换：只 PUT 标题 + 同步侧栏，不调 get_conversation
                     if (requestSessionId) {
                       await this.updateTitleOnly(requestSessionId, restreamMessage)
                     }
                   } else if (data.type === 'error') {
+                    this.markRetryExhausted(requestSessionId, data)
                     this._sessionHadError.add(requestSessionId)
                     this.markSessionErrored(requestSessionId)
                     snap[meta.aiIndex] = {
@@ -4096,11 +4378,10 @@ export default {
                     }
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                     this.stopStreamTimer(requestSessionId)
-                    this._activeStreamingSessions.delete(requestSessionId)
+                    this._endStreamingSession(requestSessionId)
                     this._streamingMessages.delete(requestSessionId)
                     this._streamingMeta.delete(requestSessionId)
-                    this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-                    if (requestSessionId) {
+                                        if (requestSessionId) {
                       await this.updateTitleOnly(requestSessionId, restreamMessage)
                     }
                   } else if (data.type === 'interrupt') {
@@ -4109,11 +4390,10 @@ export default {
                     snap[meta.aiIndex] = { ...snap[meta.aiIndex], streaming: false, interruptReason: reason }
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                     this.stopStreamTimer(requestSessionId)
-                    this._activeStreamingSessions.delete(requestSessionId)
+                    this._endStreamingSession(requestSessionId)
                     this._streamingMessages.delete(requestSessionId)
                     this._streamingMeta.delete(requestSessionId)
-                    this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-                    // 会话已切换：只 PUT 标题 + 同步侧栏，不调 get_conversation
+                                        // 会话已切换：只 PUT 标题 + 同步侧栏，不调 get_conversation
                     if (requestSessionId) {
                       await this.updateTitleOnly(requestSessionId, restreamMessage)
                     }
@@ -4140,21 +4420,24 @@ export default {
               } else if (data.type === 'reasoning') {
                 this.messages[aiMessageIndex] = {
                   ...this.messages[aiMessageIndex],
-                  reasoning: this.messages[aiMessageIndex].reasoning + data.content,
+                  ...this.reasoningDelta(this.messages[aiMessageIndex], data),
                   responseTime: this.currentResponseTime
                 }
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_name') {
                 this.messages[aiMessageIndex] = this.mergeToolCallStart(this.messages[aiMessageIndex], data)
                 this.messages[aiMessageIndex] = this._markSkillForgePending(this.messages[aiMessageIndex], data)
-                this._markWordDrawerPending(data)
-                this._markExcelDrawerPending(data)
+                if (isWordEditorCall(data.content || {}) || isExcelEditorCall(data.content || {})) {
+                  const tc = this.messages[aiMessageIndex].toolCalls.find(t => t.id === data.id)
+                  if (tc) { tc._sessionId = requestSessionId; tc._docVersion = tc._docVersion || 0 }
+                  // v0.3.8 —— 推到右侧文件预览面板（写作 tab）
+                  this._openDocPreviewTab(tc, requestSessionId)
+                }
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_result') {
                 this.messages[aiMessageIndex] = this.mergeToolCallResult(this.messages[aiMessageIndex], data)
                 this._maybeRefetchSkillsAfterResult(this.messages[aiMessageIndex], data)
-                this._maybeRefreshWordDrawerAfterResult(data)
-                this._maybeRefreshExcelDrawerAfterResult(data)
+                this._onDocToolResult(this.messages[aiMessageIndex], data, requestSessionId)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'done') {
                 this.stopResponseTimer()
@@ -4179,11 +4462,10 @@ export default {
                 await this.refreshCurrentConversation()
                 // 清理快照
                 this.stopStreamTimer(requestSessionId)
-                this._activeStreamingSessions.delete(requestSessionId)
+                this._endStreamingSession(requestSessionId)
                 this._streamingMessages.delete(requestSessionId)
                 this._streamingMeta.delete(requestSessionId)
-                this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-                // 绿点：handleRestream in-session done
+                                // 绿点：handleRestream in-session done
                 this.markSessionCompleted(requestSessionId)
               } else if (data.type === 'interrupt') {
                 this.stopResponseTimer()
@@ -4195,11 +4477,10 @@ export default {
                 this.interruptReason = reason
                 // 清理快照
                 this.stopStreamTimer(requestSessionId)
-                this._activeStreamingSessions.delete(requestSessionId)
+                this._endStreamingSession(requestSessionId)
                 this._streamingMessages.delete(requestSessionId)
                 this._streamingMeta.delete(requestSessionId)
-                this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-              } else if (data.type === 'permission_request') {
+                              } else if (data.type === 'permission_request') {
                 this.handlePermissionRequest(data, requestSessionId)
               }
             } catch (e) {
@@ -4218,6 +4499,9 @@ export default {
     },
     async confirmRestore() {
       if (!this.restoreTargetId || !this.currentSessionId) return
+      // 连点保护：ConfirmDialog 的「确定恢复」和 CheckpointPanel 的 Enter 键都能重复触发
+      if (this._restoreInFlight) return
+      this._restoreInFlight = true
 
       try {
         const response = await fetch(`/chat/${this.currentSessionId}/backtrack`, {
@@ -4260,6 +4544,7 @@ export default {
       } catch (error) {
         console.error('恢复检查点失败:', error)
       } finally {
+        this._restoreInFlight = false
         this.showRestoreConfirm = false
         this.restoreTargetId = null
       }
@@ -4405,7 +4690,8 @@ export default {
      * 调用时机：MessageItem @restart-session（仅在 isCurrentSessionInterrupted 可见）。
      */
     restartConversation() {
-      if (!this.currentSessionId || this.isLoading) return
+      // sessionActionBusy 互斥：中断 / 撤回 / 回溯 任一在跑时不许再发起重新生成
+      if (!this.currentSessionId || this.isLoading || this.sessionActionBusy) return
       // 找到被中断的最新 AI 消息 —— handleRestream 会自动 fallback 到上一轮 AI 的 checkpointId
       let interruptedAiMessage = null
       for (let i = this.messages.length - 1; i >= 0; i--) {
@@ -4563,9 +4849,8 @@ export default {
      */
     _finishStreamingSession(sid) {
       if (!sid) return
-      // _activeStreamingSessions 清理（触发 watcher）
-      this._activeStreamingSessions.delete(sid)
-      this._activeStreamingSessions = new Set(this._activeStreamingSessions)
+      // _activeStreamingSessions 清理 + 清该 session 的写作/流式态（含写作面板「写入中…」）
+      this._endStreamingSession(sid)
       // _sendingLock 释放（sendMessage 在 SSE 循环期间永不 return，finally 不可靠）
       if (this._sendingLock.has(sid)) {
         const m = new Map(this._sendingLock)
@@ -4814,9 +5099,12 @@ export default {
         return
       }
 
-      // 切换会话时清理旧会话文件标签，避免跨 session 混用路径和内容
+      // 切换会话时清理**别的**会话的文件标签，避免跨 session 混用路径和内容。
+      // ⚠️ 不能无脑 clearFilePreviewTabs()：用户在会话 B 时，会话 A 后台流式写的
+      // 文档 tab 会被一起销毁，切回 A 就只剩空面板（那份文档得重新点指示器才回来）。
+      // 所以只清不属于目标会话的。
       if (this.currentSessionId && this.currentSessionId !== sessionId) {
-        this.clearFilePreviewTabs()
+        this._clearFilePreviewTabsExcept(sessionId)
       }
 
       // —— 检查目标会话是否正在流式响应 —— 是的话走 snapshot 恢复分支
@@ -5052,10 +5340,9 @@ export default {
       } finally {
         // 清理 snapshot 引用 + 读秒 timer（无论后端删除是否成功，前端不再持有该 session 的状态）
         this.stopStreamTimer(sessionId)
-        this._activeStreamingSessions.delete(sessionId)
+        this._endStreamingSession(sessionId)
         this._streamingMessages.delete(sessionId)
         this._streamingMeta.delete(sessionId)
-        this._activeStreamingSessions = new Set(this._activeStreamingSessions)
         // 清理队列 map + 延迟 drain 标记（避免孤儿 ID 引用）
         this._pendingQueue.delete(sessionId)
         this._pendingQueue = new Map(this._pendingQueue)
@@ -5071,6 +5358,8 @@ export default {
         // 释放 sendMessage 并发锁（避免删除会话后锁卡住）
         this._sendingLock.delete(sessionId)
         this._sendingLock = new Map(this._sendingLock)
+        // v0.3.8 —— 清掉该会话的预览 tab（含 AI 写作 tab），防删了会话面板还留着孤儿预览
+        this._closeDocPreviewTabsForSession(sessionId)
         // 清掉该会话的滚动位置缓存（MessageList 维护，key 约定见 SCROLL_POS_PREFIX）
         localStorage.removeItem(`chatme-scroll-pos:${sessionId}`)
       }
@@ -5317,6 +5606,7 @@ export default {
           role: 'ai',
           content: '',
           reasoning: '',
+          impIpt: '',
           toolCalls: [],
           thinkingDone: false,
           streaming: true,
@@ -5344,6 +5634,8 @@ export default {
           const { done, value } = await reader.read()
           if (done) break
 
+          // 上游静默读秒：收到任何字节即视为「上游还活着」，重置计时
+          this.noteStreamActivity(requestSessionId)
           buffer += decoder.decode(value, { stream: true })
 
           // 用 indexOf + slice 替代 split('\n\n') + parts.pop()：
@@ -5381,21 +5673,24 @@ export default {
                   } else if (data.type === 'reasoning') {
                     snap[meta.aiIndex] = {
                       ...snap[meta.aiIndex],
-                      reasoning: snap[meta.aiIndex].reasoning + data.content,
+                      ...this.reasoningDelta(snap[meta.aiIndex], data),
                       responseTime: this.currentResponseTime
                     }
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_name') {
                     snap[meta.aiIndex] = this.mergeToolCallStart(snap[meta.aiIndex], data)
                     snap[meta.aiIndex] = this._markSkillForgePending(snap[meta.aiIndex], data)
-                    this._markWordDrawerPending(data)
-                    this._markExcelDrawerPending(data)
+                    if (isWordEditorCall(data.content || {}) || isExcelEditorCall(data.content || {})) {
+                      const tc = snap[meta.aiIndex].toolCalls.find(t => t.id === data.id)
+                      if (tc) { tc._sessionId = requestSessionId; tc._docVersion = tc._docVersion || 0 }
+                      // v0.3.8 —— 推到右侧文件预览面板（写作 tab）
+                      this._openDocPreviewTab(tc, requestSessionId)
+                    }
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'tool_call_result') {
                     snap[meta.aiIndex] = this.mergeToolCallResult(snap[meta.aiIndex], data)
                     this._maybeRefetchSkillsAfterResult(snap[meta.aiIndex], data)
-                    this._maybeRefreshWordDrawerAfterResult(data)
-                    this._maybeRefreshExcelDrawerAfterResult(data)
+                    this._onDocToolResult(snap[meta.aiIndex], data, requestSessionId)
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                   } else if (data.type === 'done') {
                     this.stopResponseTimer()
@@ -5415,11 +5710,10 @@ export default {
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                     // 清理快照：小点消失；后续切回该会话走 get_conversation 拿后端最终态
                     this.stopStreamTimer(requestSessionId)
-                    this._activeStreamingSessions.delete(requestSessionId)
+                    this._endStreamingSession(requestSessionId)
                     this._streamingMessages.delete(requestSessionId)
                     this._streamingMeta.delete(requestSessionId)
-                    this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-                    // 绿点：clean done 才标记（已计算 wasError）
+                                        // 绿点：clean done 才标记（已计算 wasError）
                     if (!wasError) this.markSessionCompleted(requestSessionId)
                     // 会话已切换：只 PUT 标题 + 同步侧栏，不调 get_conversation（避免并发 N 个 done 时反复重拉）
                     if (requestSessionId) {
@@ -5427,6 +5721,7 @@ export default {
                     }
                     this._tryDrainQueue(requestSessionId)
                   } else if (data.type === 'error') {
+                    this.markRetryExhausted(requestSessionId, data)
                     console.error('AI响应错误（原会话）:', data.error)
                     this._sessionHadError.add(requestSessionId)
                     this.markSessionErrored(requestSessionId)
@@ -5441,11 +5736,10 @@ export default {
                     }
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                     this.stopStreamTimer(requestSessionId)
-                    this._activeStreamingSessions.delete(requestSessionId)
+                    this._endStreamingSession(requestSessionId)
                     this._streamingMessages.delete(requestSessionId)
                     this._streamingMeta.delete(requestSessionId)
-                    this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-                    if (requestSessionId) {
+                                        if (requestSessionId) {
                       await this.updateTitleOnly(requestSessionId, meta.lastUserMessage || message)
                     }
                     this._tryDrainQueue(requestSessionId)
@@ -5459,11 +5753,10 @@ export default {
                     }
                     this.writeStreamMetrics(snap[meta.aiIndex], data)
                     this.stopStreamTimer(requestSessionId)
-                    this._activeStreamingSessions.delete(requestSessionId)
+                    this._endStreamingSession(requestSessionId)
                     this._streamingMessages.delete(requestSessionId)
                     this._streamingMeta.delete(requestSessionId)
-                    this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-                    this._tryDrainQueue(requestSessionId)
+                                        this._tryDrainQueue(requestSessionId)
                     // 通知 handleWithdraw：SSE interrupt 事件已到达，可以发 backtrack 了
                     if (this._withdrawInterruptResolver) {
                       const r = this._withdrawInterruptResolver
@@ -5498,21 +5791,24 @@ export default {
               } else if (data.type === 'reasoning') {
                 this.messages[aiMessageIndex] = {
                   ...this.messages[aiMessageIndex],
-                  reasoning: this.messages[aiMessageIndex].reasoning + data.content,
+                  ...this.reasoningDelta(this.messages[aiMessageIndex], data),
                   responseTime: this.currentResponseTime
                 }
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_name') {
                 this.messages[aiMessageIndex] = this.mergeToolCallStart(this.messages[aiMessageIndex], data)
                 this.messages[aiMessageIndex] = this._markSkillForgePending(this.messages[aiMessageIndex], data)
-                this._markWordDrawerPending(data)
-                this._markExcelDrawerPending(data)
+                if (isWordEditorCall(data.content || {}) || isExcelEditorCall(data.content || {})) {
+                  const tc = this.messages[aiMessageIndex].toolCalls.find(t => t.id === data.id)
+                  if (tc) { tc._sessionId = requestSessionId; tc._docVersion = tc._docVersion || 0 }
+                  // v0.3.8 —— 推到右侧文件预览面板（写作 tab）
+                  this._openDocPreviewTab(tc, requestSessionId)
+                }
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_result') {
                 this.messages[aiMessageIndex] = this.mergeToolCallResult(this.messages[aiMessageIndex], data)
                 this._maybeRefetchSkillsAfterResult(this.messages[aiMessageIndex], data)
-                this._maybeRefreshWordDrawerAfterResult(data)
-                this._maybeRefreshExcelDrawerAfterResult(data)
+                this._onDocToolResult(this.messages[aiMessageIndex], data, requestSessionId)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'done') {
                 this.stopResponseTimer()
@@ -5542,11 +5838,10 @@ export default {
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
                 // 流式结束：清理快照（this.messages 与 snapshot 同源，下一次切换走 get_conversation）
                 this.stopStreamTimer(requestSessionId)
-                this._activeStreamingSessions.delete(requestSessionId)
+                this._endStreamingSession(requestSessionId)
                 this._streamingMessages.delete(requestSessionId)
                 this._streamingMeta.delete(requestSessionId)
-                this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-                // 绿点：in-session done（sendMessage）。仅在 clean 时标记，避免覆盖错误后又被错误 done 复活。
+                                // 绿点：in-session done（sendMessage）。仅在 clean 时标记，避免覆盖错误后又被错误 done 复活。
                 if (!wasError) this.markSessionCompleted(requestSessionId)
 
                 // 如果是新建会话（没有 session_id）
@@ -5582,6 +5877,7 @@ export default {
                 // 在所有 refresh / update 完成后触发 → 占位消息被 refresh 的下一轮 fetch 自然吸收。
                 this._tryDrainQueue(requestSessionId)
               } else if (data.type === 'error') {
+                this.markRetryExhausted(requestSessionId, data)
                 console.error('AI响应错误:', data.error)
                 this._sessionHadError.add(requestSessionId)
                 this.markSessionErrored(requestSessionId)
@@ -5599,11 +5895,10 @@ export default {
                 }
                 // 流式结束：清理快照
                 this.stopStreamTimer(requestSessionId)
-                this._activeStreamingSessions.delete(requestSessionId)
+                this._endStreamingSession(requestSessionId)
                 this._streamingMessages.delete(requestSessionId)
                 this._streamingMeta.delete(requestSessionId)
-                this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-                // 仅更新标题，不重拉 messages（保护错误气泡）
+                                // 仅更新标题，不重拉 messages（保护错误气泡）
                 if (requestSessionId) {
                   await this.updateTitleOnly(requestSessionId, message)
                 }
@@ -5622,11 +5917,10 @@ export default {
                 this.interruptReason = reason
                 // 中断：清理快照（后端已落中断状态，下次切回走 get_conversation 看到完整中断态）
                 this.stopStreamTimer(requestSessionId)
-                this._activeStreamingSessions.delete(requestSessionId)
+                this._endStreamingSession(requestSessionId)
                 this._streamingMessages.delete(requestSessionId)
                 this._streamingMeta.delete(requestSessionId)
-                this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-                this._tryDrainQueue(requestSessionId)
+                                this._tryDrainQueue(requestSessionId)
                 // 通知 handleWithdraw：SSE interrupt 事件已到达，可以发 backtrack 了
                 if (this._withdrawInterruptResolver) {
                   const r = this._withdrawInterruptResolver
@@ -5663,21 +5957,24 @@ export default {
                 } else if (data.type === 'reasoning') {
                   snap[meta.aiIndex] = {
                     ...snap[meta.aiIndex],
-                    reasoning: snap[meta.aiIndex].reasoning + data.content,
+                    ...this.reasoningDelta(snap[meta.aiIndex], data),
                     responseTime: this.currentResponseTime
                   }
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
                 } else if (data.type === 'tool_call_name') {
                   snap[meta.aiIndex] = this.mergeToolCallStart(snap[meta.aiIndex], data)
                   snap[meta.aiIndex] = this._markSkillForgePending(snap[meta.aiIndex], data)
-                  this._markWordDrawerPending(data)
-                  this._markExcelDrawerPending(data)
+                  if (isWordEditorCall(data.content || {}) || isExcelEditorCall(data.content || {})) {
+                    const tc = snap[meta.aiIndex].toolCalls.find(t => t.id === data.id)
+                    if (tc) { tc._sessionId = requestSessionId; tc._docVersion = tc._docVersion || 0 }
+                    // v0.3.8 —— 推到右侧文件预览面板（写作 tab）
+                    this._openDocPreviewTab(tc, requestSessionId)
+                  }
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
                 } else if (data.type === 'tool_call_result') {
                   snap[meta.aiIndex] = this.mergeToolCallResult(snap[meta.aiIndex], data)
                   this._maybeRefetchSkillsAfterResult(snap[meta.aiIndex], data)
-                  this._maybeRefreshWordDrawerAfterResult(data)
-                  this._maybeRefreshExcelDrawerAfterResult(data)
+                  this._onDocToolResult(snap[meta.aiIndex], data, requestSessionId)
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
                 } else if (data.type === 'done') {
                   const wasError = snap[meta.aiIndex]?.error === true
@@ -5695,17 +5992,17 @@ export default {
                   }
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
                   this.stopStreamTimer(requestSessionId)
-                  this._activeStreamingSessions.delete(requestSessionId)
+                  this._endStreamingSession(requestSessionId)
                   this._streamingMessages.delete(requestSessionId)
                   this._streamingMeta.delete(requestSessionId)
-                  this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-                  // 绿点：buffer-tail sessionChanged done（已计算 wasError）
+                                    // 绿点：buffer-tail sessionChanged done（已计算 wasError）
                   if (!wasError) this.markSessionCompleted(requestSessionId)
                   // 会话已切换：只 PUT 标题 + 同步侧栏，不调 get_conversation
                   if (requestSessionId) {
                     await this.updateTitleOnly(requestSessionId, message)
                   }
                 } else if (data.type === 'error') {
+                  this.markRetryExhausted(requestSessionId, data)
                   console.error('AI响应错误（buffer，原会话）:', data.error)
                   this._sessionHadError.add(requestSessionId)
                   this.markSessionErrored(requestSessionId)
@@ -5720,11 +6017,10 @@ export default {
                   }
                   this.writeStreamMetrics(snap[meta.aiIndex], data)
                   this.stopStreamTimer(requestSessionId)
-                  this._activeStreamingSessions.delete(requestSessionId)
+                  this._endStreamingSession(requestSessionId)
                   this._streamingMessages.delete(requestSessionId)
                   this._streamingMeta.delete(requestSessionId)
-                  this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-                  if (requestSessionId) {
+                                    if (requestSessionId) {
                     await this.updateTitleOnly(requestSessionId, message)
                   }
                 } else if (data.type === 'permission_request') {
@@ -5735,21 +6031,24 @@ export default {
               if (data.type === 'reasoning') {
                 this.messages[aiMessageIndex] = {
                   ...this.messages[aiMessageIndex],
-                  reasoning: this.messages[aiMessageIndex].reasoning + data.content,
+                  ...this.reasoningDelta(this.messages[aiMessageIndex], data),
                   responseTime: this.currentResponseTime
                 }
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_name') {
                 this.messages[aiMessageIndex] = this.mergeToolCallStart(this.messages[aiMessageIndex], data)
                 this.messages[aiMessageIndex] = this._markSkillForgePending(this.messages[aiMessageIndex], data)
-                this._markWordDrawerPending(data)
-                this._markExcelDrawerPending(data)
+                if (isWordEditorCall(data.content || {}) || isExcelEditorCall(data.content || {})) {
+                  const tc = this.messages[aiMessageIndex].toolCalls.find(t => t.id === data.id)
+                  if (tc) { tc._sessionId = requestSessionId; tc._docVersion = tc._docVersion || 0 }
+                  // v0.3.8 —— 推到右侧文件预览面板（写作 tab）
+                  this._openDocPreviewTab(tc, requestSessionId)
+                }
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'tool_call_result') {
                 this.messages[aiMessageIndex] = this.mergeToolCallResult(this.messages[aiMessageIndex], data)
                 this._maybeRefetchSkillsAfterResult(this.messages[aiMessageIndex], data)
-                this._maybeRefreshWordDrawerAfterResult(data)
-                this._maybeRefreshExcelDrawerAfterResult(data)
+                this._onDocToolResult(this.messages[aiMessageIndex], data, requestSessionId)
                 this.writeStreamMetrics(this.messages[aiMessageIndex], data)
               } else if (data.type === 'content') {
                 this.messages[aiMessageIndex] = {
@@ -5791,11 +6090,10 @@ export default {
                 }
                 // 清理快照
                 this.stopStreamTimer(requestSessionId)
-                this._activeStreamingSessions.delete(requestSessionId)
+                this._endStreamingSession(requestSessionId)
                 this._streamingMessages.delete(requestSessionId)
                 this._streamingMeta.delete(requestSessionId)
-                this._activeStreamingSessions = new Set(this._activeStreamingSessions)
-                // 绿点：buffer-tail in-session done（已计算 wasError）
+                                // 绿点：buffer-tail in-session done（已计算 wasError）
                 if (!wasError) this.markSessionCompleted(requestSessionId)
                 // 与 main-loop in-session done 同样的 race 防护：
                 // drain 必须在 refresh 之后，避免 placeholder 被 messages 整体重写。
@@ -5989,9 +6287,28 @@ export default {
       }
     },
 
+    /**
+     * reasoning SSE 增量的统一归口，返回要 spread 进 ai turn 的部分字段。
+     *
+     * imp_ipt（input_parse_node 的输入优化产物）不是 agent 的推理过程，单独存到
+     * `impIpt`，由 MessageItem 渲成思考面板顶部的「理解意图」块——不能混进
+     * `reasoning`：thinkingBlocks 按 toolCall.reasoningBefore 的长度累加切分
+     * reasoning，混进去会打乱切片配对，工具行和思考段会串位。
+     *
+     * 实时流（source 标记）和刷新路径（processConversationMessages 读
+     * additional_kwargs.imp_ipt）都落到同一个字段，所以 F5 前后渲染一致。
+     */
+    reasoningDelta(turn, data) {
+      if (data && data.source === 'imp_ipt') {
+        return { impIpt: (turn.impIpt || '') + (data.content || '') }
+      }
+      return { reasoning: (turn.reasoning || '') + (data.content || '') }
+    },
+
     // 将后端返回的扁平消息列表处理成前端所需的结构
     // 后端消息类型（通过 additional_kwargs.type 区分）：
     //   role:"user"                        → 用户消息
+    //   role:"user" + imp_ipt:true        → input_parse_node 的输入优化产物（不是用户说的话）
     //   role:"ai" + type:"REASONING"       → agent 推理文本（AIMessage）或 工具调用结果（ToolMessage）
     //   role:"ai" + type:"SUMMARY"         → AI 最终回答
     //
@@ -6002,9 +6319,20 @@ export default {
     processConversationMessages(rawMessages) {
       const result = []
       let i = 0
+      // imp_ipt 消息总是紧挨在它那一轮 AI 消息之前，所以先攒着、由下一个 aiTurn 消费
+      let pendingImpIpt = null
 
       while (i < rawMessages.length) {
         const msg = rawMessages[i]
+
+        // imp_ipt 不渲染成用户气泡：它已经作为一条 user 消息混在 rawMessages 里了
+        // （input_parse_node 把它写进了 state["messages"]），但它不是用户说的话，
+        // 而是系统对本轮意图的优化结果 → 存进 aiTurn.impIpt 走思考面板。
+        if (msg.role === 'user' && msg.additional_kwargs?.imp_ipt) {
+          pendingImpIpt = typeof msg.content === 'string' ? msg.content : ''
+          i++
+          continue
+        }
 
         if (msg.role === 'user') {
           const processedMsg = { ...msg }
@@ -6056,12 +6384,14 @@ export default {
             role: 'ai',
             content: '',
             reasoning: '',
+            impIpt: pendingImpIpt || '',
             toolCalls: [],
             thinkingDone: true,
             streaming: false,
             checkpointId: null,  // 添加 checkpoint_id 字段
             additional_kwargs: {}  // 保存原始 additional_kwargs
           }
+          pendingImpIpt = null
 
           // 配对队列：AIMessage 推入工具名/参数，ToolMessage 填入结果
           const pendingToolCallIndices = []
@@ -6237,6 +6567,12 @@ export default {
   --button-hover: #0d8c6d;
   --sidebar-bg: #f7f7f8;
   --header-bg: #ffffff;
+  /* [v0.3.8] ChatHeader 布局 token */
+  --header-height: 60px;
+  --header-button-size: 40px;
+  --header-icon-size: 18px;
+  --header-button-gap: 12px;
+  --header-button-hover-bg: #d8d8d8;     /* 比 --bg-hover 深一档，hover 时变深而非失焦 */
   /* 数据分析产物面板 */
   --primary-color: #3b82f6;
   /* 代码块 */
@@ -6256,6 +6592,28 @@ export default {
   --accent-red: #ef4444;
   --accent-green: #10b981;
   --text-tool-args: #6b7280;
+  /* v0.3.8 —— 文件树文件类型色（DataTreeNode 徽章底色 + 文件夹）
+     取「中调」而非高饱和：十几类全上高饱和会变调色盘，扫视反而更累。
+     浅色不能无脑往亮里调——徽章上压的是白字，对比度低于 3:1 就读不出来了，
+     所以每个值都卡在「刚好还看得清」的上限（见 fileKind.js 的取色说明）。 */
+  --ft-sheet: #1a9c6b;        /* xlsx —— Excel 官方绿 */
+  --ft-table: #129e90;        /* csv  —— teal */
+  --ft-docx: #3d70bf;         /* docx —— Word 官方蓝 */
+  --ft-pdf: #e04a3c;          /* pdf */
+  --ft-markdown: #6670e8;     /* md */
+  --ft-html: #e16926;         /* html / vue / svg */
+  --ft-image: #ab5fe9;        /* 图片 */
+  --ft-video: #e8599a;        /* 视频 */
+  --ft-audio: #dd55d4;        /* 音频 */
+  --ft-archive: #b8820b;      /* zip / tar */
+  --ft-font: #938c85;         /* ttf / otf / woff —— stone */
+  --ft-json: #629c1f;         /* json —— lime */
+  --ft-code: #1f95ce;         /* 源码 */
+  --ft-binary: #4c5a70;       /* exe / so / pyc */
+  --ft-text: #0f99b6;         /* txt / log / yaml */
+  --ft-doc: #78828f;          /* 兜底 */
+  --ft-folder-back: #a5cdf7;
+  --ft-folder-front: #5b9bf0;
 }
 
 .dark-theme {
@@ -6273,6 +6631,8 @@ export default {
   --button-hover: #0d8c6d;
   --sidebar-bg: #171717;
   --header-bg: #212121;
+  /* [v0.3.8] ChatHeader hover token（dark theme）*/
+  --header-button-hover-bg: #2a2a2a;
   /* 代码块 - 暗色主题 */
   --code-block-bg: #141414;
   --code-block-border: rgba(255, 255, 255, 0.1);
@@ -6286,7 +6646,56 @@ export default {
   /* v0.3.4 —— dark 主题适配 */
   --thinking-bar: #2f2f2f;
   --text-tool-args: #9ca3af;
+  /* v0.3.8 —— 深色主题下把徽章底色整体提亮约 12%（深底上原来的中调会发闷、
+     白字形对比度掉到 3:1 以下），文件夹同理提亮。 */
+  --ft-sheet: #23a071;
+  --ft-table: #129e90;
+  --ft-docx: #668ecc;
+  --ft-pdf: #e56559;
+  --ft-markdown: #7b84eb;
+  --ft-html: #e16a28;
+  --ft-image: #b36deb;
+  --ft-video: #e8599a;
+  --ft-audio: #dd55d4;
+  --ft-archive: #b9830d;
+  --ft-font: #938c85;
+  --ft-json: #629c1f;
+  --ft-code: #2196ce;
+  --ft-binary: #838d9c;
+  --ft-text: #119ab7;
+  --ft-doc: #848d99;
+  --ft-folder-back: #aed2f8;
+  --ft-folder-front: #6ba5f2;
 }
+
+/* v0.3.7 —— 文件预览通用「原文 / 渲染效果」tab 切换。
+   单一来源：MD (FilePreviewTabPane) / DOCX·XLSX (ToolDocPreview) / HTML·Mermaid (FilePreviewModal)
+   三处共用，改样式只改这里。 */
+.preview-tabs {
+  display: flex;
+  gap: 4px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-color);
+  margin-bottom: 12px;
+  flex-shrink: 0;
+}
+.preview-tab-btn {
+  padding: 5px 14px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.2s;
+}
+.preview-tab-btn:hover:not(:disabled) { background: var(--bg-hover); }
+.preview-tab-btn.active {
+  background: var(--button-bg);
+  color: white;
+  border-color: var(--button-bg);
+}
+.preview-tab-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* 移动端侧边栏遮罩 */
 .sidebar-overlay {
@@ -6616,12 +7025,6 @@ body {
 }
 
 /* 文件预览遮罩 */
-.file-preview-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 99;
-}
-
 /* 图片预览弹窗 */
 .image-preview-overlay {
   position: fixed;

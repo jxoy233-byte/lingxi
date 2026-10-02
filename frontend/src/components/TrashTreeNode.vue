@@ -21,10 +21,11 @@
       </span>
 
       <span class="ttn-icon ttn-icon--folder">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"
-                :style="{ fill: 'rgba(239, 68, 68, 0.06)' }"/>
+        <svg width="18" height="18" viewBox="0 0 24 24">
+          <path class="ttn-folder-back"
+                d="M2.5 6.5a2 2 0 0 1 2-2h4.2l1.8 2.2h9a2 2 0 0 1 2 2v9.8a2 2 0 0 1-2 2h-15a2 2 0 0 1-2-2z"/>
+          <path class="ttn-folder-front"
+                d="M2.5 9.5h19v9.5a2 2 0 0 1-2 2h-15a2 2 0 0 1-2-2z"/>
         </svg>
       </span>
 
@@ -58,19 +59,26 @@
       ></span>
       <span class="ttn-caret ttn-caret--placeholder"></span>
 
-      <span class="ttn-icon ttn-icon--file" :class="'ttn-icon-' + iconKind">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path v-if="iconKind === 'image'" d="M3 5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5z"/>
-          <circle v-if="iconKind === 'image'" cx="9" cy="9" r="1.5" fill="currentColor"/>
-          <path v-if="iconKind === 'image'" d="M21 15l-5-5L5 21"/>
-          <path v-else-if="iconKind === 'data'"
-                d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-          <path v-else-if="iconKind === 'data'" d="M9 13h6M9 17h6M9 9h2"/>
-          <path v-else-if="iconKind === 'code'"
-                d="M16 18l6-6-6-6M8 6l-6 6 6 6"/>
-          <path v-else d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-          <polyline v-if="iconKind !== 'image' && iconKind !== 'code'" points="14 2 14 8 20 8"/>
+      <span class="ttn-icon ttn-icon--file" :class="'ttn-icon-' + iconKind" :title="iconHint">
+        <svg width="18" height="18" viewBox="0 0 24 24">
+          <rect class="ttn-badge" x="1.25" y="1.25" width="21.5" height="21.5" rx="5.5"/>
+          <text
+            v-if="badgeText"
+            class="ttn-tag"
+            x="12"
+            y="12"
+            text-anchor="middle"
+            dominant-baseline="central"
+            :font-size="badgeSize"
+          >{{ badgeText }}</text>
+          <!-- 无扩展名 / 后缀未注册（Makefile、LICENSE、.foo）→ 画文档页字形。
+               这类文件没有可印的短标，印 "FILE" 既没信息量又跟文本徽章长得一样。 -->
+          <g v-else>
+            <path class="ttn-gl-doc"
+                  d="M7.3 4.5h5.6l3.8 3.9v10.7a1.3 1.3 0 0 1-1.3 1.3H7.3A1.3 1.3 0 0 1 6 19.1V5.8a1.3 1.3 0 0 1 1.3-1.3z"/>
+            <path class="ttn-gl-doc" d="M12.7 4.5v4.1h3.8"/>
+            <path class="ttn-gl" d="M8.9 12.4h6.3M8.9 15.3h6.3M8.9 18.2h3.5"/>
+          </g>
         </svg>
       </span>
 
@@ -121,7 +129,11 @@
  * - 行内 × 红叉二次确认沿用偏好 21/22 模式
  * - 整目录删除在目录行右侧也挂 ×（根节点不挂，因为它没 fullPath）
  * - parent 把 busy 通过 props 透传，busy=true 时整棵子树 × 按钮全部 disabled
+ * - 文件徽章与文件树（DataTreeNode）完全同源：kind 规则来自 `utils/fileKind.js`，
+ *   颜色 token 共用 App.vue 的 `--ft-*`，两棵树不会各改各的走样
  */
+import { resolveFileKind, fileKindHint, fileBadgeText, badgeFontSize } from '../utils/fileKind.js'
+
 export default {
   name: 'TrashTreeNode',
   props: {
@@ -150,13 +162,18 @@ export default {
       })
     },
     iconKind() {
-      const n = (this.node.name || '').toLowerCase()
-      if (/\.(png|jpe?g|gif|webp|svg)$/.test(n)) return 'image'
-      if (/\.(csv|tsv|xlsx?)$/.test(n)) return 'data'
-      if (/\.json$/.test(n)) return 'data'
-      if (/\.(py|js|ts|jsx|tsx|vue|rs|go|java|c|cpp|h|hpp|rb|sh|bash)$/.test(n)) return 'code'
-      if (/\.(md|markdown|mmd)$/.test(n)) return 'markdown'
-      return 'text'
+      return resolveFileKind(this.node.name)
+    },
+    iconHint() {
+      return fileKindHint(this.node.name)
+    },
+    badgeText() {
+      return fileBadgeText(this.node.name)
+    },
+    // 注意这是「值」不是「函数」——模板里直接 :font-size="badgeSize"，
+    // 写成 badgeFontSize(badgeText) 会去调用这个数字，render 直接抛错、整棵子树消失
+    badgeSize() {
+      return badgeFontSize(this.badgeText)
     }
   },
   methods: {
@@ -316,20 +333,53 @@ export default {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 16px;
+  /* 18px 而不是 16px：徽章里印了 4 字符短标（DOCX / XLSX），16px 下缩到 ~5px 高根本读不出来。
+     行高预算够：.dtn-row min-height 24 + 上下 padding 3 = 内容区 18px */
+  width: 18px;
+  height: 18px;
   flex-shrink: 0;
 }
-.ttn-icon--folder {
-  color: #ef4444;
+
+/* 回收站专属的红色文件夹（与文件树的蓝文件夹区分开，一眼知道在回收站里） */
+.ttn-folder-back { fill: var(--ft-folder-back, #93c5fd); opacity: 0.5; }
+.ttn-folder-front { fill: var(--accent-red, #ef4444); opacity: 0.82; }
+
+/* 文件徽章：实心底色 + 扩展名小字，规则与文件树一致（--ft-* token 共用 App.vue） */
+.ttn-badge { fill: var(--dtn-fg, #6b7280); }
+.ttn-gl { fill: #fff; }
+.ttn-gl-doc {
+  fill: none;
+  stroke: #fff;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
-.ttn-icon--file {
-  color: var(--text-secondary, #6b7280);
+.ttn-tag {
+  fill: #fff;
+  font-family: -apple-system, 'Helvetica Neue', Arial, sans-serif;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  font-variant-ligatures: none;
+  text-rendering: geometricPrecision;
+  user-select: none;
 }
-.ttn-icon-image { color: #8b5cf6; }
-.ttn-icon-data { color: #10b981; }
-.ttn-icon-code { color: #f59e0b; }
-.ttn-icon-markdown { color: #6366f1; }
+.ttn-icon-sheet   { --dtn-fg: var(--ft-sheet); }
+.ttn-icon-table   { --dtn-fg: var(--ft-table); }
+.ttn-icon-docx    { --dtn-fg: var(--ft-docx); }
+.ttn-icon-pdf     { --dtn-fg: var(--ft-pdf); }
+.ttn-icon-markdown { --dtn-fg: var(--ft-markdown); }
+.ttn-icon-html    { --dtn-fg: var(--ft-html); }
+.ttn-icon-image   { --dtn-fg: var(--ft-image); }
+.ttn-icon-video   { --dtn-fg: var(--ft-video); }
+.ttn-icon-audio   { --dtn-fg: var(--ft-audio); }
+.ttn-icon-archive { --dtn-fg: var(--ft-archive); }
+.ttn-icon-font    { --dtn-fg: var(--ft-font); }
+.ttn-icon-json    { --dtn-fg: var(--ft-json); }
+.ttn-icon-code    { --dtn-fg: var(--ft-code); }
+.ttn-icon-binary  { --dtn-fg: var(--ft-binary); }
+.ttn-icon-text    { --dtn-fg: var(--ft-text); }
+.ttn-icon-doc,
+.ttn-icon-other   { --dtn-fg: var(--ft-doc); }
 
 .ttn-name {
   flex: 1;

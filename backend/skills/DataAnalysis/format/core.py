@@ -247,18 +247,23 @@ class ChatDataAnalysisFormat(metaclass=_HelpMeta):
         seaborn / pandas 都走 matplotlib backend，`rcParams['font.sans-serif']` 对三者都生效。
 
         同时尝试 4 个路径（按顺序，去重；目录不存在 no-op 不报错）：
-          1. `/skills/DataAnalysis/fonts`（沙盒 mount 主路径，**推荐**）
-          2. `<cwd>/skills/DataAnalysis/fonts`（本地 venv，cwd=backend/）
+          1. `/skills/_shared/fonts`（沙盒 mount 主路径，**推荐**）
+          2. `<cwd>/skills/_shared/fonts`（本地 venv，cwd=backend/）
           3. `/cached/.fonts`（legacy 沙盒挂载点）
           4. `<cwd>/cached/.fonts`（legacy 本地 venv）
-        把字体文件放到 `backend/skills/DataAnalysis/fonts/`（推荐）—— 随 skill 自动进
-        git、自动 mount 到容器内 `/skills/DataAnalysis/fonts/`，无需任何额外配置。
+        字体放 `backend/skills/_shared/fonts/`（推荐）—— `_shared/` 是跨 skill 共享
+        资源的既有约定（`_skill_help.py` 同理）：DataAnalysis 绘图要用，PDFEditor
+        排版也要用，各自复制一份必然走偏。随 skill 自动进 git、自动 mount 到容器内
+        `/skills/_shared/fonts/`，无需任何额外配置。
         legacy `cached/.fonts/` 保留作为老部署兼容。
 
-        推荐单文件 `NotoSansSC-Regular.otf`（~5-7MB，SIL OFL，无授权商用）：
+        推荐单文件 `NotoSansSC-Regular.otf`（~8MB，SIL OFL，无授权商用）：
           https://github.com/notofonts/noto-cjk/tree/main/Sans/SubsetOTF/SC
 
         ⚠️ 不要装 MiSans / HarmonyOS Sans SC / OPPO Sans / 阿里普惠体（商用需单独授权）。
+        ⚠️ 这个 `.otf` 是 CFF/PostScript 轮廓，matplotlib(freetype) 两种轮廓都吃，
+        但 **reportlab 只认 TrueType(glyf) 轮廓** —— 报 "postscript outlines are not
+        supported"。要嵌进 PDF 得先转 TTF，不是把路径指过来就能用。
 
         字体目录不存在时 no-op，不影响绘图。
         """
@@ -269,8 +274,8 @@ class ChatDataAnalysisFormat(metaclass=_HelpMeta):
             "try:\n"
             "    import matplotlib.font_manager as fm\n"
             "    _font_dirs = [\n"
-            "        '/skills/DataAnalysis/fonts',\n"
-            "        os.path.join(os.getcwd(), 'skills', 'DataAnalysis', 'fonts'),\n"
+            "        '/skills/_shared/fonts',\n"
+            "        os.path.join(os.getcwd(), 'skills', '_shared', 'fonts'),\n"
             "        '/cached/.fonts',\n"
             "        os.path.join(os.getcwd(), 'cached', '.fonts'),\n"
             "    ]\n"

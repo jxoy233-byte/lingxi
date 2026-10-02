@@ -474,6 +474,24 @@ class PermissionDecision(BaseModel):
     decision: str
 
 
+# 决策白名单（decide 写 redis 前 + resume 喂 LangGraph 前共用一份）。
+#
+# 白名单的作用是**挡掉真正的脏数据**（空串 / 大小写错 / 前端拼错字段名），而不是穷举所有
+# 语义。语义上的兜底在下游：permissions.request_approval 遇到不认识的 decision_value 会
+# 打 warning 并 `return "denied", None`，_permission_wrap 随后走 _rejected_tool_result
+# （"没执行、零副作用，AI 换个思路或用 interrupt 问用户"）—— 会话照常往前走。
+#
+# 所以这里特意放行裸 "feedback"（用户点了「告诉 AI 怎么做」但文本为空，前端 bug 或
+# 竞态都可能发出）：它不是错误，是「按拒绝处理并让 AI 继续」的模式标记。放行让它走
+# deny 兜底，比在这里 400 掐死强 —— 400 会让 decide 写进 hash、resume 却拒读，
+# LangGraph 就永远停在 interrupt()，用户既没待办可点也等不到 AI 推进。
+_PERMISSION_DECISIONS = ("approve", "deny", "this-time-only", "feedback")
+
+
+def _is_valid_permission_decision(decision: str) -> bool:
+    return decision in _PERMISSION_DECISIONS or decision.startswith("feedback:")
+
+
 @ChatMe_app.post("/{session_id}/permission/decide", summary="用户对 permission_request 做出决策")
 async def decide_permission(
     session_id: str = Path(..., embed=True, description="会话唯一ID"),
@@ -488,6 +506,15 @@ async def decide_permission(
     perm = r.hgetall(f"permission:{session_id}")
     if not perm:
         raise HTTPException(status_code=404, detail=f"会话 {session_id} 没有 pending permission")
+
+    # 脏决策在写 redis 之前就拒掉：写进去就等于给图挖坑（resume 必然 400，
+    # LangGraph 永远停在 interrupt()，前端只能刷新页面才能恢复）。
+    if not _is_valid_permission_decision(body.decision):
+        logger.warning(
+            f"会话 {session_id} 收到非法 permission decision={body.decision!r}，"
+            f"合法值：{_PERMISSION_DECISIONS} 或 'feedback:<text>'"
+        )
+        raise HTTPException(status_code=400, detail=f"非法 permission decision: {body.decision!r}")
 
     decoded = {
         k.decode() if isinstance(k, bytes) else k: v.decode() if isinstance(v, bytes) else v
@@ -532,7 +559,7 @@ async def resume_permission(
     decision = decoded.get("decision", "")
     if not decision:
         raise HTTPException(status_code=400, detail=f"会话 {session_id} decision 尚未设置，请先调用 /permission/decide")
-    if decision not in ("approve", "deny", "this-time-only") and not decision.startswith("feedback:"):
+    if not _is_valid_permission_decision(decision):
         raise HTTPException(status_code=400, detail=f"会话 {session_id} decision 值非法: {decision!r}")
 
     # 不在 resume 前清理 redis hash —— resume_permission_stream 内部最后清理

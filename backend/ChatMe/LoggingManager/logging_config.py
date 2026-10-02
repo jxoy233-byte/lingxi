@@ -114,7 +114,7 @@ def set_thinking_chain_logger(
 
     用途：单独承载 ChatWorkflow 各节点的 AI 思维链格式化日志
     （`imp_ipt` / `react_context` / `react_context_after_compact` /
-     `agent_node_in/out` / `should_end_in/decision` / `final_node_in_context/out`），
+     `agent_node_in/out` / `final_node_in_context/out` / `final_node_cleanup`），
     与主日志隔离，便于按文件维度回溯 LLM 决策链而不被业务日志噪声淹没。
 
     文件命名规则：`thinking_chain-YYYY-MM-DD.log`，按天切分 + RotatingFileHandler 兜底。

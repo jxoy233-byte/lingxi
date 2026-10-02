@@ -2248,6 +2248,13 @@ export default {
       const tag = (e.target && e.target.tagName) || ''
       if (tag === 'INPUT' || tag === 'TEXTAREA') return false
       if (e.target && e.target.isContentEditable) return false
+      // [v0.3.7] 用户在某处选中了文本（非输入区也包括 message 框 / 预览面板 / 任何 user-select 容器），
+      // 按 Cmd/Ctrl + C/X/V 时让浏览器默认行为接管 copy/cut/paste —— 不要抢键去复制文件树节点 / 触发 in-app paste。
+      // 没选中（sel.isCollapsed）才继续走文件树快捷键（无选中文本时 Cmd+C 复制节点是用户期望）。
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && /^[cvx]$/i.test(e.key)) {
+        const sel = window.getSelection && window.getSelection()
+        if (sel && !sel.isCollapsed && sel.toString().trim()) return false
+      }
       return true
     },
     /**

@@ -54,13 +54,13 @@
 
 | 内容 | 位置 |
 |---|---|
-| 主图 + 5 节点 + 路由函数 | `backend/ChatMe/ChatWorkflow/core.py:1385-2029` |
-| ReAct 4 阶段压缩 helpers | `backend/ChatMe/ChatWorkflow/core.py:540-791` |
-| agent_node retry 状态机 | `backend/ChatMe/ChatWorkflow/core.py:1816-1864` |
-| done cycle 检测 + RemoveMessage | `backend/ChatMe/ChatWorkflow/core.py:1680-1714` |
-| final_node SysMsg 双轨制 | `backend/ChatMe/ChatWorkflow/core.py:1894-1910` |
+| 主图 + 5 节点 + 路由函数 | `backend/ChatMe/ChatWorkflow/core.py:958-1621` |
+| ReAct 4 阶段压缩 helpers | `backend/ChatMe/ChatWorkflow/core.py:466-830` |
+| agent_node retry 状态机 | `backend/ChatMe/ChatWorkflow/core.py:1302-1350` |
+| done cycle 检测 + RemoveMessage | `backend/ChatMe/ChatWorkflow/core.py:1063-1290` |
+| final_node SysMsg 双轨制 | `backend/ChatMe/ChatWorkflow/core.py:1465-1521` |
 | PermissionedToolNode | `backend/ChatMe/ChatWorkflow/mcps/permissions/core.py:718-825` |
 | SandboxPool 池锁 | `backend/ChatMe/ChatWorkflow/mcps/sandbox/pool.py:244-310` |
 | MemoryManager | `backend/ChatMe/ChatWorkflow/Memory/core.py:62-540` |
-| ChatStateCore2 | `backend/ChatMe/ChatWorkflow/config/models.py:24-63` |
+| ChatStateCore2 | `backend/ChatMe/ChatWorkflow/config/models.py:24-61` |
 | CheckpointJanitor | `backend/ChatMe/ChatWorkflow/CheckpointJanitor.py:99-563` |

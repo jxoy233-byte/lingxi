@@ -7,7 +7,6 @@ MCP（Model Context Protocol）工具层
 - session.py           MCP stdio session 工具（client interceptor + session_id 注入）
 - tools/              工具相关代码
   ├── code_fingerprint.py   code 工具语义指纹（永久批准精确匹配）
-  ├── deprecated.py         sub_agent 已废弃（保留导入兼容）
   └── platforms/            跨平台 adapter（cmd/code/ctime prompt + 本地执行）
 - sandbox/            沙盒基础设施
   └── pool.py         SandboxPool（Docker 容器池，K 容器 × N 并发 v2）

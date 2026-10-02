@@ -15,7 +15,7 @@ ChatWorkflow 通用 helper —— 所有**纯函数 / 与类状态无关**的工
 - 这些 helper 都不依赖 ChatWorkflow 实例状态，pure function
 - 多处复用（core.py 5+ 处，Memory/core.py 1 处）
 - 单元测试不依赖 ChatWorkflow 初始化（不需要 mock LLM / Redis）
-- 降低 ChatWorkflow 类的方法数量，让 `_create_graph_core2` 内部节点函数更聚焦
+- 降低 ChatWorkflow 类的方法数量，让 `_create_graph_improved` 内部节点函数更聚焦
 """
 import re
 from typing import Callable, List

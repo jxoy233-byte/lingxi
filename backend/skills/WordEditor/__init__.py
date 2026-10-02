@@ -620,6 +620,55 @@ def _make_run(text: str, *, bold=None, italic=None, underline=None,
     return r
 
 
+# run 级 kwargs 白名单（= _make_run 的签名去掉 text）。
+# AI 写错 key（如 {"text": "x", "size": "12pt"}）时丢弃而不是 TypeError 炸掉整篇文档。
+_RUN_KWARGS = ("bold", "italic", "underline", "font", "font_size",
+               "font_weight", "color", "highlight")
+
+
+def _clean_run_kwargs(raw: dict) -> dict:
+    """run dict → 规范化后的 kwargs（未知 key 丢弃；underline / highlight /
+    font_weight 走和 add_paragraph 完全同一套 normalize）。
+
+    统一入口：add_paragraph(runs=) / set_runs / add_runs / set_cell(runs=)
+    都走这里，保证同一份 runs 在四个方法里渲染结果一致。
+    """
+    kw = {k: v for k, v in raw.items() if k in _RUN_KWARGS}
+    if kw.get("underline") is not None:
+        kw["underline"] = _normalize_underline(kw["underline"])
+    if kw.get("highlight") is not None:
+        kw["highlight"] = _normalize_highlight(kw["highlight"])
+    if kw.get("font_weight") is not None:
+        weight_info = _normalize_font_weight(kw["font_weight"])
+        if weight_info and weight_info["bold"]:
+            kw["bold"] = True
+        if weight_info and kw.get("font"):
+            kw["font"] = _resolve_font_with_weight(kw["font"], weight_info)
+    return kw
+
+
+def _runs_into_para(p, runs: list, **base_kwargs):
+    """把 list[dict] runs 逐个塞进 <w:p>（调用方需保证 pPr 已 append 在最前）。
+
+    base_kwargs 是「表头加粗」这类默认值：run 自己写了该项就用自己的，
+    没写才回落到默认值——所以单元格里的 `**加粗**` / `[color=red]` 不会被表头样式盖掉。
+    不修改传入的 runs / base_kwargs（早期版本 pop 掉过调用方的 "text"，会导致同一个
+    runs 列表被复用两次时第二遍全是空 run）。
+    """
+    base = _clean_run_kwargs(base_kwargs)
+    for item in runs or []:
+        if isinstance(item, dict):
+            text = item.get("text") or ""
+            kw = _clean_run_kwargs(item)
+        else:
+            text, kw = str(item), {}
+        if not text:
+            continue
+        merged = dict(base)
+        merged.update(kw)
+        p.append(_make_run(text, **merged))
+
+
 def _para_text(p) -> str:
     """提取段落所有 run 的文本（lxml 自动转义）."""
     return "".join((t.text or "") for t in p.iter(_wt("t")))
@@ -677,6 +726,24 @@ class _WordParagraph:
                     r.insert(0, first_rPr_copy)
             self._element.append(r)
         self.text = text or ""
+
+    def set_runs(self, runs: list) -> "_WordParagraph":
+        """替换段落所有 run 为 runs 列表（list[dict]，每项含 text + 可选 run kwargs）。
+
+        段落属性（pPr）保留不动。不修改传入的 runs。详细 help("set_runs")。
+        """
+        for r in list(self._element.findall(_wt("r"))):
+            self._element.remove(r)
+        _runs_into_para(self._element, runs)
+        self.text = _para_text(self._element)
+        return self
+
+    def add_runs(self, runs: list) -> "_WordParagraph":
+        """追加多个 run 到段落末尾（保留现有 run）。不修改传入的 runs。详细 help("add_runs")。
+        """
+        _runs_into_para(self._element, runs)
+        self.text = _para_text(self._element)
+        return self
 
     def set_format(self, *, style=None, alignment=None,
                    line_spacing=None, line_rule=None,
@@ -774,10 +841,141 @@ class _WordTable:
             grid.append(row)
         return grid
 
-    def set_cell(self, row: int, col: int, value: str, **format_kwargs):
+    # ---- 增删改（表格是 OOXML 里最容易写坏的结构，改列数必须同步 tblGrid + tcW）----
+
+    def _tbl_grid(self):
+        return self._element.find(_wt("tblGrid"))
+
+    def _sync_widths(self, cols: int):
+        """列数变化后重算 tblGrid + 每格 tcW（OOXML 要求两者一致，否则 Word 报文档损坏）。"""
+        grid = self._tbl_grid()
+        if grid is not None:
+            for gc in list(grid):
+                grid.remove(gc)
+            for _ in range(cols):
+                gridCol = etree.SubElement(grid, _wt("gridCol"))
+                gridCol.set(_wt("w"), str(int(9000 / cols)))
+        pct = str(int(5000 / cols))
+        for tr in self._element.findall(_wt("tr")):
+            for tc in tr.findall(_wt("tc")):
+                tcPr = tc.find(_wt("tcPr"))
+                tcW = tcPr.find(_wt("tcW")) if tcPr is not None else None
+                if tcW is not None:
+                    tcW.set(_wt("w"), pct)
+
+    def _make_cell(self, value=None):
+        """建一个 <w:tc>（tcPr 在前、至少一个 <w:p> 在后）。value 可为 str 或 runs。"""
+        tc = _make_element(_wt("tc"))
+        tcPr = etree.SubElement(tc, _wt("tcPr"))
+        tcW = etree.SubElement(tcPr, _wt("tcW"))
+        tcW.set(_wt("w"), str(int(5000 / max(self.cols, 1))))
+        tcW.set(_wt("type"), "pct")
+        p = _make_element(_wt("p"))
+        if isinstance(value, list):
+            _runs_into_para(p, value)
+        elif value is not None and str(value):
+            p.append(_make_run(str(value)))
+        tc.append(p)
+        return tc
+
+    def insert_row(self, at: int = None, values: Optional[list] = None) -> "_WordTable":
+        """插入一行。at 行号（0-based，None=末尾追加）；values 单元格值（str 或 runs，缺位留空）。详细 help("insert_row")。
+        """
+        tr = etree.Element(_wt("tr"))
+        for c_idx in range(self.cols):
+            tr.append(self._make_cell(
+                values[c_idx] if values and c_idx < len(values) else None))
+        trs = self._element.findall(_wt("tr"))
+        if at is None or at >= len(trs):
+            self._element.append(tr)
+        else:
+            trs[max(at, 0)].addprevious(tr)
+        self.rows += 1
+        self.cells = self._index_cells()
+        return self
+
+    def add_row(self, values: Optional[list] = None) -> "_WordTable":
+        """追加一行到表格末尾（= insert_row(None, values)）。详细 help("add_row")。
+
+        Args: values 单元格值列表（长度=列数；不足补空）。可以是 str 或 list[dict] runs。
+        """
+        return self.insert_row(None, values)
+
+    def remove_row(self, row: int) -> "_WordTable":
+        """删第 row 行（0-based）。详细 help("remove_row")。
+
+        Raises: 越界 / 删最后一行抛 OfficeDocError（OOXML 表格至少保留 1 行）。
+        """
+        trs = self._element.findall(_wt("tr"))
+        if row < 0 or row >= len(trs):
+            raise OfficeDocError(f"行索引超出范围: {row}（共 {len(trs)} 行）")
+        if len(trs) == 1:
+            raise OfficeDocError("不能删掉表格的最后一行——要删整张表请用 remove()")
+        self._element.remove(trs[row])
+        self.rows -= 1
+        self.cells = self._index_cells()
+        return self
+
+    def insert_col(self, at: int = None, values: Optional[list] = None) -> "_WordTable":
+        """插入一列。at 列号（0-based，None=末尾）；values 每行该列的值（列表，短了留空）。详细 help("insert_col")。
+        """
+        trs = self._element.findall(_wt("tr"))
+        if not trs:
+            raise OfficeDocError("表格没有行，无法插列")
+        ncols = len(trs[0].findall(_wt("tc")))
+        if at is None or at > ncols:
+            at = ncols
+        at = max(at, 0)
+        for r_idx, tr in enumerate(trs):
+            tc = self._make_cell(values[r_idx] if values and r_idx < len(values) else None)
+            tcs = tr.findall(_wt("tc"))
+            if at >= len(tcs):
+                tr.append(tc)
+            else:
+                tcs[at].addprevious(tc)
+        self.cols += 1
+        self._sync_widths(self.cols)
+        self.cells = self._index_cells()
+        return self
+
+    def remove_col(self, col: int) -> "_WordTable":
+        """删第 col 列（0-based），列宽按剩余列数重算。详细 help("remove_col")。
+
+        Raises: 越界 / 删最后一列抛 OfficeDocError。
+        """
+        trs = self._element.findall(_wt("tr"))
+        if not trs:
+            raise OfficeDocError("表格没有行")
+        ncols = len(trs[0].findall(_wt("tc")))
+        if col < 0 or col >= ncols:
+            raise OfficeDocError(f"列索引超出范围: {col}（共 {ncols} 列）")
+        if ncols == 1:
+            raise OfficeDocError("不能删掉表格的最后一列——要删整张表请用 remove()")
+        for tr in trs:
+            tcs = tr.findall(_wt("tc"))
+            if col < len(tcs):
+                tr.remove(tcs[col])
+        grid = self._tbl_grid()
+        if grid is not None:
+            gcs = grid.findall(_wt("gridCol"))
+            if col < len(gcs):
+                grid.remove(gcs[col])
+        self.cols -= 1
+        self._sync_widths(self.cols)
+        self.cells = self._index_cells()
+        return self
+
+    def remove(self):
+        """把整张表从文档里删掉。详细 help("remove")。"""
+        parent = self._element.getparent()
+        if parent is not None:
+            parent.remove(self._element)
+
+    def set_cell(self, row: int, col: int, value: str = None, *,
+                 runs: list = None, **format_kwargs):
         """设指定单元格文字 + 格式（覆盖原段落）。详细 help("set_cell")。
 
-        Args: row/col 0-based 行列索引；value 文字；**format_kwargs run 格式（bold/italic/font/color/...）。
+        Args: row/col 0-based 行列索引；value 文字（与 runs 二选一，runs 优先）；runs list[dict] 多 run 写法（每项含 text + 可选 run kwargs，未写的项用 **format_kwargs 兜底）；**format_kwargs run 格式（bold/italic/font/color/...），也作 runs 的默认值。
         Raises: row/col 越界抛 OfficeDocError。
         """
         rows = self._element.findall(_wt("tr"))
@@ -790,33 +988,11 @@ class _WordTable:
         for p in list(cell.findall(_wt("p"))):
             cell.remove(p)
         para = _make_element(_wt("p"))
-        if value:
-            r = _make_run(value, **format_kwargs)
-            para.append(r)
+        if runs:
+            _runs_into_para(para, runs, **format_kwargs)
+        elif value:
+            para.append(_make_run(value, **format_kwargs))
         cell.append(para)
-        self.cells = self._index_cells()
-
-    def add_row(self, values: Optional[list] = None) -> None:
-        """追加一行到表格末尾。详细 help("add_row")。
-
-        Args: values 单元格值列表（长度=列数；不足补空字符串）。
-        """
-        values = values or []
-        tr = etree.SubElement(self._element, _wt("tr"))
-        cols = self.cols
-        for c_idx in range(cols):
-            tc = etree.SubElement(tr, _wt("tc"))
-            tcPr = etree.SubElement(tc, _wt("tcPr"))
-            tcW = etree.SubElement(tcPr, _wt("tcW"))
-            tcW.set(_wt("w"), str(int(5000 / cols)))
-            tcW.set(_wt("type"), "pct")
-            p = etree.SubElement(tc, _wt("p"))
-            if c_idx < len(values) and values[c_idx] is not None:
-                r = etree.SubElement(p, _wt("r"))
-                t = etree.SubElement(r, _wt("t"))
-                t.set(f"{{{XML_NS}}}space", "preserve")
-                t.text = str(values[c_idx])
-        self.rows += 1
         self.cells = self._index_cells()
 
     def set_style(self, style: str) -> None:
@@ -858,6 +1034,57 @@ class _WordPicture:
         cy = int(extent.get("cy", "0"))
         return cx / 12700.0, cy / 12700.0
 
+    def _own_paragraph(self):
+        """图片独占的 <w:p>（w:drawing → w:r → w:p）；结构不符返回 None。"""
+        r = self._element.getparent()
+        p = r.getparent() if r is not None else None
+        return p if p is not None and p.tag == _wt("p") else None
+
+    def set_size(self, width=None, height=None,
+                 keep_ratio: bool = True) -> "_WordPicture":
+        """改图片显示尺寸，同步 <wp:extent> 与 <a:ext>（两处都要改，否则 Word 里拉伸变形）。详细 help("set_size")。
+
+        Args: width 宽度（"15cm"/"150px"/"5in"）；height 高度；keep_ratio 只给一边时按原比例推另一边（默认 True）。
+        Returns: self（链式）。
+        Raises: width / height 都不给抛 OfficeDocError。
+        """
+        if width is None and height is None:
+            raise OfficeDocError("set_size 至少要给 width 或 height")
+
+        old_w = (self.width_pt or 0) * 12700
+        old_h = (self.height_pt or 0) * 12700
+        if width and height:
+            w_emu, h_emu = _to_emu(width), _to_emu(height)
+        elif width:
+            w_emu = _to_emu(width)
+            h_emu = int(w_emu * old_h / old_w) if (keep_ratio and old_w) else old_h
+        else:
+            h_emu = _to_emu(height)
+            w_emu = int(h_emu * old_w / old_h) if (keep_ratio and old_h) else old_w
+
+        inline = self._element.find(f"{{{WP_NS}}}inline")
+        if inline is not None:
+            extent = inline.find(f"{{{WP_NS}}}extent")
+            if extent is not None:
+                extent.set("cx", str(w_emu))
+                extent.set("cy", str(h_emu))
+        for ext in self._element.iter(f"{{{A_NS}}}ext"):
+            ext.set("cx", str(w_emu))
+            ext.set("cy", str(h_emu))
+        self.width_pt = w_emu / 12700.0
+        self.height_pt = h_emu / 12700.0
+        return self
+
+    def remove(self):
+        """从文档里删掉这张图（连同它独占的段落）。详细 help("remove")。"""
+        p = self._own_paragraph()
+        if p is not None and p.getparent() is not None:
+            p.getparent().remove(p)
+        else:
+            r = self._element.getparent()
+            if r is not None and r.getparent() is not None:
+                r.getparent().remove(r)
+
 
 # ============================================================================
 # 核心类
@@ -874,7 +1101,9 @@ class WordDoc(metaclass=_HelpMeta):
         self._body = body_elem
         self._rels = rels or {}
         self._path = path
-        self._media_files = []  # [(rid, src_path, target, hash)]
+        # [(rid, ext, target, bytes)] — 字节直接存内存，避免 open() 后 save() 时还要回到源磁盘读。
+        # add_image() 现读一次 path 拿 bytes 入表；open() 从 zip 抽 word/media/* + rels 拼装。
+        self._media_files = []
         self._next_rid = 10  # 避开 rId1/rId2/rId3
 
     # ---- 工厂 ----
@@ -897,6 +1126,8 @@ class WordDoc(metaclass=_HelpMeta):
         Args: path .docx 文件路径。
         Returns: WordDoc 实例。
         Raises: 文件不存在 / zip 损坏 / XML 解析失败抛 OfficeDocError。
+        Note: [v0.3.7] 同步把 word/media/* 图片加载进 _media_files，save() 时原样写回
+        —— 这样 word_editor.replace 整篇重写也能保留图片。
         """
         path = str(Path(path))
         if not Path(path).exists():
@@ -904,13 +1135,72 @@ class WordDoc(metaclass=_HelpMeta):
         try:
             with zipfile.ZipFile(path, "r") as z:
                 doc_xml = z.read("word/document.xml")
+                media_items = cls._load_existing_media(z)
         except KeyError:
             raise OfficeDocError(f"docx 缺少 word/document.xml，文件可能损坏: {path}")
         except zipfile.BadZipFile:
             raise OfficeDocError(f"不是有效的 docx（zip 解析失败）: {path}")
         root = _parse_doc_xml(doc_xml)
         body = root.find(_wt("body"))
-        return cls(body, path=path)
+        instance = cls(body, path=path)
+        instance._media_files = media_items
+        # 防止后续 add_image() 撞 rId
+        rids = [
+            int(rid[3:])
+            for rid, _, _, _ in media_items
+            if rid.startswith("rId") and rid[3:].isdigit()
+        ]
+        instance._next_rid = max(rids) + 1 if rids else 10
+        return instance
+
+    @staticmethod
+    def _load_existing_media(z: "zipfile.ZipFile") -> list:
+        """读 zip 里 word/media/* 图片 + word/_rels/document.xml.rels 拼出 [(rid, ext, target, bytes), ...]。
+
+        - rels 缺失 / 图片无 rId 引用（孤立文件）→ 跳过
+        - 多个 rels 指向同一图片 → 取第一个
+        - 按 rId 数字升序排，save() 写出来的 rels 顺序稳定
+        """
+        rels_map: dict = {}  # rid → normalized target（"media/X.ext"）
+        try:
+            rels_xml = z.read("word/_rels/document.xml.rels")
+            rels_root = etree.fromstring(rels_xml)
+        except KeyError:
+            rels_root = None
+        if rels_root is not None:
+            for rel in rels_root.findall(f"{{{RELS_NS}}}Relationship"):
+                rid = rel.get("Id")
+                target = rel.get("Target", "")
+                rel_type = rel.get("Type", "")
+                if not (rid and target and "/image" in rel_type):
+                    continue
+                # Target 可能是 "media/image1.png" 或 "../media/image1.png"
+                t = target
+                while t.startswith("../"):
+                    t = t[3:]
+                if not t.startswith("media/"):
+                    continue
+                rels_map.setdefault(rid, t)  # 同 rid 多 target 只记首个
+
+        target_to_rid = {t: r for r, t in rels_map.items()}
+        media_items: list = []
+        for name in z.namelist():
+            if not name.startswith("word/media/"):
+                continue
+            target = name[len("word/"):]  # "media/image1.png"
+            rid = target_to_rid.get(target)
+            if rid is None:
+                continue  # 没有 rId 引用 → 孤立，跳过
+            ext = Path(name).suffix.lower().lstrip(".")
+            media_items.append((rid, ext, target, z.read(name)))
+
+        def _n(rid: str) -> int:
+            if rid.startswith("rId") and rid[3:].isdigit():
+                return int(rid[3:])
+            return 0
+
+        media_items.sort(key=lambda m: _n(m[0]))
+        return media_items
 
     # ---- 持久化 ----
 
@@ -951,9 +1241,8 @@ class WordDoc(metaclass=_HelpMeta):
             z.writestr("docProps/core.xml", CORE_XML)
             z.writestr("docProps/app.xml", APP_XML)
 
-            for rid, src_path, target, _hash in self._media_files:
-                with open(src_path, "rb") as f:
-                    z.writestr(f"word/{target}", f.read())
+            for rid, ext, target, content in self._media_files:
+                z.writestr(f"word/{target}", content)
 
         self._path = out
 
@@ -969,8 +1258,7 @@ class WordDoc(metaclass=_HelpMeta):
         seen = set()
         defaults_extra = ""
         overrides = []
-        for rid, src_path, target, _hash in self._media_files:
-            ext = Path(src_path).suffix.lower().lstrip(".")
+        for rid, ext, target, _content in self._media_files:
             mime = extensions.get(ext, "application/octet-stream")
             overrides.append(
                 f'<Override PartName="/word/{target}" ContentType="{mime}"/>'
@@ -1014,7 +1302,7 @@ class WordDoc(metaclass=_HelpMeta):
             '<Relationship Id="rId2" '
             f'Type="{R_NS}/settings" Target="settings.xml"/>',
         ]
-        for rid, src_path, target, _hash in self._media_files:
+        for rid, ext, target, _content in self._media_files:
             rels.append(
                 f'<Relationship Id="{rid}" '
                 f'Type="{R_NS}/image" Target="{target}"/>'
@@ -1041,12 +1329,14 @@ class WordDoc(metaclass=_HelpMeta):
                       indent_first_line=None,
                       space_before=None, space_after=None,
                       at_index: int = None,
-                      after=None) -> _WordParagraph:
+                      after=None,
+                      runs: list = None) -> _WordParagraph:
         """加段落（默认 append 到 body 末尾）。详细 help("add_paragraph")。
 
-        Args: text 段落文字（空=空段落）；style "Heading 1"/"Title"/"Normal"；bold/italic/underline/font/font_size/font_weight/color/highlight run 样式；alignment/line_spacing/line_rule/indent_*/space_* 段落属性（indent_* 支持 "2字符" 走 OOXML firstLineChars，或 "0.74cm"/"12pt" 走绝对长度）；at_index 0-based 插入位置；after `_WordParagraph` 锚点（与 at_index 互斥）。
-        Returns: _WordParagraph（可链式 set_format）。
+        Args: text 段落文字（空=空段落）；style "Heading 1"/"Title"/"Normal"；bold/italic/underline/font/font_size/font_weight/color/highlight run 样式；alignment/line_spacing/line_rule/indent_*/space_* 段落属性（indent_* 支持 "2字符" 走 OOXML firstLineChars，或 "0.74cm"/"12pt" 走绝对长度）；at_index 0-based 插入位置；after `_WordParagraph` 锚点（与 at_index 互斥）；runs list[dict] 多 run 写法（每项 dict 含 text + 可选 run kwargs；与 bold/color 等 run 级 kwargs 互斥，runs 优先）。
+        Returns: _WordParagraph（可链式 set_format / add_runs / set_runs）。
         Raises: at_index 和 after 同时给 / 对齐/下划线/字重非法值抛 OfficeDocError。
+        Note: [v0.3.8] runs 项 dict 支持 key：text/bold/italic/underline/font/font_size/font_weight/color/highlight（与 _make_run kwargs 一致）。
         """
         if at_index is not None and after is not None:
             raise OfficeDocError("at_index 和 after 互斥，只能选一个")
@@ -1074,22 +1364,26 @@ class WordDoc(metaclass=_HelpMeta):
         if pPr is not None:
             p.append(pPr)
 
-        if text:
-            r = _make_run(text, bold=bold, italic=italic, underline=underline_v,
-                          font=font, font_size=font_size,
-                          color=color, highlight=highlight_v)
-            p.append(r)
+        if runs is not None:
+            # runs 在时：忽略 run 级 kwargs（静默忽略，不抛错，向后兼容）
+            _runs_into_para(p, runs)
+        elif text:
+            p.append(_make_run(text, bold=bold, italic=italic,
+                              underline=underline_v, font=font,
+                              font_size=font_size, color=color,
+                              highlight=highlight_v))
 
         # 插入位置
         if after is not None:
-            anchor_p = after._element
-            anchor_p.addnext(p)
+            after._element.addnext(p)
         elif at_index is not None:
             self._insert_paragraph_at(p, at_index)
         else:
             _insert_before_sectpr(self._body, p)
 
-        return _WordParagraph(text, self, p)
+        # text 从实际 XML 回读：runs= 写法下入参 text 是空串，
+        # 直接透传会让返回的 para.text 与文档内容对不上
+        return _WordParagraph(_para_text(p), self, p)
 
     def add_heading(self, text: str, level: int = 1, **format_kwargs) -> _WordParagraph:
         """加标题（add_paragraph + style="Heading N" 的便捷封装）。详细 help("add_heading")。
@@ -1179,6 +1473,64 @@ class WordDoc(metaclass=_HelpMeta):
         _insert_before_sectpr(self._body, p)
         return _WordParagraph(text_before, self, p)
 
+    def add_markdown(self, md_text: str, *,
+                     base_style: str = None,
+                     alignment: str = None,
+                     heading_levels: dict = None,
+                     table_style: str = "TableGrid",
+                     table_header_fill: str = None) -> None:
+        """把 markdown 字符串解析后 dispatch 到 add_heading / add_paragraph / add_table。详细 help("add_markdown")。
+
+        Args: md_text markdown 文本；base_style 段落默认 style（heading/paragraph/quote/list 都生效，代码块强制 Normal）；alignment 段落对齐；heading_levels dict 把 # 级别映射到具体 style（如 `{1: "Title", 2: "Heading 1"}`）；table_style 表格样式（None=无边框）；table_header_fill 表头底色（默认 None = 只加粗）。
+        Note: 支持 `# 标题` / 空行分段 / `> 引用` / 表格 / 列表 / ``` 代码块。解析失败按字面量；不抛异常。**单次写整篇**，无 typewriter 节奏；要 typewriter 流式体验请手动 add_paragraph + save() 一段段写。
+        """
+        from skills.WordEditor.markdown import parse_blocks
+        heading_levels = heading_levels or {}
+        for blk in parse_blocks(md_text or ""):
+            btype = blk["type"]
+
+            if btype == "heading":
+                style = heading_levels.get(blk["level"]) or f"Heading {blk['level']}"
+                self.add_heading("", level=blk["level"], style=style,
+                                 runs=blk["runs"])
+
+            elif btype == "quote":
+                self.add_paragraph("", style="Quote", runs=blk["runs"],
+                                   alignment=alignment)
+
+            elif btype == "table":
+                cells = blk["cells"]
+                ncols = max((len(r) for r in cells), default=0)
+                if ncols:
+                    self.add_table(len(cells), ncols, data=cells,
+                                   header=blk["header"],
+                                   header_fill=table_header_fill,
+                                   alignments=blk["aligns"],
+                                   style=table_style)
+
+            elif btype == "list_item":
+                # 每项一个缩进段落，space_after=0 让连续项排成紧凑列表
+                self.add_paragraph(
+                    "", runs=blk["runs"],
+                    style=base_style,
+                    indent_left=f"{2 * (blk.get('level', 0) + 1)}字符",
+                    space_after=0)
+
+            elif btype == "code":
+                # 等宽 + 缩进；不继承 base_style（否则会跟着标题走）
+                for line in (blk["text"] or "").split("\n") or [""]:
+                    self.add_paragraph(line or " ", font="Consolas",
+                                       font_size="9pt", color="333333",
+                                       indent_left="2字符", space_after=0)
+
+            else:
+                para_kwargs = {}
+                if base_style:
+                    para_kwargs["style"] = base_style
+                if alignment:
+                    para_kwargs["alignment"] = alignment
+                self.add_paragraph("", runs=blk["runs"], **para_kwargs)
+
     def _insert_paragraph_at(self, p, index: int):
         """在 body 指定位置插入段落（跳过 sectPr）."""
         children = _body_children(self._body)
@@ -1193,15 +1545,24 @@ class WordDoc(metaclass=_HelpMeta):
                   data: Optional[list] = None,
                   header: bool = False,
                   header_fill: str = None,
+                  alignments: Optional[list] = None,
                   style: str = "TableGrid") -> _WordTable:
         """加表格到 body 末尾（表格后必有占位空段）。详细 help("add_table")。
 
-        Args: rows/cols 行列数（必须 > 0）；data 二维列表（缺位补空字符串）；header True 时首行作表头（加粗+白字+header_fill 背景）；header_fill 表头背景色；style 表样式名（默认 "TableGrid"，None=无样式+默认边框）。
+        Args: rows/cols 行列数（必须 > 0）；data 二维列表，单元格可以是 str 或 list[dict] runs（缺位补空字符串）；header True 时首行作表头（加粗+白字+header_fill 背景）；header_fill 表头背景色；alignments 每列对齐 "left"/"center"/"right"（长度不足按 left 补，忽略非法值）；style 表样式名（默认 "TableGrid"，None=无样式+默认边框）。
         Returns: _WordTable。
         Raises: rows/cols <= 0 抛 OfficeDocError。
         """
         if rows <= 0 or cols <= 0:
             raise OfficeDocError(f"表格行列数必须 > 0: rows={rows}, cols={cols}")
+
+        col_aligns = []
+        for c_idx in range(cols):
+            raw_a = alignments[c_idx] if alignments and c_idx < len(alignments) else None
+            try:
+                col_aligns.append(_normalize_alignment(raw_a))
+            except OfficeDocError:
+                col_aligns.append(None)
 
         tbl = _make_element(_wt("tbl"))
 
@@ -1250,18 +1611,28 @@ class WordDoc(metaclass=_HelpMeta):
                             f"{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}")
                 tc.append(tcPr)
 
-                # 段落
-                value = ""
+                # 段落（列对齐走 pPr；表头底色走 tcPr）
+                raw = None
                 if data and r_idx < len(data) and c_idx < len(data[r_idx]):
                     raw = data[r_idx][c_idx]
-                    value = str(raw) if raw is not None else ""
 
                 p = _make_element(_wt("p"))
-                if value:
-                    bold_flag = True if (header and r_idx == 0) else None
-                    cell_color = "FFFFFF" if (header and r_idx == 0 and header_fill) else None
-                    r = _make_run(value, bold=bold_flag, color=cell_color)
-                    p.append(r)
+                pPr = _build_pPr(alignment=col_aligns[c_idx])
+                if pPr is not None:
+                    p.append(pPr)
+
+                is_header_cell = bool(header and r_idx == 0)
+                base_kwargs = {}
+                if is_header_cell:
+                    base_kwargs["bold"] = True
+                    if header_fill:
+                        base_kwargs["color"] = "FFFFFF"
+
+                if isinstance(raw, list):
+                    _runs_into_para(p, raw, **base_kwargs)
+                elif raw is not None and str(raw):
+                    p.append(_make_run(str(raw), **base_kwargs))
+
                 tc.append(p)
                 tr.append(tc)
                 tbl.append(tr)
@@ -1296,14 +1667,15 @@ class WordDoc(metaclass=_HelpMeta):
 
         width_emu, height_emu = self._calc_image_size(path, width, height, keep_ratio)
 
-        # 按 md5 去重
+        # 按 md5 去重 + 一次性读 bytes 入表（v0.3.7：open() 加载历史图片也走同一种结构）
         with open(path, "rb") as f:
-            content_hash = md5(f.read()).hexdigest()
+            content_bytes = f.read()
+        content_hash = md5(content_bytes).hexdigest()
 
         rid = None
         media_target = None
-        for existing_rid, existing_src, existing_target, existing_hash in self._media_files:
-            if existing_hash == content_hash:
+        for existing_rid, _existing_ext, existing_target, existing_bytes in self._media_files:
+            if md5(existing_bytes).hexdigest() == content_hash:
                 rid = existing_rid
                 media_target = existing_target
                 break
@@ -1312,7 +1684,7 @@ class WordDoc(metaclass=_HelpMeta):
             rid = f"rId{self._next_rid}"
             self._next_rid += 1
             media_target = f"media/image_{rid}.{ext}"
-            self._media_files.append((rid, path, media_target, content_hash))
+            self._media_files.append((rid, ext, media_target, content_bytes))
 
         # 构建 w:p > w:r > w:drawing > wp:inline > ...
         p = _make_element(_wt("p"))
@@ -1436,7 +1808,8 @@ class WordDoc(metaclass=_HelpMeta):
     def get_paragraphs(self) -> list:
         """段落列表（含表格和占位空段，OOXML 规范）。详细 help("get_paragraphs")。
 
-        Returns: list[dict]——段落 {"index", "text", "style"}；表格 {"index", "type": "table", "rows"}；0-based index 与 set_paragraph/remove_paragraph 一致。
+        Returns: list[dict]——段落 {"index", "type", "text", "style"}，type ∈ paragraph / image / page_break / field；表格 {"index", "type": "table", "rows"}；0-based index 与 set_paragraph/remove_paragraph 一致。
+        Note: 图片段和分页符段的 text 都是空串，靠 type 才能区分——要改/删它们必须先认 type。
         """
         result = []
         idx = 0
@@ -1446,6 +1819,7 @@ class WordDoc(metaclass=_HelpMeta):
             if child.tag == _wt("p"):
                 result.append({
                     "index": idx,
+                    "type": self._kind_of(child),
                     "text": _para_text(child),
                     "style": _para_style(child),
                 })
@@ -1458,10 +1832,23 @@ class WordDoc(metaclass=_HelpMeta):
             idx += 1
         return result
 
+    @staticmethod
+    def _kind_of(p) -> str:
+        """段落内容类型：image / page_break / field / paragraph。"""
+        if p.find(f".//{_wt('drawing')}") is not None:
+            return "image"
+        if p.find(f".//{_wt('instrText')}") is not None:
+            return "field"
+        for br in p.iter(_wt("br")):
+            if br.get(_wt("type")) == "page":
+                return "page_break"
+        return "paragraph"
+
     def get_tables(self) -> List[List[List[str]]]:
         """所有顶层表格内容（不含嵌套表格）。详细 help("get_tables")。
 
         Returns: list[list[list[str]]]——外层=表格列表，中层=行，内层=单元格文字（多段用 \\n 拼接）。
+        Note: 只读快照；要改单元格/增删行列请用 `get_table(i)` 拿可编辑句柄。
         """
         result = []
         for tbl in self._body.findall(_wt("tbl")):
@@ -1477,15 +1864,64 @@ class WordDoc(metaclass=_HelpMeta):
             result.append(table_data)
         return result
 
+    # ---- 取可编辑句柄（get_* 只读；get_table / get_picture 才能改）----
+
+    def get_table(self, index: int = 0) -> _WordTable:
+        """取第 index 个顶层表格的**可编辑句柄**（0-based，按文档顺序）。详细 help("get_table")。
+
+        Returns: _WordTable——可 set_cell / insert_row / remove_row / insert_col / remove_col / remove。
+        Raises: 越界抛 OfficeDocError。
+        """
+        tbls = self._body.findall(_wt("tbl"))
+        if index < 0 or index >= len(tbls):
+            raise OfficeDocError(f"表格索引超出范围: {index}（共 {len(tbls)} 个表格）")
+        tbl = tbls[index]
+        trs = tbl.findall(_wt("tr"))
+        cols = len(trs[0].findall(_wt("tc"))) if trs else 0
+        return _WordTable(len(trs), cols, self, tbl)
+
+    def get_picture(self, index: int = 0) -> _WordPicture:
+        """取第 index 张顶层图片的**可编辑句柄**（0-based，按文档顺序）。详细 help("get_picture")。
+
+        open() 打开的已有文档也能取到——之前只能对本次 add_image 的返回值操作。
+        Returns: _WordPicture——可 set_size / remove。
+        Raises: 越界抛 OfficeDocError。
+        """
+        drawings = []
+        for child in self._body:
+            if child.tag == _wt("p"):
+                drawings.extend(child.iter(_wt("drawing")))
+        if index < 0 or index >= len(drawings):
+            raise OfficeDocError(f"图片索引超出范围: {index}（共 {len(drawings)} 张图片）")
+        drawing = drawings[index]
+        docpr = drawing.find(f"{{{WP_NS}}}inline/{{{WP_NS}}}docPr")
+        alt = ""
+        if docpr is not None:
+            alt = docpr.get("descr") or docpr.get("name") or ""
+        return _WordPicture(alt, self, drawing)
+
+    def remove_last(self, n: int = 1):
+        """删掉文档末尾 n 个元素（段落 / 表格都算），用于「刚写错最后一段，重写」。详细 help("remove_last")。
+
+        Args: n 删除个数（默认 1；>实际数量时全删）。
+        """
+        if n <= 0:
+            return
+        for child in _body_children(self._body)[-n:]:
+            self._body.remove(child)
+
     # ---- 修改 ----
 
-    def set_paragraph(self, index: int, text: str = None, **format_kwargs):
+    def set_paragraph(self, index: int, text: str = None, *,
+                     runs: list = None, **format_kwargs):
         """改第 N 行（0-based）。详细 help("set_paragraph")。
 
-        Args: index 段落索引；text 新文字（None=保留原文字，仅改格式）；**format_kwargs 格式参数（bold/italic/font/font_size/color/alignment/style 等）。
-        Raises: index 越界 / index 指向表格抛 OfficeDocError。
-        Note: 改 text 时会把段落所有 run 合并为一个新 run，保留第一个 run 的 rPr 样式。
+        Args: index 段落索引；text 新文字（None=保留原文字，仅改格式）；runs list[dict] 多 run 写法（与 text 互斥，传则忽略 text）；**format_kwargs 格式参数（bold/italic/font/font_size/color/alignment/style 等）。
+        Raises: index 越界 / index 指向表格 / text 和 runs 同时给抛 OfficeDocError。
+        Note: 改 text 时会把段落所有 run 合并为一个新 run，保留第一个 run 的 rPr 样式。改 runs 时保留段落属性（pPr），删除所有现有 run 后按 list 重建。
         """
+        if runs is not None and text is not None:
+            raise OfficeDocError("runs 和 text 互斥")
         children = _body_children(self._body)
         if index < 0 or index >= len(children):
             raise OfficeDocError(
@@ -1496,7 +1932,9 @@ class WordDoc(metaclass=_HelpMeta):
             raise OfficeDocError(f"索引 {index} 是表格，不是段落")
 
         para = _WordParagraph(_para_text(target), self, target)
-        if text is not None:
+        if runs is not None:
+            para.set_runs(runs)
+        elif text is not None:
             para.set_text(text)
         if format_kwargs:
             para.set_format(**format_kwargs)
@@ -1602,6 +2040,10 @@ def doc(name=None):
 def help(name=None):
     """doc() 别名。"""
     return doc(name)
+
+
+# 把 markdown 模块的解析函数 re-export 到顶层，方便 AI `from skills.WordEditor import parse_inline, parse_blocks`
+from skills.WordEditor.markdown import parse_inline, parse_blocks, supported_syntax  # noqa: E402
 
 
 # 自动给所有函数挂 .help 属性

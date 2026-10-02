@@ -3,8 +3,8 @@ LLM 实例懒加载工厂。
 
 设计目标：
 - 用户改 config.json 后无需重启后端，下次调用即生效
-- 5 个工作流角色（llm_core / agent_llm / summary_llm / react_compact_llm /
-  llm_imp_ipt / should_end_llm）共享同一个 ChatOpenAI 实例（连接三元组相同）
+- 5 个工作流角色（llm_core / agent_llm_with_done / summary_llm /
+  react_compact_llm / llm_imp_ipt）共享同一个 ChatOpenAI 实例（连接三元组相同）
 - VL 模型独立 cache（除非 vl.local=False fallback 到主模型）
 - cache key = (role, api_key_fp, base_url, model_name)
   - 任一字段改 → cache miss → 自动 new 一个新实例

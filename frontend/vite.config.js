@@ -29,6 +29,11 @@ export const viteServerConfig = {
       target: 'http://127.0.0.1:38211',
       changeOrigin: true,
       rewrite: (path) => path
+    },
+    '/api': {
+      target: 'http://127.0.0.1:38211',
+      changeOrigin: true,
+      rewrite: (path) => path
     }
   },
   allowedHosts: true

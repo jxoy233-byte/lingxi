@@ -19,13 +19,13 @@
       <div class="modal-body">
         <!-- HTML 文件：原文 / 渲染效果 tab 切换（与 FilePreviewPanel 同款） -->
         <div v-if="isHtmlFile && (file.preview_url || file.iframe_url)" class="html-preview">
-          <div class="html-tabs">
+          <div class="preview-tabs">
             <button
-              :class="['tab-btn', { active: htmlTab === 'raw' }]"
+              :class="['preview-tab-btn', { active: htmlTab === 'raw' }]"
               @click="htmlTab = 'raw'"
             >原文</button>
             <button
-              :class="['tab-btn', { active: htmlTab === 'rendered' }]"
+              :class="['preview-tab-btn', { active: htmlTab === 'rendered' }]"
               @click="htmlTab = 'rendered'"
             >渲染效果</button>
           </div>
@@ -73,6 +73,21 @@
           </div>
         </div>
 
+        <!-- v0.3.7 —— .docx / .xlsx 文件预览：复用 ToolDocPreview（mammoth / SheetJS 渲染 + 编辑）
+             与 AI 工具调用的 inline 预览共用同一组件，UX 一致。
+             chrome='minimal' 剥 panel 边框（Modal 已有自己的 header）。 -->
+        <ToolDocPreview
+          v-else-if="(file.kind === 'office_docx' || file.kind === 'office_xlsx') && file.url"
+          chrome="minimal"
+          :tool-name="file.kind === 'office_docx' ? 'WordEditor' : 'ExcelEditor'"
+          :args="{}"
+          :version="0"
+          :is-streaming="false"
+          :session-id="file.sessionId || ''"
+          :path="file.url"
+          class="file-preview-embedded"
+        />
+
         <!-- 文本文件预览：使用解码后的 content 字段 -->
         <div v-else-if="isTextFile(file) && file.content" class="preview-text">
           <pre>{{ file.content }}</pre>
@@ -80,13 +95,13 @@
 
         <!-- Mermaid 图表预览：原文 / 渲染切换 -->
         <div v-else-if="file.preview_method === 'mermaid'" class="mermaid-preview">
-          <div class="mermaid-tabs">
+          <div class="preview-tabs">
             <button
-              :class="['tab-btn', { active: mermaidTab === 'raw' }]"
+              :class="['preview-tab-btn', { active: mermaidTab === 'raw' }]"
               @click="mermaidTab = 'raw'"
             >原文</button>
             <button
-              :class="['tab-btn', { active: mermaidTab === 'rendered' }]"
+              :class="['preview-tab-btn', { active: mermaidTab === 'rendered' }]"
               @click="mermaidTab = 'rendered'"
             >渲染效果</button>
           </div>
@@ -126,6 +141,8 @@
 </template>
 
 <script>
+import ToolDocPreview from './ToolDocPreview.vue'
+
 export default {
   name: 'FilePreviewModal',
   props: {
@@ -138,6 +155,7 @@ export default {
       default: () => ({})
     }
   },
+  components: { ToolDocPreview },
   emits: ['close'],
   watch: {
     // 弹窗打开时焦点抢到关闭按钮，Esc 已走 document 兜底，这里只让 Tab / ↑↓ 立刻能用
@@ -513,14 +531,6 @@ export default {
   flex-direction: column;
   min-height: 0;
 }
-.html-tabs {
-  display: flex;
-  gap: 4px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid var(--border-color);
-  margin-bottom: 12px;
-  flex-shrink: 0;
-}
 .html-preview-iframe {
   width: 100%;
   flex: 1;
@@ -634,36 +644,6 @@ export default {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-}
-
-.mermaid-tabs {
-  display: flex;
-  gap: 4px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid var(--border-color);
-  margin-bottom: 12px;
-  flex-shrink: 0;
-}
-
-.tab-btn {
-  padding: 6px 16px;
-  border: 1px solid var(--border-color);
-  background: var(--bg-secondary);
-  color: var(--text-secondary);
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 13px;
-  transition: all 0.2s;
-}
-
-.tab-btn:hover {
-  background: var(--bg-hover);
-}
-
-.tab-btn.active {
-  background: var(--button-bg);
-  color: white;
-  border-color: var(--button-bg);
 }
 
 .mermaid-rendered {

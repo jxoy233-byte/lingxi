@@ -27,13 +27,14 @@ from ChatMe.APIRouter.scheduled_tasks import router as scheduled_tasks_router
 from ChatMe.APIRouter.message_queue import router as message_queue_router
 from ChatMe.APIRouter.trash import router as trash_router
 from ChatMe.APIRouter.file_ops import router as file_ops_router
+from ChatMe.APIRouter.word_editor import router as word_editor_router
 from skills.Scheduler import scheduler_lifespan
 from ChatMe.LoggingManager.logging_config import set_logger
 
 
 app_config = config.get_app_config()
-version = app_config.get("version", "v0.3.5")
-app_name = app_config.get("name", "ChatMe")
+version = app_config.get("version", "v0.3.8")
+app_name = app_config.get("name", "Lingxi")
 app_description = app_config.get("description", "")
 app_host = app_config.get("host", "127.0.0.1")
 app_port = app_config.get("port", 38211)
@@ -137,6 +138,7 @@ app.include_router(scheduled_tasks_router)
 app.include_router(message_queue_router)
 app.include_router(trash_router)
 app.include_router(file_ops_router)
+app.include_router(word_editor_router)
 
 # 仅在 local=true 时加载本地 VL 模型
 # 关键：必须延迟 import —— model_vl.py 顶层会调 Qwen3VLForConditionalGeneration.from_pretrained

@@ -34,8 +34,6 @@ class ChatStateCore2(TypedDict):
     memory_ai_response: Annotated[Optional[str], "待写入memory的AI回复"]
     memory_tool_calls: Annotated[List[Dict[str, Any]], "待写入memory的工具调用"]
     memory_tool_results: Annotated[List[str], "待写入memory的工具结果"]
-    should_end_decision: Annotated[Optional[str], "should_end_node 的决策结果，end 或 retry"]
-    should_end_retry_times: Annotated[int, "should_end_node 连续 retry 的次数，超过3次强制跳 final_node"]
     # 新 graph（_create_graph_improved）：agent 连续输出无 tool_calls 的 AIMessage 的重试次数
     agent_no_tool_call_retries: Annotated[int, "新 graph agent 输出无 tool_calls AIMessage 的连续重试次数"]
     # 新 graph：context_assembly_node 检测到 agent 当前轮调了 done 的标志位

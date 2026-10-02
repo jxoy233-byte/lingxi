@@ -23,6 +23,7 @@ from ChatMe.ChatService.config.models import MessageRole, Message, Conversation,
 from ChatMe.ChatService.FilesLoaders.core import FilesLoaders, OutputFormat
 from ChatMe.ChatWorkflow import ChatWorkflow, MemoryUpdateFormat
 from ChatMe.ChatWorkflow.config.models import AIMessageType
+from ChatMe.ChatWorkflow.decorators import TransientUpstreamError
 from ChatMe.paths import CACHED_DIR, TRASH_DIR, BACKEND_ROOT
 from ChatMe.LoggingManager.logging_config import (
     get_logger,
@@ -668,6 +669,36 @@ class ChatService:
             return {}
 
     @staticmethod
+    def _upstream_retry_fields(e: Exception) -> dict:
+        """
+        把「上游瞬时错误重试耗尽」的重试元信息抽出来，塞进 SSE error payload。
+
+        node_guard 判定 529/429/5xx/timeout 属瞬时错误后会原地重试
+        （NODE_GUARD_MAX_RETRIES × NODE_GUARD_RETRY_DELAY），耗尽才抛
+        TransientUpstreamError。这里只做搬运——前端据此把「一坨 529 堆栈」换成
+        「上游繁忙，已自动重试 N/M 次仍失败」。
+
+        非瞬时错误（KeyError / 配置缺失等）返回空 dict，error 事件形状不变。
+        """
+        if isinstance(e, TransientUpstreamError):
+            return {
+                "upstream_transient": True,
+                "retry_attempts": e.attempts,
+                "retry_max_attempts": e.max_attempts,
+                "retry_node": e.node,
+            }
+        # 内层 guard 可能已包过一层，__cause__ 链上下钻一次
+        cause = e.__cause__
+        if isinstance(cause, TransientUpstreamError):
+            return {
+                "upstream_transient": True,
+                "retry_attempts": cause.attempts,
+                "retry_max_attempts": cause.max_attempts,
+                "retry_node": cause.node,
+            }
+        return {}
+
+    @staticmethod
     async def _switch_chunk_to_str(chunk_content: Any):
         content = chunk_content
         if isinstance(content, str):
@@ -789,7 +820,7 @@ class ChatService:
 
         return events
 
-    _WORKFLOW_TOKEN_NODES = ("input_parse_node", "agent_node", "should_end_node", "final_node")
+    _WORKFLOW_TOKEN_NODES = ("input_parse_node", "agent_node", "final_node")
     _ROUND_METRICS_TTL_SECONDS = 24 * 60 * 60
 
     @staticmethod
@@ -915,8 +946,14 @@ class ChatService:
         # agent_node + final_node 从 imp_ipt 之后的所有 AIMessage.usage_metadata 求和。
         round_start = 0
         if isinstance(imp_ipt, HumanMessage):
+            # 必须按 id 比、不能用 `is`：state.values 是从 Redis checkpoint 反序列化出来的，
+            # imp_ipt 自己的 channel 和 messages channel 各反序列化一次 → 两个不同对象，
+            # 身份比较恒为 False，round_start 会永远停在 0（就是上面注释说的那个 bug）。
+            # 实测 JsonPlusSerializer round-trip：a is b → False，a.id == b.id → True。
+            # 老 checkpoint（imp_ipt 还没进 messages 时）找不到匹配 → 保持 round_start=0，
+            # 与改动前行为一致，优雅退化。
             for i in range(len(messages) - 1, -1, -1):
-                if messages[i] is imp_ipt:
+                if messages[i].id and messages[i].id == imp_ipt.id:
                     round_start = i + 1
                     break
 
@@ -1103,7 +1140,7 @@ class ChatService:
                     elif chunk['metadata']['langgraph_node'] and chunk['metadata']['langgraph_node'] == 'input_parse_node':
                         content = await self._switch_chunk_to_str(chunk['data']['chunk'].content)
                         yield json.dumps(
-                            {"type": "reasoning", "content": content,
+                            {"type": "reasoning", "content": content, "source": "imp_ipt",
                              "elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
                             ensure_ascii=False,
                             default=str
@@ -1172,6 +1209,7 @@ class ChatService:
             self.logger.error(f"流式响应异常(session_id:{session_id}): {error_detail}")
             yield json.dumps(
                 {"type": "error", "error": str(e),
+                 **self._upstream_retry_fields(e),
                  "elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
                 ensure_ascii=False,
                 default=str
@@ -1305,6 +1343,7 @@ class ChatService:
                     role = MessageRole.USER
                     files = []
                     is_file = msg.additional_kwargs.get("is_file", False)
+                    is_imp_ipt = bool(msg.additional_kwargs.get("imp_ipt"))
                     human_message = (await self._switch_chunk_to_str(msg.content)).strip()
 
                     if is_file:
@@ -1317,11 +1356,14 @@ class ChatService:
                             additional_kwargs={"is_file": True}
                         ))
                     elif human_message:
+                        # imp_ipt 是 input_parse_node 的输入优化产物、不是用户说的话：
+                        # 打标记让前端把它渲进思考面板的「理解意图」块，而不是当成用户气泡
+                        # （实时流里由 reasoning 事件 + source=imp_ipt 走同一条路，两边一致）
                         messages_list.append(Message(
                             role=role,
                             content=human_message,
                             files=files,
-                            additional_kwargs=None
+                            additional_kwargs={"imp_ipt": True} if is_imp_ipt else None
                         ))
 
                 elif isinstance(msg, AIMessage):
@@ -1824,6 +1866,7 @@ class ChatService:
                         content = await self._switch_chunk_to_str(chunk['data']['chunk'].content)
                         yield json.dumps(
                             {"type": "reasoning", "content": content,
+                             "source": "imp_ipt" if chunk['metadata']['langgraph_node'] == 'input_parse_node' else "agent",
                              "elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
                             ensure_ascii=False,
                             default=str,
@@ -1878,6 +1921,7 @@ class ChatService:
             self.logger.error(f"resume_permission_stream 异常(session_id:{session_id}): {error_detail}")
             yield json.dumps(
                 {"type": "error", "error": str(e),
+                 **self._upstream_retry_fields(e),
                  "elapsed_ms": self._elapsed_ms_since(start_mono), "token_usage": token_usage},
                 ensure_ascii=False,
                 default=str,
@@ -2139,6 +2183,7 @@ class ChatService:
                 {
                     "type": "error",
                     "error": str(e),
+                    **self._upstream_retry_fields(e),
                     "elapsed_ms": self._elapsed_ms_since(start_mono) if 'start_mono' in locals() else 0,
                     "token_usage": token_usage if 'token_usage' in locals() else self._new_workflow_token_usage(),
                 },
@@ -2155,86 +2200,86 @@ class ChatService:
             if 'token_usage' in locals():
                 await self._persist_round_token_usage(session_id, token_usage)
 
-        if await self._judge_is_interrupted(session_id):
-            key_value = await self._get_interrupted_info(session_id)
-            reason = key_value.get("reason", "user_initiated_interrupt")
+            if await self._judge_is_interrupted(session_id):
+                key_value = await self._get_interrupted_info(session_id)
+                reason = key_value.get("reason", "user_initiated_interrupt")
 
-            self.logger.info(f"会话{session_id}被中断: {reason}")
+                self.logger.info(f"会话{session_id}被中断: {reason}")
+
+                elapsed_ms = self._elapsed_ms_since(start_mono)
+                checkpoint_id = await self._save_round_checkpoint(
+                    session_id,
+                    metrics={"elapsed_ms": elapsed_ms, "token_usage": token_usage},
+                    status="interrupted",
+                    skip_memory=True,  # 中断轮的 memory 调度跳过：撤回不需要，续接在 completed 保存时覆盖写
+                )
+
+                # 补充checkpoint_id字段进去
+                await self.redis_client.hset(
+                    f"interrupt:{session_id}",
+                    mapping={
+                        "reason": key_value.get("reason", "user_initiated_interrupt"),
+                        "checkpoint_id": checkpoint_id,
+                        "timestamp": key_value.get("timestamp", "")
+                    })
+
+                yield json.dumps(
+                    {
+                        "type": "interrupt",
+                        "session_id": session_id,
+                        "checkpoint_id": checkpoint_id,
+                        "memory_status": self._get_memory_update_status(session_id),
+                        "reason": reason,
+                        "elapsed_ms": elapsed_ms,
+                        "token_usage": token_usage,
+                    },
+                    ensure_ascii=False,
+                    default=str
+                ) + "\n\n"
+
+                # thinking_chain 收尾：中断路径也 flush（保留中断前的思考过程）
+                flush_pending_thinking_for_session(session_id)
+                return
+
+            # round 结束时再扫一遍 pending（防止决策链上又触发新权限请求）
+            if await self._judge_has_pending_permission(session_id):
+                perm_info = await self._get_permission_request_info(session_id)
+                elapsed_ms = self._elapsed_ms_since(start_mono)
+                yield json.dumps(
+                    {
+                        "type": "permission_request",
+                        "session_id": session_id,
+                        "command": perm_info.get("command", ""),
+                        "action": perm_info.get("action", ""),
+                        "tool_call_name": perm_info.get("tool_call_name", ""),
+                        "timestamp": perm_info.get("timestamp", ""),
+                        "elapsed_ms": elapsed_ms,
+                        "token_usage": token_usage,
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                ) + "\n\n"
+                flush_pending_thinking_for_session(session_id)
+                return
 
             elapsed_ms = self._elapsed_ms_since(start_mono)
             checkpoint_id = await self._save_round_checkpoint(
                 session_id,
                 metrics={"elapsed_ms": elapsed_ms, "token_usage": token_usage},
-                status="interrupted",
-                skip_memory=True,  # 中断轮的 memory 调度跳过：撤回不需要，续接在 completed 保存时覆盖写
             )
 
-            # 补充checkpoint_id字段进去
-            await self.redis_client.hset(
-                f"interrupt:{session_id}",
-                mapping={
-                    "reason": key_value.get("reason", "user_initiated_interrupt"),
-                    "checkpoint_id": checkpoint_id,
-                    "timestamp": key_value.get("timestamp", "")
-                })
+            self.logger.info(f"会话 {session_id} 续接对话完成 (checkpoint: {checkpoint_id}) elapsed_ms={elapsed_ms} token_total={token_usage['total']}")
 
-            yield json.dumps(
-                {
-                    "type": "interrupt",
-                    "session_id": session_id,
-                    "checkpoint_id": checkpoint_id,
-                    "memory_status": self._get_memory_update_status(session_id),
-                    "reason": reason,
-                    "elapsed_ms": elapsed_ms,
-                    "token_usage": token_usage,
-                },
-                ensure_ascii=False,
-                default=str
-            ) + "\n\n"
+            # 返回最终完整结果
+            yield json.dumps({
+                "type": "done",
+                "session_id": session_id,
+                "checkpoint_id": checkpoint_id,
+                "memory_status": self._get_memory_update_status(session_id),
+                "interrupted_before": True,
+                "elapsed_ms": elapsed_ms,
+                "token_usage": token_usage,
+            }) + "\n\n"
 
-            # thinking_chain 收尾：中断路径也 flush（保留中断前的思考过程）
+            # thinking_chain 收尾：续接完成路径 flush
             flush_pending_thinking_for_session(session_id)
-            return
-
-        # round 结束时再扫一遍 pending（防止决策链上又触发新权限请求）
-        if await self._judge_has_pending_permission(session_id):
-            perm_info = await self._get_permission_request_info(session_id)
-            elapsed_ms = self._elapsed_ms_since(start_mono)
-            yield json.dumps(
-                {
-                    "type": "permission_request",
-                    "session_id": session_id,
-                    "command": perm_info.get("command", ""),
-                    "action": perm_info.get("action", ""),
-                    "tool_call_name": perm_info.get("tool_call_name", ""),
-                    "timestamp": perm_info.get("timestamp", ""),
-                    "elapsed_ms": elapsed_ms,
-                    "token_usage": token_usage,
-                },
-                ensure_ascii=False,
-                default=str,
-            ) + "\n\n"
-            flush_pending_thinking_for_session(session_id)
-            return
-
-        elapsed_ms = self._elapsed_ms_since(start_mono)
-        checkpoint_id = await self._save_round_checkpoint(
-            session_id,
-            metrics={"elapsed_ms": elapsed_ms, "token_usage": token_usage},
-        )
-
-        self.logger.info(f"会话 {session_id} 续接对话完成 (checkpoint: {checkpoint_id}) elapsed_ms={elapsed_ms} token_total={token_usage['total']}")
-
-        # 返回最终完整结果
-        yield json.dumps({
-            "type": "done",
-            "session_id": session_id,
-            "checkpoint_id": checkpoint_id,
-            "memory_status": self._get_memory_update_status(session_id),
-            "interrupted_before": True,
-            "elapsed_ms": elapsed_ms,
-            "token_usage": token_usage,
-        }) + "\n\n"
-
-        # thinking_chain 收尾：续接完成路径 flush
-        flush_pending_thinking_for_session(session_id)

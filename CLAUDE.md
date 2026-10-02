@@ -244,6 +244,7 @@ docker-compose up -d redis       # 端口 48211，密码 123456
 - `impIpt` 身份判定从 `is` 改为 `messages[i].id == imp_ipt.id`（LangGraph 反序列化后是等价不同对象）；`imp_ipt` / `final_node` 的 SSE 增量补 `source` 字段，前端据此区分「理解意图阶段」与「正式回复阶段」
 - `/[xxx]` pill 改为**按命令清单校验**（`App.vue slashCommands` → `MessageList` → `MessageItem`），不在清单里就**原样保留文本、不 pill 化**；判定 case-insensitive，skill 未拉回（`skillsLoaded=false`）时不判定。**Why**：pill 是「这是个真命令」的承诺，拼错的 `/[Excle]` 跟 `/[WordEditor]` 长得一样等于替错误背书，用户以为命令生效了
 - 输入框手打未知命令不再静默：`extractTypedSlashCommand` emit `unknown-slash-command` → toast 提示 + 列相近候选（同一前缀只提示一次）
+- `lazyLibs.js` 的 mammoth 从 `mammoth/mammoth.browser.js` 改走包主入口 `mammoth`：Vite 客户端构建会应用 mammoth 的 `browser` 字段（`lib/unzip.js` → `browser/unzip.js` 真 ArrayBuffer 实现、`lib/docx/files.js` → 浏览器版），调用方仍传 `{ arrayBuffer }` 无需改。**Why**：深路径是伸手进别人包里的 browserify 预构建产物，路径随时会消失，且失败只在「那台机器 node_modules 没装全」时出现（Windows 打包就是这么断的），本地永远复现不了；换过去 chunk 还小 113KB（494→381）。17 个 mammoth fixture 实测 16 个输出逐字节一致，第 17 个 external-picture 是外链图片，两条路径都读不了（既有 browser 限制，非回归）
 
 **v0.3.7**
 - WordEditor 段内多 run 样式 `runs=[{text,...format_kwargs}]` + `add_markdown()`（自写零依赖 parser 在 `markdown.py`）

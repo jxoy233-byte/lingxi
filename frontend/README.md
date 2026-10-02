@@ -135,7 +135,7 @@ frontend/
 │   ├── App.vue                 # 根组件：全局状态、SSE 连接、错误气泡保护、刷新页面
 │   ├── router/index.js         # 路由表
 │   ├── utils/
-│   │   ├── lazyLibs.js         # mammoth / SheetJS 动态 import（按需加载，不进首屏 bundle）
+│   │   ├── lazyLibs.js         # mammoth / SheetJS 动态 import（按需加载，不进首屏 bundle；mammoth 必须走包主入口，禁止改回 `mammoth/mammoth.browser.js`）
 │   │   ├── wordExcel.js        # Word/Excel 工具调用 → 文档路径抽取（extractWordPath / extractExcelPath / normalizeDocPath / extractDocPathFromOutput）
 │   │   ├── wordExtract.js      # docx HTML → 原文视图纯文本段落（含 `[[图片 N]]` 占位符），脱离组件可单测
 │   │   └── fileKind.js         # 文件名 → 类型 kind / 徽章短标 / 字号档位（v0.3.8；文件树 + 回收站树共用的唯一判定源）

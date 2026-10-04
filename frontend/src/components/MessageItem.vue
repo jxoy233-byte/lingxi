@@ -197,12 +197,30 @@
                  所以不能跟 .reasoning-text 共用 ▸ 项目符号排版 —— 做成带左侧强调条的
                  卡片，一眼能和下面的思考段分开（它是 thinkingBlocks 的固定第一块） -->
             <div v-if="blk.type === 'impIpt'" class="imp-ipt-block">
-              <span class="imp-ipt-label">
-                <svg class="imp-ipt-icon" xmlns="http://www.w3.org/2000/svg" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
-                  <circle cx="12" cy="12" r="8.5"/>
-                  <circle cx="12" cy="12" r="2.5"/>
-                </svg>理解意图
-              </span>{{ blk.text }}
+              <!-- v0.3.9 —— 「理解意图」同样超 5 行自动折叠。
+                   折叠态必须作用在内层 .imp-ipt-text 而不是 .imp-ipt-block：
+                   line-clamp 只裁渲染内容，外层一 clamp 就把「展开」按钮本身也裁没了。
+                   data-reasoning-index="0" —— imp_ipt 在 thinkingBlocks 里恒为第 0 块
+                   （见 thinkingBlocks 注释「固定排在最前」），且 v-if / v-else-if 互斥，
+                   所以 reasoning 分支永远拿不到 0，两边共用同一份测量状态不会撞车。 -->
+              <div
+                class="imp-ipt-text"
+                :class="{ 'imp-ipt-text--clamped': reasoningOverflow[0] && !expandedReasonings[0] }"
+                :data-reasoning-index="0"
+              >
+                <span class="imp-ipt-label">
+                  <svg class="imp-ipt-icon" xmlns="http://www.w3.org/2000/svg" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+                    <circle cx="12" cy="12" r="8.5"/>
+                    <circle cx="12" cy="12" r="2.5"/>
+                  </svg>理解意图
+                </span>{{ blk.text }}
+              </div>
+              <button
+                v-if="reasoningOverflow[0]"
+                type="button"
+                class="imp-ipt-toggle"
+                @click.stop="toggleReasoning(0)"
+              >{{ impIptToggleLabel }}</button>
             </div>
 
             <!-- 组头：这一段思考。
@@ -757,8 +775,14 @@ export default {
     // 监听全局 mouseup，用于检测 AI 消息内的文本选区
     document.addEventListener('mouseup', this.handleTextSelection)
     document.addEventListener('selectionchange', this.handleSelectionChange)
-    // 思考段是否超 5 行取决于渲染宽度，窗口缩放要重新量一次
+    // 思考段是否超 5 行完全取决于渲染宽度：同一段文字在宽窗口 3 行、窄窗口 8 行。
+    // 宽度变化的来源不止拖窗口（侧栏展开/收起、面板开合都不会触发 window.resize），
+    // 所以以 ResizeObserver 为主、window.resize 为兜底。
     window.addEventListener('resize', this.handleWindowResize)
+    if (typeof ResizeObserver !== 'undefined' && this.$el) {
+      this._resizeObserver = new ResizeObserver(this.handleWindowResize)
+      this._resizeObserver.observe(this.$el)
+    }
     this.$nextTick(this.measureReasoningOverflow)
   },
   updated() {
@@ -770,6 +794,7 @@ export default {
     document.removeEventListener('mouseup', this.handleTextSelection)
     document.removeEventListener('selectionchange', this.handleSelectionChange)
     window.removeEventListener('resize', this.handleWindowResize)
+    if (this._resizeObserver) { this._resizeObserver.disconnect(); this._resizeObserver = null }
     if (this._resizeTimer) clearTimeout(this._resizeTimer)
   },
   computed: {
@@ -1028,6 +1053,14 @@ export default {
       const tail = reasoning.slice(consumed).trim()
       if (tail) blocks.push({ type: 'reasoning', text: tail })
       return blocks
+    },
+    /**
+     * 「理解意图」折叠按钮文案。跟 reasoningToggleLabel 分开是因为它不是
+     * 「思考」——展开的是 input_parse_node 对用户输入的改写结果。
+     */
+    impIptToggleLabel() {
+      if (this.expandedReasonings[0]) return '收起意图'
+      return `展开完整意图（约 ${this.reasoningLines[0]} 行）`
     },
     /**
      * 上游重试提示（作为思考链里的一条信息，不覆盖任何已有内容）。
@@ -2543,18 +2576,22 @@ export default {
       this.thinkingCollapsed = !this.thinkingCollapsed
     },
     /**
-     * v0.3.9 —— 实测每个思考段是否超过 5 行。
+     * v0.3.9 —— 实测每个思考段 / 意图块是否超过 5 行。
      *
      * 为什么必须实测：换行由渲染宽度决定，同一段文字在宽窗口 3 行、窄窗口 8 行，
-     * 任何按字符数 / 换行符数的估算都会判错。clamp 后的元素 scrollHeight 是全文高度、
-     * clientHeight 是 5 行高度，两者比较即溢出量（line-clamp 的标准探测法）。
+     * 任何按字符数 / 换行符数的估算都会判错。
      *
-     * 三个必须绕开的坑：
+     * ⚠️ 判据必须是「行数 > 5」，**不能**写成 `scrollHeight > clientHeight`。
+     * 那种写法量的是「已被 line-clamp 裁过之后的溢出量」，而 clamp 本身要靠这个
+     * 判据才加上去 —— 鸡生蛋。未 clamp 的元素（max-height: none）scrollHeight
+     * 恒等于 clientHeight（都是全文高度），判据永远 false，折叠永远不触发。
+     * 反过来「全文高度 / 行高」在未 clamp 和已 clamp 两种状态下都等于真实行数，
+     * 所以它是唯一跟 clamp 状态无关的判据，展开态也不用再特判。
+     *
+     * 另外两个必须绕开的坑：
      * ① 思考面板整体折叠时 thinking-body 是 display:none，clientHeight === 0，
      *    这时量出来永远是「没溢出」→ 保留旧值，等下次 updated（面板展开时）再量。
-     * ② 展开态不能再量 —— 去掉 clamp 后 scrollHeight === clientHeight，
-     *    会误判成没溢出 → 按钮消失 → 又折回去，无限抖动。展开态直接判 true。
-     * ③ 只在值真的变了时才写回 reactive 数据：写回会触发 re-render → 再次 updated，
+     * ② 只在值真的变了时才写回 reactive 数据：写回会触发 re-render → 再次 updated，
      *    无脑赋值就是死循环。
      */
     measureReasoningOverflow() {
@@ -2569,34 +2606,34 @@ export default {
       nodes.forEach((el) => {
         const bi = Number(el.dataset.reasoningIndex)
         if (Number.isNaN(bi)) return
-        // ② 展开态：必然原本就超 5 行，保持 true 且不再测量
-        if (this.expandedReasonings[bi]) {
-          if (nextOverflow[bi] !== true) { nextOverflow[bi] = true; changed = true }
-          return
-        }
         // ① 不可测量（面板折叠 / 未渲染）：保留旧值
         if (!el.clientHeight) return
-        const overflow = el.scrollHeight > el.clientHeight + 1
-        // 实际行数 = 全文高度 / 行高（font-size 固定 → line-height 解析出来是 px）
+        // 实际行数 = 全文高度 / 行高（font-size 固定 → line-height 解析出来是 px）。
+        // scrollHeight 与 clamp 无关，未 clamp 时它就是全文高度。
         const lh = parseFloat(window.getComputedStyle(el).lineHeight)
-        const lines = lh > 0 ? Math.max(5, Math.round(el.scrollHeight / lh)) : 0
+        if (!(lh > 0)) return
+        const lines = Math.round(el.scrollHeight / lh)
+        const overflow = lines > 5
         if (!!nextOverflow[bi] !== overflow) { nextOverflow[bi] = overflow; changed = true }
         if (nextLines[bi] !== lines) { nextLines[bi] = lines; changed = true }
       })
-      // ③ 有变化才写回，避免 updated → 写数据 → updated 的自激循环
+      // ② 有变化才写回，避免 updated → 写数据 → updated 的自激循环
       if (!changed) return
       this.reasoningOverflow = nextOverflow
       this.reasoningLines = nextLines
     },
     reasoningToggleLabel(bi) {
       if (this.expandedReasonings[bi]) return '收起思考'
-      const lines = this.reasoningLines[bi]
-      return lines > 5 ? `展开全部思考（约 ${lines} 行）` : '展开全部思考'
+      // 按钮只在 lines > 5 时才渲染（见 measureReasoningOverflow），这里必有行数
+      return `展开全部思考（约 ${this.reasoningLines[bi]} 行）`
     },
     toggleReasoning(bi) {
       this.expandedReasonings = { ...this.expandedReasonings, [bi]: !this.expandedReasonings[bi] }
     },
     handleWindowResize() {
+      // 拖窗口 / 拖分栏时 resize 是连续高频事件，必须防抖。
+      // 150ms 也顺带隔开了「clamp 改了高度 → ResizeObserver 再次触发」这一轮自激：
+      // 第二次进来时行数已经稳定，changed 为 false，不会再写回数据。
       if (this._resizeTimer) clearTimeout(this._resizeTimer)
       this._resizeTimer = setTimeout(this.measureReasoningOverflow, 150)
     },
@@ -3030,13 +3067,21 @@ export default {
             type: file.type,
             file_type: file.file_type,
             suffix: file.suffix,
+            size: file.size,
+            size_human: file.size_human,
             text_content: textContent,
             content: textContent,
             preview: file.preview,
-            url: file.url
+            url: file.url,
+            // ⚠️ 必须带 file_path：App.vue previewFile 靠它委托给 onDataAnalysisFileClick
+            // （文件树点击的同一入口），把后端内联的 data: base64 换成 /static/ 真实路径。
+            // 本分支手工挑字段重建对象，漏了这个 office 预览就只能拿到 data URL。
+            file_path: file.file_path
           })
         } else {
-          const previewUrl = file.preview_url || file.iframe_url
+          // file.preview 也要兜底：上传文件的 preview / iframe_url 同为内联 data URL，
+          // 两个都空时原先直接静默不 emit，点击等于没反应。
+          const previewUrl = file.preview_url || file.iframe_url || file.preview
           if (previewUrl) {
             this.$emit('preview-file', {
               preview_url: previewUrl,
@@ -3045,8 +3090,11 @@ export default {
               type: file.type,
               file_type: file.file_type,
               suffix: file.suffix,
+              size: file.size,
+              size_human: file.size_human,
               preview_method: file.preview_method,
-              preview: file.preview
+              preview: file.preview,
+              file_path: file.file_path
             })
           }
         }
@@ -4543,10 +4591,14 @@ export default {
 }
 
 .imp-ipt-label {
-  display: inline-flex;
+  /* 块级，不能改回 inline-flex：折叠态的 .imp-ipt-text--clamped 是 display:-webkit-box，
+     它会把子元素块级化 → 徽章在折叠时跳到独占一行、展开时又回到行内，
+     流式跨过 5 行那一刻会看到一次布局抖动。恒为块级则两种状态一致。 */
+  display: flex;
   align-items: center;
   gap: 4px;
-  margin-right: 8px;
+  width: fit-content;
+  margin-bottom: 3px;
   padding: 1px 7px;
   border-radius: 3px;
   background: var(--thinking-accent);
@@ -4555,7 +4607,6 @@ export default {
   font-weight: 500;
   line-height: 1.6;
   letter-spacing: 0.2px;
-  vertical-align: 1px;
   white-space: nowrap;
   user-select: none;
 }
@@ -4563,6 +4614,30 @@ export default {
 .imp-ipt-icon {
   flex-shrink: 0;
   opacity: 0.9;
+}
+
+/* v0.3.9 —— 意图文本与 .imp-ipt-block 分开：折叠只裁文本，标题徽章和
+   「展开」按钮留在折叠框外，否则按钮会跟正文一起被 line-clamp 裁掉。 */
+.imp-ipt-text--clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 5;
+  overflow: hidden;
+}
+
+.imp-ipt-toggle {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  padding: 4px 0 0;
+  cursor: pointer;
+  line-height: 1.6;
+  display: block;
+}
+
+.imp-ipt-toggle:hover {
+  color: var(--text-primary);
 }
 
 .reasoning-text {

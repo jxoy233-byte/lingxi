@@ -741,6 +741,9 @@ export default {
         }
         if (e.key === 'Escape') {
           e.preventDefault()
+          // 吞掉冒泡：Esc 已经被「关 slash 面板」消费了，不能再冒到
+          // App.vue 的 handleOverlayKeydown 去收起文件预览面板。
+          e.stopPropagation()
           this.closeSlashPalette()
           return
         }

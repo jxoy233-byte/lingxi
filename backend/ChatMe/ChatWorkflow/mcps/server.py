@@ -248,8 +248,7 @@ def find_skill(
 
 @server.tool
 def done() -> str:
-    """Mark your thinking chain as complete
-
+    """Mark your thinking chain as complete.
     Call `done` when the reasoning is finished: info collected, task complete, stuck, casual chat, or out of scope.
     """
     session_id = current_session_id.get()

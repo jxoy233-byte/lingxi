@@ -427,6 +427,7 @@ import {
   isHtmlPreviewFile,
   isImagePreviewFile,
   isOfficePreviewFile,
+  staticUrlFromFilePath,
   truncateTextToBytes
 } from './utils/filePreview.js'
 import { isWordEditorCall, isExcelEditorCall, extractWordPath, extractExcelPath, normalizeDocPath, extractDocPathFromOutput } from './utils/wordExcel.js'
@@ -2437,11 +2438,12 @@ export default {
       this.focusInput()
     },
     /**
-     * App.vue 持有的 overlay 弹层（image-preview / resume-input）开 Esc/Enter 全局快捷键。
-     * 监听 document 而不是 overlay div 上的 @keydown.esc —— 后者 div 无 tabindex 时
-     * 收不到 keyboard 事件。
+     * App.vue 持有的 overlay 弹层（image-preview / file-preview / resume-input）
+     * 开 Esc/Enter 全局快捷键。监听 document 而不是 overlay div 上的 @keydown.esc ——
+     * 后者 div 无 tabindex 时收不到 keyboard 事件。
      *
      * - image-preview：Esc 关闭
+     * - file-preview：Esc 收起右侧文件渲染面板（等同工具条 ✕，只藏不关 tab）
      * - resume-input：Esc 取消；Enter 仅在焦点不在 textarea（用户没在输入续接内容）时
      *   才确认。textarea 里的 Enter 仍走原生换行，不 hijack。
      */
@@ -2450,6 +2452,15 @@ export default {
         if (e.key === 'Escape') {
           e.preventDefault()
           this.showImagePreview = false
+        }
+        return
+      }
+      if (this.showFilePreview) {
+        if (e.key === 'Escape') {
+          e.preventDefault()
+          // 走同一个入口，面板 ✕ 和 Esc 行为完全一致（都只隐藏，tab 留着，
+          // AI 续写同一份文档时还能弹回来 —— 见 closeFilePreviewPanel 注释）。
+          this.closeFilePreviewPanel()
         }
         return
       }
@@ -2910,6 +2921,25 @@ export default {
       if (isOfficePreviewFile(file)) {
         // v0.3.7 —— .docx / .xlsx 复用 ToolDocPreview（mammoth / SheetJS 渲染）
         const suf = suffix || (file.suffix ? String(file.suffix).toLowerCase() : '')
+
+        // [v0.3.9] 上传文件：后端把每个上传件都内联成 data: base64（FilesLoaders 621），
+        // 而 ToolDocPreview reload 时会拼 '?t=' 破缓存 —— data URL 的 '?' 之后全算
+        // payload，base64 被污染 → Failed to fetch；且原文 tab 保存要从 URL 剥 sid，
+        // data URL 剥不出来。文件其实一直躺在 backend/cached/{sid}/… 上（file_path），
+        // 所以**直接走文件树那条路**：onDataAnalysisFileClick 是文件树点击的同一入口，
+        // 消息里的附件和树里的节点从此只有一段分流逻辑，不会各自漂移。
+        const staticUrl = staticUrlFromFilePath(file.file_path)
+        if (staticUrl) {
+          await this.onDataAnalysisFileClick({
+            path: staticUrl.replace(/^\/static\//, ''),
+            name: file.name,
+            suffix: suf,
+            size: file.size,
+            size_human: file.size_human
+          })
+          return
+        }
+
         if (suf === '.docx') {
           await this.openFilePreviewTab({ file, url, suffix, kind: 'office_docx' })
           return
@@ -3024,19 +3054,24 @@ export default {
         this.activeFilePreviewTabId = id
         this.showFilePreview = true
       }
+
+      // 文本类 tab 建完立刻拉内容。**必须在这行 return 之前**：早退是为了回传响应式
+      // 代理（见下），而这段取内容原本写在 return 后面，成了死代码 —— 文件树点开的
+      // .md / .csv / .json content 一定是空的（只有消息里上传的文本文件才带
+      // text_content），不拉就永远是一块空白面板。tab.suffix / tab.content 读的是
+      // 刚 push 进数组的同一个对象，值没问题。
+      if (kind === 'text' && (url || !content)) {
+        const shouldFetch = !content || size > MAX_TEXT_PREVIEW_BYTES
+        if (shouldFetch && url) await this.loadFilePreviewTab(id)
+        else if (tab.suffix === '.mmd' && tab.content) await this.renderMermaidPreview(tab.id)
+      }
+
       // ⚠️ 必须回传**响应式代理**而不是上面那个 raw 对象：raw 上写属性不过 Proxy 的
       // set trap，不触发任何 effect。原先 return raw，调用方在 promise 回调里写
       // `tab.isStreaming = true` 写的是 raw → 子组件拿到的永远是初值 false → 首次写新文档时
       // 面板弹出后挂一个假的「加载失败: HTTP 404」（那时文件本来就不存在，
       // 本该被 isStreaming 压掉）。
       return this.filePreviewTabs.find(t => t.id === id)
-
-      if (kind === 'text' && (url || !content)) {
-        const shouldFetch = !content || size > MAX_TEXT_PREVIEW_BYTES
-        if (shouldFetch && url) await this.loadFilePreviewTab(id)
-        else if (tab.suffix === '.mmd' && tab.content) await this.renderMermaidPreview(tab.id)
-      }
-      return tab
     },
     activateFilePreviewTab(tabId) {
       if (!this.filePreviewTabs.some(tab => tab.id === tabId)) return
@@ -5488,6 +5523,8 @@ export default {
               iframe_url: file.iframe_url || processed.iframe_url || null,
               content: file.content || processed.content || null,
               fileId: file.file_id || file.fileId || processed.file_id || null,
+              // v0.3.9 —— 同上：office 预览靠它换 /static/ URL，data URL 用不了
+              file_path: file.file_path || processed.file_path || null,
               file_type: file.type || file.file_type || processed.file_type || null,
               preview_method: file.preview_method || processed.preview_method || 'download',
               preview_hint: file.preview_hint || processed.preview_hint || null,
@@ -6380,6 +6417,9 @@ export default {
                 iframe_url: file.iframe_url || null,
                 content: file.content || null,
                 fileId: file.file_id || file.fileId || null,
+                // v0.3.9 —— 落盘绝对路径。preview/iframe_url 是内联 data: base64，
+                // office 预览必须靠它换 /static/ URL（见 previewFile + staticUrlFromFilePath）。
+                file_path: file.file_path || null,
                 file_type: file.type || file.file_type || null,
                 preview_method: file.preview_method || 'download',
                 preview_hint: file.preview_hint || '不支持在线预览，请下载后查看',

@@ -586,6 +586,9 @@ export default {
       if (e.key === 'Escape' && this.viewTab === 'raw' && !this._editDirty) {
         // 原文 tab 且未改动 → 切回渲染 tab
         e.preventDefault()
+        // 必须吞掉冒泡：App.vue 的 handleOverlayKeydown 也有 Esc → 收起整个面板。
+        // 两边都响应的话，用户只想退回渲染 tab 却把面板整个关掉了。
+        e.stopPropagation()
         this.viewTab = 'rendered'
       }
     }

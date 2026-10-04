@@ -28,6 +28,32 @@ export function isOfficePreviewFile(file = {}) {
   return OFFICE_EXTENSIONS.has(getFileSuffix(file))
 }
 
+/**
+ * 上传文件的落盘绝对路径 → `/static/` URL。
+ *
+ * 后端 `FilesLoaders/core.py` 把每个上传文件都内联成 `preview =
+ * "data:{content_type};base64,..."`，office 类型照抄不误。**这个 data URL
+ * 不能直接喂给 ToolDocPreview**：
+ *   ① 它 reload 时会拼 `?t=` 破缓存，data URL 的 `?` 之后全算 payload →
+ *      base64 被污染 → `Failed to fetch`（v0.3.9 线上现象）
+ *   ② 就算渲染过了，「原文」tab 保存要靠 `_relPath()` 从 URL 里剥 sid，
+ *      data URL 剥不出任何东西 → 保存必然 422
+ *
+ * 但文件**一直实实在在躺在磁盘上**，只是 `file_path` 没被前端用上：
+ *   /…/backend/cached/{sid}/{file_id}{name}/{name}{随机}.docx
+ * 取 `cached/` 之后那段拼成 `/static/cached/…` 即可，sid 在路径里
+ * （12 / 32 位 hex 都行，static_file 是 dual regex）。
+ *
+ * 兼容 Windows：`os.path.abspath` 在 Win 上出反斜杠，统一成正斜杠。
+ * 路径里没有 `cached/` 段（老数据 / 手工构造）→ 返回 ''，调用方走原兜底。
+ */
+export function staticUrlFromFilePath(filePath) {
+  const p = String(filePath || '')
+  const m = p.match(/(?:^|[\\/])cached[\\/](.+)$/)
+  if (!m) return ''
+  return `/static/cached/${m[1].replace(/\\/g, '/')}`
+}
+
 function hashString(value) {
   let hash = 2166136261
   for (let i = 0; i < value.length; i++) {

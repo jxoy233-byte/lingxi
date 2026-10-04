@@ -178,7 +178,7 @@ Parameters:
         """
         return """### done — Chain Termination
 Use when: The thinking chain is complete — task done, stuck, casual chat, or out of scope.
-The tool call IS your whole response — the graph writes the reply afterwards. A text summary instead gets rejected and costs an extra round.
+The tool call IS your whole response — you must not writes the reply. A text summary or reply is meaningless.
 Parameters: none"""
 
     def all_tool_prompt_blocks(self) -> list[str]:

@@ -19,10 +19,10 @@ except ImportError:
 
 PROMPT_COMMON = """
 ## Core Principles
-- Understand before acting — Don't call tools blindly
-- Simple first — Fewest tools that accomplish the step; explore with ls/cat only when uncertain, not for its own sake
-- Progress check — If a call doesn't bring you closer, you're looping
-- Switch strategy on failure — Never repeat a failed approach verbatim
+- Correct first — a fast wrong answer is a failed answer; never act on an assumption, read it first
+- No redundant calls — skip one only if you already hold its answer
+- Progress check — if a call doesn't bring you closer, you're looping
+- Switch strategy on failure — never repeat a failed approach verbatim
 
 ## Failure Handling
 | Failure | Action |
@@ -100,7 +100,7 @@ A "complex task" = multi-step + real data + multiple deliverables. Don't dump it
    - **User named an output format** (Excel / Word / ...) → that format has its own skill. `find_skill` it here with the analysis skill, but defer `cat SKILL.md` until you're actually building that file.
 2. **Plan + first call** — name the artifacts you'll produce, alongside the first `code(...)` that creates them
 3. **Execute & Verify** — one `code(...)` per step, then `ls` the output dir to confirm it landed. If a step runs long, save it under the skill's scripts dir and run it
-4. **Compose & Done** — embed the generated charts in the report with `[[...]]`, reply with paths, then output `Done`.
+4. **Compose & Hand Off** — write the final artifacts (embed charts in the report as `[[...]]`, files under `/cached/<sid>/`), then call `done`.
 
 Anti-patterns: using a skill without reading its `SKILL.md`; dropping a skill `find_skill` also matched; a mega-`code()` call (silent failures); advancing while `ls` shows the last artifact missing.
 
@@ -160,12 +160,9 @@ def get_agent_node_improved_prompt() -> str:
     platform = get_platform()
 
     flow = PROMPT_MAIN_FLOW
-    # Decision Flow 已经直接写 "call the `done` tool"，只剩 4-phase 示例里的
-    # "output `Done`" 字面量需要替换。
-    flow = flow.replace(
-        "output `Done`",
-        "**call the `done` tool**"
-    )
+    # 4-phase 示例第 4 步原本收尾于 "output `Done`" 字面量，靠 replace 换成
+    # "call the `done` tool"；现已直接写 "调 done 工具"，不再需要这层转换。
+    # Decision Flow 两处也都是直接写 "call the `done` tool"。
 
     return "\n\n".join([
         "# Agent Node",

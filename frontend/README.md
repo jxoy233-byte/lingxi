@@ -138,6 +138,7 @@ frontend/
 │   │   ├── lazyLibs.js         # mammoth / SheetJS 动态 import（按需加载，不进首屏 bundle；mammoth 必须走包主入口，禁止改回 `mammoth/mammoth.browser.js`）
 │   │   ├── wordExcel.js        # Word/Excel 工具调用 → 文档路径抽取（extractWordPath / extractExcelPath / normalizeDocPath / extractDocPathFromOutput）
 │   │   ├── wordExtract.js      # docx HTML → 原文视图纯文本段落（含 `[[图片 N]]` 占位符），脱离组件可单测
+│   │   ├── filePreview.js      # 文件类型判定 + 预览 tab 工具（buildFilePreviewSourceKey / fetchTextPreview / truncateTextToBytes / staticUrlFromFilePath）
 │   │   └── fileKind.js         # 文件名 → 类型 kind / 徽章短标 / 字号档位（v0.3.8；文件树 + 回收站树共用的唯一判定源）
 │   └── components/             # 业务组件
 │       ├── App.vue (父组件)
@@ -168,17 +169,17 @@ frontend/
 
 | 组件 | 职责 |
 |------|------|
-| `App.vue` | 全局状态中心；维护 SSE 连接、错误气泡保护集合 `_sessionHadError: Set<session_id>`、当前会话切换；`refreshPage()` 触发 Electron `webContents.reload()`（web fallback `location.reload()`）；v0.1.5 起维护 `scheduledTasksMap: Map<session_id, ScheduledTask[]>` + `_scheduledTasksRefreshing: bool` + 三 Set 侧栏状态点（`_activeStreamingSessions` / `_approvalPendingSessions` / `_completedSessions` / `_errorSessions`）；v0.2.1 起 `_hasEverConnected` gate 抑制启动期 banner + `_backendRestarting/_restartElapsed/_restartTimer` 全局重启遮罩状态 + `_swappedProjectRoot`/`_currentProjectRoot` 项目根迁移横幅数据；统一 `handleRestartBackend()` 是 banner/Settings/SetupView 三处入口的 IPC + reload 通路。**v0.3.8** 写作 tab 三件套：`_openDocPreviewTab`（tool_call_name，建 tab）/ `_bumpDocPreviewTab`（tool_call_result，bump `docVersion`）/ `_ensureDocTab`（两者共用的建 tab + 激活规则）；路径优先级 **stdout 真实路径 > code 文本猜的**，猜错时清掉 `_inferred` 标记的猜测 tab；**v0.3.8** `sessionActionBusy` 互斥锁（回溯 / 撤回 / 重新对话防连点，中断不参与）+ `_lastStreamActivity` / `markRetryExhausted()` 维护上游重试的静默读秒与耗尽态 |
+| `App.vue` | 全局状态中心；维护 SSE 连接、错误气泡保护集合 `_sessionHadError: Set<session_id>`、当前会话切换；`refreshPage()` 触发 Electron `webContents.reload()`（web fallback `location.reload()`）；v0.1.5 起维护 `scheduledTasksMap: Map<session_id, ScheduledTask[]>` + `_scheduledTasksRefreshing: bool` + 三 Set 侧栏状态点（`_activeStreamingSessions` / `_approvalPendingSessions` / `_completedSessions` / `_errorSessions`）；v0.2.1 起 `_hasEverConnected` gate 抑制启动期 banner + `_backendRestarting/_restartElapsed/_restartTimer` 全局重启遮罩状态 + `_swappedProjectRoot`/`_currentProjectRoot` 项目根迁移横幅数据；统一 `handleRestartBackend()` 是 banner/Settings/SetupView 三处入口的 IPC + reload 通路。**v0.3.8** 写作 tab 三件套：`_openDocPreviewTab`（tool_call_name，建 tab）/ `_bumpDocPreviewTab`（tool_call_result，bump `docVersion`）/ `_ensureDocTab`（两者共用的建 tab + 激活规则）；路径优先级 **stdout 真实路径 > code 文本猜的**，猜错时清掉 `_inferred` 标记的猜测 tab；**v0.3.8** `sessionActionBusy` 互斥锁（回溯 / 撤回 / 重新对话防连点，中断不参与）+ `_lastStreamActivity` / `markRetryExhausted()` 维护上游重试的静默读秒与耗尽态。**v0.3.9** 上传的 office 文件预览走 `file_path`（后端内联的 `data:` base64 不能喂 `ToolDocPreview`——reload 拼 `?t=` 会污染 payload）：`previewFile` 的 office 分支**委托 `onDataAnalysisFileClick`**，与文件树点击共用同一段分流；两条路构造的 node 都带 `path`，`buildFilePreviewSourceKey` 因此命中同一个 tab。**v0.3.9** `handleOverlayKeydown` 加 `showFilePreview` 分支（Esc 收起预览面板，走 `closeFilePreviewPanel()` 与工具条 ✕ 同入口） |
 | `Sidebar.vue` | 会话列表容器，支持新建 / 删除 / 切换会话；v0.1.5 起把每个会话的定时任务触发状态、展开按钮下发给 ConversationItem |
 | `ConversationItem.vue` | 单个会话项：双击编辑标题、悬停显示删除按钮、相对时间显示（分钟/小时/天数）、四色侧栏状态点（streaming 蓝闪 / approval 黄脉冲 / errored 红常 / completed 绿常）；**v0.1.5 起** 底部内嵌 ⏰ 触发按钮（仅 `tasks.length > 0` 渲染）+ `<transition name="scheduled-expand">` 展开任务列表（`max-height: 0 → 110px`，超过 3 条滚动）；展开状态按 `lingxi.scheduledTasksExpanded` localStorage 持久化 |
 | `ChatHeader.vue` | 顶部条：主题切换、Checkpoint 面板、**↻ 刷新页面按钮**（与 `DataAnalysisTree` 同款 SVG），新对话按钮 |
 | `MessageList.vue` | 消息列表容器：自动滚动控制（入场 easeInOut + 流式 ramp + 100ms 打断防抖 + 用户 wheel/touch 让出控制权）；向上转发 `scheduled-task-*` / `restart-session` 事件；**v0.3.8** 纯透传 `slashCommandNames` / `slashCommandsReady` 给每个 `MessageItem`（slash pill 有效性判定用，本组件不碰语义）|
-| `MessageItem.vue` | 单条消息渲染：Markdown / 代码高亮 / 数学公式 / 流程图；`message.error=true` 时渲染为红色错误框；中断态显示「重新对话」按钮（emit `restart-session`）；内嵌审批 UI 直接按 `tool.args.local` 判执行环境。**v0.3.8** `impIpt`（理解意图）块改卡片式排版，不再复用 `.reasoning-text` 的 `▸` 列表样式；单段思考超 **5 行自动折叠**（`reasoning-text--clamped` 用 `-webkit-line-clamp`，`measureReasoningOverflow()` 在 `updated()` / 窗口 resize 时实测 `scrollHeight > clientHeight` 判定并统计行数，附「展开全部思考」按钮；**面板折叠时量不到 → 保留旧值，展开态不再量**，否则会自激成折叠↔展开死循环）；`actionBusy` prop 禁用回溯 / 重新生成 / 重新对话。**v0.3.8** 流式三态提示：`message.stalledMs > 0` 显示「上游繁忙，正在自动重试 · 已等待 Ns」（App.vue `startStreamTimer` 每 250ms 写，任何 SSE 事件到达即归零 → 重试成功自动消失），`message.retryExhausted` 显示「已自动重试 N/M 次仍失败」。**v0.3.8** `/[xxx]` pill 按 prop `slashCommandNames` 校验（App.vue `slashCommands` = 静态 action + 动态 skill，判定大小写不敏感），**名字不在清单里就原样保留 `/[xxx]` 文本、不 pill 化**——pill 等于「这是个真命令」的承诺，拼错的 `/[Excle]` 不该跟 `/[WordEditor]` 长得一样；prop `slashCommandsReady=false`（skill 还没拉回来）时一律不判定，避免冷启动首屏反向闪一下 |
+| `MessageItem.vue` | 单条消息渲染：Markdown / 代码高亮 / 数学公式 / 流程图；`message.error=true` 时渲染为红色错误框；中断态显示「重新对话」按钮（emit `restart-session`）；内嵌审批 UI 直接按 `tool.args.local` 判执行环境。**v0.3.8** `impIpt`（理解意图）块改卡片式排版，不再复用 `.reasoning-text` 的 `▸` 列表样式；单段思考超 **5 行自动折叠**（`reasoning-text--clamped` 用 `-webkit-line-clamp`，`measureReasoningOverflow()` 按 `round(scrollHeight / lineHeight) > 5` 判定并统计行数，附「展开全部思考」按钮；**不能用 `scrollHeight > clientHeight`**——那只在已经加了高度约束之后才成立，未 clamp 时两者恒等 → 折叠永不触发。宽度自适应靠 `ResizeObserver`（观察组件根，150ms 防抖）+ `window.resize` 兜底，因为侧栏开合不触发 resize。**v0.3.9** 「理解意图」块同样折叠，clamp 作用在内层 `.imp-ipt-text`（line-clamp 只裁渲染内容，作用在外层会把「展开」按钮一起裁掉）；`.imp-ipt-label` 恒为块级，否则 `-webkit-box` 把子元素块级化会让徽章在折叠/展开两态间跳行）；`actionBusy` prop 禁用回溯 / 重新生成 / 重新对话。**v0.3.8** 流式三态提示：`message.stalledMs > 0` 显示「上游繁忙，正在自动重试 · 已等待 Ns」（App.vue `startStreamTimer` 每 250ms 写，任何 SSE 事件到达即归零 → 重试成功自动消失），`message.retryExhausted` 显示「已自动重试 N/M 次仍失败」。**v0.3.8** `/[xxx]` pill 按 prop `slashCommandNames` 校验（App.vue `slashCommands` = 静态 action + 动态 skill，判定大小写不敏感），**名字不在清单里就原样保留 `/[xxx]` 文本、不 pill 化**——pill 等于「这是个真命令」的承诺，拼错的 `/[Excle]` 不该跟 `/[WordEditor]` 长得一样；prop `slashCommandsReady=false`（skill 还没拉回来）时一律不判定，避免冷启动首屏反向闪一下 |
 | `MessageInput.vue` | 输入框：Enter 发送、Shift+Enter 换行、文件上传、语音输入；**流式期间不再禁用发送**——消息由 App.vue 入队，本轮 `done` 后自动续发。**v0.3.8** `extractTypedSlashCommand()` 收编手打的 `/[xxx] ` / `/xxx ` 前缀成 chip，**命令不存在时不再静默放行**：emit `unknown-slash-command` → App.vue `showToast` 提示 + 列相近候选；`_lastUnknownSlashKey` 保证同一条前缀只提示一次（继续打字会反复命中同一 regex）|
 | `CheckpointPanel.vue` | 回溯面板：展示历史 checkpoint 节点列表，支持回溯到指定轮 |
 | `ConfirmDialog.vue` | 通用确认弹窗（删除对话、关闭会话等）。**v0.3.8** 加 `busy` prop，执行中禁用按钮并屏蔽 Esc/Enter |
 | `FilePreviewPanel.vue` / `FilePreviewTabPane.vue` | 文件预览面板 / 单个 tab 渲染器（图片、文本、表格、markdown、html、**docx/xlsx**）。**v0.3.8 起同时承担「AI 写作面板」职责**：AI 调 `WordEditor` / `ExcelEditor` 时 App.vue 自动把文档 push 成一个 tab（`kind: 'office_docx' \| 'office_xlsx'` + `docVersion` + `isStreaming`），TabPane 复用 `ToolDocPreview` 渲染，toolbar 显示「写入中…」徽标。**为什么不做独立抽屉**：v0.3.7 曾把文档正文 inline 嵌到 `MessageItem` 的 `tool_call_item` 里，结果 AI 写一份 100 段文档就把整个思考面板撑爆，AIMessage 的思考段和 ToolMessage 的结果层级彻底看不清；而且右侧同时存在两个面板会互相抢位置。 |
-| `ToolDocPreview.vue` | 文档渲染器：Word 走 mammoth、Excel 走 SheetJS，输出 HTML 直接显示（**v0.3.8 起无 typewriter / 逐段揭示动画**——内容增量刷新本身就是进度信号）；「原文 / 渲染效果」双 tab，原文 tab 可直接编辑并保存回后端（`POST /api/word_editor/replace`）。`chrome` prop 控制外观：`panel`（独立面板，带边框）/ `minimal`（内嵌到 `FilePreviewTabPane`，剥边框）。`version` 每次 +1 触发重 fetch（`tool_call_result` 时 +1）。**v0.3.8** 原文 tab 段落由 `wordExtract.js` 抽出，图片位置编码成 `[[图片 N]]` 占位符，后端保存时按 N 搬回原位 |
+| `ToolDocPreview.vue` | 文档渲染器：Word 走 mammoth、Excel 走 SheetJS，输出 HTML 直接显示（**v0.3.8 起无 typewriter / 逐段揭示动画**——内容增量刷新本身就是进度信号）；「原文 / 渲染效果」双 tab，原文 tab 可直接编辑并保存回后端（`POST /api/word_editor/replace`）。`chrome` prop 控制外观：`panel`（独立面板，带边框）/ `minimal`（内嵌到 `FilePreviewTabPane`，剥边框）。`version` 每次 +1 触发重 fetch（`tool_call_result` 时 +1）。**v0.3.8** 原文 tab 段落由 `wordExtract.js` 抽出，图片位置编码成 `[[图片 N]]` 占位符，后端保存时按 N 搬回原位。**v0.3.9** 原文 tab 的 Esc（切回渲染 tab）必须 `stopPropagation`：App.vue 的 `handleOverlayKeydown` 也有 Esc → 收起整个面板，不拦的话用户只想退回渲染 tab 却把面板关了 |
 | `DataAnalysisTree.vue` / `DataTreeNode.vue` | 数据分析生成的目录树（递归节点），面板头部含 reload 按钮。**v0.3.8 文件类型徽章重做**：18px 圆角方块（底色 = `--ft-<kind>` token）+ 扩展名小字（`PDF` / `DOCX` / `PY` / `TSX`），三档决策「扩展名 ≤4 字符印真实扩展名 → 太长但 kind 认得印共识短标（`.woff2`→`FONT`）→ 压根不认得（Makefile / LICENSE / 未注册后缀）画文档页字形」。**为什么不画抽象图形字形**：18px 下「文档轮廓 / 网格 / 地球」十几种全糊成同一坨，用户反馈「没有区分度」；印真实扩展名才跟 Windows / Finder 一致。字号按字符数分 4 档（13 / 11 / 9.6 / 7.5），档位按粗体大写实际宽度 `0.62 × fontSize × 字符数` 反解 |
 | `TrashTreeNode.vue` | 回收站树节点（递归，↩ 恢复 / × 永久删除行内二次确认）。**v0.3.8** 此前自绘了一套细线图标且已跟文件树走样（缺 docx / pdf / markdown），现改为与 `DataTreeNode` 完全同源：kind 判定走 `utils/fileKind.js`，颜色共用 App.vue 的 `--ft-*`，只把文件夹换成红色，一眼知道在回收站里 |
 | `ScheduledTaskItem.vue` | **v0.1.5 起** 单条定时任务卡片：状态圆点 + cron + 上次运行时间 + 累计次数；⏸/▶ 启停、⚡ 立即运行、🗑 行内小红叉二次确认删除（参考偏好 21 状态机：`confirmingDelete` + document click 取消） |
@@ -376,7 +377,7 @@ const isTest = process.env.NODE_ENV === 'test'
 | `app.name` | `灵析` | 应用名（菜单栏第一项、`app.getName()`） |
 | `app.title` | `灵析——数据分析智能助手` | 窗口标题 / 关于弹窗 |
 | `app.identifier` | `com.chatme.app` | bundle identifier |
-| `app.version` | `0.3.8` | 同步后端版本号 |
+| `app.version` | `0.3.9` | 同步后端版本号 |
 | `window.width × height` | `1100 × 720` | 主窗口尺寸 |
 | `window.minWidth × minHeight` | `650 × 480` | 最小尺寸 |
 | `devServer.url` | 从 Vite 导入的 `http://localhost:18211` | Electron 开发时加载的 URL |
@@ -509,8 +510,8 @@ DMG 阶段需要 `dmgbuild-bundle-arm64-*.tar.gz` 包，npmmirror 当前缺这�
 release/electron-builder/
 ├── mac-arm64/
 │   └── 灵析.app          ← 直接打开
-├── 灵析-0.3.8-arm64-mac.zip
-└── 灵析-0.3.8-mac.zip
+├── 灵析-0.3.9-arm64-mac.zip
+└── 灵析-0.3.9-mac.zip
 ```
 
 打开方式：
@@ -522,7 +523,7 @@ open ~/coding/projects/ChatMe/release/electron-builder/mac-arm64/灵析.app
 "~/coding/projects/ChatMe/release/electron-builder/mac-arm64/灵析.app/Contents/MacOS/灵析"
 
 # 解压 zip 后再打开
-unzip 灵析-0.3.8-arm64-mac.zip -d ~/Downloads
+unzip 灵析-0.3.9-arm64-mac.zip -d ~/Downloads
 open ~/Downloads/灵析.app
 ```
 

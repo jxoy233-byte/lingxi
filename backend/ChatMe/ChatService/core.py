@@ -70,13 +70,20 @@ def _truncate_title(text: str, max_len: int = _TITLE_MAX_LEN) -> str:
 
 
 def _derive_title_from_latest_human(messages: List[Any]) -> str:
-    """从 messages 列表里倒序找最近的 HumanMessage，剥掉引用/pill 后截断为标题。
+    """从 messages 列表里倒序找最近的**用户真的说过话的** HumanMessage，剥掉引用/pill 后截断为标题。
 
     - HumanMessage.content 可能是 str 或 list（多模态时是 `[{"type": "text", "text": ...}]`）
     - list 形态只取首个 text 段（与前端 `humanMessageText` 取首段文本一致）
+    - ⚠️ 必须跳过 imp_ipt：input_parse_node 把优化后的意图也作为 HumanMessage
+      写进 state["messages"]（`additional_kwargs.imp_ipt == True`），而且它排在真实
+      用户消息**后面**。不跳过的话倒序第一个 HumanMessage 永远是 imp_ipt，
+      标题就变成了「理解意图」那段的截断。前端 processConversationMessages 有同样的
+      过滤，这里是它在本项目的对位实现。
     """
     for m in reversed(messages):
         if not isinstance(m, HumanMessage):
+            continue
+        if (m.additional_kwargs or {}).get("imp_ipt"):
             continue
         content = m.content
         if isinstance(content, list):
@@ -1432,15 +1439,26 @@ class ChatService:
                     ))
 
         created_at = state.created_at if hasattr(state, "created_at") and state.created_at else datetime.now()
-        updated_at = datetime.now()
+        # 兜底用 created_at 而不是 now()：updated_at 会拿去做会话列表排序（见
+        # get_conversation_list），用 now() 等于每次请求都把本会话顶到最前面。
+        # 真的没有用户轮次时「更新时间 ≈ 创建时间」本来就是对的。
+        updated_at = created_at
         title = "新对话"
 
         if "messages" in state.values and state.values["messages"]:
             # 获取 updated_at
             for msg in reversed(state.values["messages"]):
-                if isinstance(msg, HumanMessage):
-                    updated_at = msg.additional_kwargs.get("updated_at") or datetime.now()
-                    break
+                # ⚠️ 必须跳过 imp_ipt：input_parse_node 把优化后的意图也作为 HumanMessage
+                # 写进 messages（`additional_kwargs.imp_ipt == True`），且排在真实用户消息
+                # **后面**。它的 additional_kwargs 来自 LLM 响应，不带 updated_at —— 不跳过
+                # 就会永远落到 now() 兜底上，每次刷新会话侧边栏时间都跟着刷新时刻跳。
+                # 与 _derive_title_from_latest_human 的过滤是同一个道理。
+                if not isinstance(msg, HumanMessage):
+                    continue
+                if (msg.additional_kwargs or {}).get("imp_ipt"):
+                    continue
+                updated_at = (msg.additional_kwargs or {}).get("updated_at") or updated_at
+                break
             # 获取 title
             if len(state.values["messages"]) > 0:
                 last_msg = state.values["messages"][-1]

@@ -220,6 +220,17 @@ docker-compose up -d redis       # 端口 48211，密码 123456
 
 > 每条只留「改了什么 + 为什么」，实现细节看 `git log` 和对应文件。
 
+**v0.3.9**
+- agent 工具调用原则从「省工具」改成「先正确」（Correct first / No redundant calls / Progress check / Switch strategy on failure）。**Why**：原措辞把 agent 推向为少调一次而跳过 `cat SKILL.md` / `ls` 验证，省下的是正确性；反滥用改成两条可判定的跳过条件
+- 4-phase 第 4 步收尾改调 `done` 工具（原「reply with paths, then output `Done`」是「未采纳回复草稿」缺陷的根），并删掉依赖旧字面量的 `flow.replace`。**不提 final_node**：agent_node 没有下游节点概念，改成「回复会在你交完之后替你写好」
+- 标题派生 + `updated_at` 都跳过 `imp_ipt`。**Why**：imp_ipt 是排在真实用户消息后面的 HumanMessage，两处都倒序找第一个就 break → 标题变成优化后文本的截断；`updated_at` 落到 `datetime.now()` 兜底 → **每次刷新侧边栏时间都跟着刷新时刻跳**，会话列表排序跟着抖。兜底一并换成 `created_at`
+- 思考段 / 理解意图块 >5 行折叠，判据从 `scrollHeight > clientHeight` 改成 `round(scrollHeight / lineHeight) > 5`。**Why 原判据是死循环**：只在已加高度约束后成立，未 clamp 时两者恒等 → 永不触发
+- 折叠宽度自适应改用 `ResizeObserver`（150ms 防抖）+ `window.resize` 兜底。**Why**：侧栏开合改列宽但不触发 resize
+- `-webkit-box` 把子元素块级化，`.imp-ipt-label` 恒为块级，否则折叠/展开两态间徽章跳行
+- 上传的 office 预览改走 `file_path`（`staticUrlFromFilePath`），并**委托 `onDataAnalysisFileClick`** 与文件树共用同一分流 → 两条路命中同一个 tab。**Why**：后端内联的 `data:` base64 撑不住 `?t=` 破缓存（`?` 之后全算 payload → `Failed to fetch`），原文 tab 保存也剥不出 sid。只对 office 收窄，图片走 OSS/blob 一直正常
+- `openFilePreviewTab` 修死代码：回传响应式代理的 `return` 早退把「文本类 tab 立刻取内容」盖住了 → 文件树点 md 原文和渲染同时空白
+- Esc 收起文件预览面板（走 `closeFilePreviewPanel()`，与 ✕ 同入口），同轮补 `ToolDocPreview` / `MessageInput` 两处 `stopPropagation`——已消费的按键别让下游再解释一遍
+
 **v0.3.8**
 - Word/Excel 实时预览回到**已有的** `FilePreviewPanel`（v0.3.7 内嵌进 `tool_call_item` → 100 段文档把思考面板撑爆，层级全乱），思考面板只留 `.tool-doc-indicator` 胶囊
 - AIMessage / ToolMessage 层级改缩进阶梯（▸ 0 / └ 18 / ⎿ 36px，零新增边框）；`impIpt` 块改卡片式排版
